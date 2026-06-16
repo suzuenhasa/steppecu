@@ -189,6 +189,26 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME block_partition_unit COMMAND test_block_partition)
 
+# --- Host-only unit test of the block-range INVERSE rule (M4; X-3/B3) ---------
+# Pure C++ TU (no CUDA, no io): exercises core::block_ranges — the single-source
+# inverse of assign_blocks that BOTH backends now call instead of a hand-rolled
+# scan (the X-3 DRY triplication close). Pins the VALID layouts (empty, single,
+# multi-block, round-trip vs assign_blocks) and that MALFORMED partitions are
+# FAIL-FAST (throw): short/null block_id, out-of-range id, non-monotonic — the OOB
+# write/read B3 closes. block_ranges is header-inline (it is reached from BOTH the
+# core and device layers only through the header-only steppe::core_internal target,
+# so it cannot live out-of-line in block_partition_rule.cpp / steppe_core); linking
+# steppe::core also pulls assign_blocks for the round-trip case.
+# architecture.md §2 fail-fast, §8, §13.
+add_executable(test_block_ranges unit/test_block_ranges.cpp)
+target_link_libraries(test_block_ranges
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_block_ranges PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_block_ranges PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME block_ranges_unit COMMAND test_block_ranges)
+
 # Real-AADR INTERNAL-CONSISTENCY check (no synthetic, no statistic): feed the real
 # v66 .snp to assign_blocks and assert the measured block count + dense/ordering
 # invariants. Path overridable via -DSTEPPE_AADR_SNP=<path>; defaults to the box

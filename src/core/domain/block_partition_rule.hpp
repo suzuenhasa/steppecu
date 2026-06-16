@@ -27,7 +27,11 @@
 #define STEPPE_CORE_DOMAIN_BLOCK_PARTITION_RULE_HPP
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "steppe/config.hpp"  // kCentimorgansPerMorgan (the conversion constant)
@@ -125,6 +129,119 @@ struct BlockPartition {
 [[nodiscard]] BlockPartition assign_blocks(std::span<const int> chrom,
                                            std::span<const double> genpos_morgans,
                                            double block_size_morgans);
+
+/// The half-open SNP column range `[begin, end)` of one jackknife block in the
+/// per-SNP arrays (file order). `begin` is the block's first column (the CUDA
+/// path's `block_offsets[b]`); `size() == end - begin` is the block's SNP count
+/// (the S4 jackknife weighting denominator base, also `F2BlockTensor::block_sizes`).
+/// Widths are `long` to match `MatView::M` / the per-SNP column index.
+struct BlockRange {
+    long begin = 0;  ///< first SNP column of the block (inclusive).
+    long end = 0;    ///< one past the block's last SNP column (exclusive).
+
+    /// SNP count of the block (`end - begin`).
+    [[nodiscard]] long size() const noexcept { return end - begin; }
+};
+
+/// THE single-source inverse of `assign_blocks`: turn the dense, non-decreasing
+/// per-SNP `block_id[]` into the per-block half-open column ranges `[begin, end)`,
+/// validating the partition contract ONCE (architecture.md §2 fail-fast, §5, §8;
+/// ROADMAP M4; cleanup X-3/B3).
+///
+/// Both backends (`device/cuda/cuda_backend.cu`, `device/cpu/cpu_backend.cpp`)
+/// derive their per-block layout from `block_id` — the CUDA path as
+/// `block_offsets`/`block_sizes` it copies to the device and the kernel
+/// dereferences (`f2_blocks_kernel.cu`), the CPU oracle as `begin`/`end`. That
+/// scan was hand-duplicated in both backends (and a third near-copy in the M4
+/// equivalence test) and NONE validated the partition, so a malformed `block_id`
+/// (an id `< 0` or `>= n_block`, or `block_id.size() < M`) was a silent
+/// out-of-bounds write on the host range vectors and an out-of-bounds device read
+/// of `block_offsets[id]`. This is the one home for that inverse; both backends
+/// call it and the validation lives here, exactly once.
+///
+/// CONTRACT (the `assign_blocks` postcondition every consumer relies on, made
+/// fail-fast here): `block_id` must have at least `M` entries, every
+/// `block_id[s]` (for `s ∈ [0, M)`) must satisfy `0 <= id < n_block`, and the
+/// sequence must be non-decreasing (so each block's SNPs form one contiguous
+/// half-open range). A violation is a programming/data error — it throws
+/// `std::runtime_error` rather than corrupting memory (the OOB B3 closes). The
+/// result is dense in `[0, n_block)`: a block with no SNPs gets an empty
+/// `[begin, end)` (`begin == end`); `assign_blocks` never produces one, but the
+/// validation does not forbid it (it only forbids the unsafe ids above).
+///
+/// @param block_id  per-SNP global block ids in file order (length `>= M`); the
+///                  `BlockPartition::block_id` from `assign_blocks`.
+/// @param M         number of SNP columns to scan (the `MatView::M` the backend
+///                  trusts — the count travels separately from `block_id`'s
+///                  length, so this also pins `block_id.size() >= M`).
+/// @param n_block   number of distinct blocks (`BlockPartition::n_block`); the
+///                  length of the returned vector.
+/// @return  `n_block` ranges, indexed by block id; `out[b]` is block `b`'s
+///          half-open `[begin, end)`. Empty input (`M <= 0` or `n_block <= 0`) →
+///          empty vector.
+/// @throws std::runtime_error if the partition violates the contract above.
+///
+/// HEADER-INLINE (unlike the out-of-line `assign_blocks`): both backends — which
+/// compile into `steppe_device`, NOT `steppe_core` — call this, and `device`
+/// cannot link `steppe_core` (that would cycle: `steppe_core` links
+/// `steppe::device` PRIVATE). Like `block_of`, this is host-pure CUDA-free code
+/// reachable from BOTH layers only through the header-only `steppe::core_internal`
+/// INTERFACE target, so its body lives here. It is one O(M) scan, called once per
+/// `compute_f2_blocks` (the inlining cost is negligible vs the f2 GEMMs).
+[[nodiscard]] inline std::vector<BlockRange> block_ranges(std::span<const int> block_id,
+                                                          long M, int n_block) {
+    // Empty input → empty layout (the backends early-out on this too). Guard both
+    // axes: M is the SNP count the backend trusts (MatView::M), n_block the
+    // distinct-block count; either non-positive means there is nothing to range.
+    if (M <= 0 || n_block <= 0) {
+        return {};
+    }
+
+    // FAIL-FAST contract guard (architecture.md §2): the scan below indexes
+    // out[block_id[s]] for s in [0, M), so a short block_id or an id outside
+    // [0, n_block) would be an out-of-bounds read/write. assign_blocks guarantees
+    // these, but a hand-built or recomputed partition (the M4 test, a future
+    // merged-dataset path) might not — surface it here, ONCE, with context,
+    // rather than silently corrupting memory in the backend (cleanup X-3/B3).
+    // This is the single home: both backends and the M4 test call this; the OOB
+    // is closed in every build config, not just debug.
+    if (block_id.size() < static_cast<std::size_t>(M)) {
+        throw std::runtime_error(
+            "core::block_ranges: block_id has " + std::to_string(block_id.size()) +
+            " entries but M = " + std::to_string(M) +
+            " columns are required (partition shorter than the SNP count)");
+    }
+
+    std::vector<BlockRange> ranges(static_cast<std::size_t>(n_block));
+
+    // Single forward scan over the contiguous runs. block_id is non-decreasing
+    // (assign_blocks), so each block id's SNPs are exactly one half-open run
+    // [s, e); we validate both the range bound and monotonicity as we go.
+    long s = 0;
+    int prev_b = -1;  // last block id seen; ids must be non-decreasing.
+    while (s < M) {
+        const int b = block_id[static_cast<std::size_t>(s)];
+        if (b < 0 || b >= n_block) {
+            throw std::runtime_error(
+                "core::block_ranges: block_id[" + std::to_string(s) + "] = " +
+                std::to_string(b) + " is out of range [0, " + std::to_string(n_block) + ")");
+        }
+        if (b < prev_b) {
+            throw std::runtime_error(
+                "core::block_ranges: block_id is not non-decreasing at column " +
+                std::to_string(s) + " (" + std::to_string(b) + " < " +
+                std::to_string(prev_b) + "); the partition is not contiguous");
+        }
+
+        long e = s;
+        while (e < M && block_id[static_cast<std::size_t>(e)] == b) ++e;
+        ranges[static_cast<std::size_t>(b)] = BlockRange{s, e};
+        prev_b = b;
+        s = e;
+    }
+
+    return ranges;
+}
 
 }  // namespace steppe::core
 

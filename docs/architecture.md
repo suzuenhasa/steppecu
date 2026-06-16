@@ -136,8 +136,9 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │   │   └── decode_af.hpp            # [BUILT, M1] shared __host__ __device__ decode primitive (2-bit unpack, raw-value
 │   │   │                                #   0/1/2=copies, 3=missing; AC/AN -> Q/V/N; ploidy param) -- one source, no divergence
 │   │   ├── domain/
-│   │   │   └── block_partition_rule.hpp # [BUILT, M3] host-pure SNP->block rule (+ .cpp): block_of + assign_blocks (per-chrom
-│   │   │                                #   reset, dense-renumber occupied bins, cM<->Morgan); filter-agnostic single source
+│   │   │   └── block_partition_rule.hpp # [BUILT, M3/M4] host-pure SNP->block rule (+ .cpp): block_of + assign_blocks (per-chrom
+│   │   │                                #   reset, dense-renumber occupied bins, cM<->Morgan) + the inverse block_ranges
+│   │   │                                #   (per-block [begin,end), validated once; both backends call it); single source
 │   │   └── fstats/
 │   │       ├── f2_from_blocks.hpp/.cpp  # [BUILT] host orchestration: drives the f2 compute via the ComputeBackend seam
 │   │       ├── f4_matrix.cpp            # (planned, P2) f3/f4 contraction
@@ -175,6 +176,7 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   ├── reference/test_filter_oracle.cu # [BUILT, M2] no-op-when-default + drop-equals-mask + exact-mask vs scalar oracle
 │   ├── unit/test_f2.cpp                 # [BUILT] host unit test of the shared f2_estimator primitive
 │   ├── unit/test_block_partition.cpp   # [BUILT, M3] assign_blocks logic (synthetic layouts) + real-AADR consistency
+│   ├── unit/test_block_ranges.cpp      # [BUILT, M4] block_ranges inverse: valid layouts + fail-fast on malformed (X-3/B3)
 │   └── unit/test_filters.cpp           # [BUILT, M2] host unit test of the filter_decision predicates
 │
 ├── docs/
@@ -528,7 +530,7 @@ target_link_libraries(steppe_core
 | Host/device + debug | `core/internal/host_device.hpp` | `STEPPE_HD` (the one host/device qualifier), `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT` |
 | Precision / traits | `internal/type_traits.hpp` | `real_t<P>`, `is_fp64`, index aliases — the precision switch lives here |
 | Views | `internal/span_view.hpp` | non-owning matrix/tensor views over `cuda::std::span`/`mdspan` |
-| **SNP→block rule** | `core/domain/block_partition_rule.hpp` | `int block_of(genetic_pos, blgsize)` — host-pure, consumed by `io` *and* device kernels (§5) |
+| **SNP→block rule** | `core/domain/block_partition_rule.hpp` | the forward `int block_of(genetic_pos, blgsize)` + `assign_blocks` (per-SNP `block_id[]`) AND the inverse `block_ranges(block_id, M, n_block)` (per-block `[begin,end)` ranges, validated once) — host-pure, consumed by `io` *and* both device backends (§5; the inverse was previously hand-duplicated per backend, cleanup X-3/B3) |
 | **Reference backend** | `device/cpu/cpu_backend.cpp` | same `ComputeBackend` interface, scalar host implementation |
 
 **The CPU reference backend is both DRY and the correctness anchor.** `ComputeBackend` (in `device/backend.hpp`, CUDA-free) is one interface with two implementations (`CudaBackend`, `CpuBackend`). The compute layer is written once against the interface and never branches on GPU-vs-CPU. The deliberately-naive scalar `CpuBackend` is what the GPU f2/jackknife kernels are continuously diffed against in `tests/reference/`, and both are validated against ADMIXTOOLS 2 via `tools/compare_against_admixtools2.R`. It also guarantees `import steppe` works GPU-free.
@@ -870,7 +872,7 @@ An AI agent or engineer can execute this top-to-bottom to reach a building, test
 3. **Presets:** `CMakePresets.json` (`dev/debug/release/cuda-debug/asan/ci`).
 4. **Dependency pins:** `third_party/CMakeLists.txt` with **CCCL ≥ 3.1 (toolkit-first, 3.1 floor enforced, CPM fallback)**, **NCCL (from toolkit, single-node multi-GPU broadcast, §3/§11.4)**, Eigen, spdlog, CLI11, GoogleTest, nvbench, nanobind.
 5. **Public C-ABI headers (`include/steppe/`):** `version.hpp.in`, `error.hpp` (`steppe_status_t` taxonomy, §10), `config.hpp` (§9), `io/genotype.hpp`, `fstats.hpp`, `qpadm.hpp` (opaque handles + status returns), `steppe.hpp`. Add `include/CMakeLists.txt` defining `steppe_api` INTERFACE.
-6. **DRY internals (`src/core/internal/` + `src/core/domain/`):** `host_device.hpp` (`STEPPE_HD`, `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT`), `expected.hpp` (`STEPPE_TRY`, internal-only), `log.hpp/.cpp` (`STEPPE_LOG_*` incl. the teardown-warning sink), `nvtx.hpp` (with the one color palette), `type_traits.hpp` (`real_t<P>`), `launch_config.hpp`, `span_view.hpp`, and `domain/block_partition_rule.hpp` (`block_of`). Define `steppe::core_internal` INTERFACE.
+6. **DRY internals (`src/core/internal/` + `src/core/domain/`):** `host_device.hpp` (`STEPPE_HD`, `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT`), `expected.hpp` (`STEPPE_TRY`, internal-only), `log.hpp/.cpp` (`STEPPE_LOG_*` incl. the teardown-warning sink), `nvtx.hpp` (with the one color palette), `type_traits.hpp` (`real_t<P>`), `launch_config.hpp`, `span_view.hpp`, and `domain/block_partition_rule.hpp` (`block_of` + `assign_blocks` + the inverse `block_ranges`). Define `steppe::core_internal` INTERFACE.
 7. **Device RAII + checks (`src/device/cuda/`):** `check.cuh` (`STEPPE_CUDA_CHECK`, `STEPPE_CUDA_CHECK_KERNEL`, `CUBLAS_CHECK`, `CUSOLVER_CHECK`), `device_buffer.cuh`, `pinned_buffer.cuh`, `stream.hpp`, `handles.hpp` (full move-assign + debug teardown logging, §7), `allocator.hpp` (pool). These are the **allowlisted** allocation TUs (§2).
 8. **Backend seam:** `src/device/backend.hpp` (`ComputeBackend`, CUDA-free). Stub `cpu/cpu_backend.cpp` (scalar) and `cuda/cuda_backend.cu` first as compiling no-ops, plus `cuda/multi_gpu.cu/.hpp` (device enumeration, per-device streams/handles, NCCL comm setup, SNP-tile sharding, fixed-order host-side `f2_blocks` combine + broadcast — §11.4) and `src/device/CMakeLists.txt` wiring CUDA `PRIVATE` + `CCCL::CCCL` + **`CUDA::nccl`** (§8).
 9. **First real kernel + reference:** f2 estimator as a `__host__ __device__` pure function (`core/fstats/`), the `f2_block_kernel.cu` shell, and the matching CPU-backend path. Minimum slice proving the architecture and the reference seam.

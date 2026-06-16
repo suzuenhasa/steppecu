@@ -48,8 +48,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
+#include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/decode_af.hpp"     // genotype_code, genotype_valid, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
@@ -207,22 +209,18 @@ public:
         if (P <= 0 || M <= 0 || n_block <= 0) return out;
 
         // Block columns are CONTIGUOUS in file order (assign_blocks is
-        // non-decreasing), so a block is the half-open SNP range [begin, end). One
-        // scan finds the per-block ranges; the block-size count is the S4 metadata.
-        std::vector<long> begin(static_cast<std::size_t>(n_block), 0);
-        std::vector<long> end(static_cast<std::size_t>(n_block), 0);
-        {
-            long s = 0;
-            while (s < M) {
-                const int b = block_id[s];
-                long e = s;
-                while (e < M && block_id[e] == b) ++e;
-                begin[static_cast<std::size_t>(b)] = s;
-                end[static_cast<std::size_t>(b)] = e;
-                out.block_sizes[static_cast<std::size_t>(b)] =
-                    static_cast<int>(e - s);
-                s = e;
-            }
+        // non-decreasing), so a block is the half-open SNP range [begin, end). The
+        // SINGLE-SOURCE inverse of assign_blocks (core::block_ranges) validates the
+        // partition contract ONCE (0 <= id < n_block, non-decreasing, block_id long
+        // enough) and returns those ranges — closing the OOB write/read this scan
+        // used to risk on a malformed partition (cleanup X-3/B3). The per-block SNP
+        // count is the S4 metadata (F2BlockTensor::block_sizes).
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+        for (int b = 0; b < n_block; ++b) {
+            out.block_sizes[static_cast<std::size_t>(b)] =
+                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
         }
 
         // Per-block, per-pair: the cancellation-free long-double reference, sharing
@@ -238,8 +236,8 @@ public:
         // off-diagonal f2 only — but it must not spuriously differ across paths).
         std::vector<long double> terms(static_cast<std::size_t>(M));
         for (int b = 0; b < n_block; ++b) {
-            const long s0 = begin[static_cast<std::size_t>(b)];
-            const long s1 = end[static_cast<std::size_t>(b)];
+            const long s0 = ranges[static_cast<std::size_t>(b)].begin;
+            const long s1 = ranges[static_cast<std::size_t>(b)].end;
             const std::size_t base = slab * static_cast<std::size_t>(b);
             for (int i = 0; i < P; ++i) {
                 for (int j = i; j < P; ++j) {

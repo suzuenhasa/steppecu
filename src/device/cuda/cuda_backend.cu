@@ -26,8 +26,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
+#include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
@@ -139,20 +141,22 @@ public:
         if (P <= 0 || M <= 0 || n_block <= 0) return out;
 
         // ---- Block layout from block_id (contiguous in file order) -----------
-        // block_id is non-decreasing (assign_blocks), so each block's SNPs are the
-        // half-open column range [offset, offset+size). One host scan; the sizes
-        // are also the F2BlockTensor metadata (the S4 weighting denominator base).
+        // The SINGLE-SOURCE inverse of assign_blocks: block_ranges validates the
+        // partition contract ONCE (0 <= id < n_block, non-decreasing, block_id
+        // long enough) and returns each block's half-open column range
+        // [begin, end) — closing the OOB write/read this scan used to risk on a
+        // malformed partition (cleanup X-3/B3). The device wants block_offsets
+        // (= each range's begin) it copies to dOffsets and the kernel dereferences
+        // (f2_blocks_kernel.cu), plus block_sizes (= each range's size, the S4
+        // F2BlockTensor metadata / weighting denominator base).
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
         std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
-        {
-            long s = 0;
-            while (s < M) {
-                const int b = block_id[s];
-                long e = s;
-                while (e < M && block_id[e] == b) ++e;
-                block_offsets[static_cast<std::size_t>(b)] = s;
-                out.block_sizes[static_cast<std::size_t>(b)] = static_cast<int>(e - s);
-                s = e;
-            }
+        for (int b = 0; b < n_block; ++b) {
+            block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
+            out.block_sizes[static_cast<std::size_t>(b)] =
+                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
         }
 
         // ---- Group blocks by ceil-pow{kBlockGroupPadBase}(size) (the spike rule).

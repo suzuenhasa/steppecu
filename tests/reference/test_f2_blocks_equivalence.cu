@@ -45,6 +45,7 @@
 #include <cstring>
 #include <cmath>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -138,15 +139,16 @@ Acc accuracy(const F2BlockTensor& cand, const F2BlockTensor& ref) {
 bool vpair_matches_recount(const F2BlockTensor& t, const MatView& V,
                            const BlockPartition& part) {
     const int P = t.P, B = t.n_block; const long M = V.M;
-    // per-block SNP ranges (block_id non-decreasing ⇒ contiguous)
-    std::vector<long> begin(B, 0), end(B, 0);
-    { long s = 0; while (s < M) { int b = part.block_id[s]; long e = s;
-        while (e < M && part.block_id[e] == b) ++e; begin[b] = s; end[b] = e; s = e; } }
+    // per-block SNP ranges via the SINGLE-SOURCE inverse of assign_blocks
+    // (core::block_ranges; cleanup X-3/B3) — no hand-rolled scan here either.
+    const std::vector<steppe::core::BlockRange> ranges = steppe::core::block_ranges(
+        std::span<const int>(part.block_id.data(), static_cast<std::size_t>(M)), M, B);
     for (int b = 0; b < B; ++b)
         for (int i = 0; i < P; ++i)
             for (int j = 0; j < P; ++j) {
                 long cnt = 0;
-                for (long s = begin[b]; s < end[b]; ++s)
+                for (long s = ranges[static_cast<std::size_t>(b)].begin;
+                     s < ranges[static_cast<std::size_t>(b)].end; ++s)
                     if (V.element(i, s) != 0.0 && V.element(j, s) != 0.0) ++cnt;
                 const std::size_t o = static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * j
                                     + static_cast<std::size_t>(P) * P * b;
