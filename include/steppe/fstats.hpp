@@ -34,9 +34,12 @@ namespace steppe {
 /// is the [P × P × n_block] resident tensor of architecture.md §11.1/§11.2 — the
 /// `n_block` axis is the jackknife batch axis the fit engine (S3–S8) contracts
 /// over. Each [P × P] slab is SYMMETRIC. The DIAGONAL carries the full (i,i)
-/// computation (= -2·mean within-pop het correction, generally nonzero — the M0
-/// compute_f2 convention), NOT a forced 0; downstream f3/f4 read off-diagonal f2
-/// only, so the diagonal is never consumed but is kept consistent across paths.
+/// computation (= -2·mean within-pop het correction, generally nonzero), NOT a
+/// forced 0 — the SAME diagonal convention as the single-block F2Result (pinned
+/// in src/device/backend.hpp; cleanup X-2/B4), so the GPU grouped path, the CPU
+/// per-block oracle, and the single-block == M0 F2Result all agree on the
+/// diagonal. Downstream f3/f4 read off-diagonal f2 only, so the diagonal is never
+/// consumed but is kept consistent across paths.
 struct F2BlockTensor {
     /// Per-block bias-corrected f2: `f2[i + P·j + P·P·b]` is the AT2-unbiased f2
     /// for pair (i, j) over the SNPs of block b that are valid in BOTH i and j

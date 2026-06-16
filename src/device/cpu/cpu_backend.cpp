@@ -106,7 +106,9 @@ public:
         F2Result out;
         out.P = P;
         // Column-major [P × P] outputs: element (i, j) at i + P·j. Zero-filled so
-        // the diagonal and any untouched entry default to 0 (f2(i,i) = 0).
+        // any entry left untouched on an empty block defaults to 0; the loop below
+        // writes EVERY (i, j) including the diagonal (the F2Result diagonal
+        // convention pinned in backend.hpp — see the loop comment).
         out.f2.assign(static_cast<std::size_t>(P) * static_cast<std::size_t>(P), 0.0);
         out.vpair.assign(static_cast<std::size_t>(P) * static_cast<std::size_t>(P), 0.0);
 
@@ -117,12 +119,21 @@ public:
         // §11.1): the reference is O(P²·M) time, O(M) extra space.
         std::vector<long double> terms(static_cast<std::size_t>(M));
 
-        // Walk the upper triangle (i < j); f2 is symmetric, so mirror each
-        // result to (j, i) and leave the diagonal at its zero default. This is
-        // the AT2 pairwise-complete path: a SNP contributes to pair (i, j) only
-        // when it is valid in BOTH populations.
+        // Walk the upper triangle INCLUDING the diagonal (j = i); f2 is symmetric,
+        // so mirror each off-diagonal result to (j, i). The diagonal carries the
+        // full (i, i) computation: f2_term(p_i, p_i, hc_i, hc_i) = (p_i − p_i)²
+        // − hc_i − hc_i = −2·hc_i, so f2(i,i) = −2·mean within-pop het correction
+        // and vpair(i,i) = i's valid-SNP count. This MATCHES the GPU M0 path
+        // (assemble_f2_kernel writes every (i,j) with no i==j guard) and the
+        // per-block oracle (compute_f2_blocks, j = i), so the F2Result diagonal is
+        // consistent across backends — the convention pinned in backend.hpp
+        // (cleanup X-2/B4; the diagonal is never consumed downstream, f3/f4 read
+        // off-diagonal f2 only, but it must not spuriously differ across paths).
+        // This is the AT2 pairwise-complete path: a SNP contributes to pair (i, j)
+        // only when it is valid in BOTH populations (for the diagonal, that is
+        // simply "valid in i").
         for (int i = 0; i < P; ++i) {
-            for (int j = i + 1; j < P; ++j) {
+            for (int j = i; j < P; ++j) {
                 long count = 0;  // pairwise-valid SNP count == Vpair(i, j)
 
                 for (long s = 0; s < M; ++s) {
@@ -228,12 +239,14 @@ public:
         // to the largest block so the [P×P×M] intermediate is never materialized.
         //
         // FULL i,j (INCLUDING the diagonal): the GPU grouped path computes every
-        // (i,j) entry via the GEMM reformulation, and the M0 compute_f2 GPU/ref
-        // pair likewise fill the diagonal (the diagonal f2(i,i) = -hc_i - hc_i ⇒
-        // -2·mean_het, vpair(i,i) = i's valid-SNP count). We MATCH that here so the
-        // oracle, the GPU grouped path, and the single-block == M0 check all agree
-        // bit-consistently (the diagonal is never consumed downstream — f3/f4 read
-        // off-diagonal f2 only — but it must not spuriously differ across paths).
+        // (i,j) entry via the GEMM reformulation, and BOTH M0 compute_f2 paths
+        // (GPU assemble_f2_kernel and the CPU oracle, j = i since cleanup X-2/B4)
+        // likewise fill the diagonal (f2(i,i) = -hc_i - hc_i ⇒ -2·mean_het,
+        // vpair(i,i) = i's valid-SNP count). We MATCH that here so the oracle, the
+        // GPU grouped path, the M0 GPU/CPU pair, and the single-block == M0 check
+        // all agree bit-consistently (the diagonal is never consumed downstream —
+        // f3/f4 read off-diagonal f2 only — but it must not spuriously differ
+        // across paths).
         std::vector<long double> terms(static_cast<std::size_t>(M));
         for (int b = 0; b < n_block; ++b) {
             const long s0 = ranges[static_cast<std::size_t>(b)].begin;

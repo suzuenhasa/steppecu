@@ -39,12 +39,26 @@ namespace steppe {
 struct F2Result {
     /// f2 matrix, column-major [P × P]. Bias-corrected, AT2-unbiased estimator
     /// f2(i,j) = mean over jointly-valid SNPs of (p_i − p_j)² − hc_i − hc_j.
+    ///
+    /// DIAGONAL CONVENTION (pinned; cleanup X-2/B4): f2(i,i) carries the FULL
+    /// (i,i) computation, NOT a forced 0. With p_i == p_i the per-SNP summand is
+    /// (p_i − p_i)² − hc_i − hc_i = −2·hc_i, so f2(i,i) = −2·mean within-pop het
+    /// correction (generally nonzero, and a within-pop het quantity, NOT a
+    /// between-pop f2). BOTH backends agree on the diagonal by construction: the
+    /// GPU assemble_f2_kernel writes every (i,j) with no i==j guard, and the CPU
+    /// oracle loops j = i. The diagonal is never consumed downstream (f3/f4 read
+    /// off-diagonal f2 only) but is kept consistent across backends so the §13
+    /// oracle≡GPU diff at the F2Result seam compares the FULL matrix, diagonal
+    /// included, and an M7 F2Result round-trip cannot reintroduce a backend split.
     std::vector<double> f2;
 
     /// Pairwise-valid SNP count, column-major [P × P]: Vpair(i,j) = number of
     /// SNPs valid in BOTH i and j. RETAINED as the S4 jackknife weight
     /// (architecture.md §5 S2 caveat (a)); the per-pair divide and S4 weighting
-    /// must compose to AT2's f2_blocks definition, not double-normalize.
+    /// must compose to AT2's f2_blocks definition, not double-normalize. The
+    /// DIAGONAL Vpair(i,i) is i's own valid-SNP count (the i==j case of "valid in
+    /// both"); like f2(i,i) it is filled, not 0, and agrees across backends
+    /// (cleanup X-2/B4).
     std::vector<double> vpair;
 
     /// Number of populations P (the leading dimension of both matrices).

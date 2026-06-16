@@ -22,10 +22,16 @@ else()
 fallback (returns non-zero on failure; CTest gates on exit code)")
 endif()
 
-# --- GPU-vs-CPU equivalence test (the central trust seam) --------------------
-# CUDA TU: links steppe::device (CudaBackend + CpuBackend) directly so it can
-# diff the two implementations. CUDA::cublas comes transitively-private through
-# steppe_device; the test only needs the CUDA-free backend.hpp seam.
+# --- GPU-vs-CPU equivalence test (the central M0 trust seam) -----------------
+# CUDA TU: drives the PRODUCTION backends — steppe::core::make_cpu_backend() (the
+# long-double oracle) and steppe::device::make_cuda_backend() (the 3-GEMM GPU
+# path) — through the CUDA-free ComputeBackend::compute_f2 seam, NOT an inline
+# re-implementation (cleanup X-2/B4: the old inline oracle walked j=i+1 and hid the
+# M0 diagonal divergence). It diffs the FULL [P × P] matrix INCLUDING the diagonal
+# and exits non-zero on any mismatch. Links steppe::core (make_cpu_backend) +
+# steppe::device (make_cuda_backend + the device-private kernel header for the X-6/
+# B2 emulation_honorable predicate); CUDA::cublas is transitively-private through
+# steppe_device.
 #
 # This test has its OWN main() and is NOT a GoogleTest-style TU (it self-checks
 # and exits non-zero on failure), so it does NOT link gtest_main or define
@@ -34,16 +40,15 @@ endif()
 add_executable(test_f2_equivalence reference/test_f2_equivalence.cu)
 target_link_libraries(test_f2_equivalence
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+# Separable compilation so the executable device-links steppe_device's RDC kernels
+# directly (the same path the other CUDA reference tests use).
 set_target_properties(test_f2_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-# The equivalence test engages the fixed-slice Ozaki tuning (EAGER strategy +
-# FIXED mantissa control) under its own STEPPE_HAVE_EMU_TUNING guard, exactly like
-# the device layer. Without it the EAGER strategy is absent, cuBLAS declines to
-# emulate these tiny GEMMs, the emu output is bit-identical to native, and the
-# engagement guard reports the EmulatedFp64 arm SKIPPED (a non-assert). The
-# MEASURED precision policy REQUIRES the tuning (ROADMAP §0), so define it on this
-# target when the option is on — this is what turns the emu arm from SKIPPED into
-# an asserted PASS on the sm_120 / CUDA-13 box.
+# The EmulatedFp64 arm asserts on BOTH lanes via the PRODUCTION emulation_honorable
+# predicate (X-6/B2): the predicate reflects steppe_device's own
+# STEPPE_HAVE_EMU_TUNING, so the verdict is correct regardless of this target's
+# define. Match the library's define anyway so this TU's #if-guarded includes agree
+# with steppe_device (both flow from the one cmake option; box build turns it on).
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_equivalence PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()

@@ -30,8 +30,12 @@
 //        * native vs oracle  < 1e-9   (near bit-stable)
 //        * emu{40} vs oracle < 1e-6   (40-bit ≈ native; spike combined ~4.5e-5 @P=768)
 //   4. Property checks: per-block f2 symmetric; Vpair integer-valued and EQUAL to
-//      an INDEPENDENT recount of the per-block pairwise non-missing SNP count;
-//      f2 diagonal zero.
+//      an INDEPENDENT recount of the per-block pairwise non-missing SNP count. The
+//      f2 DIAGONAL is the full (i,i) computation (= -2·mean_het, NOT 0 — the
+//      pinned F2Result/F2BlockTensor convention, cleanup X-2/B4); it is never
+//      consumed downstream so it is not separately asserted here, but it is
+//      compared bit-for-bit by the single-block == M0 check (step 5) and the M0
+//      GPU-vs-production-CpuBackend full-matrix diff lives in test_f2_equivalence.
 //   5. SINGLE-BLOCK CONSISTENCY: with ALL SNPs forced into one block,
 //      compute_f2_blocks must reproduce the M0 compute_f2 result bit-for-bit
 //      (same backend, same precision) — the n_block=1 case is exactly M0.
@@ -159,10 +163,12 @@ bool vpair_matches_recount(const F2BlockTensor& t, const MatView& V,
                     return false;
                 }
                 // NB: the f2 DIAGONAL is the full (i,i) computation (= -2·mean_het,
-                // not 0) — the M0 compute_f2 convention this M4 path must match
-                // (single-block == M0). It is never consumed downstream (f3/f4 read
-                // off-diagonal f2), so it is not asserted here; the accuracy check
-                // excludes it and the single-block == M0 check covers it.
+                // not 0) — the pinned F2Result/F2BlockTensor diagonal convention
+                // (src/device/backend.hpp; cleanup X-2/B4), agreed across the GPU
+                // grouped path, the CPU per-block oracle, and the single-block == M0
+                // F2Result. It is never consumed downstream (f3/f4 read off-diagonal
+                // f2), so it is not asserted here; the accuracy check excludes it and
+                // the single-block == M0 check covers it bit-for-bit.
             }
     return true;
 }
