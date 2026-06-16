@@ -34,8 +34,14 @@ target_link_libraries(steppe_core_internal INTERFACE steppe::api)  # config.hpp,
 target_compile_features(steppe_core_internal INTERFACE cxx_std_20)
 
 # --- steppe_core: host orchestration (static lib) ----------------------------
+# domain/block_partition_rule.cpp — the whole-ordering SNP→block assignment
+# (M3). Host-pure, CUDA-free; the single home of the jackknife block id consumed
+# by both io and the device kernels (architecture.md §8 DRY invariant). The
+# per-SNP `block_of` primitive + the cM→Morgan conversion stay header-inline; only
+# the stateful pass compiles here.
 add_library(steppe_core STATIC
-    fstats/f2_from_blocks.cpp)
+    fstats/f2_from_blocks.cpp
+    domain/block_partition_rule.cpp)
 add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core
