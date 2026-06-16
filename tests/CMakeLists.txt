@@ -107,6 +107,21 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME f2_estimator_unit COMMAND test_f2_estimator)
 
+# --- Host-only unit test of the B7 single-source-home headers ----------------
+# Pure C++ TU (no CUDA): pins the launch-math home (core/internal/launch_config.hpp
+# — cdiv int+long, grid_for, the warp-justified 32×8 decode block dims) and the
+# host/device + debug facility home (core/internal/host_device.hpp — STEPPE_HD,
+# STEPPE_DEBUG_ONLY, STEPPE_ASSERT), reached DIRECTLY through their new homes so the
+# B7 move out of f2_estimator.hpp is a real single source. architecture.md §8, §13.
+add_executable(test_launch_config unit/test_launch_config.cpp)
+target_link_libraries(test_launch_config
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_launch_config PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_launch_config PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME launch_config_unit COMMAND test_launch_config)
+
 # --- Host-only unit test of the shared SNP→block partition rule (M3) ----------
 # Pure C++ TU (no CUDA, no io): exercises core/domain/block_partition_rule on
 # synthetic chromosome/position LAYOUTS (control-flow, not a precision claim —

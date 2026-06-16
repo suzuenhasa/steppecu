@@ -28,20 +28,8 @@
 
 #include <utility>
 
+#include "core/internal/log.hpp"  // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"  // STEPPE_CUDA_CHECK
-
-// Debug-only teardown warning sink, mirroring device_buffer.cuh / handles.hpp.
-// Destroy-time failures route through internal/log.hpp's STEPPE_LOG_WARN
-// (architecture.md §7, §10) once that facade is wired into steppe_device; until
-// then, warn to stderr in debug builds only and stay silent in release. The
-// destructors must never throw.
-#if defined(NDEBUG)
-#  define STEPPE_STREAM_WARN_ON_TEARDOWN(what, errstr) ((void)0)
-#else
-#  include <cstdio>
-#  define STEPPE_STREAM_WARN_ON_TEARDOWN(what, errstr) \
-    std::fprintf(stderr, "[steppe][warn] %s at teardown: %s\n", (what), (errstr))
-#endif
 
 namespace steppe::device {
 
@@ -81,8 +69,8 @@ private:
         if (s_) {
             const cudaError_t e = cudaStreamDestroy(s_);
             if (e != cudaSuccess) {
-                STEPPE_STREAM_WARN_ON_TEARDOWN("cudaStreamDestroy",
-                                               cudaGetErrorString(e));
+                STEPPE_LOG_WARN("cudaStreamDestroy at teardown: %s",
+                                cudaGetErrorString(e));
             }
         }
         s_ = nullptr;
@@ -153,8 +141,8 @@ private:
         if (e_) {
             const cudaError_t err = cudaEventDestroy(e_);
             if (err != cudaSuccess) {
-                STEPPE_STREAM_WARN_ON_TEARDOWN("cudaEventDestroy",
-                                               cudaGetErrorString(err));
+                STEPPE_LOG_WARN("cudaEventDestroy at teardown: %s",
+                                cudaGetErrorString(err));
             }
         }
         e_ = nullptr;

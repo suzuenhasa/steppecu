@@ -32,8 +32,9 @@
 
 #include <cuda_runtime.h>
 
-#include "core/internal/decode_af.hpp"  // genotype_code, genotype_valid, finalize_af
-#include "device/cuda/check.cuh"        // STEPPE_CUDA_CHECK_KERNEL
+#include "core/internal/decode_af.hpp"       // genotype_code, genotype_valid, finalize_af
+#include "core/internal/launch_config.hpp"   // cdiv, kDecodeBlockX/Y (the launch-math home)
+#include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
 
 namespace steppe::device {
 
@@ -41,14 +42,10 @@ using core::AfResult;
 using core::finalize_af;
 using core::genotype_code;
 using core::genotype_valid;
+using core::kDecodeBlockX;  // SNP axis (32 = one warp, warp-aligned for coalescing)
+using core::kDecodeBlockY;  // population axis (32*8 = 256 threads/block)
 
 namespace {
-
-/// Thread-block edge for the 2-D decode launch (SNP × pop). 16×16 = 256 threads
-/// per block, mirroring kCdivBlock for the f2 kernels; x is the SNP axis (the
-/// coalescing axis), y is the population axis. Local to this TU.
-inline constexpr int kDecodeBlockX = 32;  // SNP axis (warp-aligned for coalescing)
-inline constexpr int kDecodeBlockY = 8;   // population axis (32*8 = 256 threads)
 
 /// Decode one (population, SNP) entry. One thread owns (i = population row, s =
 /// SNP). It reduces over population i's individual segment [seg_begin, seg_end),
@@ -90,11 +87,6 @@ __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
     N[off] = r.n;
 }
 
-/// Ceiling division for the launch grid (device-local; mirrors core::cdiv but
-/// kept here so this kernel TU has no dependency beyond the decode primitive).
-[[nodiscard]] inline long cdiv_l(long n, long b) noexcept { return (n + b - 1) / b; }
-[[nodiscard]] inline int cdiv_i(int n, int b) noexcept { return (n + b - 1) / b; }
-
 }  // namespace
 
 void launch_decode_af(const std::uint8_t* d_packed,
@@ -103,9 +95,13 @@ void launch_decode_af(const std::uint8_t* d_packed,
                       int P, long M, int ploidy,
                       double* d_Q, double* d_V, double* d_N,
                       cudaStream_t stream) {
+    // Grid math via the single launch-config home (architecture.md §4, §8): the
+    // SNP axis (M, `long`) MUST use the long cdiv overload; the population axis
+    // (P, `int`) uses the int one. The 32×8 block is NON-square, so we pass the
+    // explicit per-axis dims (kDecodeBlockX/Y) — NOT grid_for's square default.
     const dim3 block(kDecodeBlockX, kDecodeBlockY);
-    const dim3 grid(static_cast<unsigned>(cdiv_l(M, static_cast<long>(kDecodeBlockX))),
-                    static_cast<unsigned>(cdiv_i(P, kDecodeBlockY)));
+    const dim3 grid(static_cast<unsigned>(core::cdiv(M, static_cast<long>(kDecodeBlockX))),
+                    static_cast<unsigned>(core::cdiv(P, kDecodeBlockY)));
     decode_af_kernel<<<grid, block, 0, stream>>>(d_packed, bytes_per_record,
                                                  d_pop_offsets, P, M, ploidy,
                                                  d_Q, d_V, d_N);

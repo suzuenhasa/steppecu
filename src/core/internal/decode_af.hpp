@@ -29,20 +29,17 @@
 //     For the real AADR data every sample is diploid (ploidy == 2), so every N is
 //     even — exactly the oracle's `N = 2*non-missing`, `Q = AC/(2*AN)`.
 //
-// __host__ __device__ portability: like f2_estimator.hpp, STEPPE_HD expands to the
-// CUDA qualifiers under nvcc and to nothing otherwise, so the SAME functions
-// compile and unit-test on the CPU and run on the GPU (the point of one shared
-// primitive). CUDA-free-compilable (it includes no CUDA header).
+// __host__ __device__ portability: like f2_estimator.hpp, STEPPE_HD (from the
+// single home core/internal/host_device.hpp) expands to the CUDA qualifiers under
+// nvcc and to nothing otherwise, so the SAME functions compile and unit-test on
+// the CPU and run on the GPU (the point of one shared primitive). CUDA-free-
+// compilable (it includes no CUDA header).
 #ifndef STEPPE_CORE_INTERNAL_DECODE_AF_HPP
 #define STEPPE_CORE_INTERNAL_DECODE_AF_HPP
 
 #include <cstdint>
 
-#if defined(__CUDACC__)
-#  define STEPPE_HD __host__ __device__
-#else
-#  define STEPPE_HD
-#endif
+#include "core/internal/host_device.hpp"  // STEPPE_HD
 
 namespace steppe::core {
 

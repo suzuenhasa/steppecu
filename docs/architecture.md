@@ -520,9 +520,10 @@ target_link_libraries(steppe_core
 | CUDA error check | `device/cuda/check.cuh` | `STEPPE_CUDA_CHECK(expr)` → `CudaError{file:line, cudaGetErrorName/String}` |
 | cuBLAS/cuSOLVER check | `device/cuda/check.cuh` | `CUBLAS_CHECK` / `CUSOLVER_CHECK` switch on status enums |
 | Error propagation (internal) | `internal/expected.hpp` | `STEPPE_TRY(expr)` over `std::expected<T,Error>` — **internal only; never crosses the ABI** (§16) |
-| Logging | `internal/log.hpp` | `STEPPE_LOG_*` facade over spdlog; never `printf`/`cout` in lib code; also the teardown-warning sink (§7) |
+| Logging | `core/internal/log.hpp` | `STEPPE_LOG_*` facade (a spdlog backend lands with §10); never `printf`/`cout` in lib code; also the teardown-warning sink `STEPPE_LOG_WARN` (§7) |
 | NVTX + colors | `internal/nvtx.hpp` | `STEPPE_NVTX_SCOPE("name", color)` RAII; **the color palette (`nvtx::Color`) is defined here, once** |
-| Launch math | `internal/launch_config.hpp` | `cdiv`, `grid_for`, occupancy sizing |
+| Launch math | `core/internal/launch_config.hpp` | `cdiv` (int + long), `grid_for`, the per-kernel block dims (`kDecodeBlockX/Y`); occupancy sizing later |
+| Host/device + debug | `core/internal/host_device.hpp` | `STEPPE_HD` (the one host/device qualifier), `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT` |
 | Precision / traits | `internal/type_traits.hpp` | `real_t<P>`, `is_fp64`, index aliases — the precision switch lives here |
 | Views | `internal/span_view.hpp` | non-owning matrix/tensor views over `cuda::std::span`/`mdspan` |
 | **SNP→block rule** | `core/domain/block_partition_rule.hpp` | `int block_of(genetic_pos, blgsize)` — host-pure, consumed by `io` *and* device kernels (§5) |
@@ -867,7 +868,7 @@ An AI agent or engineer can execute this top-to-bottom to reach a building, test
 3. **Presets:** `CMakePresets.json` (`dev/debug/release/cuda-debug/asan/ci`).
 4. **Dependency pins:** `third_party/CMakeLists.txt` with **CCCL ≥ 3.1 (toolkit-first, 3.1 floor enforced, CPM fallback)**, **NCCL (from toolkit, single-node multi-GPU broadcast, §3/§11.4)**, Eigen, spdlog, CLI11, GoogleTest, nvbench, nanobind.
 5. **Public C-ABI headers (`include/steppe/`):** `version.hpp.in`, `error.hpp` (`steppe_status_t` taxonomy, §10), `config.hpp` (§9), `io/genotype.hpp`, `fstats.hpp`, `qpadm.hpp` (opaque handles + status returns), `steppe.hpp`. Add `include/CMakeLists.txt` defining `steppe_api` INTERFACE.
-6. **DRY internals (`src/core/internal/` + `src/core/domain/`):** `expected.hpp` (`STEPPE_TRY`, internal-only), `log.hpp/.cpp`, `nvtx.hpp` (with the one color palette), `type_traits.hpp` (`real_t<P>`), `launch_config.hpp`, `span_view.hpp`, and `domain/block_partition_rule.hpp` (`block_of`). Define `steppe::core_internal` INTERFACE.
+6. **DRY internals (`src/core/internal/` + `src/core/domain/`):** `host_device.hpp` (`STEPPE_HD`, `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT`), `expected.hpp` (`STEPPE_TRY`, internal-only), `log.hpp/.cpp` (`STEPPE_LOG_*` incl. the teardown-warning sink), `nvtx.hpp` (with the one color palette), `type_traits.hpp` (`real_t<P>`), `launch_config.hpp`, `span_view.hpp`, and `domain/block_partition_rule.hpp` (`block_of`). Define `steppe::core_internal` INTERFACE.
 7. **Device RAII + checks (`src/device/cuda/`):** `check.cuh` (`STEPPE_CUDA_CHECK`, `STEPPE_CUDA_CHECK_KERNEL`, `CUBLAS_CHECK`, `CUSOLVER_CHECK`), `device_buffer.cuh`, `pinned_buffer.cuh`, `stream.hpp`, `handles.hpp` (full move-assign + debug teardown logging, §7), `allocator.hpp` (pool). These are the **allowlisted** allocation TUs (§2).
 8. **Backend seam:** `src/device/backend.hpp` (`ComputeBackend`, CUDA-free). Stub `cpu/cpu_backend.cpp` (scalar) and `cuda/cuda_backend.cu` first as compiling no-ops, plus `cuda/multi_gpu.cu/.hpp` (device enumeration, per-device streams/handles, NCCL comm setup, SNP-tile sharding, fixed-order host-side `f2_blocks` combine + broadcast — §11.4) and `src/device/CMakeLists.txt` wiring CUDA `PRIVATE` + `CCCL::CCCL` + **`CUDA::nccl`** (§8).
 9. **First real kernel + reference:** f2 estimator as a `__host__ __device__` pure function (`core/fstats/`), the `f2_block_kernel.cu` shell, and the matching CPU-backend path. Minimum slice proving the architecture and the reference seam.

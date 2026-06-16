@@ -23,21 +23,8 @@
 #include <cstddef>
 #include <utility>
 
+#include "core/internal/log.hpp"  // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"  // STEPPE_CUDA_CHECK
-
-// Debug-only teardown warning sink. The architecture routes destructor warnings
-// through internal/log.hpp's STEPPE_LOG_WARN (architecture.md §7, §10); until that
-// facade is wired into steppe_device, emit to stderr in debug builds only and stay
-// silent in release. The destructor must never throw, so a non-fatal report is the
-// correct behavior here. Swap the body for STEPPE_LOG_WARN once log.hpp lands.
-#if defined(NDEBUG)
-#  define STEPPE_DEVICE_BUFFER_WARN_ON_TEARDOWN(errstr) ((void)(errstr))
-#else
-#  include <cstdio>
-#  define STEPPE_DEVICE_BUFFER_WARN_ON_TEARDOWN(errstr)                       \
-    std::fprintf(stderr, "[steppe][warn] cudaFree at DeviceBuffer teardown: " \
-                         "%s\n", (errstr))
-#endif
 
 namespace steppe::device {
 
@@ -85,7 +72,8 @@ private:
             // never thrown. cudaFree(nullptr) is a no-op, hence the guard.
             const cudaError_t e = cudaFree(ptr_);  // ALLOWLISTED TU
             if (e != cudaSuccess) {
-                STEPPE_DEVICE_BUFFER_WARN_ON_TEARDOWN(cudaGetErrorString(e));
+                STEPPE_LOG_WARN("cudaFree at DeviceBuffer teardown: %s",
+                                cudaGetErrorString(e));
             }
         }
         ptr_ = nullptr;

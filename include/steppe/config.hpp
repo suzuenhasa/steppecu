@@ -46,8 +46,8 @@ inline constexpr int kDefaultMantissaBits = 40;
 /// Square thread-block edge for the elementwise f2 assemble/numerator kernels:
 /// a `dim3(kCdivBlock, kCdivBlock)` 2-D block over the [P × P] output.
 /// Replaces the spike's `dim3 block(16,16)` (f2_emu_spike.cu:311). The single
-/// source of launch geometry lives in `core/internal/f2_estimator.hpp` /
-/// `launch_config.hpp`; kernels never re-pick a block size.
+/// source of launch geometry (`cdiv`, `grid_for`, and the per-kernel block dims)
+/// lives in `core/internal/launch_config.hpp`; kernels never re-pick a block size.
 inline constexpr int kCdivBlock = 16;
 
 /// Relative-error floor: pairs whose reference |f2| is below this are scored by

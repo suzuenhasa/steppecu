@@ -24,19 +24,16 @@
 // ---------------------------------------------------------------------------
 // This header is included BOTH by host-pure `core` TUs (compiled by the C++
 // host compiler, where `__host__`/`__device__` are unknown) AND by device TUs
-// (compiled by nvcc). We define STEPPE_HD to the CUDA qualifiers under nvcc and
+// (compiled by nvcc). STEPPE_HD (from core/internal/host_device.hpp — the single
+// home, shared with decode_af.hpp) expands to the CUDA qualifiers under nvcc and
 // to nothing otherwise, so the exact SAME functions compile and unit-test on the
 // CPU and run on the GPU — that is the whole point of one shared primitive.
 #ifndef STEPPE_CORE_INTERNAL_F2_ESTIMATOR_HPP
 #define STEPPE_CORE_INTERNAL_F2_ESTIMATOR_HPP
 
-#include "steppe/config.hpp"  // kHetCorrDenomFloor, kCdivBlock
-
-#if defined(__CUDACC__)
-#  define STEPPE_HD __host__ __device__
-#else
-#  define STEPPE_HD
-#endif
+#include "core/internal/host_device.hpp"    // STEPPE_HD
+#include "core/internal/launch_config.hpp"  // cdiv, grid_for (the launch-math home)
+#include "steppe/config.hpp"                // kHetCorrDenomFloor
 
 namespace steppe::core {
 
@@ -111,33 +108,10 @@ namespace steppe::core {
     return (vpair > 0.0) ? (numerator / vpair) : 0.0;
 }
 
-// ===========================================================================
-// Launch-config helpers (architecture.md §7, §8 — one home for grid math).
-//
-// These mirror core/internal/launch_config.hpp's `cdiv`/`grid_for`; they live
-// alongside the f2 primitive so the f2 feeder kernels never recompute grid math
-// (replacing the spike's inline `(P + block.x - 1) / block.x`,
-// f2_emu_spike.cu:312). Host-callable; constexpr so they fold at compile time.
-// ===========================================================================
-
-/// Ceiling division `ceil(n / b)` — the launch-grid building block. `b` must be
-/// > 0 (a block dimension). Replaces the spike's open-coded `(n + b - 1) / b`.
-[[nodiscard]] STEPPE_HD constexpr int cdiv(int n, int b) noexcept {
-    return (n + b - 1) / b;
-}
-
-/// Long overload of `cdiv` for SNP-count-scale dimensions (M can exceed 2^31).
-[[nodiscard]] STEPPE_HD constexpr long cdiv(long n, long b) noexcept {
-    return (n + b - 1) / b;
-}
-
-/// Number of `block`-sized tiles needed to cover `n` elements along one axis —
-/// the grid extent for a 1-D-per-axis launch. Alias of `cdiv` named for the
-/// launch-config call site (`grid_for(P, kCdivBlock)` for each of x/y over the
-/// [P × P] output). Defaults `block` to the project's standard square edge.
-[[nodiscard]] STEPPE_HD constexpr int grid_for(int n, int block = kCdivBlock) noexcept {
-    return cdiv(n, block);
-}
+// The launch-config helpers `cdiv`/`grid_for` now live in their own single home,
+// core/internal/launch_config.hpp (architecture.md §4 line 466, §8 line 525),
+// included above and re-exported through this header for the f2 feeder kernels
+// and the host unit test that include it for both the numerics and the grid math.
 
 }  // namespace steppe::core
 

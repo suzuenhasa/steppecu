@@ -20,19 +20,8 @@
 
 #include <utility>
 
+#include "core/internal/log.hpp"  // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"  // CUBLAS_CHECK, CublasError
-
-// Debug-only teardown warning sink, mirroring device_buffer.cuh. Destroy-time
-// failures route through internal/log.hpp's STEPPE_LOG_WARN (architecture.md §7,
-// §10) once that facade is wired into steppe_device; until then, warn to stderr in
-// debug builds only and stay silent in release. The destructor must never throw.
-#if defined(NDEBUG)
-#  define STEPPE_HANDLES_WARN_ON_TEARDOWN(what, statusname) ((void)0)
-#else
-#  include <cstdio>
-#  define STEPPE_HANDLES_WARN_ON_TEARDOWN(what, statusname) \
-    std::fprintf(stderr, "[steppe][warn] %s at teardown: %s\n", (what), (statusname))
-#endif
 
 namespace steppe::device {
 
@@ -71,8 +60,8 @@ private:
         if (h_) {
             const cublasStatus_t s = cublasDestroy(h_);
             if (s != CUBLAS_STATUS_SUCCESS) {
-                STEPPE_HANDLES_WARN_ON_TEARDOWN("cublasDestroy",
-                                                CublasError::status_name(s));
+                STEPPE_LOG_WARN("cublasDestroy at teardown: %s",
+                                CublasError::status_name(s));
             }
         }
         h_ = nullptr;

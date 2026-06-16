@@ -29,6 +29,8 @@
 #include <source_location>
 #include <string>
 
+#include "core/internal/host_device.hpp"  // STEPPE_DEBUG_ONLY (the one debug gate)
+
 namespace steppe::device {
 
 /// Typed exception thrown on a nonzero CUDA runtime status, carrying the call
@@ -128,21 +130,16 @@ inline void cublas_check(cublasStatus_t status, const char* expr,
 
 /// Post-launch kernel check (architecture.md §7). `cudaGetLastError()` surfaces a
 /// bad launch configuration synchronously; the debug-only `cudaDeviceSynchronize`
-/// forces async kernel faults to attribute to THIS launch under compute-sanitizer
-/// (architecture.md §7, §13). Release relies on the next runtime call surfacing
-/// the sticky error — no forced sync in the hot path. Place immediately after
-/// every `kernel<<<...>>>(...)`.
-#if defined(NDEBUG)
-#  define STEPPE_CUDA_CHECK_KERNEL()                              \
-    do {                                                          \
-        STEPPE_CUDA_CHECK(cudaGetLastError()); /* bad launch */   \
-    } while (0)
-#else
-#  define STEPPE_CUDA_CHECK_KERNEL()                                            \
+/// — gated through the ONE STEPPE_DEBUG_ONLY facility (core/internal/host_device.hpp),
+/// not a per-site `#if defined(NDEBUG)` — forces async kernel faults to attribute
+/// to THIS launch under compute-sanitizer (architecture.md §7, §13). Release relies
+/// on the next runtime call surfacing the sticky error — no forced sync in the hot
+/// path. Place immediately after every `kernel<<<...>>>(...)`.
+#define STEPPE_CUDA_CHECK_KERNEL()                                              \
     do {                                                                        \
         STEPPE_CUDA_CHECK(cudaGetLastError());      /* bad launch config */     \
-        STEPPE_CUDA_CHECK(cudaDeviceSynchronize()); /* attribute async fault */ \
+        STEPPE_DEBUG_ONLY(                                                      \
+            STEPPE_CUDA_CHECK(cudaDeviceSynchronize())); /* attr async fault */ \
     } while (0)
-#endif
 
 #endif  // STEPPE_DEVICE_CUDA_CHECK_CUH
