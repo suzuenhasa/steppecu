@@ -35,9 +35,19 @@
 //
 // The emulation TUNING calls (strategy / fixed mantissa control / bit count) are
 // compiled under -DSTEPPE_HAVE_EMU_TUNING (architecture.md build flag; ROADMAP
-// precision policy). Without it, the LOAD-BEARING mechanisms — the emulated
-// compute type and the FP64-emulated math mode — still engage emulation; the
-// tuning only pins the FIXED slice count. Build on the remote CUDA-13 box.
+// precision policy). The FIXED-slice pin is what makes EmulatedFp64 HONORABLE:
+// without it cuBLAS engages emulation under its DOCUMENTED DEFAULT mantissa
+// control, `CUDA_EMULATION_MANTISSA_CONTROL_DYNAMIC` ("Dynamic mantissa control
+// represents the cuBLAS library default mantissa control" — cuBLAS Library docs,
+// FP64 floating-point emulation), which on real data's wide dynamic range
+// overshoots to ~60 bits and collapses to parity with native FP64 (ROADMAP §0;
+// architecture.md §12 line 726). That is the EXPLICITLY REJECTED trap — and it
+// would still report the `EmulatedFp64` tag. So when the tuning is unavailable we
+// do NOT silently run dynamic: `emulation_honorable()` is the ONE predicate that
+// gates BOTH the math mode and the compute type (cleanup X-6/B2; architecture.md
+// §9 build() "fall back to native Fp64 or error"); an unhonorable EmulatedFp64
+// request DOWNGRADES to native Fp64 with an observable capability-tagged log line.
+// Build on the remote CUDA-13 box with -DSTEPPE_HAVE_EMU_TUNING=1.
 //
 // This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It includes
 // the SHARED host/device f2 primitive so the CPU oracle and this path cannot
@@ -47,6 +57,9 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <library_types.h>
+
+#include <atomic>   // std::atomic_flag — one-shot capability-tag emission
+#include <cstdio>   // std::fprintf — interim log sink (until internal/log.hpp, B7)
 
 #include "core/internal/f2_estimator.hpp"  // het_correction, assemble_f2_numerator,
                                            //   finalize_f2, grid_for, kCdivBlock
@@ -160,46 +173,105 @@ __global__ void assemble_f2_kernel(const double* __restrict__ G,
 }  // namespace
 
 // -----------------------------------------------------------------------------
-// Map the typed Precision to a cuBLAS compute type for the f2 GEMMs.
-//   EmulatedFp64 -> CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT (Ozaki; default)
-//   Fp64         -> CUBLAS_COMPUTE_64F                     (native; oracle)
-//   Tf32         -> CUBLAS_COMPUTE_32F_FAST_TF32 path is data-typed FP32 and is
-//                   not wired into this FP64-storage GEMM path (screening-only,
-//                   architecture.md §12); EmulatedFp64 is the FP64-storage
-//                   default. We therefore treat a Tf32 request on this FP64 path
-//                   as native FP64 here (the dedicated TF32 screening path is a
-//                   later milestone) — never silently downgrade reported numbers.
+// emulation_honorable — THE ONE predicate that decides whether an EmulatedFp64
+// request can be honored as the FIXED-slice Ozaki path (cleanup X-6/B2).
+//
+// EmulatedFp64 is honorable ONLY when the build carries the fixed-slice tuning
+// API (STEPPE_HAVE_EMU_TUNING). Without it, `cublasSetFixedPointEmulationMantissa
+// Control(FIXED)` cannot be called, so cuBLAS would engage emulation under its
+// DOCUMENTED DEFAULT `CUDA_EMULATION_MANTISSA_CONTROL_DYNAMIC` (cuBLAS Library
+// docs, FP64 floating-point emulation) — the rejected ~60-bit parity trap
+// (architecture.md §12 line 726; ROADMAP §0). So when tuning is off we report
+// EmulatedFp64 as NOT honorable and the caller downgrades to native Fp64.
+//
+// BOTH the math-mode engagement (`engage_f2_precision`) AND the compute-type
+// mapping (`f2_compute_type`) consult THIS predicate, so they can never disagree:
+// a request that is downgraded for the math mode is downgraded for the compute
+// type in lockstep (the C-2 split is closed). It is the single source of the
+// EmulatedFp64-honorability decision (architecture.md §2 DRY).
+// -----------------------------------------------------------------------------
+[[nodiscard]] bool emulation_honorable(const Precision& precision) noexcept {
+    if (precision.kind != Precision::Kind::EmulatedFp64) return false;
+#if STEPPE_HAVE_EMU_TUNING
+    return true;
+#else
+    return false;
+#endif
+}
+
+#if !STEPPE_HAVE_EMU_TUNING
+namespace {
+
+// Emit the EmulatedFp64-unavailable capability tag AT MOST ONCE per process so the
+// downgrade is OBSERVABLE without spamming the per-call hot path (cleanup X-6/B2,
+// T-CAP-1). Compiled ONLY on the no-tuning lane — the only build where an
+// EmulatedFp64 request is downgraded — so the default (tuning-ON) build carries no
+// unused helper (warnings-as-errors clean). INTERIM SINK: a guarded
+// `std::fprintf(stderr, …)` until the phantom `internal/log.hpp` (cleanup X-4/B7)
+// lands a real `STEPPE_LOG_WARN`; the §10 "no printf in library code" rule is
+// satisfied by routing through that sink once it exists. The std::atomic_flag
+// makes the one-shot guard thread-safe (M4.5 multi-GPU may engage from more than
+// one host thread).
+void warn_emulated_fp64_downgraded_once() {
+    static std::atomic_flag emitted = ATOMIC_FLAG_INIT;
+    if (!emitted.test_and_set(std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+            "[steppe][capability] EmulatedFp64 requested but the FIXED-slice Ozaki "
+            "tuning is unavailable (built without -DSTEPPE_HAVE_EMU_TUNING) -> "
+            "downgraded to native Fp64 [tag: emu_tuning_unavailable]. The reported "
+            "precision is native FP64, NOT emulated (architecture.md §9, §12; "
+            "cleanup X-6/B2).\n");
+    }
+}
+
+}  // namespace
+#endif  // !STEPPE_HAVE_EMU_TUNING
+
+// -----------------------------------------------------------------------------
+// Map the typed Precision to a cuBLAS compute type for the f2 GEMMs. The
+// EmulatedFp64-honorability decision routes through `emulation_honorable` so the
+// compute type and the math mode (engage_f2_precision) are ALWAYS derived from the
+// same predicate and can never disagree (cleanup X-6/B2 C-2):
+//   EmulatedFp64 (honorable)   -> CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT (Ozaki)
+//   EmulatedFp64 (unhonorable) -> CUBLAS_COMPUTE_64F  (DOWNGRADED — tuning absent;
+//                                  must match engage_f2_precision's PEDANTIC math)
+//   Fp64                       -> CUBLAS_COMPUTE_64F                     (native; oracle)
+//   Tf32                       -> CUBLAS_COMPUTE_32F_FAST_TF32 path is data-typed FP32
+//                                 and is not wired into this FP64-storage GEMM path
+//                                 (screening-only, architecture.md §12); treated as
+//                                 native FP64 here — never silently downgrade reported
+//                                 numbers. The dedicated TF32 path is a later milestone.
 // Shared by the single-block (run_f2_gemms) and the M4 batched/grouped
 // (run_f2_gemms_group) paths — the single source of the compute-type mapping.
 // -----------------------------------------------------------------------------
 cublasComputeType_t f2_compute_type(const Precision& precision) {
-    switch (precision.kind) {
-        case Precision::Kind::EmulatedFp64:
-            return CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT;
-        case Precision::Kind::Fp64:
-        case Precision::Kind::Tf32:
-        default:
-            return CUBLAS_COMPUTE_64F;
-    }
+    if (emulation_honorable(precision)) return CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT;
+    // Fp64, Tf32, AND an unhonorable EmulatedFp64 request all run native FP64.
+    return CUBLAS_COMPUTE_64F;
 }
 
 // -----------------------------------------------------------------------------
 // Engage the precision policy on the handle (architecture.md §12; spike
-// f2_timing.cu:91-99 fixed-bit engagement). For EmulatedFp64 this is the
-// load-bearing cublasSet* sequence:
+// f2_timing.cu:91-99 fixed-bit engagement). For an HONORABLE EmulatedFp64 request
+// (STEPPE_HAVE_EMU_TUNING on) this is the load-bearing cublasSet* sequence:
 //   cublasSetMathMode(CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH)
 //   cublasSetEmulationStrategy(EAGER)                    -- force-emulate even tiny GEMMs
 //   cublasSetFixedPointEmulationMantissaControl(FIXED)   -- FIXED slices, NOT dynamic
 //   cublasSetFixedPointEmulationMaxMantissaBitCount(bits)
 // FIXED control is the whole point: dynamic overshoots to ~60 bits and loses the
-// win (ROADMAP §0 trap). For Fp64 we set PEDANTIC math (strict native FP64, the
-// oracle path). The EAGER/FIXED tuning needs STEPPE_HAVE_EMU_TUNING; without it
-// the emulated math mode still engages emulation (just not the pinned slice
-// count), which is why the build flag is required for the measured speedup.
-// Exposed (non-anonymous) so the M4 grouped path engages the SAME policy ONCE.
+// win (ROADMAP §0 trap).
+//
+// For Fp64 — AND for an EmulatedFp64 request the build CANNOT honor (tuning absent,
+// `emulation_honorable()==false`) — we set PEDANTIC math (strict native FP64, the
+// oracle/fallback path) and emit the capability tag ONCE. Critically we do NOT set
+// the emulated math mode in the unhonorable case: doing so would engage cuBLAS's
+// DYNAMIC-default emulation (the rejected trap) while `f2_compute_type` (consulting
+// the SAME predicate) returns native CUBLAS_COMPUTE_64F — the downgrade is coherent
+// across both halves (cleanup X-6/B2). Exposed (non-anonymous) so the M4 grouped
+// path engages the SAME policy ONCE.
 // -----------------------------------------------------------------------------
 void engage_f2_precision(cublasHandle_t handle, const Precision& precision) {
-    if (precision.kind == Precision::Kind::EmulatedFp64) {
+    if (emulation_honorable(precision)) {
         CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH));
 #if STEPPE_HAVE_EMU_TUNING
         CUBLAS_CHECK(cublasSetEmulationStrategy(handle, CUBLAS_EMULATION_STRATEGY_EAGER));
@@ -207,11 +279,18 @@ void engage_f2_precision(cublasHandle_t handle, const Precision& precision) {
             handle, CUDA_EMULATION_MANTISSA_CONTROL_FIXED));
         CUBLAS_CHECK(cublasSetFixedPointEmulationMaxMantissaBitCount(
             handle, precision.mantissa_bits));
-#else
-        (void)precision;
 #endif
     } else {
         // Native FP64 oracle / fallback: strict, no tensor-core shortcuts.
+#if !STEPPE_HAVE_EMU_TUNING
+        // On the no-tuning lane this branch ALSO catches a DOWNGRADED EmulatedFp64
+        // request (emulation_honorable()==false for it) — surface it observably
+        // exactly once (the foot-gun closes with a logged tag, not silently). On
+        // the tuning-ON lane EmulatedFp64 is honorable, so it never reaches here
+        // and the tag/helper are compiled out entirely.
+        if (precision.kind == Precision::Kind::EmulatedFp64)
+            warn_emulated_fp64_downgraded_once();
+#endif
         CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
     }
 }

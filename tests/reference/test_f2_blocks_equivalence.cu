@@ -55,6 +55,7 @@
 #include "core/domain/block_partition_rule.hpp" // assign_blocks, BlockPartition, block_size_cm_to_morgans
 #include "core/fstats/f2_from_blocks.hpp"       // compute_f2_block, compute_f2_blocks (the seam)
 #include "device/backend.hpp"                   // ComputeBackend, F2Result
+#include "device/cuda/f2_block_kernel.cuh"      // emulation_honorable (the PRODUCTION honorability predicate, X-6/B2)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
 using steppe::Precision;
@@ -229,11 +230,27 @@ int main(int argc, char** argv) {
     const Acc esNat = accuracy(native, ref);
     const Acc esEmu = accuracy(emu, ref);
 
-    // emu must have ENGAGED (Ozaki is not bit-identical to native): if emu == native
-    // bit-for-bit it silently fell back (no -DSTEPPE_HAVE_EMU_TUNING). Then SKIP the
-    // emu assertion (loudly) rather than pass it falsely (architecture.md §12).
-    bool emu_engaged = (emu.f2.size() == native.f2.size()) &&
-                       (std::memcmp(emu.f2.data(), native.f2.data(), emu.f2.size() * sizeof(double)) != 0);
+    // X-6/B2 — the EmulatedFp64 honorability gate, asserted OBJECTIVELY.
+    //
+    // `emulation_honorable(precEmu)` is the PRODUCTION predicate compiled INTO
+    // steppe_device, so it reports what the LIBRARY will actually do (it reflects
+    // steppe_device's own -DSTEPPE_HAVE_EMU_TUNING, not this test target's). Two
+    // build lanes, each with a HARD assertion (no silent skip):
+    //   * honorable (default build, tuning ON): the FIXED-slice Ozaki path MUST
+    //     engage, so the emu output MUST DIFFER from native bit-for-bit. If it is
+    //     bit-identical, emulation silently fell back to native — the C-1 trap —
+    //     and that is now a FAIL (promoted from the old loud SKIP).
+    //   * unhonorable (tuning OFF): the path MUST have been DOWNGRADED to native
+    //     Fp64 (the X-6/B2 fix: no silent DYNAMIC emulation), so the emu output
+    //     MUST be bit-identical to native. If it DIFFERS, something engaged a
+    //     non-native mode without the FIXED-slice pin — the dynamic trap — FAIL.
+    // The downgrade is ALSO observable as the one-shot capability-tag log line
+    // emitted by engage_f2_precision; here we assert the numeric consequence.
+    const bool honorable = steppe::device::emulation_honorable(precEmu);
+    const bool emu_differs_from_native =
+        (emu.f2.size() == native.f2.size()) &&
+        (std::memcmp(emu.f2.data(), native.f2.data(), emu.f2.size() * sizeof(double)) != 0);
+    const bool emu_engaged = emu_differs_from_native;
 
     // ---- (2) property checks ------------------------------------------------
     constexpr double kSymTol = 1e-12;  // f2(i,j) vs f2(j,i) FP-rounding floor
@@ -271,18 +288,41 @@ int main(int argc, char** argv) {
     // ---- Verdicts -----------------------------------------------------------
     const bool nat_pass = sym_ref && sym_nat && vpair_ok && single_block_ok &&
                           esNat.signflips == 0 && esNat.maxCombined < kTolNativeVsRef;
-    const bool emu_pass = sym_emu && esEmu.signflips == 0 && esEmu.maxCombined < kTolEmuVsRef;
-    const bool emu_skipped = !emu_engaged;
+
+    // The EmulatedFp64-arm verdict, branched on the PRODUCTION honorability state.
+    // No "SKIPPED" outcome any more: the arm is a HARD PASS/FAIL on BOTH lanes.
+    bool emu_pass = false;
+    const char* emu_mode = "";
+    if (honorable) {
+        // Tuning ON: emulation must engage (output differs from native) AND meet
+        // the EmulatedFp64-vs-oracle tight tolerance. A silent fallback (emu ==
+        // native) is now a FAIL, not a skip (X-6/B2 — promotes the old SKIP).
+        emu_pass = emu_engaged && sym_emu && esEmu.signflips == 0 &&
+                   esEmu.maxCombined < kTolEmuVsRef;
+        emu_mode = "engaged";
+    } else {
+        // Tuning OFF: the path must be DOWNGRADED to native Fp64 (X-6/B2) — emu
+        // must be bit-identical to native (and therefore also meet the native
+        // tolerance vs the oracle). A DIFFERENCE here would mean a non-native mode
+        // engaged without the FIXED-slice pin (the dynamic trap) — FAIL.
+        const bool downgraded_to_native = !emu_differs_from_native;
+        emu_pass = downgraded_to_native && sym_emu && esEmu.signflips == 0 &&
+                   esEmu.maxCombined < kTolNativeVsRef;
+        emu_mode = "downgraded->Fp64";
+    }
 
     std::printf("\nM4 per-block f2 equivalence (REAL data P=%d M=%ld n_block=%d) — tight tier\n",
                 P, M, part.n_block);
+    std::printf("EmulatedFp64 honorable (production STEPPE_HAVE_EMU_TUNING): %s [%s]\n",
+                honorable ? "YES" : "NO", emu_mode);
     std::printf("%-26s %12s %12s %9s %8s\n", "check", "combinedRel", "maxAbs", "signFlip", "verdict");
     std::printf("%-26s %12.3e %12.3e %9d %8s\n", "cuda Fp64   vs oracle",
                 esNat.maxCombined, esNat.maxAbs, esNat.signflips,
                 (esNat.signflips == 0 && esNat.maxCombined < kTolNativeVsRef) ? "PASS" : "FAIL");
-    std::printf("%-26s %12.3e %12.3e %9d %8s\n", "cuda EmuFp64{40} vs oracle",
+    std::printf("%-26s %12.3e %12.3e %9d %8s\n",
+                honorable ? "cuda EmuFp64{40} vs oracle" : "cuda EmuFp64->Fp64 vs orac",
                 esEmu.maxCombined, esEmu.maxAbs, esEmu.signflips,
-                emu_skipped ? "SKIPPED" : (emu_pass ? "PASS" : "FAIL"));
+                emu_pass ? "PASS" : "FAIL");
     std::printf("%-26s %12.3e %12s %9s %8s\n", "f2 symmetric (worst asym)",
                 std::max(asym_ref, std::max(asym_nat, asym_emu)), "-", "-",
                 (sym_ref && sym_nat && sym_emu) ? "PASS" : "FAIL");
@@ -292,13 +332,22 @@ int main(int argc, char** argv) {
                 sb_maxabs_f2, sb_maxabs_vp, "-", single_block_ok ? "PASS" : "FAIL");
     std::printf("\n");
 
-    if (emu_skipped)
-        std::fprintf(stderr, "  [warn] EmulatedFp64 arm SKIPPED: emulation did not engage "
-                             "(build without -DSTEPPE_HAVE_EMU_TUNING, or silent fallback). "
-                             "Rebuild with it on the CUDA-13/sm_120 box to assert this arm.\n");
+    if (honorable && !emu_engaged)
+        std::fprintf(stderr, "  [FAIL] EmulatedFp64 honorable but emulation did NOT engage "
+                             "(emu == native bit-for-bit): the FIXED-slice Ozaki path silently "
+                             "fell back. The §12 emulated-FP64 path is not running (X-6/B2 C-1).\n");
+    if (!honorable && emu_differs_from_native)
+        std::fprintf(stderr, "  [FAIL] EmulatedFp64 NOT honorable yet the emu output DIFFERS from "
+                             "native: a non-native mode engaged without the FIXED-slice pin — the "
+                             "rejected DYNAMIC trap (X-6/B2). The downgrade to Fp64 did not hold.\n");
+    if (!honorable && emu_pass)
+        std::fprintf(stderr, "  [info] EmulatedFp64 NOT honorable (built without "
+                             "-DSTEPPE_HAVE_EMU_TUNING) -> path correctly DOWNGRADED to native Fp64 "
+                             "(X-6/B2). Rebuild with the tuning on the CUDA-13/sm_120 box to "
+                             "exercise the FIXED-slice Ozaki arm.\n");
 
-    const bool overall = nat_pass && (emu_skipped || emu_pass);
+    const bool overall = nat_pass && emu_pass;
     if (!overall) { std::fprintf(stderr, "RESULT: FAIL\n"); return EXIT_FAILURE; }
-    std::fprintf(stderr, "RESULT: PASS%s\n", emu_skipped ? " (EmulatedFp64 arm skipped — see warning)" : "");
+    std::fprintf(stderr, "RESULT: PASS (EmulatedFp64 arm %s)\n", emu_mode);
     return EXIT_SUCCESS;
 }

@@ -136,6 +136,17 @@ struct Precision {
         /// and not IEEE-754 on specials — which is why `Fp64` stays the oracle.
         /// Dynamic mantissa control is NOT used: on real data's wide dynamic
         /// range it overshoots to ~60 bits and collapses to parity (the trap).
+        ///
+        /// HONORABILITY COUPLING (this header cannot enforce it — the macro is
+        /// device-private — but it is the authoritative cross-reference): the
+        /// FIXED-slice pin is engaged in the device layer ONLY when steppe_device
+        /// is built with `STEPPE_HAVE_EMU_TUNING` (default ON; SteppeOptions.cmake).
+        /// A build with it OFF cannot call the FIXED mantissa-control API, so
+        /// selecting `EmulatedFp64` is NOT honorable there — the device path
+        /// DOWNGRADES to native `Fp64` with a logged capability tag rather than
+        /// silently running the rejected DYNAMIC mantissa (device
+        /// `emulation_honorable` / `engage_f2_precision`; architecture.md §9
+        /// build() "fall back to native Fp64 or error"; cleanup X-6/B2).
         EmulatedFp64,
 
         /// TF32 tensor-core. Opt-in, model-space SCREENING / ranking ONLY.

@@ -122,6 +122,32 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_ROOT}")
 
+# --- X-6/B2 EmulatedFp64 honorability gate (the dynamic-mantissa-trap close-out)
+# CUDA TU, DATA-FREE: drives the production seam (make_cuda_backend → compute_f2)
+# on a tiny SYNTHETIC Q/V/N to assert the engaged MODE, not a precision value. It
+# pins the ONE honorability predicate (emulation_honorable), that f2_compute_type
+# routes through it (so the compute type and math mode can never disagree — the
+# C-1/C-2 split close), and end-to-end that an EmulatedFp64 request is EITHER the
+# engaged FIXED-slice Ozaki path (tuning ON) OR an OBSERVABLY downgraded native
+# Fp64 path with a logged capability tag (tuning OFF) — never silently DYNAMIC
+# (architecture.md §9, §12; ROADMAP §0; cleanup X-6/B2). Passes on BOTH lanes.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device only (no io / no data). Includes the device-private kernel header
+# for emulation_honorable / f2_compute_type (the src/ root is on steppe_device's
+# PUBLIC include dir).
+add_executable(test_emu_honorability reference/test_emu_honorability.cu)
+target_link_libraries(test_emu_honorability
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_emu_honorability PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Match steppe_device's STEPPE_HAVE_EMU_TUNING so this TU's banner/#if agrees with
+# the library (both flow from the one cmake option). The end-to-end arm trusts the
+# library's compiled emulation_honorable() regardless, so the test is correct on
+# both lanes even if the defines ever diverged.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_emu_honorability PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME emu_honorability COMMAND test_emu_honorability)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.
