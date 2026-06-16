@@ -1,0 +1,52 @@
+# .clang-format — the single source of formatting (architecture.md §4, §14).
+# Applied to C, C++, and CUDA (.cu/.cuh) TUs by pre-commit and CI.
+#
+# Tuned to the style the authored contract files already use: 4-space indent,
+# 100-col lines, attached braces, pointer-left (const double* data). LLVM base
+# with those overrides so the diff to existing headers is zero.
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ContinuationIndentWidth: 4
+ColumnLimit:     100
+
+# Braces attached (struct/class/function/control all on the same line).
+BreakBeforeBraces: Attach
+
+# Pointers/refs bind to the type: `const double* data`, `MatView& v`.
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+# Keep short constructs readable but not collapsed (matches the headers).
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+
+# Namespaces: no extra indent inside, comment the closing brace.
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+# Includes: group and sort, but DO NOT reorder across blocks blindly — keep the
+# project ("steppe/...", "core/...", "device/...") groups distinct from system.
+SortIncludes: CaseSensitive
+IncludeBlocks:   Preserve
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignTrailingComments: true
+SpaceAfterCStyleCast: true
+SpacesBeforeTrailingComments: 2
+Cpp11BracedListStyle: true
+IndentCaseLabels: true
+AccessModifierOffset: -4
+EmptyLineBeforeAccessModifier: LogicalBlock
+
+# Standard: match the build (C++20). clang-format only uses this for parsing.
+Standard:        c++20
+...

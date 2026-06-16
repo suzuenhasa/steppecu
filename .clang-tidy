@@ -1,0 +1,72 @@
+# .clang-tidy — single source of static analysis (architecture.md §2, §14).
+# Runs over compile_commands.json (Ninja-generated) in pre-commit/CI, scoped to
+# first-party targets. Naming conventions encode the conventions the contract
+# files already follow: CamelCase types, lower_case functions/vars/members,
+# k-prefixed CamelCase for constexpr/global constants, UPPER_CASE macros.
+#
+# CUDA note: clang-tidy parses .cu via the CUDA-aware compile-commands entries;
+# checks that misfire on device code are tuned per-milestone, not blanket-off.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cppcoreguidelines-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  portability-*,
+  misc-*,
+  -modernize-use-trailing-return-type,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-avoid-c-arrays,
+  -modernize-avoid-c-arrays,
+  -misc-non-private-member-variables-in-classes,
+  -cppcoreguidelines-non-private-member-variable-in-classes,
+  -readability-identifier-length,
+  -bugprone-easily-swappable-parameters
+
+# Block the build on any enabled diagnostic — warnings-as-errors is the M0 gate.
+WarningsAsErrors: '*'
+
+# Analyze project headers (src/, include/), skip third_party.
+HeaderFilterRegex: '.*/(include/steppe|src)/.*'
+
+FormatStyle: file
+
+CheckOptions:
+  # --- Magic-number policy is enforced by ROADMAP §4 review + the named ---
+  # --- constants in config.hpp, NOT by the magic-number check (which would ---
+  # --- flag the legitimate mathematical 2 in a²−2ab+b²); hence disabled above. ---
+
+  # Types: structs/classes/enums/aliases are CamelCase (Precision, MatView,
+  # ComputeBackend, F2Result, Status).
+  - { key: readability-identifier-naming.ClassCase,         value: CamelCase }
+  - { key: readability-identifier-naming.StructCase,        value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase,          value: CamelCase }
+  - { key: readability-identifier-naming.TypeAliasCase,     value: CamelCase }
+  - { key: readability-identifier-naming.TypedefCase,       value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantCase,  value: CamelCase }
+
+  # Functions / methods / variables / params / members: lower_case.
+  - { key: readability-identifier-naming.FunctionCase,      value: lower_case }
+  - { key: readability-identifier-naming.MethodCase,        value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,      value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,     value: lower_case }
+  - { key: readability-identifier-naming.MemberCase,        value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix, value: _ }
+
+  # Compile-time / global constants: k-prefixed CamelCase (kDefaultMantissaBits,
+  # kCdivBlock, kRelFloor, ...).
+  - { key: readability-identifier-naming.ConstexprVariableCase,   value: CamelCase }
+  - { key: readability-identifier-naming.ConstexprVariablePrefix, value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase,      value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix,    value: k }
+
+  # Namespaces: lower_case (steppe, steppe::core).
+  - { key: readability-identifier-naming.NamespaceCase,     value: lower_case }
+
+  # Macros: UPPER_CASE (STEPPE_CUDA_CHECK, STEPPE_HD, CUBLAS_CHECK).
+  - { key: readability-identifier-naming.MacroDefinitionCase, value: UPPER_CASE }
