@@ -20,7 +20,8 @@
 #     single-source-of-the-formula invariant, architecture.md §8).
 
 add_library(steppe_device STATIC
-    cuda/f2_block_kernel.cu       # 3-GEMM reformulation + fixed-slice Ozaki + assemble
+    cuda/f2_block_kernel.cu       # 3-GEMM reformulation + fixed-slice Ozaki + assemble (single block)
+    cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cpu/cpu_backend.cpp)          # REFERENCE backend: scalar host oracle

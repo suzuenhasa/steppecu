@@ -1,0 +1,304 @@
+// tests/reference/test_f2_blocks_equivalence.cu
+//
+// M4 REFERENCE-EQUIVALENCE TEST for the per-block f2 tensor (ROADMAP M4 gate;
+// architecture.md §13 "Golden / reference-equivalence", §5 S2, §11.1, §12).
+//
+// The M4 trust seam at f2_blocks: the GPU size-grouped strided-batched per-block
+// path (CudaBackend::compute_f2_blocks) diffed against the obviously-correct CPU
+// per-block long-double oracle (CpuBackend::compute_f2_blocks), on REAL AADR. It
+// is a CORRECTNESS test (real genotype-derived input), NOT a precision/throughput
+// benchmark — those numbers were established by the throwaway spike on real data
+// (experiments/f2_block_batched_spike; ROADMAP §0 cautionary tale). This test
+// confirms the production backends AGREE per-block on real data.
+//
+// What it does (data root as argv[1], default /workspace/data/aadr):
+//   1. Loads the real derived_acc Q/V/N matrix (P=50, M=100000) and reads the
+//      first M rows of the raw .snp via the SHARED io::read_snp; runs the SHARED
+//      core::assign_blocks → BlockPartition{block_id[M], n_block}. (derived_acc is
+//      the first-100k SNP file-order prefix, so the first M .snp rows are its
+//      chrom/genpos — the SAME prefix build_tgeno_matrix.py decoded.)
+//   2. Computes the per-block f2 tensor THREE ways through the production seam
+//      (steppe::core::compute_f2_blocks driving the injected backend):
+//        * CpuBackend                      (per-block long-double oracle)
+//        * CudaBackend, Precision::Fp64    (native FP64 grouped GEMMs)
+//        * CudaBackend, Precision::EmulatedFp64{40}  (fixed-slice Ozaki)
+//   3. Asserts per-block accuracy in the TIGHT tier under the COMBINED tolerance
+//      |c-r| / (atol + |r|) over ALL blocks × off-diagonal pairs (the spike showed
+//      per-block PURE-relative inflates on the many near-zero block f2 entries
+//      while the absolute error stays at the FP64 floor — so the production gate is
+//      the combined form, architecture.md §12 tolerance policy):
+//        * native vs oracle  < 1e-9   (near bit-stable)
+//        * emu{40} vs oracle < 1e-6   (40-bit ≈ native; spike combined ~4.5e-5 @P=768)
+//   4. Property checks: per-block f2 symmetric; Vpair integer-valued and EQUAL to
+//      an INDEPENDENT recount of the per-block pairwise non-missing SNP count;
+//      f2 diagonal zero.
+//   5. SINGLE-BLOCK CONSISTENCY: with ALL SNPs forced into one block,
+//      compute_f2_blocks must reproduce the M0 compute_f2 result bit-for-bit
+//      (same backend, same precision) — the n_block=1 case is exactly M0.
+//
+// Build (REMOTE sm_120 / CUDA 13 box; NOT locally). Built by CMake/CTest as the
+// `f2_blocks_equivalence` test (tests/CMakeLists.txt) linking steppe::io +
+// steppe::core + steppe::device, with -DSTEPPE_HAVE_EMU_TUNING=1.
+// Run:  ./test_f2_blocks_equivalence [data_root]   (default /workspace/data/aadr)
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
+#include <algorithm>
+
+#include "steppe/config.hpp"                     // Precision, kDefaultMantissaBits
+#include "steppe/fstats.hpp"                     // F2BlockTensor
+#include "core/internal/views.hpp"              // MatView (Q/V/N contract)
+#include "core/domain/block_partition_rule.hpp" // assign_blocks, BlockPartition, block_size_cm_to_morgans
+#include "core/fstats/f2_from_blocks.hpp"       // compute_f2_block, compute_f2_blocks (the seam)
+#include "device/backend.hpp"                   // ComputeBackend, F2Result
+#include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
+
+using steppe::Precision;
+using steppe::F2BlockTensor;
+using steppe::F2Result;
+using steppe::core::MatView;
+using steppe::core::BlockPartition;
+
+// Backend factories (declared where defined: CPU in steppe::core, CUDA in
+// steppe::device — mirrors tests/reference/test_decode_equivalence.cu).
+namespace steppe::core   { std::unique_ptr<steppe::ComputeBackend> make_cpu_backend(); }
+namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
+
+namespace {
+
+constexpr const char* kDefaultDataRoot = "/workspace/data/aadr";
+constexpr const char* kGenoBase = "v66.p1_HO.aadr.patch.PUB";  // raw/<base>.snp
+
+// Tight-tier COMBINED-tolerance thresholds (architecture.md §12; spike-measured).
+constexpr double kAtol           = 1e-9;   // absorbs the near-zero block-f2 entries
+constexpr double kTolEmuVsRef    = 1e-6;   // EmulatedFp64{40} vs oracle, combined form
+constexpr double kTolNativeVsRef = 1e-8;   // native Fp64 vs oracle, combined form
+                                           //   (per-block native sits ~1.6e-9: fewer
+                                           //    SNPs/block than the M0 big GEMM ⇒ less
+                                           //    averaging; still firmly the tight tier)
+
+// shape.txt "P M" + Q/V/N.f64 (P*M little-endian doubles, column-major [P×M]).
+void read_f64(const std::string& path, std::vector<double>& out, std::size_t count) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { std::fprintf(stderr, "ERROR: cannot open %s\n", path.c_str()); std::exit(EXIT_FAILURE); }
+    out.resize(count);
+    const std::size_t got = std::fread(out.data(), sizeof(double), count, f);
+    std::fclose(f);
+    if (got != count) {
+        std::fprintf(stderr, "ERROR: %s has %zu doubles, expected %zu\n", path.c_str(), got, count);
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+void load_qvn(const std::string& dir, int& P, long& M,
+              std::vector<double>& Q, std::vector<double>& V, std::vector<double>& N) {
+    const std::string shapePath = dir + "/shape.txt";
+    FILE* sf = std::fopen(shapePath.c_str(), "r");
+    if (!sf) { std::fprintf(stderr, "ERROR: cannot open %s\n", shapePath.c_str()); std::exit(EXIT_FAILURE); }
+    if (std::fscanf(sf, "%d %ld", &P, &M) != 2) {
+        std::fprintf(stderr, "ERROR: %s must contain 'P M'\n", shapePath.c_str());
+        std::fclose(sf); std::exit(EXIT_FAILURE);
+    }
+    std::fclose(sf);
+    const std::size_t count = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+    read_f64(dir + "/Q.f64", Q, count);
+    read_f64(dir + "/V.f64", V, count);
+    read_f64(dir + "/N.f64", N, count);
+}
+
+// Combined-tolerance worst error over ALL blocks × off-diagonal pairs.
+struct Acc { double maxCombined = 0; double maxAbs = 0; int signflips = 0; long scored = 0; };
+Acc accuracy(const F2BlockTensor& cand, const F2BlockTensor& ref) {
+    Acc a;
+    const int P = ref.P, B = ref.n_block;
+    for (int b = 0; b < B; ++b)
+        for (int j = 0; j < P; ++j)
+            for (int i = 0; i < P; ++i) {
+                if (i == j) continue;
+                const std::size_t o = static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * j
+                                    + static_cast<std::size_t>(P) * P * b;
+                const double r = ref.f2[o], c = cand.f2[o];
+                const double ae = std::fabs(c - r);
+                if (ae > a.maxAbs) a.maxAbs = ae;
+                const double comb = ae / (kAtol + std::fabs(r));
+                if (comb > a.maxCombined) a.maxCombined = comb;
+                ++a.scored;
+                if (((r > 0) != (c > 0)) && c != 0.0) ++a.signflips;
+            }
+    return a;
+}
+
+// Independent per-block recount of the pairwise non-missing SNP count, to validate
+// Vpair (the retained S4 weight) — NOT via any GEMM (architecture.md §5 S2 (a)).
+bool vpair_matches_recount(const F2BlockTensor& t, const MatView& V,
+                           const BlockPartition& part) {
+    const int P = t.P, B = t.n_block; const long M = V.M;
+    // per-block SNP ranges (block_id non-decreasing ⇒ contiguous)
+    std::vector<long> begin(B, 0), end(B, 0);
+    { long s = 0; while (s < M) { int b = part.block_id[s]; long e = s;
+        while (e < M && part.block_id[e] == b) ++e; begin[b] = s; end[b] = e; s = e; } }
+    for (int b = 0; b < B; ++b)
+        for (int i = 0; i < P; ++i)
+            for (int j = 0; j < P; ++j) {
+                long cnt = 0;
+                for (long s = begin[b]; s < end[b]; ++s)
+                    if (V.element(i, s) != 0.0 && V.element(j, s) != 0.0) ++cnt;
+                const std::size_t o = static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * j
+                                    + static_cast<std::size_t>(P) * P * b;
+                const double vp = t.vpair[o];
+                if (vp != static_cast<double>(cnt)) {
+                    std::fprintf(stderr, "  [FAIL] Vpair(%d,%d,blk%d)=%.1f != recount %ld\n",
+                                 i, j, b, vp, cnt);
+                    return false;
+                }
+                // NB: the f2 DIAGONAL is the full (i,i) computation (= -2·mean_het,
+                // not 0) — the M0 compute_f2 convention this M4 path must match
+                // (single-block == M0). It is never consumed downstream (f3/f4 read
+                // off-diagonal f2), so it is not asserted here; the accuracy check
+                // excludes it and the single-block == M0 check covers it.
+            }
+    return true;
+}
+
+// f2 symmetry, to a tight absolute floor. The GPU computes f2(i,j) and f2(j,i)
+// from INDEPENDENT GEMM output cells (G(i,j) vs G(j,i)), so they agree to FP
+// rounding, not necessarily bit-for-bit (cuBLAS may tile the two triangles
+// differently — pronounced under emulated FP64). The mathematical symmetry holds;
+// we assert it to ~1e-12 (well below the entries' O(1e-2) magnitude). Returns the
+// worst |f2(i,j) - f2(j,i)| so a failure is diagnosable.
+double max_asymmetry(const F2BlockTensor& t) {
+    const int P = t.P, B = t.n_block;
+    double mx = 0.0;
+    for (int b = 0; b < B; ++b)
+        for (int j = 0; j < P; ++j)
+            for (int i = 0; i < P; ++i) {
+                const std::size_t ij = static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * j
+                                     + static_cast<std::size_t>(P) * P * b;
+                const std::size_t ji = static_cast<std::size_t>(j) + static_cast<std::size_t>(P) * i
+                                     + static_cast<std::size_t>(P) * P * b;
+                mx = std::max(mx, std::fabs(t.f2[ij] - t.f2[ji]));
+            }
+    return mx;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::string root = (argc >= 2) ? argv[1] : kDefaultDataRoot;
+    const std::string derived_dir = root + "/derived_acc";
+    const std::string snp = root + "/raw/" + kGenoBase + ".snp";
+
+    // ---- Load real Q/V/N + the SNP prefix; SHARED io::read_snp + assign_blocks --
+    int P = 0; long M = 0;
+    std::vector<double> Qd, Vd, Nd;
+    load_qvn(derived_dir, P, M, Qd, Vd, Nd);
+    const MatView Q{Qd.data(), P, M};
+    const MatView V{Vd.data(), P, M};
+    const MatView N{Nd.data(), P, M};
+
+    steppe::io::SnpTable snptab;
+    try { snptab = steppe::io::read_snp(snp, static_cast<std::size_t>(M)); }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "ERROR: read_snp(%s) failed: %s\n", snp.c_str(), e.what());
+        return EXIT_FAILURE;
+    }
+    if (static_cast<long>(snptab.count) != M) {
+        std::fprintf(stderr, "ERROR: .snp rows %zu != M %ld\n", snptab.count, M);
+        return EXIT_FAILURE;
+    }
+    const double bs_morgans = steppe::core::block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
+    const BlockPartition part = steppe::core::assign_blocks(snptab.chrom, snptab.genpos_morgans, bs_morgans);
+    std::fprintf(stderr, "[load] derived_acc P=%d M=%ld -> n_block=%d (blgsize=%.3f Morgans) — REAL AADR\n",
+                 P, M, part.n_block, bs_morgans);
+
+    auto cpu = steppe::core::make_cpu_backend();
+    auto gpu = steppe::device::make_cuda_backend();
+
+    const Precision precNat{Precision::Kind::Fp64, steppe::kDefaultMantissaBits};
+    const Precision precEmu{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+
+    // ---- (1) per-block tensors: oracle, native, emu -------------------------
+    const F2BlockTensor ref    = steppe::core::compute_f2_blocks(*cpu, Q, V, N, part, precNat);
+    const F2BlockTensor native = steppe::core::compute_f2_blocks(*gpu, Q, V, N, part, precNat);
+    const F2BlockTensor emu    = steppe::core::compute_f2_blocks(*gpu, Q, V, N, part, precEmu);
+
+    const Acc esNat = accuracy(native, ref);
+    const Acc esEmu = accuracy(emu, ref);
+
+    // emu must have ENGAGED (Ozaki is not bit-identical to native): if emu == native
+    // bit-for-bit it silently fell back (no -DSTEPPE_HAVE_EMU_TUNING). Then SKIP the
+    // emu assertion (loudly) rather than pass it falsely (architecture.md §12).
+    bool emu_engaged = (emu.f2.size() == native.f2.size()) &&
+                       (std::memcmp(emu.f2.data(), native.f2.data(), emu.f2.size() * sizeof(double)) != 0);
+
+    // ---- (2) property checks ------------------------------------------------
+    constexpr double kSymTol = 1e-12;  // f2(i,j) vs f2(j,i) FP-rounding floor
+    const double asym_ref = max_asymmetry(ref);
+    const double asym_nat = max_asymmetry(native);
+    const double asym_emu = max_asymmetry(emu);
+    const bool sym_ref = asym_ref <= kSymTol;
+    const bool sym_nat = asym_nat <= kSymTol;
+    const bool sym_emu = asym_emu <= kSymTol;
+    const bool vpair_ok = vpair_matches_recount(native, V, part);
+
+    // ---- (3) SINGLE-BLOCK CONSISTENCY: n_block=1 == M0 compute_f2 -----------
+    // Force every SNP into one block; compute_f2_blocks's single slab must equal
+    // the M0 compute_f2 result (same backend, same precision) bit-for-bit.
+    BlockPartition one; one.block_id.assign(static_cast<std::size_t>(M), 0); one.n_block = 1;
+    const F2BlockTensor blk1_nat = steppe::core::compute_f2_blocks(*gpu, Q, V, N, one, precNat);
+    const F2Result      m0_nat   = steppe::core::compute_f2_block(*gpu, Q, V, N, precNat);
+    // Vpair (integer counts) must be EXACT; f2 must match to a tight floor — the
+    // M4 path pads block 0 to a power-of-2 width (zero pad columns), so its GEMM
+    // accumulates in a slightly different order than M0's exact-width GEMM ⇒ a
+    // ~1e-14 FP rounding difference, far below the M0-vs-oracle level (~1.1e-11).
+    constexpr double kSingleBlockF2Tol = 1e-12;
+    bool single_block_ok = (blk1_nat.n_block == 1) &&
+                           (blk1_nat.f2.size() == m0_nat.f2.size()) &&
+                           (blk1_nat.vpair.size() == m0_nat.vpair.size());
+    double sb_maxabs_f2 = 0, sb_maxabs_vp = 0;
+    if (single_block_ok) {
+        for (std::size_t k = 0; k < m0_nat.f2.size(); ++k) {
+            sb_maxabs_f2 = std::max(sb_maxabs_f2, std::fabs(blk1_nat.f2[k] - m0_nat.f2[k]));
+            sb_maxabs_vp = std::max(sb_maxabs_vp, std::fabs(blk1_nat.vpair[k] - m0_nat.vpair[k]));
+        }
+        single_block_ok = (sb_maxabs_f2 < kSingleBlockF2Tol) && (sb_maxabs_vp == 0.0);
+    }
+
+    // ---- Verdicts -----------------------------------------------------------
+    const bool nat_pass = sym_ref && sym_nat && vpair_ok && single_block_ok &&
+                          esNat.signflips == 0 && esNat.maxCombined < kTolNativeVsRef;
+    const bool emu_pass = sym_emu && esEmu.signflips == 0 && esEmu.maxCombined < kTolEmuVsRef;
+    const bool emu_skipped = !emu_engaged;
+
+    std::printf("\nM4 per-block f2 equivalence (REAL data P=%d M=%ld n_block=%d) — tight tier\n",
+                P, M, part.n_block);
+    std::printf("%-26s %12s %12s %9s %8s\n", "check", "combinedRel", "maxAbs", "signFlip", "verdict");
+    std::printf("%-26s %12.3e %12.3e %9d %8s\n", "cuda Fp64   vs oracle",
+                esNat.maxCombined, esNat.maxAbs, esNat.signflips,
+                (esNat.signflips == 0 && esNat.maxCombined < kTolNativeVsRef) ? "PASS" : "FAIL");
+    std::printf("%-26s %12.3e %12.3e %9d %8s\n", "cuda EmuFp64{40} vs oracle",
+                esEmu.maxCombined, esEmu.maxAbs, esEmu.signflips,
+                emu_skipped ? "SKIPPED" : (emu_pass ? "PASS" : "FAIL"));
+    std::printf("%-26s %12.3e %12s %9s %8s\n", "f2 symmetric (worst asym)",
+                std::max(asym_ref, std::max(asym_nat, asym_emu)), "-", "-",
+                (sym_ref && sym_nat && sym_emu) ? "PASS" : "FAIL");
+    std::printf("%-26s %12s %12s %9s %8s\n", "Vpair == recount", "-", "-", "-",
+                vpair_ok ? "PASS" : "FAIL");
+    std::printf("%-26s %12.3e %12.3e %9s %8s\n", "single-block == M0",
+                sb_maxabs_f2, sb_maxabs_vp, "-", single_block_ok ? "PASS" : "FAIL");
+    std::printf("\n");
+
+    if (emu_skipped)
+        std::fprintf(stderr, "  [warn] EmulatedFp64 arm SKIPPED: emulation did not engage "
+                             "(build without -DSTEPPE_HAVE_EMU_TUNING, or silent fallback). "
+                             "Rebuild with it on the CUDA-13/sm_120 box to assert this arm.\n");
+
+    const bool overall = nat_pass && (emu_skipped || emu_pass);
+    if (!overall) { std::fprintf(stderr, "RESULT: FAIL\n"); return EXIT_FAILURE; }
+    std::fprintf(stderr, "RESULT: PASS%s\n", emu_skipped ? " (EmulatedFp64 arm skipped — see warning)" : "");
+    return EXIT_SUCCESS;
+}

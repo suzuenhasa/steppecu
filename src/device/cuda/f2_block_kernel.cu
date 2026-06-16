@@ -157,6 +157,8 @@ __global__ void assemble_f2_kernel(const double* __restrict__ G,
     f2[si + sj * Pp] = finalize_f2(num, vp);
 }
 
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Map the typed Precision to a cuBLAS compute type for the f2 GEMMs.
 //   EmulatedFp64 -> CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT (Ozaki; default)
@@ -167,8 +169,10 @@ __global__ void assemble_f2_kernel(const double* __restrict__ G,
 //                   default. We therefore treat a Tf32 request on this FP64 path
 //                   as native FP64 here (the dedicated TF32 screening path is a
 //                   later milestone) — never silently downgrade reported numbers.
+// Shared by the single-block (run_f2_gemms) and the M4 batched/grouped
+// (run_f2_gemms_group) paths — the single source of the compute-type mapping.
 // -----------------------------------------------------------------------------
-cublasComputeType_t compute_type_for(const Precision& precision) {
+cublasComputeType_t f2_compute_type(const Precision& precision) {
     switch (precision.kind) {
         case Precision::Kind::EmulatedFp64:
             return CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT;
@@ -192,8 +196,9 @@ cublasComputeType_t compute_type_for(const Precision& precision) {
 // oracle path). The EAGER/FIXED tuning needs STEPPE_HAVE_EMU_TUNING; without it
 // the emulated math mode still engages emulation (just not the pinned slice
 // count), which is why the build flag is required for the measured speedup.
+// Exposed (non-anonymous) so the M4 grouped path engages the SAME policy ONCE.
 // -----------------------------------------------------------------------------
-void engage_precision(cublasHandle_t handle, const Precision& precision) {
+void engage_f2_precision(cublasHandle_t handle, const Precision& precision) {
     if (precision.kind == Precision::Kind::EmulatedFp64) {
         CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH));
 #if STEPPE_HAVE_EMU_TUNING
@@ -210,8 +215,6 @@ void engage_precision(cublasHandle_t handle, const Precision& precision) {
         CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
     }
 }
-
-}  // namespace
 
 // =============================================================================
 // Launch wrappers (architecture.md §7 — host code never sees <<<>>>).
@@ -237,9 +240,9 @@ void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
                   double* dG, double* dVpair, double* dR,
                   cudaStream_t stream) {
     CUBLAS_CHECK(cublasSetStream(handle, stream));
-    engage_precision(handle, precision);
+    engage_f2_precision(handle, precision);
 
-    const cublasComputeType_t ct = compute_type_for(precision);
+    const cublasComputeType_t ct = f2_compute_type(precision);
     const double one = 1.0;
     const double zero = 0.0;
     const int Mi = static_cast<int>(M);   // cublasGemmEx takes int k; M fits a tile

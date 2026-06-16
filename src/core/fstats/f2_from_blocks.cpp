@@ -38,4 +38,17 @@ F2Result compute_f2_block(ComputeBackend& backend, const MatView& Q, const MatVi
     return backend.compute_f2(Q, V, N, precision);
 }
 
+F2BlockTensor compute_f2_blocks(ComputeBackend& backend, const MatView& Q, const MatView& V,
+                                const MatView& N, const BlockPartition& partition,
+                                const Precision& precision) {
+    // Dispatch the M4 per-block tensor through the injected backend. `core` owns
+    // the block policy (the BlockPartition from the shared assign_blocks rule) and
+    // the precision policy; the backend owns the implementation (the size-grouped
+    // strided-batched GPU path vs the CPU per-block oracle). The block_id[] vector
+    // and n_block are the partition's two fields; passing the raw pointer keeps the
+    // ComputeBackend seam CUDA-free and free of any std-container ABI dependency.
+    return backend.compute_f2_blocks(Q, V, N, partition.block_id.data(),
+                                     partition.n_block, precision);
+}
+
 }  // namespace steppe::core

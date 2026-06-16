@@ -35,6 +35,21 @@ void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* 
                       double* dQ_masked, double* dV_out, double* dS,
                       int P, long M, cudaStream_t stream);
 
+/// Engage the precision policy on the handle for the f2 GEMMs (architecture.md
+/// §12). For EmulatedFp64 this is the load-bearing cublasSet* sequence (FP64-
+/// emulated math mode + EAGER strategy + FIXED mantissa control at
+/// `precision.mantissa_bits`, under STEPPE_HAVE_EMU_TUNING); for Fp64 it sets
+/// PEDANTIC native math. Exposed (rather than inlined in run_f2_gemms) so the M4
+/// batched/grouped path (f2_blocks_kernel.cu) engages the SAME policy ONCE before
+/// its group loop instead of re-deriving it — the single source of the precision
+/// engagement (architecture.md §2 DRY).
+void engage_f2_precision(cublasHandle_t handle, const Precision& precision);
+
+/// Map the typed Precision to the cuBLAS compute type for the f2 GEMMs
+/// (EmulatedFp64 ⇒ CUBLAS_COMPUTE_64F_EMULATED_FIXEDPOINT; Fp64/Tf32 ⇒ native
+/// CUBLAS_COMPUTE_64F). Shared by the single-block and batched f2 GEMM paths.
+[[nodiscard]] cublasComputeType_t f2_compute_type(const Precision& precision);
+
 /// The three f2 GEMMs (architecture.md §5 S2 line 236-240; spike run_f2_gemms),
 /// all column-major, into pre-allocated outputs:
 ///   dG     [P  × P] = Q · Qᵀ

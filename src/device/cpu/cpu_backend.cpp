@@ -175,6 +175,106 @@ public:
         return out;
     }
 
+    /// The CPU REFERENCE per-block f2 oracle (architecture.md §5 S2, §11.1;
+    /// ROADMAP M4). The obviously-correct scalar/long-double transcription the GPU
+    /// grouped-batched path is diffed against. For each block (the contiguous run
+    /// of SNPs with the same `block_id`) it runs the SAME cancellation-free
+    /// per-SNP-difference + long-double pairwise accumulation as `compute_f2`,
+    /// using the SHARED `het_correction` / `f2_term` / `finalize_f2` primitives so
+    /// the oracle and the GPU feeder cannot diverge on the formula
+    /// (architecture.md §13). `precision` governs the GPU GEMMs only and is ignored
+    /// here (this is the native/long-double reference; architecture.md §12).
+    ///
+    /// Output layout matches F2BlockTensor: f2/vpair are n_block stacked
+    /// column-major [P × P] slabs, entry (i,j,b) at `i + P·j + P·P·b`.
+    [[nodiscard]] F2BlockTensor compute_f2_blocks(const MatView& Q, const MatView& V,
+                                                  const MatView& N, const int* block_id,
+                                                  int n_block,
+                                                  const Precision& precision) override {
+        (void)precision;  // oracle is always the long-double native reference (§12)
+
+        const int P = Q.P;
+        const long M = Q.M;
+
+        F2BlockTensor out;
+        out.P = P;
+        out.n_block = n_block;
+        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+        const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+        out.f2.assign(total, 0.0);
+        out.vpair.assign(total, 0.0);
+        if (P <= 0 || M <= 0 || n_block <= 0) return out;
+
+        // Block columns are CONTIGUOUS in file order (assign_blocks is
+        // non-decreasing), so a block is the half-open SNP range [begin, end). One
+        // scan finds the per-block ranges; the block-size count is the S4 metadata.
+        std::vector<long> begin(static_cast<std::size_t>(n_block), 0);
+        std::vector<long> end(static_cast<std::size_t>(n_block), 0);
+        {
+            long s = 0;
+            while (s < M) {
+                const int b = block_id[s];
+                long e = s;
+                while (e < M && block_id[e] == b) ++e;
+                begin[static_cast<std::size_t>(b)] = s;
+                end[static_cast<std::size_t>(b)] = e;
+                out.block_sizes[static_cast<std::size_t>(b)] =
+                    static_cast<int>(e - s);
+                s = e;
+            }
+        }
+
+        // Per-block, per-pair: the cancellation-free long-double reference, sharing
+        // the exact primitives `compute_f2` uses (header rationale). Scratch sized
+        // to the largest block so the [P×P×M] intermediate is never materialized.
+        //
+        // FULL i,j (INCLUDING the diagonal): the GPU grouped path computes every
+        // (i,j) entry via the GEMM reformulation, and the M0 compute_f2 GPU/ref
+        // pair likewise fill the diagonal (the diagonal f2(i,i) = -hc_i - hc_i ⇒
+        // -2·mean_het, vpair(i,i) = i's valid-SNP count). We MATCH that here so the
+        // oracle, the GPU grouped path, and the single-block == M0 check all agree
+        // bit-consistently (the diagonal is never consumed downstream — f3/f4 read
+        // off-diagonal f2 only — but it must not spuriously differ across paths).
+        std::vector<long double> terms(static_cast<std::size_t>(M));
+        for (int b = 0; b < n_block; ++b) {
+            const long s0 = begin[static_cast<std::size_t>(b)];
+            const long s1 = end[static_cast<std::size_t>(b)];
+            const std::size_t base = slab * static_cast<std::size_t>(b);
+            for (int i = 0; i < P; ++i) {
+                for (int j = i; j < P; ++j) {
+                    long count = 0;
+                    for (long s = s0; s < s1; ++s) {
+                        const bool vi = V.element(i, s) != 0.0;
+                        const bool vj = V.element(j, s) != 0.0;
+                        if (!vi || !vj) continue;
+                        const double p_i = Q.element(i, s);
+                        const double p_j = Q.element(j, s);
+                        const double hc_i = het_correction(p_i, N.element(i, s), true);
+                        const double hc_j = het_correction(p_j, N.element(j, s), true);
+                        terms[static_cast<std::size_t>(count)] =
+                            static_cast<long double>(f2_term(p_i, p_j, hc_i, hc_j));
+                        ++count;
+                    }
+                    const long double numerator =
+                        pairwise_sum(terms.data(), static_cast<std::size_t>(count));
+                    const double vpair = static_cast<double>(count);
+                    const double f2_ij =
+                        finalize_f2(static_cast<double>(numerator), vpair);
+                    const std::size_t ij = base +
+                        static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(j);
+                    const std::size_t ji = base +
+                        static_cast<std::size_t>(j) + static_cast<std::size_t>(P) * static_cast<std::size_t>(i);
+                    out.f2[ij] = f2_ij;
+                    out.f2[ji] = f2_ij;
+                    out.vpair[ij] = vpair;
+                    out.vpair[ji] = vpair;
+                }
+            }
+        }
+        return out;
+    }
+
     /// The CPU REFERENCE genotype decode (architecture.md §5 S0/S1; ROADMAP M1):
     /// the obviously-correct scalar transcription of the oracle math, the
     /// bit-for-bit target the GPU decode is diffed against. For each population p

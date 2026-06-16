@@ -8,9 +8,11 @@
 #ifndef STEPPE_CORE_FSTATS_F2_FROM_BLOCKS_HPP
 #define STEPPE_CORE_FSTATS_F2_FROM_BLOCKS_HPP
 
-#include "device/backend.hpp"       // steppe::ComputeBackend, steppe::F2Result
-#include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
-#include "steppe/config.hpp"        // steppe::Precision
+#include "device/backend.hpp"                  // steppe::ComputeBackend, steppe::F2Result
+#include "core/internal/views.hpp"             // steppe::core::MatView (Q/V/N contract)
+#include "core/domain/block_partition_rule.hpp" // steppe::core::BlockPartition
+#include "steppe/config.hpp"                   // steppe::Precision
+#include "steppe/fstats.hpp"                   // steppe::F2BlockTensor
 
 namespace steppe::core {
 
@@ -24,6 +26,19 @@ namespace steppe::core {
 [[nodiscard]] F2Result compute_f2_block(ComputeBackend& backend, const MatView& Q,
                                         const MatView& V, const MatView& N,
                                         const Precision& precision);
+
+/// Compute the M4 PER-BLOCK f2 tensor `f2_blocks [P × P × n_block]` + retained
+/// Vpair from the FULL per-SNP Q/V/N and a SNP→block partition, dispatching
+/// through the injected `backend` (architecture.md §5 S2, §11.1; ROADMAP M4). The
+/// `partition` comes from the shared `assign_blocks` (block_partition_rule.hpp) —
+/// `core` owns the block policy; the backend owns the batched GPU implementation
+/// (the spike-chosen size-grouped strided-batched design) vs the CPU per-block
+/// long-double oracle. `precision` governs only the matmul-heavy GEMMs. This stays
+/// CUDA-free: it names only the ComputeBackend seam + the host-pure block rule.
+[[nodiscard]] F2BlockTensor compute_f2_blocks(ComputeBackend& backend, const MatView& Q,
+                                              const MatView& V, const MatView& N,
+                                              const BlockPartition& partition,
+                                              const Precision& precision);
 
 }  // namespace steppe::core
 

@@ -22,30 +22,23 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "device/backend.hpp"               // ComputeBackend, F2Result, MatView, DecodeResult
+#include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, CUBLAS_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
-#include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, run_f2_gemms, launch_assemble_f2
+#include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision
+#include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
-#include "steppe/config.hpp"                // Precision
+#include "steppe/config.hpp"                // Precision, kBlockGroupPadBase
+#include "steppe/fstats.hpp"                // F2BlockTensor
 
 namespace steppe::device {
-
-namespace {
-
-/// cuBLAS workspace size for the f2 GEMMs. An explicit workspace is REQUIRED for
-/// run-to-run reproducibility of emulated FP64 (architecture.md §12; spike
-/// f2_emu_spike.cu:765 used the same 64 MiB). Ample for these reduce-to-[P×P]
-/// GEMMs; promoted out of the spike's bare literal into a named constant.
-inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
-
-}  // namespace
 
 /// GPU compute backend. The 3-GEMM f2 reformulation; one CublasHandle created
 /// once (architecture.md §7) and reused, with its workspace set for emulated-FP64
@@ -109,6 +102,187 @@ public:
         return out;
     }
 
+    /// M4 — PER-BLOCK f2 via the SPIKE-CHOSEN size-grouped strided-batched design
+    /// (architecture.md §5 S2, §11.1; ROADMAP M4). One fused feeder over ALL SNPs
+    /// (the existing block-agnostic launch_f2_feeder), then per power-of-2 size
+    /// bucket: gather the bucket's blocks into a padded slab → 3 strided-batched
+    /// GEMMs → fused assemble (native FP64) scattered into the resident
+    /// [P × P × n_block] f2 + Vpair tensors. Only ONE bucket's padded slabs + GEMM
+    /// outputs are resident at a time (VRAM-frugal; the spike's grouped design),
+    /// alongside the persistent feeder outputs and the resident f2/Vpair tensors.
+    [[nodiscard]] F2BlockTensor compute_f2_blocks(const core::MatView& Q,
+                                                  const core::MatView& V,
+                                                  const core::MatView& N,
+                                                  const int* block_id,
+                                                  int n_block,
+                                                  const Precision& precision) override {
+        const int P = Q.P;
+        const long M = Q.M;
+
+        F2BlockTensor out;
+        out.P = P;
+        out.n_block = n_block;
+        const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+        const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+        out.f2.assign(total, 0.0);
+        out.vpair.assign(total, 0.0);
+        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        if (P <= 0 || M <= 0 || n_block <= 0) return out;
+
+        // ---- Block layout from block_id (contiguous in file order) -----------
+        // block_id is non-decreasing (assign_blocks), so each block's SNPs are the
+        // half-open column range [offset, offset+size). One host scan; the sizes
+        // are also the F2BlockTensor metadata (the S4 weighting denominator base).
+        std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
+        {
+            long s = 0;
+            while (s < M) {
+                const int b = block_id[s];
+                long e = s;
+                while (e < M && block_id[e] == b) ++e;
+                block_offsets[static_cast<std::size_t>(b)] = s;
+                out.block_sizes[static_cast<std::size_t>(b)] = static_cast<int>(e - s);
+                s = e;
+            }
+        }
+
+        // ---- Group blocks by ceil-pow{kBlockGroupPadBase}(size) (the spike rule).
+        // One strided-batched call per bucket, padded only to the bucket width;
+        // bounds pad waste < base× WITHIN a bucket while keeping the call count
+        // O(log max_size). Buckets sorted by width (cosmetic / smallest first).
+        auto ceil_bucket = [](int x) {
+            int p = 1;
+            while (p < x) p *= steppe::kBlockGroupPadBase;
+            return p;
+        };
+        struct Bucket { int s_pad = 0; std::vector<int> blocks; };
+        std::vector<Bucket> buckets;
+        for (int b = 0; b < n_block; ++b) {
+            const int sp = ceil_bucket(out.block_sizes[static_cast<std::size_t>(b)]);
+            int gi = -1;
+            for (std::size_t k = 0; k < buckets.size(); ++k)
+                if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
+            if (gi < 0) { gi = static_cast<int>(buckets.size()); buckets.push_back({sp, {}}); }
+            buckets[static_cast<std::size_t>(gi)].blocks.push_back(b);
+        }
+        std::sort(buckets.begin(), buckets.end(),
+                  [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
+
+        // ---- Resident, run-long device tensors + the feeder outputs over ALL M.
+        // VRAM is the binding constraint at scale (architecture.md §11.2): the raw
+        // inputs (dQ_raw/dV_raw/dN_raw, 3·P·M doubles) are needed ONLY by the
+        // feeder, so they live in an inner scope and free BEFORE the bucket loop —
+        // otherwise at P=768/M=584k the raw (10.8 GB) + feeder outputs (17.9 GB) +
+        // resident f2/Vpair (7.1 GB) sum to 35.8 GB > 32 GB and OOM. After the
+        // feeder runs, only dQ/dV/dS (the masked Q, V, S=[Qsq;Hc]) and the resident
+        // f2/Vpair tensors persist (~25 GB), leaving headroom for the bucket slabs.
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t two_pm = 2u * pm;
+        DeviceBuffer<double> dQ(pm), dV(pm), dS(two_pm);     // feeder outputs (persist)
+        DeviceBuffer<double> dF2_all(total), dVpair_all(total);  // the resident tensors
+        DeviceBuffer<long>   dOffsets(static_cast<std::size_t>(n_block));
+        DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
+
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(long),
+                                          cudaMemcpyHostToDevice, stream_));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), out.block_sizes.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_));
+
+        {
+            // Raw inputs — feeder-only; freed at the end of this scope.
+            DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, pm * sizeof(double),
+                                              cudaMemcpyHostToDevice, stream_));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, pm * sizeof(double),
+                                              cudaMemcpyHostToDevice, stream_));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, pm * sizeof(double),
+                                              cudaMemcpyHostToDevice, stream_));
+            // ONE fused feeder over ALL SNPs (block-agnostic; native FP64).
+            launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
+                             dQ.data(), dV.data(), dS.data(), P, M, stream_);
+            // Sync so the feeder finishes before dQ_raw/dV_raw/dN_raw free (the
+            // gather then reads dQ/dV/dS, and the freed raw VRAM is reused by the
+            // bucket slabs).
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        }
+
+        // Engage the precision policy ONCE (the SHARED engagement; the grouped GEMM
+        // routine then sets only the per-call compute type). The handle's workspace
+        // was bound in the ctor for emulated-FP64 determinism (architecture.md §12).
+        engage_f2_precision(blas_.get(), precision);
+
+        // ---- VRAM budget for one strided-batched chunk (architecture.md §11.2).
+        // The resident set (dQ/dV/dS + dF2_all/dVpair_all + workspace) is already
+        // committed; the remaining free VRAM bounds how many blocks of a bucket can
+        // be in one strided-batched call. A single big bucket's slabs would
+        // otherwise OOM (at P=768 the 2048-pad bucket alone exceeds what is left),
+        // so each bucket is processed in CHUNKS of at most `max_blocks` blocks sized
+        // to the per-block-in-chunk footprint at that bucket's s_pad. This keeps the
+        // grouped strided-batched design while bounding the working set (the M5
+        // out-of-core generalization is a superset of this; here it is the
+        // single-GPU VRAM guard ROADMAP M4 requires).
+        std::size_t free_b = 0, total_b = 0;
+        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        // Use a conservative fraction of what's free for the chunk slabs+outputs.
+        const std::size_t chunk_budget =
+            static_cast<std::size_t>(0.80 * static_cast<double>(free_b));
+
+        // ---- Per bucket (chunked): gather → strided-batched GEMMs → assemble ----
+        for (const Bucket& bk : buckets) {
+            const int s_pad = bk.s_pad;
+            const int nb_total = static_cast<int>(bk.blocks.size());
+            // Per-block-in-chunk bytes: inputs Qg+Vg (P·s_pad each) + Sg (2P·s_pad)
+            // = 4·P·s_pad; outputs Gg+Vpairg (P² each) + Rg (2P²) = 4·P². ×8 bytes.
+            const std::size_t per_block_bytes =
+                (4u * static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) +
+                 4u * slab) * sizeof(double);
+            int max_blocks = static_cast<int>(chunk_budget / per_block_bytes);
+            if (max_blocks < 1) max_blocks = 1;   // a single block must always fit
+            if (max_blocks > nb_total) max_blocks = nb_total;
+
+            for (int start = 0; start < nb_total; start += max_blocks) {
+                const int nb = std::min(max_blocks, nb_total - start);
+
+                DeviceBuffer<int> dIds(static_cast<std::size_t>(nb));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
+                                                  static_cast<std::size_t>(nb) * sizeof(int),
+                                                  cudaMemcpyHostToDevice, stream_));
+
+                const std::size_t psp_nb =
+                    static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) *
+                    static_cast<std::size_t>(nb);
+                DeviceBuffer<double> dQg(psp_nb), dVg(psp_nb), dSg(2u * psp_nb);
+                const std::size_t pp_nb = slab * static_cast<std::size_t>(nb);
+                DeviceBuffer<double> dGg(pp_nb), dVpairg(pp_nb), dRg(2u * pp_nb);
+
+                launch_gather_group(dQ.data(), dV.data(), dS.data(),
+                                    dIds.data(), dOffsets.data(), dSizes.data(),
+                                    P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_);
+                run_f2_gemms_group(blas_.get(), precision, P, s_pad, nb,
+                                   dQg.data(), dVg.data(), dSg.data(),
+                                   dGg.data(), dVpairg.data(), dRg.data(), stream_);
+                launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
+                                             dIds.data(), P, nb,
+                                             dF2_all.data(), dVpair_all.data(), stream_);
+                // Sync before this chunk's slabs (dQg…dRg) free at scope exit, so
+                // the next chunk reuses the VRAM (one chunk resident at a time).
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+            }
+        }
+
+        // ---- Copy the resident tensors back across the CUDA-free seam ---------
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2_all.data(),
+                                          total * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair_all.data(),
+                                          total * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        return out;
+    }
+
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
         const int P = tile.n_pop;
         const long M = static_cast<long>(tile.n_snp);
@@ -163,7 +337,7 @@ private:
     // Stream lands with the streaming pipeline (architecture.md §11.1).
     cudaStream_t stream_ = nullptr;
     CublasHandle blas_{stream_};
-    DeviceBuffer<std::byte> workspace_{kCublasWorkspaceBytes};
+    DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
 };
 
 /// Factory for the GPU backend (architecture.md §9 — backend chosen at build()).

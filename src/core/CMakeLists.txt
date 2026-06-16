@@ -47,3 +47,13 @@ add_library(steppe::core ALIAS steppe_core)
 target_link_libraries(steppe_core
     PUBLIC  steppe::api steppe::core_internal
     PRIVATE steppe::device steppe::warnings)   # GPU only via ComputeBackend
+
+# steppe_core has NO CUDA sources of its own (pure host orchestration); it links
+# steppe_device PRIVATE only to reach the GPU through ComputeBackend. Do NOT let it
+# archive its own nvcc -dlink object for steppe_device's RDC symbols
+# (CUDA_RESOLVE_DEVICE_SYMBOLS OFF): if it did, a CUDA executable that links BOTH
+# steppe_core and steppe_device (e.g. the M4 equivalence test) would double-resolve
+# the __cudaRegisterLinkedBinary symbols and the final host link would miss them.
+# With this OFF, the consuming executable device-links steppe_device directly — the
+# same path the M0/M1 CUDA tests already use successfully.
+set_target_properties(steppe_core PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS OFF)

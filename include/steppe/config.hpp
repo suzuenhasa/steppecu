@@ -70,6 +70,23 @@ inline constexpr double kAbsFloor = 1e-300;
 /// `f2_estimator` primitive so the CPU oracle and GPU feeder cannot diverge.
 inline constexpr double kHetCorrDenomFloor = 1.0;
 
+/// Base of the per-block size-bucketing used by the M4 batched f2 path: blocks
+/// are grouped by `ceil_pow{kBlockGroupPadBase}(block_size)` and each group is
+/// run as one cublasDgemmStridedBatched call padded to that group's bucket width.
+/// Base 2 (power-of-two buckets) bounds the per-block padding waste to < this
+/// factor WITHIN a group while keeping the number of strided-batched calls
+/// O(log max_block_size) (MEASURED: real-AADR P=768 → 10 groups, 1.43× pad waste
+/// vs the global-s_max design's 2.76×; the grouped design is the spike-chosen M4
+/// design — fastest AND VRAM-viable, ROADMAP M4 spike). The pad columns carry
+/// V=0 ⇒ they contribute nothing to the masked GEMMs (architecture.md §5 S2).
+inline constexpr int kBlockGroupPadBase = 2;
+
+/// cuBLAS workspace bytes for the f2 GEMMs (architecture.md §12 — an explicit
+/// workspace is REQUIRED for run-to-run reproducibility of emulated FP64). Ample
+/// for the reduce-to-[P×P] GEMMs; promoted out of the spike's bare 64 MiB literal
+/// (f2_emu_spike.cu) into a named constant shared by the M0 and M4 device paths.
+inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
+
 /// Default jackknife block size in centimorgans. ADMIXTOOLS 2's `blgsize`
 /// default is 0.05 Morgans = 5 cM (architecture.md §9; ROADMAP §4). The accessor
 /// surface speaks cM; the block math stores Morgans (1 cM = 0.01 Morgans). The

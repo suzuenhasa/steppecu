@@ -70,6 +70,31 @@ set(STEPPE_AADR_ROOT "/workspace/data/aadr"
     CACHE PATH "AADR data root (contains raw/ TGENO triple + derived_acc/ oracle)")
 add_test(NAME decode_equivalence COMMAND test_decode_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
+# CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
+# the SHARED assign_blocks, computes the per-block f2 tensor via the production
+# seam (core::compute_f2_blocks) through CpuBackend (per-block long-double oracle)
+# + CudaBackend (the size-grouped strided-batched design) at Fp64 and EmuFp64{40},
+# and asserts: per-block combined-tolerance tight tier, f2 symmetry, Vpair ==
+# independent recount, and single-block == M0 compute_f2. Self-checking main()
+# (not a GoogleTest TU); CTest gates on the exit code. Links steppe::io (read_snp)
+# + steppe::core (assign_blocks + compute_f2_blocks) + steppe::device (backends).
+add_executable(test_f2_blocks_equivalence reference/test_f2_blocks_equivalence.cu)
+target_link_libraries(test_f2_blocks_equivalence
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+# Separable compilation so the executable device-links steppe_device's RDC kernels
+# directly (the same path the M0/M1 CUDA tests use). steppe_core carries no device
+# link object of its own (CUDA_RESOLVE_DEVICE_SYMBOLS OFF, src/core/CMakeLists.txt),
+# so there is exactly one device-link of steppe_device — here.
+set_target_properties(test_f2_blocks_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Like test_f2_equivalence: the EmulatedFp64 arm only asserts when the fixed-slice
+# Ozaki tuning is compiled in; otherwise it is SKIPPED (a non-assert), so define
+# the macro on this target when the option is on (the box build) to assert it.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_blocks_equivalence PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_blocks_equivalence COMMAND test_f2_blocks_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.

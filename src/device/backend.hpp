@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "steppe/config.hpp"        // steppe::Precision
+#include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 
 namespace steppe {
@@ -135,6 +136,37 @@ public:
                                               const core::MatView& V,
                                               const core::MatView& N,
                                               const Precision& precision) = 0;
+
+    /// Compute the PER-BLOCK f2 tensor `f2_blocks [P × P × n_block]` + the retained
+    /// per-block `Vpair` from the FULL per-SNP Q/V/N contract and a SNP→block
+    /// assignment — the M4 deliverable (architecture.md §5 S2, §11.1; ROADMAP M4).
+    ///
+    /// The inputs Q/V/N are the SAME column-major [P × M] contract as `compute_f2`,
+    /// but spanning ALL M SNPs (not one block). `block_id` is an M-vector from the
+    /// shared `assign_blocks` (core/domain/block_partition_rule.hpp): `block_id[s]`
+    /// is the dense jackknife block of SNP s, in `0 .. n_block-1`, non-decreasing in
+    /// file order (so a block's SNPs are CONTIGUOUS — the property the batched
+    /// reorder relies on). The GPU backend runs the spike-chosen SIZE-GROUPED
+    /// strided-batched design over the blocks; the CPU backend is the per-block
+    /// long-double oracle. `precision` governs only the matmul-heavy GEMMs
+    /// (architecture.md §12); the numerator/divide stays native FP64.
+    ///
+    /// @param Q         reference-allele frequencies in [0,1], 0 where invalid,
+    ///                  column-major [P × M] over ALL SNPs.
+    /// @param V         validity mask (1.0 valid / 0.0 missing), [P × M].
+    /// @param N         non-missing haploid count, [P × M] (enters het correction).
+    /// @param block_id  per-SNP dense block id (length M), from assign_blocks;
+    ///                  non-decreasing ⇒ each block's columns are contiguous.
+    /// @param n_block   number of distinct blocks (== max(block_id)+1).
+    /// @param precision governs the f2 GEMMs only (default EmulatedFp64{40}).
+    /// @return  F2BlockTensor with f2 + Vpair [P × P × n_block] (block-major outer,
+    ///          column-major within a block: `i + P·j + P·P·b`) + block_sizes.
+    [[nodiscard]] virtual F2BlockTensor compute_f2_blocks(const core::MatView& Q,
+                                                          const core::MatView& V,
+                                                          const core::MatView& N,
+                                                          const int* block_id,
+                                                          int n_block,
+                                                          const Precision& precision) = 0;
 
     /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5
     /// S0 Format decode + S1 Allele-freq reduction; ROADMAP M1). Unpacks the
