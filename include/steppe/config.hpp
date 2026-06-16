@@ -87,6 +87,29 @@ inline constexpr int kBlockGroupPadBase = 2;
 /// (f2_emu_spike.cu) into a named constant shared by the M0 and M4 device paths.
 inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
 
+/// Target fraction of device VRAM the resident working set may occupy
+/// (architecture.md §11.1/§11.2 — the `build()`-validated budget fraction; ROADMAP
+/// §4 — promoted out of the bare `0.80` literal in cuda_backend.cu). It is the one
+/// home for the `budget · free` fraction in §11.2's `total_vram ≤ budget · free`
+/// check AND the in-stream chunk-sizing in the M4 backend, so the up-front reject
+/// and the runtime chunk budget can never drift to two different fractions.
+///
+/// VALUE — reconciliation to architecture.md §11.1 ("a target fraction (say 60–70%)
+/// of free VRAM"). The §11.1 60–70% figure is the budget against the WHOLE device's
+/// free VRAM at chunk-size derivation time, where the headroom must also absorb the
+/// resident `f2_blocks`/`Vpair` tensors, the cuSOLVER/cuBLAS workspaces, AND the
+/// double-buffered pinned/device tile staging that §11.1 still has to allocate. The
+/// M4 chunk budget this constant gates is applied to the free VRAM that REMAINS
+/// AFTER the resident tensors + the cuBLAS workspace are already subtracted (the
+/// budget helper in device/vram_budget.hpp subtracts `2·P²·n_block·8` for f2+Vpair
+/// and `kCublasWorkspaceBytes` before applying this fraction), so the residual it
+/// scales is the headroom for ONE transient strided-batched chunk — a narrower
+/// quantity than §11.1's gross-free budget. 0.80 of that already-net residual keeps
+/// a ≥20% margin for cuBLAS GEMM scratch beyond the bound workspace and for
+/// allocator fragmentation, while staying within the §11.1 spirit (never commit all
+/// free VRAM). Tunable policy number, NOT a mathematical constant.
+inline constexpr double kMaxVramUtilizationFraction = 0.80;
+
 /// Default jackknife block size in centimorgans. ADMIXTOOLS 2's `blgsize`
 /// default is 0.05 Morgans = 5 cM (architecture.md §9; ROADMAP §4). The accessor
 /// surface speaks cM; the block math stores Morgans (1 cM = 0.01 Morgans). The

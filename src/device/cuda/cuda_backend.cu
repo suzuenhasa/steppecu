@@ -37,7 +37,8 @@
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
-#include "steppe/config.hpp"                // Precision, kBlockGroupPadBase
+#include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
+#include "steppe/config.hpp"                // Precision, kBlockGroupPadBase, kMaxVramUtilizationFraction
 #include "steppe/fstats.hpp"                // F2BlockTensor
 
 namespace steppe::device {
@@ -181,6 +182,20 @@ public:
         std::sort(buckets.begin(), buckets.end(),
                   [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
 
+        // ---- VRAM budget for one strided-batched chunk (architecture.md §11.2).
+        // Query free VRAM BEFORE committing the resident set, so the budget helper
+        // genuinely subtracts the resident f2+Vpair tensors AND the cuBLAS workspace
+        // from a gross-free figure rather than relying on allocation ordering
+        // (cleanup X-5/B5 + X-13/B26). The helper accounts for BOTH P²·n_block FP64
+        // tensors (the prior path counted one ⇒ ~2× under-budget) and reserves the
+        // determinism workspace before applying kMaxVramUtilizationFraction; the
+        // resulting per-bucket `max_blocks` bounds how many blocks of a bucket fit
+        // in one strided-batched call. A single big bucket's slabs would otherwise
+        // OOM (at P=768 the 2048-pad bucket alone exceeds what is left). The helper
+        // is host-pure + unit-tested GPU-free (device/vram_budget.hpp).
+        std::size_t free_b = 0, total_b = 0;
+        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+
         // ---- Resident, run-long device tensors + the feeder outputs over ALL M.
         // VRAM is the binding constraint at scale (architecture.md §11.2): the raw
         // inputs (dQ_raw/dV_raw/dN_raw, 3·P·M doubles) are needed ONLY by the
@@ -226,34 +241,19 @@ public:
         // was bound in the ctor for emulated-FP64 determinism (architecture.md §12).
         engage_f2_precision(blas_.get(), precision);
 
-        // ---- VRAM budget for one strided-batched chunk (architecture.md §11.2).
-        // The resident set (dQ/dV/dS + dF2_all/dVpair_all + workspace) is already
-        // committed; the remaining free VRAM bounds how many blocks of a bucket can
-        // be in one strided-batched call. A single big bucket's slabs would
-        // otherwise OOM (at P=768 the 2048-pad bucket alone exceeds what is left),
-        // so each bucket is processed in CHUNKS of at most `max_blocks` blocks sized
-        // to the per-block-in-chunk footprint at that bucket's s_pad. This keeps the
+        // ---- Per bucket (chunked): gather → strided-batched GEMMs → assemble ----
+        // Each bucket is processed in CHUNKS of at most `max_blocks` blocks (the
+        // host-pure, GPU-free budget helper: it reserves BOTH resident tensors +
+        // the cuBLAS workspace, applies kMaxVramUtilizationFraction, and clamps in
+        // size_t before the int narrowing — device/vram_budget.hpp). This keeps the
         // grouped strided-batched design while bounding the working set (the M5
         // out-of-core generalization is a superset of this; here it is the
         // single-GPU VRAM guard ROADMAP M4 requires).
-        std::size_t free_b = 0, total_b = 0;
-        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
-        // Use a conservative fraction of what's free for the chunk slabs+outputs.
-        const std::size_t chunk_budget =
-            static_cast<std::size_t>(0.80 * static_cast<double>(free_b));
-
-        // ---- Per bucket (chunked): gather → strided-batched GEMMs → assemble ----
         for (const Bucket& bk : buckets) {
             const int s_pad = bk.s_pad;
             const int nb_total = static_cast<int>(bk.blocks.size());
-            // Per-block-in-chunk bytes: inputs Qg+Vg (P·s_pad each) + Sg (2P·s_pad)
-            // = 4·P·s_pad; outputs Gg+Vpairg (P² each) + Rg (2P²) = 4·P². ×8 bytes.
-            const std::size_t per_block_bytes =
-                (4u * static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) +
-                 4u * slab) * sizeof(double);
-            int max_blocks = static_cast<int>(chunk_budget / per_block_bytes);
-            if (max_blocks < 1) max_blocks = 1;   // a single block must always fit
-            if (max_blocks > nb_total) max_blocks = nb_total;
+            const int max_blocks =
+                max_blocks_per_chunk(free_b, P, n_block, s_pad, nb_total);
 
             for (int start = 0; start < nb_total; start += max_blocks) {
                 const int nb = std::min(max_blocks, nb_total - start);

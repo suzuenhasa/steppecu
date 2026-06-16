@@ -180,6 +180,27 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME launch_config_unit COMMAND test_launch_config)
 
+# --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
+# Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
+# chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is
+# unit-testable GPU-free (architecture.md §13). Pins that the budget counts BOTH
+# resident f2+vpair tensors (the B26 2× term — the prior path counted one and
+# under-budgeted by ~2×), subtracts the cuBLAS workspace before applying
+# kMaxVramUtilizationFraction (the X-5 nuance), clamps in size_t before the int
+# narrowing (the X-5/F9 wrap), and that one chunk's slabs never exceed the
+# fraction-of-net budget. The header is CUDA-free and reached as
+# "device/vram_budget.hpp" via steppe::core_internal's src/ include root (the same
+# root that resolves "core/internal/..." / "device/backend.hpp"); steppe::api
+# carries config.hpp. No CUDA here. architecture.md §8, §11.2, §13.
+add_executable(test_vram_budget unit/test_vram_budget.cpp)
+target_link_libraries(test_vram_budget
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_vram_budget PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_vram_budget PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME vram_budget_unit COMMAND test_vram_budget)
+
 # --- Host-only unit test of the shared SNP→block partition rule (M3) ----------
 # Pure C++ TU (no CUDA, no io): exercises core/domain/block_partition_rule on
 # synthetic chromosome/position LAYOUTS (control-flow, not a precision claim —

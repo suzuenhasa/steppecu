@@ -16,7 +16,11 @@
 //
 // STORAGE IS FP64 IN EVERY PRECISION MODE (architecture.md §11.2): the `Precision`
 // knob is an OPERATION mode for the matmul-heavy GEMMs, never a storage type — the
-// resident tensor is always FP64 (`P² · n_block · 8` bytes, the §11.2 budget term).
+// resident tensors are always FP64. The M4 device path keeps BOTH `f2` AND the
+// retained `vpair` co-resident, each `P² · n_block · 8` bytes, so the resident pair
+// is `2 · P² · n_block · 8` bytes — both §11.2 budget terms (cleanup X-13/B26;
+// counting only `f2` under-reserves the resident set by 2× and OOMs mid-stream).
+// The device budget helper reserves for both (src/device/vram_budget.hpp).
 #ifndef STEPPE_FSTATS_HPP
 #define STEPPE_FSTATS_HPP
 
