@@ -14,6 +14,10 @@
 //  DYNAMIC mantissa control is the rejected TRAP -- it overshoots to ~60 bits on
 //  real data's wide dynamic range and collapses to parity with native (no win);
 //  the win comes from FIXED slices.)
+// (Bit-sweep evidence lives in the follow-ups, NOT this file: f2_prec_acc.cu =
+//  fixed-bit ACCURACY sweep {24,32,40,48,53} vs the long-double reference;
+//  f2_timing.cu = fixed-bit THROUGHPUT sweep {32,40,48}. This file uses dynamic
+//  mantissa, so read it for the engagement guard + oracle, not the bit frontier.)
 //
 // Three computations of the same P x P f2 matrix on identical input:
 //   (1) NATIVE FP64    : cublasGemmEx with CUBLAS_COMPUTE_64F (native hardware).
