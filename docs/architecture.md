@@ -131,10 +131,13 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │   ├── CMakeLists.txt               # [BUILT] steppe_core target
 │   │   ├── internal/                    #   DRY shared helpers (the "kernel" of the codebase)
 │   │   │   ├── views.hpp                # [BUILT] MatView -- the Q/V/N column-major [P x M] contract (element i + P*s)
-│   │   │   └── f2_estimator.hpp         # [BUILT] shared __host__ __device__ f2 primitive (bias-corrected estimator,
-│   │   │                                #   het-correction, numerator/divide, cdiv/grid_for) -- CPU ref & GPU cannot diverge
+│   │   │   ├── f2_estimator.hpp         # [BUILT] shared __host__ __device__ f2 primitive (bias-corrected estimator,
+│   │   │   │                            #   het-correction, numerator/divide, cdiv/grid_for) -- CPU ref & GPU cannot diverge
+│   │   │   └── decode_af.hpp            # [BUILT, M1] shared __host__ __device__ decode primitive (2-bit unpack, raw-value
+│   │   │                                #   0/1/2=copies, 3=missing; AC/AN -> Q/V/N; ploidy param) -- one source, no divergence
 │   │   ├── domain/
-│   │   │   └── block_partition_rule.hpp # [BUILT] host-pure SNP->block rule (block_of, cM); the single shared source
+│   │   │   └── block_partition_rule.hpp # [BUILT, M3] host-pure SNP->block rule (+ .cpp): block_of + assign_blocks (per-chrom
+│   │   │                                #   reset, dense-renumber occupied bins, cM<->Morgan); filter-agnostic single source
 │   │   └── fstats/
 │   │       ├── f2_from_blocks.hpp/.cpp  # [BUILT] host orchestration: drives the f2 compute via the ComputeBackend seam
 │   │       ├── f4_matrix.cpp            # (planned, P2) f3/f4 contraction
@@ -142,7 +145,7 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │
 │   ├── device/                          # steppe_device -- the backend layer (CUDA isolated here)
 │   │   ├── CMakeLists.txt               # [BUILT] steppe_device; CUDA PRIVATE; links CUDA::cublas
-│   │   ├── backend.hpp                  # [BUILT] ComputeBackend interface (CUDA-FREE) -- the DI seam; F2Result compute_f2()
+│   │   ├── backend.hpp                  # [BUILT] ComputeBackend interface (CUDA-FREE) -- the DI seam; compute_f2() + decode_af() [M1]
 │   │   ├── cpu/
 │   │   │   └── cpu_backend.cpp          # [BUILT] REFERENCE backend: long-double cancellation-free f2 (the correctness oracle)
 │   │   └── cuda/
@@ -152,18 +155,27 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │       ├── handles.hpp              # [BUILT] CublasHandle RAII (created once)
 │   │       ├── f2_block_kernel.cuh/.cu  # [BUILT] fused pre-pass (Q,V,Qsq,Hc) + 3-GEMM (fixed-slice Ozaki / native FP64)
 │   │       │                            #   + assemble_f2 kernel; all constants from config (no magic numbers)
-│   │       └── cuda_backend.cu          # [BUILT] implements ComputeBackend on the GPU (DeviceBuffer + the kernel + handle)
+│   │       ├── decode_af_kernel.cuh/.cu # [BUILT, M1] 2-bit unpack + segmented reduction over individuals -> Q/V/N
+│   │       └── cuda_backend.cu          # [BUILT] implements ComputeBackend on the GPU (decode_af + f2; DeviceBuffer + handle)
 │   │
-│   ├── io/                              # (planned, M1/M6) steppe_io -- genotype decode + QC front-end (ISOLATED leaf)
-│   │   ├── tgeno_reader / plink_bed / eigenstrat   # (planned, M1) decode -> Q/V/N (incl. pseudo-haploid)
-│   │   ├── merge/ filter/ impute/       # (planned, M6) merge-plan, on-the-fly filters, missing-data policy
+│   ├── io/                              # [BUILT, M1/M2] steppe_io -- genotype decode + QC front-end (ISOLATED leaf, host-pure)
+│   │   ├── eigenstrat_format.{hpp,cpp}  # [BUILT, M1] TGENO/GENO header parse + format constants (no magic numbers)
+│   │   ├── {geno,snp,ind}_reader.{hpp,cpp} # [BUILT, M1] .geno (tiled raw bytes) / .snp (chrom,genpos,alleles) / .ind (pops)
+│   │   ├── genotype_tile.hpp            # [BUILT, M1] plain decoded-tile struct (the leaf's output to app)
+│   │   ├── filter/                      # [BUILT, M2] filter_decision (shared predicates) + snp_filter + mind_prepass +
+│   │   │                                #   include_exclude + filter_plan (MAF/geno/mind/autosomes/ts-tv; drop-not-flip)
+│   │   ├── merge/ impute/               # (planned, M6) multi-dataset merge-plan + optional imputation
 │   │   └── precomputed_f2.cpp           # (planned, M7) on-disk f2_blocks cache (ADMIXTOOLS-compatible)
 │   └── app/                             # (planned, P3) CLI (extract-f2, qpadm, qpdstat)
 │
 ├── tests/
-│   ├── CMakeLists.txt                   # [BUILT] CTest wiring (gtest_discover_tests + the equivalence test)
+│   ├── CMakeLists.txt                   # [BUILT] CTest wiring (gtest if present, else self-checking harness)
 │   ├── reference/test_f2_equivalence.cu # [BUILT] GPU (EmuFp64{40} & Fp64) vs long-double CPU ref on real AADR -- the trust seam
-│   └── unit/test_f2.cpp                 # [BUILT] host unit test of the shared f2_estimator primitive
+│   ├── reference/test_decode_equivalence.cu # [BUILT, M1] GPU/CPU decode vs numpy Q/V/N oracle (bit-for-bit) on real AADR
+│   ├── reference/test_filter_oracle.cu # [BUILT, M2] no-op-when-default + drop-equals-mask + exact-mask vs scalar oracle
+│   ├── unit/test_f2.cpp                 # [BUILT] host unit test of the shared f2_estimator primitive
+│   ├── unit/test_block_partition.cpp   # [BUILT, M3] assign_blocks logic (synthetic layouts) + real-AADR consistency
+│   └── unit/test_filters.cpp           # [BUILT, M2] host unit test of the filter_decision predicates
 │
 ├── docs/
 │   ├── architecture.md                  # [BUILT] this document
