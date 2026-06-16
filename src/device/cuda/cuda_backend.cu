@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, CUBLAS_CHECK
+#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision
@@ -46,10 +46,16 @@ namespace steppe::device {
 class CudaBackend final : public ComputeBackend {
 public:
     CudaBackend() {
-        // RAII handle, created once; bind the workspace for emulated-FP64
-        // bit-stability on the single statistic stream (architecture.md §12).
-        CUBLAS_CHECK(cublasSetWorkspace(blas_.get(), workspace_.data(),
-                                        workspace_.bytes()));
+        // RAII handle, created once. Bind the (stream, workspace) invariant ONCE
+        // here (architecture.md §12; cleanup X-1/B1): the workspace pins emulated-
+        // FP64 reproducibility (cuBLAS §2.1.4) and the single statistic stream is
+        // bound through `set_stream`, which re-applies the workspace after the
+        // `cublasSetStream` reset (cuBLAS §2.4.7). The GEMM routines never touch
+        // the stream again, so the workspace survives for every GEMM batch on
+        // BOTH the M0 and M4 paths. Order matters: bind the workspace FIRST so the
+        // `set_stream` re-apply has it.
+        blas_.set_workspace(workspace_.data(), workspace_.bytes());
+        blas_.set_stream(stream_);
     }
 
     [[nodiscard]] F2Result compute_f2(const core::MatView& Q,
@@ -83,9 +89,12 @@ public:
         // ---- Fused feeder -> 3 GEMMs -> fused numerator/divide ---------------
         launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
                          dQ.data(), dV.data(), dS.data(), P, M, stream_);
+        // The handle's stream + emulated-FP64 workspace are bound ONCE in the ctor
+        // (architecture.md §12; cleanup X-1/B1); run_f2_gemms never re-binds the
+        // stream, so the determinism workspace survives every GEMM.
         run_f2_gemms(blas_.get(), precision, P, M,
                      dQ.data(), dV.data(), dS.data(),
-                     dG.data(), dVpair.data(), dR.data(), stream_);
+                     dG.data(), dVpair.data(), dR.data());
         launch_assemble_f2(dG.data(), dVpair.data(), dR.data(), dF2.data(), P, stream_);
 
         // ---- Copy results back across the CUDA-free seam --------------------
@@ -260,9 +269,14 @@ public:
                 launch_gather_group(dQ.data(), dV.data(), dS.data(),
                                     dIds.data(), dOffsets.data(), dSizes.data(),
                                     P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_);
+                // The handle's stream + emulated-FP64 workspace are bound ONCE in
+                // the ctor (architecture.md §12; cleanup X-1/B1). The M4 grouped
+                // path previously reset the stream — and thus the workspace — per
+                // CHUNK; it no longer touches the stream, so the determinism
+                // workspace survives every chunk's strided-batched GEMMs.
                 run_f2_gemms_group(blas_.get(), precision, P, s_pad, nb,
                                    dQg.data(), dVg.data(), dSg.data(),
-                                   dGg.data(), dVpairg.data(), dRg.data(), stream_);
+                                   dGg.data(), dVpairg.data(), dRg.data());
                 launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
                                              dIds.data(), P, nb,
                                              dF2_all.data(), dVpair_all.data(), stream_);
@@ -334,9 +348,18 @@ public:
 private:
     // Single statistic stream for bit-stability (architecture.md §12). The
     // default stream suffices at M0 (one f2 call at a time); a dedicated RAII
-    // Stream lands with the streaming pipeline (architecture.md §11.1).
+    // Stream lands with the streaming pipeline (architecture.md §11.1). The
+    // handle is bound to this stream + the workspace ONCE in the ctor and is
+    // never re-`cublasSetStream`'d (cleanup X-1/B1), so the emulated-FP64
+    // determinism workspace persists for every GEMM (cuBLAS §2.4.7).
+    //
+    // Declaration order is load-bearing at teardown (reverse-order destruction):
+    // `blas_` holds a NON-owning pointer into `workspace_`, so `workspace_` must
+    // be declared AFTER `blas_` to be freed first — `cublasDestroy` only
+    // synchronizes (it does not read the workspace), so freeing the workspace
+    // VRAM before the handle is destroyed is safe (architecture.md §7).
     cudaStream_t stream_ = nullptr;
-    CublasHandle blas_{stream_};
+    CublasHandle blas_{};
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
 };
 

@@ -59,13 +59,15 @@ void engage_f2_precision(cublasHandle_t handle, const Precision& precision);
 /// FIXED-slice Ozaki at `precision.mantissa_bits` (the cublasSet* sequence,
 /// engaged under STEPPE_HAVE_EMU_TUNING); Fp64 ⇒ native CUBLAS_COMPUTE_64F;
 /// Tf32 ⇒ screening compute type. The handle must already be created (RAII,
-/// architecture.md §7) and have its workspace set for emulated-FP64
-/// determinism (architecture.md §12).
+/// architecture.md §7) and have its stream + emulated-FP64 determinism workspace
+/// bound ONCE via CublasHandle::set_stream/set_workspace (architecture.md §12;
+/// cleanup X-1/B1). This routine deliberately takes NO stream and never calls
+/// `cublasSetStream` — doing so would reset the workspace to the default pool
+/// (cuBLAS §2.4.7) and defeat the §12 determinism guarantee.
 void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
                   int P, long M,
                   const double* dQ, const double* dV, const double* dS,
-                  double* dG, double* dVpair, double* dR,
-                  cudaStream_t stream);
+                  double* dG, double* dVpair, double* dR);
 
 /// Fused numerator + divide (architecture.md §5 S2, §11.3), native FP64 in every
 /// precision mode. Assembles f2(i,j) from the three GEMM outputs using the SHARED

@@ -185,12 +185,16 @@ void launch_gather_group(const double* dQ_all, const double* dV_all, const doubl
 void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
                         int P, int s_pad, int n_in_group,
                         const double* dQg, const double* dVg, const double* dSg,
-                        double* dGg, double* dVpairg, double* dRg,
-                        cudaStream_t stream) {
-    CUBLAS_CHECK(cublasSetStream(handle, stream));
-    // The handle's math mode / FIXED-slice control are engaged ONCE by the caller
-    // (engage_f2_precision before the group loop); set only the per-call compute
-    // type here, matching that engaged policy (architecture.md §12, §2 DRY).
+                        double* dGg, double* dVpairg, double* dRg) {
+    // No cublasSetStream here: the handle's stream + emulated-FP64 workspace are
+    // bound ONCE at backend construction via CublasHandle::set_stream
+    // (architecture.md §12; cleanup X-1/B1). The M4 grouped path is called once
+    // PER CHUNK, so a per-call cublasSetStream would reset the workspace to the
+    // default pool (cuBLAS §2.4.7) before EVERY chunk's strided-batched GEMMs —
+    // the worst incarnation of the B1 determinism void. The handle's math mode /
+    // FIXED-slice control are engaged ONCE by the caller (engage_f2_precision
+    // before the group loop); set only the per-call compute type here, matching
+    // that engaged policy (architecture.md §12, §2 DRY).
     const cublasComputeType_t ct = f2_compute_type(precision);
     const double one = 1.0;
     const double zero = 0.0;

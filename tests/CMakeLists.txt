@@ -95,6 +95,33 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_blocks_equivalence COMMAND test_f2_blocks_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- B1 emulated-FP64 run-to-run determinism gate ----------------------------
+# CUDA TU (mirrors test_f2_blocks_equivalence.cu's data loading): loads the real
+# derived_acc Q/V/N + the .snp prefix via the io leaf, runs the SHARED
+# assign_blocks, and computes f2 (M0 compute_f2) and the per-block tensor (M4
+# compute_f2_blocks) TWICE each through CudaBackend at EmulatedFp64{40}, asserting
+# the two runs are BIT-IDENTICAL (exact byte-for-byte equality). This is the §12
+# Results-Reproducibility gate (architecture.md §12, §13): it holds ONLY because
+# CublasHandle owns the (stream, workspace) invariant and re-applies the
+# determinism workspace after the (single, ctor-bound) stream binding — the X-1/B1
+# fix. Without it the per-call cublasSetStream reset the workspace (cuBLAS §2.4.7),
+# per-chunk on the M4 path, and the emulated-FP64 output was not guaranteed
+# bit-stable. Self-checking main() (not a GoogleTest TU); CTest gates on the exit
+# code. Links steppe::io (read_snp) + steppe::core (assign_blocks +
+# compute_f2_blocks) + steppe::device (the GPU backend).
+add_executable(test_f2_determinism reference/test_f2_determinism.cu)
+target_link_libraries(test_f2_determinism
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_determinism PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Engage the fixed-slice Ozaki tuning when the option is on (the box build), so
+# the emulated arm actually emulates; the bit-identity assertion holds either way
+# (native single-stream is also deterministic), but the box build exercises the
+# emulated workspace the B1 fix protects.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_determinism PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_ROOT}")
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.

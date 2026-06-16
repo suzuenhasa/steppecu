@@ -57,15 +57,17 @@ void launch_gather_group(const double* dQ_all, const double* dV_all, const doubl
 ///   dRg     [2P × P  × n] = Sg · Vgᵀ     per slab (top P rows Σp², bottom P Σhc)
 /// `precision` governs ONLY these GEMMs (architecture.md §12): EmulatedFp64 ⇒
 /// FIXED-slice Ozaki at `precision.mantissa_bits`; Fp64 ⇒ native CUBLAS_COMPUTE_64F.
-/// The handle must already be created (RAII) with its workspace set for emulated-
-/// FP64 determinism (architecture.md §12). Engaging the precision on the handle is
+/// The handle must already be created (RAII) with its stream + emulated-FP64
+/// determinism workspace bound ONCE via CublasHandle::set_stream/set_workspace
+/// (architecture.md §12; cleanup X-1/B1). Engaging the precision on the handle is
 /// done ONCE by the caller (run_f2_gemms in f2_block_kernel.cu shares the policy);
-/// this routine sets only the per-call compute type.
+/// this routine sets only the per-call compute type. It takes NO stream and never
+/// calls `cublasSetStream` — doing so per chunk would reset the workspace to the
+/// default pool (cuBLAS §2.4.7) before every chunk's GEMMs and defeat §12.
 void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
                         int P, int s_pad, int n_in_group,
                         const double* dQg, const double* dVg, const double* dSg,
-                        double* dGg, double* dVpairg, double* dRg,
-                        cudaStream_t stream);
+                        double* dGg, double* dVpairg, double* dRg);
 
 /// Scatter one size-group's assembled f2 + Vpair into the resident
 /// [P × P × n_block] tensors (architecture.md §5 S2, §11.1). Each slab k holds the

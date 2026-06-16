@@ -450,6 +450,8 @@ private:
 // shape: move-construct + move-assign + dtor->destroy()-with-debug-log. No exceptions.
 ```
 
+The snippet above is the **RAII shape** reference. The production `CublasHandle` additionally **owns the (stream, workspace) invariant** the §12 emulated-FP64 determinism contract depends on: it holds the non-owning workspace span and exposes `set_workspace(ptr, bytes)` + `set_stream(stream)`, where `set_stream` **re-applies** the pinned workspace after `cublasSetStream`. This is required because `cublasSetStream` "unconditionally resets the cuBLAS library workspace back to the default workspace pool" (cuBLAS §2.4.7, CUDA 13.x), so any stream change after the workspace is bound would otherwise silently discard the §12 reproducibility workspace. The backend binds both **once** at construction and the GEMM routines never call raw `cublasSetStream` — so the workspace survives for every GEMM batch on both the M0 and M4 paths (the M4 grouped path otherwise reset it per chunk). The single statistic stream rule (§12) is unchanged.
+
 **`STEPPE_CUDA_CHECK` + post-launch checks.** One macro (`device/cuda/check.cuh`) captures file/line via `std::source_location` and throws a typed `CudaError`; sibling `CUBLAS_CHECK`/`CUSOLVER_CHECK` map those status enums (they do not share `cudaGetErrorString`). Every API call is checked; every launch is followed by a synchronous *and* (debug-only) async check:
 
 ```cpp

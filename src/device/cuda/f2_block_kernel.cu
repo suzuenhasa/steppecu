@@ -237,9 +237,13 @@ void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* 
 void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
                   int P, long M,
                   const double* dQ, const double* dV, const double* dS,
-                  double* dG, double* dVpair, double* dR,
-                  cudaStream_t stream) {
-    CUBLAS_CHECK(cublasSetStream(handle, stream));
+                  double* dG, double* dVpair, double* dR) {
+    // No cublasSetStream here: the handle's stream + emulated-FP64 workspace are
+    // bound ONCE at backend construction via CublasHandle::set_stream
+    // (architecture.md §12; cleanup X-1/B1). A per-call cublasSetStream would
+    // "unconditionally reset the cuBLAS library workspace back to the default
+    // workspace pool" (cuBLAS §2.4.7), silently discarding the determinism
+    // workspace before every GEMM batch — the exact defect B1 fixes.
     engage_f2_precision(handle, precision);
 
     const cublasComputeType_t ct = f2_compute_type(precision);
