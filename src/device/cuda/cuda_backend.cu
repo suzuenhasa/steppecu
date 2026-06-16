@@ -23,11 +23,13 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "device/backend.hpp"               // ComputeBackend, F2Result, MatView
+#include "device/backend.hpp"               // ComputeBackend, F2Result, MatView, DecodeResult
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, CUBLAS_CHECK
+#include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, run_f2_gemms, launch_assemble_f2
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
@@ -102,6 +104,54 @@ public:
                                           cudaMemcpyDeviceToHost, stream_));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair.data(),
                                           pp * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        return out;
+    }
+
+    [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
+        const int P = tile.n_pop;
+        const long M = static_cast<long>(tile.n_snp);
+
+        DecodeResult out;
+        out.P = P;
+        out.M = M;
+        const std::size_t pm =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        out.q.assign(pm, 0.0);
+        out.v.assign(pm, 0.0);
+        out.n.assign(pm, 0.0);
+        if (P <= 0 || M <= 0) return out;
+
+        // ---- Device allocations (RAII; freed on scope exit) ------------------
+        // Packed tile bytes + the P+1 segment offsets + the three [P×M] outputs.
+        // Only tile-sized and [P×M] buffers — never a [SNP×ind] decode-all
+        // (architecture.md §11.1; tile-shaped for the M5 loop).
+        const std::size_t packed_bytes =
+            tile.n_individuals * tile.bytes_per_record;
+        const std::size_t n_off = static_cast<std::size_t>(P) + 1u;
+        DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
+        DeviceBuffer<std::size_t> dOffsets(n_off);
+        DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
+
+        // ---- Upload the packed tile + the population partition ---------------
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
+                                          packed_bytes * sizeof(std::uint8_t),
+                                          cudaMemcpyHostToDevice, stream_));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
+                                          n_off * sizeof(std::size_t),
+                                          cudaMemcpyHostToDevice, stream_));
+
+        // ---- Decode (S0 unpack + S1 segmented reduction → Q/V/N) -------------
+        launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
+                         P, M, tile.ploidy, dQ.data(), dV.data(), dN.data(), stream_);
+
+        // ---- Copy results back across the CUDA-free seam ---------------------
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.q.data(), dQ.data(), pm * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.v.data(), dV.data(), pm * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.n.data(), dN.data(), pm * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
         return out;

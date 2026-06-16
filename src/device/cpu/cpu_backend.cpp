@@ -45,12 +45,15 @@
 // `import steppe` work without a GPU and is the correctness anchor the GPU is
 // diffed against (architecture.md §8, §13).
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "core/internal/decode_af.hpp"     // genotype_code, genotype_valid, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
-#include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result
+#include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult
 #include "steppe/config.hpp"               // steppe::Precision
 
 namespace steppe::core {
@@ -169,6 +172,63 @@ public:
             }
         }
 
+        return out;
+    }
+
+    /// The CPU REFERENCE genotype decode (architecture.md §5 S0/S1; ROADMAP M1):
+    /// the obviously-correct scalar transcription of the oracle math, the
+    /// bit-for-bit target the GPU decode is diffed against. For each population p
+    /// (segment of gathered individuals) and SNP s, sum the ref-allele codes (AC)
+    /// and count non-missing individuals (AN) over the segment, then finalize via
+    /// the SHARED primitive (core/internal/decode_af.hpp `genotype_code`,
+    /// `genotype_valid`, `finalize_af`) so the GPU kernel and this oracle cannot
+    /// diverge on the unpack / missing-handling / divide. Integer accumulators,
+    /// single FP64 divide ⇒ Q exact; N, V integer-valued ⇒ exact.
+    [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
+        const int P = tile.n_pop;
+        const long M = static_cast<long>(tile.n_snp);
+
+        DecodeResult out;
+        out.P = P;
+        out.M = M;
+        const std::size_t pm =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        out.q.assign(pm, 0.0);
+        out.v.assign(pm, 0.0);
+        out.n.assign(pm, 0.0);
+
+        if (P <= 0 || M <= 0) return out;
+
+        // One (population, SNP) entry at a time; reduce over the population's
+        // individual segment. Column-major [P × M]: element (i, s) at i + P·s.
+        for (int i = 0; i < P; ++i) {
+            const std::size_t seg_begin = tile.pop_offsets[static_cast<std::size_t>(i)];
+            const std::size_t seg_end = tile.pop_offsets[static_cast<std::size_t>(i) + 1];
+
+            for (long s = 0; s < M; ++s) {
+                const std::size_t byte_in_rec = static_cast<std::size_t>(s) / 4u;
+                const int pos_in_byte = static_cast<int>(s & 3);
+                long ac = 0;  // Σ ref-allele copies over non-missing individuals
+                long an = 0;  // count of non-missing individuals
+
+                for (std::size_t g = seg_begin; g < seg_end; ++g) {
+                    const std::uint8_t byte =
+                        tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                    const std::uint8_t code = core::genotype_code(byte, pos_in_byte);
+                    if (core::genotype_valid(code)) {
+                        ac += static_cast<long>(code);
+                        ++an;
+                    }
+                }
+
+                const core::AfResult r = core::finalize_af(ac, an, tile.ploidy);
+                const std::size_t off =
+                    static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+                out.q[off] = r.q;
+                out.v[off] = r.v;
+                out.n[off] = r.n;
+            }
+        }
         return out;
     }
 };

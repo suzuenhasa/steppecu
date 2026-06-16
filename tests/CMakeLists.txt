@@ -50,6 +50,26 @@ endif()
 
 add_test(NAME f2_equivalence COMMAND test_f2_equivalence)
 
+# --- M1 genotype-decode equivalence test (the M1 trust seam) -----------------
+# CUDA TU: reads the raw TGENO triple via the `io` leaf, reproduces derived_acc's
+# auto-top-50 × 100k-SNP selection, decodes via CpuBackend + CudaBackend, diffs
+# the two against each other and against the numpy oracle, checks the property
+# invariants, and runs the decoded Q/V/N through compute_f2 end-to-end. Self-
+# checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::io (the readers) + steppe::device (both decode backends + compute_f2).
+add_executable(test_decode_equivalence reference/test_decode_equivalence.cu)
+target_link_libraries(test_decode_equivalence
+    PRIVATE steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+# The decode path itself uses no emulation, but compute_f2 (end-to-end step) runs
+# native FP64 here; the EmulatedFp64 tuning is not required for this test. Pass
+# the data ROOT (default /workspace/data/aadr) as argv[1] so raw/ + derived_acc/
+# resolve from one argument, matching the box layout.
+set(STEPPE_AADR_ROOT "/workspace/data/aadr"
+    CACHE PATH "AADR data root (contains raw/ TGENO triple + derived_acc/ oracle)")
+add_test(NAME decode_equivalence COMMAND test_decode_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.

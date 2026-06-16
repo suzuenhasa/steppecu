@@ -22,6 +22,8 @@
 #ifndef STEPPE_DEVICE_BACKEND_HPP
 #define STEPPE_DEVICE_BACKEND_HPP
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "steppe/config.hpp"        // steppe::Precision
@@ -46,6 +48,53 @@ struct F2Result {
 
     /// Number of populations P (the leading dimension of both matrices).
     int P = 0;
+};
+
+/// A CUDA-FREE, NON-OWNING view of one packed genotype tile + its population
+/// partition — the input to `decode_af` (architecture.md §5 S0/S1; ROADMAP M1).
+/// This is the plain-data seam between the `io` leaf (which produces an
+/// io::GenotypeTile of the same shape) and the device/CPU decode backend: `io`
+/// does NOT depend on `device`, and `backend.hpp` does NOT depend on the `io`
+/// leaf — `app`/the test bridge them by filling this view from a GenotypeTile.
+/// All pointers are borrowed (the caller owns the storage for the call's
+/// duration); no CUDA type appears.
+///
+/// TGENO individual-major packing: `packed` holds `n_individuals` records of
+/// `bytes_per_record` bytes each, gathered POPULATION-CONTIGUOUS; SNP `s` of
+/// gathered individual `g` is the 2-bit code at byte `g*bytes_per_record + s/4`,
+/// position `s%4` (MSB-first). Population `p` owns gathered individuals
+/// `[pop_offsets[p], pop_offsets[p+1])`. `n_pop == pop_offsets length − 1`.
+struct DecodeTileView {
+    const std::uint8_t* packed = nullptr;   ///< packed bytes, pop-contiguous records
+    std::size_t bytes_per_record = 0;       ///< stride between individual records
+    std::size_t n_snp = 0;                  ///< SNPs in the tile (the column axis M)
+    std::size_t n_individuals = 0;          ///< gathered individuals across all pops
+    const std::size_t* pop_offsets = nullptr;  ///< P+1 segment boundaries (sample axis)
+    int n_pop = 0;                          ///< number of populations P (row axis)
+
+    /// Per-sample PLOIDY factor for N: 2 diploid (the AADR case — every sample is
+    /// diploid, so every N is even), 1 pseudo-haploid (ancient DNA). A METADATA
+    /// parameter, NEVER auto-detected from genotypes (ROADMAP Q/V/N contract).
+    /// Default 2 (diploid), documented.
+    int ploidy = 2;
+};
+
+/// Output of a genotype-decode: the Q/V/N contract as plain column-major [P × M]
+/// host arrays (element (pop i, snp s) at `i + P·s` — the views.hpp layout that
+/// drops straight into MatView/compute_f2). Plain host vectors so the type
+/// crosses the CUDA-free seam (architecture.md §4); the CUDA backend copies its
+/// device results into these before returning.
+struct DecodeResult {
+    /// Reference-allele frequency in [0,1], 0 where invalid. Column-major [P × M].
+    std::vector<double> q;
+    /// Validity mask (1.0 valid / 0.0 missing). Column-major [P × M].
+    std::vector<double> v;
+    /// Non-missing haploid count (ploidy × non-missing individuals). [P × M].
+    std::vector<double> n;
+    /// Number of populations P (the leading dimension of Q/V/N).
+    int P = 0;
+    /// Number of SNPs M (the column count of Q/V/N).
+    long M = 0;
 };
 
 /// Abstract compute backend. One interface, two implementations (CUDA, CPU
@@ -86,6 +135,23 @@ public:
                                               const core::MatView& V,
                                               const core::MatView& N,
                                               const Precision& precision) = 0;
+
+    /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5
+    /// S0 Format decode + S1 Allele-freq reduction; ROADMAP M1). Unpacks the
+    /// 2-bit codes (raw-value mapping: 0/1/2 ref-allele copies, 3 missing),
+    /// reduces over the individuals within each population segment into integer
+    /// AC (ref-allele count) / AN (non-missing individual count), then a single
+    /// FP64 divide yields Q = AC/(ploidy·AN), N = ploidy·AN, V = (AN>0) — the EXACT
+    /// oracle math, shared with the CPU reference via core/internal/decode_af.hpp
+    /// so the two cannot diverge (architecture.md §13).
+    ///
+    /// @param tile  the packed tile + population partition + ploidy (CUDA-free
+    ///              view; the `io` leaf fills it from an io::GenotypeTile).
+    /// @return Q/V/N as column-major [P × M] host arrays (i + P·s), dropping
+    ///         straight into MatView/compute_f2. Both backends must agree exactly
+    ///         (N, V integer-valued ⇒ zero diff; Q via integer-accumulate AC/AN +
+    ///         single FP64 divide ⇒ exact is the goal/gate).
+    [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
 };
 
 }  // namespace steppe

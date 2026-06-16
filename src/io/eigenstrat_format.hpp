@@ -1,0 +1,115 @@
+// src/io/eigenstrat_format.hpp
+//
+// EIGENSTRAT / packed-genotype FORMAT CONSTANTS + header parse (architecture.md
+// §4 `io` LEAF, §5 S0; ROADMAP §4 "TGENO header 48 / ceil(nsnp/4) belong in io
+// format constants", M1).
+//
+// This is the single home for the packed-genotype format literals the §4
+// magic-number inventory flags: the 48-byte header record and the
+// `ceil(n_snp/4)` packed-record stride are DERIVED from the parsed header here,
+// never hardcoded at a decode call site. Two on-disk packings are recognized:
+//
+//   * TGENO  (magic "TGENO") — INDIVIDUAL-major: one record per INDIVIDUAL,
+//     `ceil(n_snp/4)` bytes, 4 SNPs/byte. This is the real AADR v66 layout
+//     (`TGENO 27594 584131` = n_ind, n_snp). The genotype code for SNP k in a
+//     byte is `(byte >> (6 - 2*(k mod 4))) & 3` (MSB-first); SNP k lives in byte
+//     `k/4` of the individual's record.
+//   * GENO   (magic "GENO")  — SNP-major PACKEDANCESTRYMAP: one record per SNP,
+//     `max(48, ceil(n_ind/4))` bytes, 4 individuals/byte. Recognized so the
+//     reader can tell the two apart and refuse to mis-decode; the M1 decode path
+//     targets TGENO (the real data), and a GENO file is reported, not silently
+//     read with the wrong axis.
+//
+// The 2-bit code → genotype mapping is the RAW VALUE (verified bit-for-bit
+// against the on-box oracle build_tgeno_matrix.py): 0→0 ref-allele copies, 1→1,
+// 2→2, 3→MISSING. This is NOT the binary mapping (00→0,10→1,11→2,01→missing),
+// which mis-decodes; the raw-value mapping reproduces the oracle exactly.
+//
+// LAYERING: this is an `io`-leaf header (architecture.md §4) — pure host C++20,
+// depends on NOTHING in core/device, includes only the standard library. No
+// CUDA, no upward dependency.
+#ifndef STEPPE_IO_EIGENSTRAT_FORMAT_HPP
+#define STEPPE_IO_EIGENSTRAT_FORMAT_HPP
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+namespace steppe::io {
+
+// ---------------------------------------------------------------------------
+// Packed-format constants — the promoted §4 literals (ROADMAP §4). No decode
+// site may re-spell these numbers; they live here once and the header parse
+// derives the record stride from them.
+// ---------------------------------------------------------------------------
+
+/// Bytes in the leading ASCII header record of a packed EIGENSTRAT .geno file
+/// (`TGENO`/`GENO`). The header begins with the magic, then the two decimal
+/// counts and dataset hashes, NUL-padded to this fixed width. Verified against
+/// the real AADR v66 TGENO file (the 48-byte `TGENO 27594 584131 ...` header).
+inline constexpr std::size_t kGenoHeaderBytes = 48;
+
+/// Genotype codes packed per byte (4 SNPs/byte for TGENO, 4 individuals/byte for
+/// GENO) — 2 bits each. A true structural constant of the 2-bit packing.
+inline constexpr int kCodesPerByte = 4;
+
+/// Bits per packed genotype code (2-bit packing).
+inline constexpr int kBitsPerCode = 2;
+
+/// The 2-bit code that denotes a MISSING genotype. Codes 0/1/2 are reference-
+/// allele copy counts; code 3 is missing (RAW-VALUE mapping — verified against
+/// the oracle). Excluded from BOTH numerator and denominator of the allele freq.
+inline constexpr std::uint8_t kMissingCode = 3;
+
+/// Number of bytes needed to pack `n_codes` 2-bit codes, 4 per byte: ceil(n/4).
+/// This is the `ceil(nsnp/4)` (TGENO) / `ceil(nind/4)` (GENO) record-stride
+/// formula the §4 inventory flags — computed here, never open-coded elsewhere.
+[[nodiscard]] constexpr std::size_t packed_bytes(std::size_t n_codes) noexcept {
+    return (n_codes + static_cast<std::size_t>(kCodesPerByte) - 1) /
+           static_cast<std::size_t>(kCodesPerByte);
+}
+
+/// Extract the 2-bit code for position `k` (0-based) within a packed byte,
+/// MSB-first: position 0 in bits 7-6, 1 in 5-4, 2 in 3-2, 3 in 1-0. This is the
+/// `(byte >> (6 - 2*(k mod 4))) & 3` rule, the SINGLE bit-order site shared by
+/// the host reader and (via the decode primitive) the GPU/CPU decoders.
+[[nodiscard]] constexpr std::uint8_t code_in_byte(std::uint8_t byte, int k) noexcept {
+    const int shift = (kCodesPerByte - 1 - (k % kCodesPerByte)) * kBitsPerCode;  // 6,4,2,0
+    return static_cast<std::uint8_t>((byte >> shift) & 0x3u);
+}
+
+// ---------------------------------------------------------------------------
+// Header parse.
+// ---------------------------------------------------------------------------
+
+/// Which packed layout a .geno file uses (its row axis). TGENO records are
+/// individual-major; GENO (PACKEDANCESTRYMAP) records are SNP-major. The M1
+/// decode targets TGENO; GENO is recognized so the reader does not mis-decode.
+enum class GenoFormat { Unknown, Tgeno, Geno };
+
+/// Parsed packed-.geno header: the format, the two dataset counts, and the
+/// DERIVED record stride. For TGENO `n_records == n_ind` and `bytes_per_record
+/// == packed_bytes(n_snp)`; for GENO `n_records == n_snp` and `bytes_per_record
+/// == max(kGenoHeaderBytes, packed_bytes(n_ind))` (the PACKEDANCESTRYMAP rlen
+/// floor). All record offsets are `kGenoHeaderBytes + record * bytes_per_record`.
+struct GenoHeader {
+    GenoFormat format = GenoFormat::Unknown;
+    std::size_t n_ind = 0;             ///< number of individuals (samples)
+    std::size_t n_snp = 0;            ///< number of SNPs
+    std::size_t n_records = 0;        ///< records on disk (n_ind for TGENO, n_snp for GENO)
+    std::size_t bytes_per_record = 0; ///< stride between records (DERIVED, not hardcoded)
+    std::size_t header_bytes = kGenoHeaderBytes;  ///< leading header record width
+};
+
+/// Parse the leading `kGenoHeaderBytes` of a .geno header buffer. `head` must
+/// point to at least `kGenoHeaderBytes` bytes. Recognizes the "TGENO"/"GENO"
+/// magic and the two decimal counts that follow it (n_ind, n_snp for TGENO;
+/// n_ind, n_snp for GENO — both store the same two numbers, the difference is
+/// the record axis). Returns a header with `format == Unknown` on a bad magic or
+/// unparsable counts (the caller decides how to fail; the `io` leaf never throws
+/// across the layer boundary on a format probe).
+[[nodiscard]] GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noexcept;
+
+}  // namespace steppe::io
+
+#endif  // STEPPE_IO_EIGENSTRAT_FORMAT_HPP

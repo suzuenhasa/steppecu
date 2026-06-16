@@ -46,8 +46,10 @@ find_package(CUDAToolkit REQUIRED)
 
 # --- Targets (one per subdirectory) ------------------------------------------
 # Order matters: api (INTERFACE) → core_internal (INTERFACE) → device → core.
-# M0 slice only; io/app/bindings/benchmarks arrive in later milestones (§17).
+# io is an ISOLATED LEAF (architecture.md §4): genotype decode front-end, depends
+# on nothing in core/device. app/bindings/benchmarks arrive in later milestones.
 add_subdirectory(include)        # steppe_api          (INTERFACE: public headers)
+add_subdirectory(src/io)         # steppe_io           (LEAF: genotype readers; M1)
 add_subdirectory(src/core)       # steppe_core_internal (INTERFACE) + steppe_core (host)
 add_subdirectory(src/device)     # steppe_device        (CUDA, PRIVATE cuBLAS)
 
