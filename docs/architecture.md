@@ -104,108 +104,77 @@ Pin everything; `third_party/CMakeLists.txt` is the single place `FetchContent_D
 ## 4. Repository layout
 
 ```text
-steppe/
-├── CMakeLists.txt                    # top-level: project(), options, add_subdirectory only
-├── CMakePresets.json                 # named configs: dev, release, asan, cuda-debug, ci
-├── pyproject.toml                    # scikit-build-core backend; wheel metadata + runtime deps
-├── README.md  LICENSE  CHANGELOG.md  # Keep-a-Changelog; SemVer
-├── .clang-format  .clang-tidy        # single source of style + static analysis
-├── .editorconfig                     # whitespace/charset for non-C++ files
-├── .pre-commit-config.yaml           # format/lint/iwyu gate before commit
+# Legend:  [BUILT] = exists as of M0 (the f2 vertical slice);  (planned, Mn/Pn) = future milestone/phase.
+steppe/                                  # repo root.  git: main = docs; branch m0-f2-scaffold = this slice.
+├── CMakeLists.txt                       # [BUILT] top-level: options + add_subdirectory(include, src, tests)
+├── CMakePresets.json                    # [BUILT] named configs (dev/release/ci); CMake >= 3.28 + Ninja
+├── build_m0.sh                          # [BUILT] fallback direct-nvcc build of the equivalence test (sm_120)
+├── .clang-format / .clang-tidy          # [BUILT] single source of style + static analysis
+├── .gitignore                           # [BUILT] excludes build trees, binaries, AND the real genotype DATA
 │
-├── cmake/                            # reusable build logic — NO targets defined here
-│   ├── SteppeOptions.cmake           # all option()/cache vars in one place
-│   ├── SteppeWarnings.cmake          # warnings as INTERFACE target steppe::warnings
-│   ├── SteppeSanitizers.cmake        # asan/ubsan/compute-sanitizer wiring
-│   ├── CompilerLauncher.cmake        # sccache + IWYU launcher hooks
-│   ├── CUDAArch.cmake                # CMAKE_CUDA_ARCHITECTURES policy + device-LTO wiring
-│   ├── CPM.cmake                     # dependency fetcher
-│   └── packaging/SteppeConfig.cmake.in
+├── cmake/                               # [BUILT] reusable build logic (defines NO targets)
+│   ├── CUDAArch.cmake                   #   forces CMAKE_CUDA_ARCHITECTURES=120 (Blackwell) under CUDA 13
+│   ├── SteppeOptions.cmake              #   option() vars incl. STEPPE_HAVE_EMU_TUNING (default ON)
+│   └── SteppeWarnings.cmake             #   warnings-as-errors INTERFACE target (host + nvcc)
 │
-├── include/steppe/                  # ───── PUBLIC API (the C-ABI contract; see §16) ─────
-│   ├── version.hpp                   # generated STEPPE_VERSION_* macros
-│   ├── steppe.hpp                    # umbrella header
-│   ├── config.hpp                    # immutable RunConfig, DeviceConfig, Precision
-│   ├── error.hpp                     # steppe_status_t taxonomy (C enum) + C++ Error view
-│   ├── fstats.hpp                    # F2BlockTensor handle, f4/f3 entry points
-│   ├── qpadm.hpp                     # QpAdmModel, QpAdmResult, rank-test API
-│   └── io/genotype.hpp               # GenotypeDataset opaque handle, format enum
+├── include/                             # ----- PUBLIC API (the installed surface) -----
+│   ├── CMakeLists.txt                   # [BUILT] defines the steppe_api INTERFACE target
+│   └── steppe/
+│       ├── config.hpp                   # [BUILT] Precision{kind, mantissa_bits=40}, DeviceConfig, FilterConfig +
+│       │                                #   named constants (kCdivBlock, kRelFloor, kDefaultBlockSizeCm...) -- no magic numbers
+│       ├── error.hpp                    # [BUILT] Status enum (Ok/DeviceOom/RankDeficient/NonSpdCovariance/InvalidConfig)
+│       ├── fstats.hpp                   # (planned, M4) public F2BlockTensor handle + f2/f3/f4 entry points
+│       └── qpadm.hpp                    # (planned, P2) qpWave/qpAdm public API
 │
-├── src/                             # ───── IMPLEMENTATION (not publicly installed) ─────
-│   ├── core/                         # steppe_core — pure host C++20, NO CUDA, NO I/O
-│   │   ├── internal/                 #   DRY shared helpers (the "kernel" of the codebase)
-│   │   │   ├── log.hpp/.cpp           #     logging facade over spdlog
-│   │   │   ├── nvtx.hpp               #     RAII NVTX scope + the ONE color palette; no-op when off
-│   │   │   ├── type_traits.hpp        #     real_t<P>, precision/index traits
-│   │   │   ├── launch_config.hpp      #     cdiv, grid_for, occupancy helpers
-│   │   │   ├── expected.hpp           #     std::expected + STEPPE_TRY (INTERNAL ONLY, never in ABI)
-│   │   │   └── span_view.hpp          #     non-owning matrix/tensor views
+├── src/
+│   ├── core/                            # steppe_core -- pure host C++ (NO CUDA, NO I/O)
+│   │   ├── CMakeLists.txt               # [BUILT] steppe_core target
+│   │   ├── internal/                    #   DRY shared helpers (the "kernel" of the codebase)
+│   │   │   ├── views.hpp                # [BUILT] MatView -- the Q/V/N column-major [P x M] contract (element i + P*s)
+│   │   │   └── f2_estimator.hpp         # [BUILT] shared __host__ __device__ f2 primitive (bias-corrected estimator,
+│   │   │                                #   het-correction, numerator/divide, cdiv/grid_for) -- CPU ref & GPU cannot diverge
 │   │   ├── domain/
-│   │   │   └── block_partition_rule.hpp  # the SNP→block rule, host-pure, shared by io + kernels
-│   │   ├── fstats/                    #   f2 assembly, f4 derivation, weighted jackknife (orchestration)
-│   │   ├── qpadm/                     #   GLS solve, rank test, nested models, p-values (orchestration)
-│   │   └── linalg/                    #   host-only small dense LA facade (Eigen) for CpuBackend
+│   │   │   └── block_partition_rule.hpp # [BUILT] host-pure SNP->block rule (block_of, cM); the single shared source
+│   │   └── fstats/
+│   │       ├── f2_from_blocks.hpp/.cpp  # [BUILT] host orchestration: drives the f2 compute via the ComputeBackend seam
+│   │       ├── f4_matrix.cpp            # (planned, P2) f3/f4 contraction
+│   │       └── jackknife.cpp            # (planned, P2) block jackknife -> covariance/SEs
 │   │
-│   ├── device/                       # steppe_device — CUDA ONLY; the kernel layer
-│   │   ├── backend.hpp                #   ComputeBackend interface (the DI seam; ALL device calls go here)
-│   │   ├── cuda/
-│   │   │   ├── check.cuh              #     STEPPE_CUDA_CHECK / CUBLAS_CHECK / CUSOLVER_CHECK
-│   │   │   ├── allocator.hpp/.cu      #     injectable device allocator (pool/cudaMalloc) — ALLOWLISTED
-│   │   │   ├── device_buffer.cuh      #     RAII device alloc — ALLOWLISTED
-│   │   │   ├── pinned_buffer.cuh      #     RAII pinned host alloc — ALLOWLISTED
-│   │   │   ├── stream.hpp             #     RAII Stream/Event
-│   │   │   ├── handles.hpp            #     RAII cuBLAS/cuSOLVER/cuRAND handles
-│   │   │   ├── decode_af_kernel.cu    #     S0–S1: .bed unpack → afmat/countmat (tiled)
-│   │   │   ├── f2_block_kernel.cu     #     S2: fused feeders + 3-GEMM (native-FP64) f2 reformulation + block accumulate
-│   │   │   ├── jackknife_kernel.cu    #     S4: block-sum diff + covariance assembly
-│   │   │   ├── multi_gpu.cu/.hpp      #     single-node multi-GPU: device enumeration, per-device streams,
-│   │   │   │                          #       NCCL comms (broadcast), SNP-tile sharding, fixed-order host-side f2_blocks combine (§11.4)
-│   │   │   └── cuda_backend.cu        #     implements ComputeBackend on the GPU
-│   │   └── cpu/cpu_backend.cpp        #   REFERENCE backend: same interface, scalar host
+│   ├── device/                          # steppe_device -- the backend layer (CUDA isolated here)
+│   │   ├── CMakeLists.txt               # [BUILT] steppe_device; CUDA PRIVATE; links CUDA::cublas
+│   │   ├── backend.hpp                  # [BUILT] ComputeBackend interface (CUDA-FREE) -- the DI seam; F2Result compute_f2()
+│   │   ├── cpu/
+│   │   │   └── cpu_backend.cpp          # [BUILT] REFERENCE backend: long-double cancellation-free f2 (the correctness oracle)
+│   │   └── cuda/
+│   │       ├── check.cuh                # [BUILT] STEPPE_CUDA_CHECK / CUBLAS_CHECK / post-launch kernel check
+│   │       ├── device_buffer.cuh        # [BUILT] DeviceBuffer<T> move-only RAII -- the ONLY place cudaMalloc/cudaFree live
+│   │       ├── stream.hpp               # [BUILT] Stream / Event RAII
+│   │       ├── handles.hpp              # [BUILT] CublasHandle RAII (created once)
+│   │       ├── f2_block_kernel.cuh/.cu  # [BUILT] fused pre-pass (Q,V,Qsq,Hc) + 3-GEMM (fixed-slice Ozaki / native FP64)
+│   │       │                            #   + assemble_f2 kernel; all constants from config (no magic numbers)
+│   │       └── cuda_backend.cu          # [BUILT] implements ComputeBackend on the GPU (DeviceBuffer + the kernel + handle)
 │   │
-│   ├── io/                           # steppe_io — genotype formats + QC front-end; ISOLATED, no compute
-│   │   ├── reader.hpp                 #   GenotypeReader interface (streams harmonized/filtered SNP tiles + V + N)
-│   │   ├── plink_bed.cpp              #   PLINK .bed/.bim/.fam (2-bit packed), polarity-aware
-│   │   ├── eigenstrat.cpp             #   EIGENSTRAT .geno/.snp/.ind
-│   │   ├── packedancestrymap.cpp      #   packed ancestrymap
-│   │   ├── merge/                     #   MERGE: build the harmonized virtual schema (no on-disk rewrite)
-│   │   │   ├── merge_plan.cpp          #     SNP keying (variant-ID default), intersection/union, source maps
-│   │   │   └── allele_harmonize.cpp    #     declared-allele ref/alt swap → 2−dosage; drop A/T·C/G ambiguous + multiallelic (no strand inference); .missnp list
-│   │   ├── filter/                    #   FILTER: on-the-fly QC
-│   │   │   ├── snp_filter.cpp          #     cheap in-tile predicate: maf/geno/include-exclude (+ flag-gated monomorphic/auto-only/ts-tv)
-│   │   │   ├── sample_filter.cpp       #     keep/remove/pops/inds → column map
-│   │   │   └── prepass.cpp             #     aggregate filters needing a pass: --mind; reads an external prune.in (LD NOT computed here, §1) (S−1)
-│   │   ├── impute/                    #   IMPUTE: missing-data policy
-│   │   │   └── missing_policy.cpp      #     PairwiseComplete (emit V,N; parity default) | MeanImpute (2p; opt-in, tagged)
-│   │   ├── genetic_positions.cpp      #   delivers per-SNP genetic positions (NOT the block rule)
-│   │   └── precomputed_f2.cpp         #   read/write on-disk f2 store (ADMIXTOOLS-compat)
-│   │
-│   └── app/                          # steppe (CLI) — depends DOWN only
-│       ├── main.cpp
-│       ├── cli_args.cpp               #   CLI11 → ConfigBuilder
-│       └── commands/                  #   extract-f2, qpadm, qpdstat subcommands
-│
-├── bindings/                        # steppe._core (nanobind)
-│   ├── CMakeLists.txt                 #   nanobind_add_module(...)
-│   ├── module.cpp                     #   thin NumPy<->span conversion; NO logic
-│   └── steppe/__init__.py  _typing.pyi
+│   ├── io/                              # (planned, M1/M6) steppe_io -- genotype decode + QC front-end (ISOLATED leaf)
+│   │   ├── tgeno_reader / plink_bed / eigenstrat   # (planned, M1) decode -> Q/V/N (incl. pseudo-haploid)
+│   │   ├── merge/ filter/ impute/       # (planned, M6) merge-plan, on-the-fly filters, missing-data policy
+│   │   └── precomputed_f2.cpp           # (planned, M7) on-disk f2_blocks cache (ADMIXTOOLS-compatible)
+│   └── app/                             # (planned, P3) CLI (extract-f2, qpadm, qpdstat)
 │
 ├── tests/
-│   ├── unit/                          #   per-module, fast (host + kernel)
-│   ├── reference/                     #   GPU-vs-CPU-backend equivalence (golden seam)
-│   ├── golden/                        #   admixtools2 reference CSVs + full env metadata
-│   ├── fixtures/                      #   tiny committed genotype datasets
-│   └── python/                        #   pytest against the wheel
+│   ├── CMakeLists.txt                   # [BUILT] CTest wiring (gtest_discover_tests + the equivalence test)
+│   ├── reference/test_f2_equivalence.cu # [BUILT] GPU (EmuFp64{40} & Fp64) vs long-double CPU ref on real AADR -- the trust seam
+│   └── unit/test_f2.cpp                 # [BUILT] host unit test of the shared f2_estimator primitive
 │
-├── benchmarks/                      # nvbench (CUDA) + google-benchmark (host)
 ├── docs/
-│   ├── adr/                           # Architecture Decision Records (Nygard format)
-│   └── architecture.md                # living copy of this document
-├── tools/                           # dev scripts; never linked into the build
-│   ├── run-clang-tidy.py  run-iwyu.sh
-│   ├── compare_against_admixtools2.R  # numerical oracle vs upstream
-│   └── ci/
-└── third_party/CMakeLists.txt        # all dependency pins in ONE place
+│   ├── architecture.md                  # [BUILT] this document
+│   └── ROADMAP.md                       # [BUILT] milestones, magic-number->config inventory, commit discipline
+│
+├── experiments/                         # THROWAWAY spike -- validated the kernel + precision; NOT production, NOT layered
+│   ├── f2_emu_spike/{f2_emu_spike,f2_timing,f2_prec_acc}.cu  # the precision/throughput experiments
+│   └── aadr/{00_setup,01_download,02_build_matrix,03_run,...} # AADR fetch + per-pop Q/V/N matrix builder
+│
+├── aadr/                                # real AADR genotype DATA -- GITIGNORED, never committed (~4 GB)
+└── (root strays: build_run.sh, f2_emu_spike.cu -- leftover spike dupes, slated for removal)
 ```
 
 **Dependency-direction rule.** Allowed edges only: `app/bindings → api → core → device`; `io` is a sibling leaf that produces plain data structs (genotype tiles + per-SNP genetic positions) and depends on nothing in `core`/`device`. The *app* layer is the only place that wires `io` output into compute. **Nothing depends upward; no cycles.** The one shared domain rule (`block_partition_rule.hpp`) lives in `core` and is the single exception that both `io` consumers and device kernels read — it is host-pure and CUDA-free, so it does not break the layering.
