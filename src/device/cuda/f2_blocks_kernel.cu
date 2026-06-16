@@ -40,7 +40,8 @@
 #include <cuda_runtime.h>
 #include <library_types.h>
 
-#include "core/internal/f2_estimator.hpp"  // assemble_f2_numerator, finalize_f2, grid_for, kCdivBlock
+#include "core/internal/f2_estimator.hpp"  // assemble_f2_numerator, finalize_f2
+#include "core/internal/launch_config.hpp" // grid_for, grid_z_extent, kMaxGridZ (launch-math home)
 #include "device/cuda/check.cuh"           // STEPPE_CUDA_CHECK, CUBLAS_CHECK, STEPPE_CUDA_CHECK_KERNEL
 #include "device/cuda/f2_block_kernel.cuh" // engage_f2_precision, f2_compute_type (SHARED policy)
 #include "steppe/config.hpp"               // kCdivBlock
@@ -172,10 +173,17 @@ void launch_gather_group(const double* dQ_all, const double* dV_all, const doubl
                          int P, int s_pad, int n_in_group,
                          double* dQg, double* dVg, double* dSg,
                          cudaStream_t stream) {
+    // Grid math via the single launch-config home (architecture.md §4, §7, §8).
+    // x = P-tile, y = s_pad-tile (both square-block axes ⇒ grid_for, which now
+    // debug-asserts the y/z 65 535 cap); z = the batch count, which is set DIRECTLY
+    // and so bypasses grid_for — it routes through the dedicated grid_z_extent guard
+    // (cleanup X-7/B6: a grid_for clamp alone would miss this direct z-extent). The
+    // backend tiles the batch into chunks of ≤ kMaxGridZ blocks (vram_budget.hpp), so
+    // n_in_group ≤ kMaxGridZ holds at the call site; the assert pins it.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
                     static_cast<unsigned>(core::grid_for(s_pad)),
-                    static_cast<unsigned>(n_in_group));
+                    core::grid_z_extent(n_in_group));
     gather_group_kernel<<<grid, block, 0, stream>>>(
         dQ_all, dV_all, dS_all, d_block_ids_in_group, d_block_offsets, d_block_sizes,
         P, s_pad, n_in_group, dQg, dVg, dSg);
@@ -231,10 +239,15 @@ void launch_assemble_blocks_group(const double* dGg, const double* dVpairg, cons
                                   int P, int n_in_group,
                                   double* dF2_all, double* dVpair_all,
                                   cudaStream_t stream) {
+    // Grid math via the single launch-config home (architecture.md §4, §7, §8).
+    // x = y = P-tile (square-block axes ⇒ grid_for, with the y/z-cap assert); z =
+    // the batch count, set DIRECTLY and so bypassing grid_for — routed through the
+    // dedicated grid_z_extent guard (cleanup X-7/B6). The backend tiles the batch so
+    // n_in_group ≤ kMaxGridZ holds; the assert pins it.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
                     static_cast<unsigned>(core::grid_for(P)),
-                    static_cast<unsigned>(n_in_group));
+                    core::grid_z_extent(n_in_group));
     assemble_blocks_group_kernel<<<grid, block, 0, stream>>>(
         dGg, dVpairg, dRg, d_block_ids_in_group, P, n_in_group, dF2_all, dVpair_all);
     STEPPE_CUDA_CHECK_KERNEL();

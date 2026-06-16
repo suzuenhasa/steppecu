@@ -12,16 +12,22 @@
 // Dual harness (build contract): with -DSTEPPE_TEST_WITH_GTEST it uses GoogleTest;
 // otherwise it is a self-checking main() that returns non-zero on the first
 // failure — all CTest needs to gate (tests/CMakeLists.txt). No CUDA here.
+#include <cstddef>
 #include <cstdio>
 
 #include "core/internal/host_device.hpp"    // STEPPE_HD, STEPPE_DEBUG_ONLY, STEPPE_ASSERT
-#include "core/internal/launch_config.hpp"  // cdiv (int+long), grid_for, kDecodeBlockX/Y
+#include "core/internal/launch_config.hpp"  // cdiv (int+long), grid_for, grid_z_extent, kMaxGridX/Y/Z, kDecodeBlockX/Y
+#include "device/vram_budget.hpp"           // max_blocks_per_chunk (the grid-z tiling cap, X-7/B6)
 #include "steppe/config.hpp"                // kCdivBlock
 
 namespace {
 
 using steppe::core::cdiv;
 using steppe::core::grid_for;
+using steppe::core::grid_z_extent;
+using steppe::core::kMaxGridX;
+using steppe::core::kMaxGridY;
+using steppe::core::kMaxGridZ;
 
 // ---- cdiv: the int overload (the launch-grid building block) ----------------
 [[nodiscard]] bool test_cdiv_int() {
@@ -63,6 +69,117 @@ static_assert(cdiv(3'000'000'001L, 32L) == 93'750'001L, "cdiv(long) must constan
 static_assert(steppe::core::kDecodeBlockX == 32 && steppe::core::kDecodeBlockY == 8,
               "decode block dims are the named 32x8 home");
 
+// ====== Grid-dimension launch-failure fixes (cleanup X-7/B6) =================
+// These pin the B6 fix: the y/z grid axes are hardware-capped at 65 535 and only
+// x reaches 2^31−1, so the large (SNP/M-scale) extent MUST ride x, the batch axis
+// (gridDim.z) must stay ≤ 65 535, and the M4 chunk loop tiles the batch so it does.
+// All checks are build-mode-independent (they assert RETURN VALUES / constants, not
+// the debug-only STEPPE_ASSERT side effect, which would abort rather than report).
+
+// ---- the named hardware limits are the documented values --------------------
+[[nodiscard]] bool test_grid_limit_constants() {
+    return kMaxGridX == 2147483647u &&  // 2^31 − 1, the only axis past 65 535
+           kMaxGridY == 65535u &&
+           kMaxGridZ == 65535u;
+}
+static_assert(steppe::core::kMaxGridY == 65535u && steppe::core::kMaxGridZ == 65535u,
+              "y/z grid axes are hardware-capped at 65 535 (architecture.md §7)");
+static_assert(steppe::core::kMaxGridX == 2147483647u, "x grid axis reaches 2^31 − 1");
+
+// ---- f2-feeder / decode RE-ORIENTATION: the large extent rides grid.x -------
+// The bug B6 fixes: the f2 feeder put the SNP count M on gridDim.y (capped 65 535),
+// failing at M > ~1.05M SNPs. The fix mirrors the safe decode launcher — M rides
+// gridDim.x (cap 2^31−1) and P rides gridDim.y. Here we replicate EXACTLY the grid
+// math both launch wrappers now perform (cdiv(M,long) for x; grid_for/cdiv(P) for y)
+// at a SNP count whose y-axis extent would have BLOWN the 65 535 cap under the old
+// orientation, and assert: (i) the M-derived extent lands on x and fits kMaxGridX;
+// (ii) the P-derived extent lands on y and fits kMaxGridY; (iii) the M-derived
+// extent really would have OVER-RUN the y cap (so the re-orientation is load-bearing,
+// not cosmetic).
+[[nodiscard]] bool test_feeder_orientation_large_M() {
+    constexpr long kBigM = 1'050'000L;          // > 65 535·16 = 1 048 560 ⇒ trips y@16
+    constexpr int  kP = 4266;                    // architecture.md §12 P_max
+
+    // The f2 feeder (square kCdivBlock block): x = cdiv(M, kCdivBlock), y = grid_for(P).
+    const long gx_feeder = cdiv(kBigM, static_cast<long>(steppe::kCdivBlock));
+    const int  gy_feeder = grid_for(kP);  // == cdiv(P, kCdivBlock); asserts ≤ kMaxGridY
+
+    // The SNP extent must fit the x cap and must NOT fit the y/z cap — the whole
+    // point: it can only legally ride x.
+    const bool x_holds = static_cast<unsigned long long>(gx_feeder) <=
+                         static_cast<unsigned long long>(kMaxGridX);
+    const bool would_overrun_y =
+        static_cast<unsigned long long>(gx_feeder) > static_cast<unsigned long long>(kMaxGridY);
+    const bool y_holds = gy_feeder >= 0 &&
+                         static_cast<unsigned>(gy_feeder) <= kMaxGridY;
+
+    // The decode kernel (non-square 32×8 block): x = cdiv(M, kDecodeBlockX), y =
+    // grid_for(P, kDecodeBlockY). Same orientation, same invariants.
+    const long gx_decode = cdiv(kBigM, static_cast<long>(steppe::core::kDecodeBlockX));
+    const int  gy_decode = grid_for(kP, steppe::core::kDecodeBlockY);
+    const bool decode_x_holds = static_cast<unsigned long long>(gx_decode) <=
+                                static_cast<unsigned long long>(kMaxGridX);
+    const bool decode_y_holds = gy_decode >= 0 &&
+                                static_cast<unsigned>(gy_decode) <= kMaxGridY;
+
+    return x_holds && would_overrun_y && y_holds && decode_x_holds && decode_y_holds;
+}
+
+// ---- grid_for keeps a square-block axis within its cap ----------------------
+// For every in-scope P (≤ P_max), grid_for(P) is the y-axis extent of the f2
+// kernels and must stay ≤ kMaxGridY. Sweep a range incl. P_max.
+[[nodiscard]] bool test_grid_for_within_y_cap() {
+    for (int P = 0; P <= 5000; P += 137) {
+        const int g = grid_for(P);  // square kCdivBlock edge
+        if (g < 0 || static_cast<unsigned>(g) > kMaxGridY) return false;
+    }
+    // exactly at the kCdivBlock·kMaxGridY boundary, grid_for == kMaxGridY (still OK)
+    const long boundary = static_cast<long>(steppe::kCdivBlock) * kMaxGridY;  // 16·65535
+    return cdiv(boundary, static_cast<long>(steppe::kCdivBlock)) ==
+           static_cast<long>(kMaxGridY);
+}
+
+// ---- grid_z_extent: the DIRECT batch-axis guard (bypasses grid_for) ---------
+// The M4 gather/scatter set gridDim.z = n_in_group directly, so they route through
+// grid_z_extent, not grid_for. Within [1, kMaxGridZ] it returns the extent verbatim;
+// the out-of-range cases (0, > kMaxGridZ) are guarded by the debug STEPPE_ASSERT and
+// are not exercised here (an assert aborts; we test the legal-input return + that
+// the legal domain reaches the cap exactly).
+[[nodiscard]] bool test_grid_z_extent_legal_domain() {
+    return grid_z_extent(1) == 1u &&
+           grid_z_extent(40) == 40u &&                 // the spike's 40-block bucket
+           grid_z_extent(static_cast<int>(kMaxGridZ)) == kMaxGridZ;  // exactly the cap
+}
+
+// ---- max_blocks_per_chunk TILES the batch so gridDim.z ≤ kMaxGridZ ----------
+// The fix that makes grid_z_extent's precondition always hold: the per-bucket chunk
+// budget caps blocks-per-chunk at kMaxGridZ, so each chunk's n_in_group (= gridDim.z)
+// never exceeds the hardware z limit, even when VRAM would permit far more (the
+// high-VRAM PRO-6000 tier where the latent failure lives). We hand it an
+// effectively-unbounded free VRAM and a tiny per-block footprint and assert the
+// result is capped at kMaxGridZ — not the (much larger) VRAM/nb_total figure.
+[[nodiscard]] bool test_chunk_tiling_caps_grid_z() {
+    using steppe::device::max_blocks_per_chunk;
+    constexpr std::size_t kHugeFree = static_cast<std::size_t>(1) << 60;  // ~1 EiB free
+    const int P = 2;            // tiny [2×2] slabs ⇒ huge per-block fit
+    const int n_block = 200000; // > kMaxGridZ blocks in the bucket
+    const int s_pad = 1;
+    const int nb_total = 200000;
+    const int mb = max_blocks_per_chunk(kHugeFree, P, n_block, s_pad, nb_total);
+    // VRAM + nb_total would both permit > 65 535; the grid-z cap must bind.
+    if (static_cast<unsigned>(mb) != kMaxGridZ) return false;
+    // grid_z_extent must then accept exactly that chunk size (the invariant holds).
+    return grid_z_extent(mb) == kMaxGridZ;
+}
+
+// ---- a small bucket is unaffected (the cap only bites past kMaxGridZ) --------
+[[nodiscard]] bool test_chunk_tiling_small_bucket_unaffected() {
+    using steppe::device::max_blocks_per_chunk;
+    constexpr std::size_t kHugeFree = static_cast<std::size_t>(1) << 60;
+    const int mb = max_blocks_per_chunk(kHugeFree, 768, 757, 2048, 40);  // spike shape
+    return mb == 40 && static_cast<unsigned>(mb) <= kMaxGridZ;  // bucket fits, no tiling
+}
+
 // ---- STEPPE_HD: the one host/device qualifier compiles on the host ----------
 // Under the host compiler STEPPE_HD expands to nothing; a STEPPE_HD function must
 // therefore be an ordinary callable. (The whole point of the single home: the
@@ -101,6 +218,14 @@ constexpr Case kCases[] = {
     {"cdiv long overload (M > 2^31)", test_cdiv_long},
     {"grid_for == cdiv(n, block)", test_grid_for},
     {"decode block geometry (warp-justified 32x8)", test_decode_block_geometry},
+    // --- B6: grid-dimension launch-failure fixes (X-7) ---
+    {"grid limit constants (x=2^31-1, y/z=65535)", test_grid_limit_constants},
+    {"feeder/decode re-orientation: large M rides grid.x", test_feeder_orientation_large_M},
+    {"grid_for stays within the y cap for all in-scope P", test_grid_for_within_y_cap},
+    {"grid_z_extent legal-domain identity (1..kMaxGridZ)", test_grid_z_extent_legal_domain},
+    {"chunk tiling caps gridDim.z at kMaxGridZ", test_chunk_tiling_caps_grid_z},
+    {"small bucket unaffected by the grid-z cap", test_chunk_tiling_small_bucket_unaffected},
+    // --- B7 single-source-home facilities (unchanged) ---
     {"STEPPE_HD host-callable", test_hd_qualifier},
     {"STEPPE_DEBUG_ONLY / STEPPE_ASSERT facility", test_debug_facilities},
 };

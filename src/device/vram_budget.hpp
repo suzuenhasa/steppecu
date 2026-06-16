@@ -32,7 +32,8 @@
 #include <algorithm>
 #include <cstddef>
 
-#include "steppe/config.hpp"  // kMaxVramUtilizationFraction, kCublasWorkspaceBytes
+#include "core/internal/launch_config.hpp"  // kMaxGridZ (the M4 batch rides gridDim.z)
+#include "steppe/config.hpp"                // kMaxVramUtilizationFraction, kCublasWorkspaceBytes
 
 namespace steppe::device {
 
@@ -113,17 +114,29 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// `chunk_budget / per_block` is computed and clamped in `std::size_t` BEFORE the
 /// `int` narrowing (closing the X-5/F9 wrap where a `size_t` quotient above
 /// `INT_MAX` casts negative, then clamps catastrophically to 1): the result is
-/// `min(quotient, nb_total)` (never more blocks than the bucket has), floored at 1
-/// (a single block must always be attempted), so the returned `int` is always in
-/// `[1, nb_total]` and never overflows. Never lets a chunk's slabs exceed
-/// `kMaxVramUtilizationFraction` of the post-resident-set/post-workspace VRAM.
+/// `min(quotient, nb_total, kMaxGridZ)` (never more blocks than the bucket has, and
+/// never more than the hardware grid-z limit — see below), floored at 1 (a single
+/// block must always be attempted), so the returned `int` is always in
+/// `[1, min(nb_total, kMaxGridZ)]` and never overflows. Never lets a chunk's slabs
+/// exceed `kMaxVramUtilizationFraction` of the post-resident-set/post-workspace
+/// VRAM.
+///
+/// GRID-Z TILING (cleanup X-7/B6). Each block of a chunk becomes one slab on
+/// `gridDim.z = n_in_group` in the M4 gather/scatter launches (f2_blocks_kernel.cu),
+/// and z is hardware-capped at `kMaxGridZ` (65 535) on every compute capability. On
+/// the budget tier the VRAM quotient is far below that, but on the high-VRAM tier
+/// (PRO-6000 96 GB ⇒ larger `n_block`/smaller per-block footprint) the quotient can
+/// exceed 65 535 — the latent launch failure that fires only on the capable box.
+/// Capping `fit` at `kMaxGridZ` HERE makes the existing per-bucket chunk loop tile
+/// the batch over z (no new loop): a bucket with more than `kMaxGridZ` blocks is
+/// processed in ≤ kMaxGridZ-block chunks, so the launch is correct on BOTH tiers.
 ///
 /// @param free_vram  free device VRAM in bytes.
 /// @param P          number of populations.
 /// @param n_block    number of jackknife blocks (for the resident-tensor reserve).
 /// @param s_pad      the bucket's padded block width.
 /// @param nb_total   number of blocks in this bucket (the upper clamp).
-/// @return           blocks per chunk, clamped to `[1, nb_total]`.
+/// @return           blocks per chunk, clamped to `[1, min(nb_total, kMaxGridZ)]`.
 [[nodiscard]] inline int max_blocks_per_chunk(std::size_t free_vram, int P, int n_block,
                                               int s_pad, int nb_total) noexcept {
     if (nb_total <= 0) return 0;  // empty bucket — nothing to chunk.
@@ -132,9 +145,11 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
     // per_block ≥ 4·sizeof(double) > 0 whenever P > 0 (the caller's guard); guard
     // the divide anyway so the helper is total on any input.
     const std::size_t fit = (per_block > 0u) ? (budget / per_block) : 0u;
-    // Clamp the quotient against nb_total IN size_t, THEN narrow — the X-5/F9 fix.
+    // Clamp the quotient against nb_total AND the hardware grid-z limit IN size_t,
+    // THEN narrow — the X-5/F9 wrap fix folded with the X-7/B6 grid-z tiling cap.
     const std::size_t capped =
-        std::min(fit, static_cast<std::size_t>(nb_total));
+        std::min({fit, static_cast<std::size_t>(nb_total),
+                  static_cast<std::size_t>(core::kMaxGridZ)});
     // A single block must always be attempted even if the budget says zero (it
     // then OOMs cleanly mid-chunk rather than silently producing nothing).
     const std::size_t clamped = std::max<std::size_t>(capped, 1u);

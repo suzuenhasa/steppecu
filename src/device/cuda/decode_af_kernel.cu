@@ -95,13 +95,18 @@ void launch_decode_af(const std::uint8_t* d_packed,
                       int P, long M, int ploidy,
                       double* d_Q, double* d_V, double* d_N,
                       cudaStream_t stream) {
-    // Grid math via the single launch-config home (architecture.md §4, §8): the
-    // SNP axis (M, `long`) MUST use the long cdiv overload; the population axis
-    // (P, `int`) uses the int one. The 32×8 block is NON-square, so we pass the
-    // explicit per-axis dims (kDecodeBlockX/Y) — NOT grid_for's square default.
+    // Grid math via the single launch-config home (architecture.md §4, §7, §8): the
+    // SNP axis (M, `long`) rides gridDim.x via the long cdiv overload — x is the only
+    // 2^31 axis, the correct home for the large SNP count. The population axis (P,
+    // `int`) rides gridDim.y through `grid_for(P, kDecodeBlockY)`, whose y/z-cap
+    // assert (kMaxGridY = 65 535) now applies (cleanup X-7/B6: the decode grid.y clamp
+    // is folded into grid_for); P ≤ ~4266 ≪ that, so it is always satisfied. The 32×8
+    // block is NON-square, so the y axis passes the explicit kDecodeBlockY edge — NOT
+    // grid_for's square default; the SNP/x axis keeps the long cdiv overload grid_for
+    // (int-only) cannot provide.
     const dim3 block(kDecodeBlockX, kDecodeBlockY);
     const dim3 grid(static_cast<unsigned>(core::cdiv(M, static_cast<long>(kDecodeBlockX))),
-                    static_cast<unsigned>(core::cdiv(P, kDecodeBlockY)));
+                    static_cast<unsigned>(core::grid_for(P, kDecodeBlockY)));
     decode_af_kernel<<<grid, block, 0, stream>>>(d_packed, bytes_per_record,
                                                  d_pop_offsets, P, M, ploidy,
                                                  d_Q, d_V, d_N);

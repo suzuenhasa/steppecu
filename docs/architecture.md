@@ -467,7 +467,7 @@ The snippet above is the **RAII shape** reference. The production `CublasHandle`
 
 The debug sync makes compute-sanitizer attribute faults to the exact kernel; release relies on the next runtime call to surface the sticky error. Throwing (not `exit()`) lets tests `catch (const CudaError&)`.
 
-**Launch-config helpers** live once in `core/internal/launch_config.hpp`: `cdiv(n,b)`, `grid_for(n, block, max_grid)`, occupancy-aware block sizing. Kernel files never recompute grid math.
+**Launch-config helpers** live once in `core/internal/launch_config.hpp`: `cdiv(n,b)`, `grid_for(n, block, max_grid)`, occupancy-aware block sizing. Kernel files never recompute grid math. A CUDA grid is capped per axis at `(x, y, z) = (2^31−1, 65 535, 65 535)` on every compute capability incl. Blackwell sm_120, so **the large (SNP/`M`-scale) extent always rides `gridDim.x`** (the decode kernel, the f2 feeder) — putting it on `y`/`z` is a latent launch failure at `M > ~1.05M` SNPs. `grid_for` debug-asserts its extent fits `max_grid` (default the y/z cap `kMaxGridZ`); the M4 strided-batched gather/scatter set `gridDim.z = n_in_group` directly (bypassing `grid_for`), so they route through the dedicated `grid_z_extent(n)` guard and the backend tiles the batch into ≤ `kMaxGridZ`-block chunks so the z extent never exceeds the limit (this is the chunk loop that already tiles for VRAM; the z cap is folded into `vram_budget.hpp::max_blocks_per_chunk`).
 
 **CCCL usage policy.** Use the highest abstraction that fits; drop down only for control. Thrust for whole-container ops; **CUB** when you need explicit temp storage, a specific stream, or fused operators. **Two important constraints, reconciled here:**
 
@@ -526,7 +526,7 @@ target_link_libraries(steppe_core
 | Error propagation (internal) | `internal/expected.hpp` | `STEPPE_TRY(expr)` over `std::expected<T,Error>` — **internal only; never crosses the ABI** (§16) |
 | Logging | `core/internal/log.hpp` | `STEPPE_LOG_*` facade (a spdlog backend lands with §10); never `printf`/`cout` in lib code; also the teardown-warning sink `STEPPE_LOG_WARN` (§7) |
 | NVTX + colors | `internal/nvtx.hpp` | `STEPPE_NVTX_SCOPE("name", color)` RAII; **the color palette (`nvtx::Color`) is defined here, once** |
-| Launch math | `core/internal/launch_config.hpp` | `cdiv` (int + long), `grid_for`, the per-kernel block dims (`kDecodeBlockX/Y`); occupancy sizing later |
+| Launch math | `core/internal/launch_config.hpp` | `cdiv` (int + long), `grid_for(n, block, max_grid)` (debug-asserts the y/z 65 535 cap), the per-kernel block dims (`kDecodeBlockX/Y`), the hardware grid limits `kMaxGridX/Y/Z`, and `grid_z_extent(n)` for the M4 batch axis (which sets `gridDim.z` directly, bypassing `grid_for`); occupancy sizing later |
 | Host/device + debug | `core/internal/host_device.hpp` | `STEPPE_HD` (the one host/device qualifier), `STEPPE_DEBUG_ONLY`, `STEPPE_ASSERT` |
 | Precision / traits | `internal/type_traits.hpp` | `real_t<P>`, `is_fp64`, index aliases — the precision switch lives here |
 | Views | `internal/span_view.hpp` | non-owning matrix/tensor views over `cuda::std::span`/`mdspan` |

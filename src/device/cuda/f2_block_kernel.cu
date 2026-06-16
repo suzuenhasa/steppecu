@@ -105,8 +105,11 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
                                  double* __restrict__ V_out,
                                  double* __restrict__ S,
                                  int P, long M) {
-    const long i = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;  // population
-    const long s = static_cast<long>(blockIdx.y) * blockDim.y + threadIdx.y;  // SNP
+    // SNP count M rides gridDim.x (the only 2^31 axis); P rides gridDim.y (≤ 65 535
+    // cap, P ≤ ~4266 ≪ that). This matches the safe decode-kernel orientation and
+    // fixes the latent grid.y launch failure at M > ~1.05M SNPs (cleanup X-7/B6).
+    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;  // SNP
+    const long i = static_cast<long>(blockIdx.y) * blockDim.y + threadIdx.y;  // population
     if (i >= P || s >= M) return;
 
     const long Pl = static_cast<long>(P);
@@ -302,12 +305,18 @@ void engage_f2_precision(cublasHandle_t handle, const Precision& precision) {
 void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* dN_raw,
                       double* dQ_masked, double* dV_out, double* dS,
                       int P, long M, cudaStream_t stream) {
-    // 2-D block over (population, SNP); grid math from the one launch-config home
-    // (core/internal/f2_estimator.hpp grid_for / kCdivBlock — replaces the spike's
-    // open-coded (n+b-1)/b, ROADMAP §4). `long` grid extent for the SNP axis.
+    // 2-D block over (SNP, population); grid math from the one launch-config home
+    // (core/internal/launch_config.hpp cdiv / grid_for / kCdivBlock — replaces the
+    // spike's open-coded (n+b-1)/b, ROADMAP §4). ORIENTATION (cleanup X-7/B6): the
+    // SNP count M rides gridDim.x via the `cdiv(long,long)` overload — x is the only
+    // axis that reaches 2^31−1, so M (which `MatView::M`'s `long` type permits past
+    // 2^31, and which exceeds the 65 535 y/z cap already at M > ~1.05M SNPs) MUST
+    // ride it. P rides gridDim.y through `grid_for`, whose y/z-cap assert applies
+    // (P ≤ ~4266 ≪ 65 535, so it is always satisfied). This matches the safe decode
+    // launcher; the previous orientation put M on the capped y axis.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
-    const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
-                    static_cast<unsigned>(core::cdiv(M, static_cast<long>(steppe::kCdivBlock))));
+    const dim3 grid(static_cast<unsigned>(core::cdiv(M, static_cast<long>(steppe::kCdivBlock))),
+                    static_cast<unsigned>(core::grid_for(P)));
     f2_feeder_kernel<<<grid, block, 0, stream>>>(dQ_raw, dV_raw, dN_raw,
                                                  dQ_masked, dV_out, dS, P, M);
     STEPPE_CUDA_CHECK_KERNEL();
