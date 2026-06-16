@@ -109,3 +109,32 @@ if(NOT STEPPE_HAVE_GTEST)
   add_test(NAME block_partition_aadr_consistency
            COMMAND test_block_partition "${STEPPE_AADR_SNP}")
 endif()
+
+# --- Host-only unit test of the SHARED M2 filter predicates (no GPU, no data) -
+# Pure C++ TU: exercises the host-pure filter_decision.hpp predicates + the
+# include/exclude membership + the --mind per-sample resolution on hand-built
+# inputs (control flow / boundaries, NOT a precision claim — ROADMAP §0). Links
+# steppe::io (the filter sources live in the io leaf). architecture.md §13.
+add_executable(test_filters unit/test_filters.cpp)
+target_link_libraries(test_filters
+    PRIVATE steppe::io steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_filters PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_filters PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME filters_unit COMMAND test_filters)
+
+# --- M2 filter ORACLE test (real AADR; the M2 trust seam) --------------------
+# CUDA TU (mirrors test_decode_equivalence.cu): reads the raw TGENO triple via the
+# io leaf, decodes via the CPU reference backend, builds the filter keep-mask via
+# the io filters, and validates it against an INDEPENDENT scalar host oracle on
+# real AADR — no-op-when-default, drop-equals-mask bit-identity, exact-mask match,
+# --mind exact, monotonicity, autosomes_only block count, strand/tv class. Links
+# steppe::io (readers + filters) + steppe::device (CPU decode + compute_f2) +
+# steppe::core (assign_blocks for the autosomes tie-in). Self-checking main(); CTest
+# gates on the exit code. Takes the data ROOT as argv[1] (default the box layout).
+add_executable(test_filter_oracle reference/test_filter_oracle.cu)
+target_link_libraries(test_filter_oracle
+    PRIVATE steppe::io steppe::device steppe::core steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_filter_oracle PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME filter_oracle COMMAND test_filter_oracle "${STEPPE_AADR_ROOT}")

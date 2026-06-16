@@ -70,6 +70,7 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
             ref_tok = "N";
             alt_tok = "N";
         }
+        t.id.push_back(id);
         t.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
         t.genpos_morgans.push_back(genpos);
         t.ref.push_back(ref_tok.empty() ? 'N' : ref_tok[0]);

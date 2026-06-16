@@ -14,10 +14,16 @@
 # in core and is read by `app`, not by io re-deriving it; architecture.md §2, §8.)
 
 add_library(steppe_io STATIC
-    eigenstrat_format.cpp     # packed-.geno header parse + DERIVED record stride
-    ind_reader.cpp            # .ind → pop labels + selection (oracle-faithful)
-    snp_reader.cpp            # .snp → chrom / genpos (Morgans) / ref / alt
-    geno_reader.cpp)          # .geno tiled raw-byte gather (NO decode)
+    eigenstrat_format.cpp        # packed-.geno header parse + DERIVED record stride
+    ind_reader.cpp               # .ind → pop labels + selection (oracle-faithful)
+    snp_reader.cpp               # .snp → id / chrom / genpos (Morgans) / ref / alt
+    geno_reader.cpp              # .geno tiled raw-byte gather (NO decode)
+    # M2 on-the-fly filters (host-pure; part of the SAME io leaf). filter_decision/
+    # filter_plan are header-only predicates/structs (no .cpp). architecture.md §1,
+    # §5 S-1/S0'; ROADMAP M2.
+    filter/include_exclude.cpp   # resolve include/exclude + external prune.in (READ, never computed)
+    filter/snp_filter.cpp        # per-SNP keep-mask: pooled MAF / geno / class / membership / flags
+    filter/mind_prepass.cpp)     # conditional S-1 per-sample --mind pre-pass
 add_library(steppe::io ALIAS steppe_io)
 
 # Headers under src/io/ are included as "io/..."; the include root is src/ (one

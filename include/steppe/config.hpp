@@ -24,6 +24,7 @@
 #define STEPPE_CONFIG_HPP
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace steppe {
@@ -78,6 +79,18 @@ inline constexpr double kDefaultBlockSizeCm = 5.0;
 /// Centimorgans per Morgan — the single conversion constant between the
 /// cM-facing config accessor and the Morgan-based block rule.
 inline constexpr double kCentimorgansPerMorgan = 100.0;
+
+/// Inclusive autosome chromosome-code range for the `autosomes_only` filter
+/// (M2). ADMIXTOOLS 2's `extract_f2` default is `auto_only = TRUE` ("keep only
+/// SNPs on chromosomes 1 to 22"), so AT2 parity = chromosomes 1..22 — the sex
+/// chromosomes (X→23, Y→24 in the EIGENSTRAT codes snp_reader emits) and MT/other
+/// non-autosomal codes are dropped. Named here (not a bare 22) so the single AT2
+/// autosome definition lives in one place and the filter predicate reads it.
+/// (Verified against the AT2 extract_f2 reference: auto_only default TRUE = chr
+/// 1-22. The M3 real-AADR finding — chr 1-24 → 757 blocks, chr 1-23 → 756 —
+/// is consistent: dropping chr 23 AND 24 here is the AT2-parity autosome set.)
+inline constexpr int kAutosomeChromMin = 1;
+inline constexpr int kAutosomeChromMax = 22;
 
 // ---------------------------------------------------------------------------
 // Precision — the typed precision knob (architecture.md §9, §12; ROADMAP §4).
@@ -170,15 +183,71 @@ struct DeviceConfig {
 // ---------------------------------------------------------------------------
 struct FilterConfig {
     /// Minimum minor-allele frequency to keep a SNP. 0.0 ⇒ no MAF filter.
+    /// MAF is the POOLED folded minor allele frequency: min(q, 1-q) of the
+    /// pooled reference-allele frequency across all KEPT samples
+    /// (Σ_pop ref_count / Σ_pop allele_count), matching build_tgeno_matrix.py's
+    /// ssum/scnt pooling — NOT a per-population frequency. Pinned and documented
+    /// in src/io/filter/filter_decision.hpp (the single source of the rule).
     double maf_min = 0.0;
 
     /// Maximum per-SNP missing fraction (the `geno` filter): drop a SNP whose
-    /// missing fraction exceeds this. 1.0 ⇒ keep every SNP.
+    /// missing fraction exceeds this. 1.0 ⇒ keep every SNP. The fraction is over
+    /// the SAMPLE (individual) axis: 1 - (Σ non-missing individuals across kept
+    /// pops) / (total kept individuals) — the PLINK `--geno` convention. NOTE:
+    /// ADMIXTOOLS 2's `maxmiss` is a per-SNP fraction over POPULATIONS, a
+    /// different denominator; see filter_decision.hpp for the pinned convention.
     double geno_max_missing = 1.0;
 
     /// Maximum per-sample missing fraction (the `mind` filter): drop a sample
-    /// whose missing fraction exceeds this. 1.0 ⇒ keep every sample.
+    /// whose missing fraction exceeds this. 1.0 ⇒ keep every sample. Decidable
+    /// only from a streaming pre-pass over ALL SNPs (the conditional S-1 pass),
+    /// since per-sample missingness is not a single-tile quantity.
     double mind_max_missing = 1.0;
+
+    // ----- NEW M2 flag-gated filters (each defaults to a NO-OP so the parity /
+    // pairwise-complete path is untouched unless the flag is explicitly set).
+    // These are the "additions beyond bare filter" (architecture.md §1): gated
+    // behind explicit flags and tagged, never on by default. -----------------
+
+    /// Keep only autosomal SNPs (chromosomes kAutosomeChromMin..kAutosomeChromMax
+    /// == 1..22). false ⇒ keep every chromosome (no-op). ADMIXTOOLS 2's
+    /// extract_f2 default is `auto_only = TRUE` (chr 1-22) — set this true for
+    /// AT2 autosome parity; it is OFF here so the bare-filter default keeps the
+    /// sex chromosomes (architecture.md §1: autosome-only is an explicit add-on).
+    bool autosomes_only = false;
+
+    /// Drop monomorphic SNPs (pooled MAF exactly 0 ⇒ no variation across kept
+    /// samples). false ⇒ keep monomorphic SNPs (no-op). An explicit add-on
+    /// beyond bare filter (architecture.md §1); equivalent to maf_min at the
+    /// strict-positive boundary but kept as a separate, named flag.
+    bool drop_monomorphic = false;
+
+    /// Keep only transversion SNPs (ref/alt is a transversion: a purine↔pyrimidine
+    /// change, NOT a transition A↔G or C↔T). false ⇒ keep transitions too
+    /// (no-op). An explicit add-on beyond bare filter (architecture.md §1, the
+    /// ts/tv option). NB: strand-AMBIGUOUS (A/T, C/G) and multiallelic SNPs are
+    /// DROPPED regardless of this flag (drop-not-flip; architecture.md §1).
+    bool transversions_only = false;
+
+    // ----- Include / exclude SNP membership (resolved against the .snp ids by
+    // include_exclude.{hpp,cpp}). Empty ⇒ no constraint (no-op). An external
+    // prune.in (LD-pruned SNP id list) is READ here, NEVER computed — steppe
+    // does not compute LD itself (architecture.md §1). -----------------------
+
+    /// Explicit SNP-id keep set (the `keepsnps`/`--extract` analogue). Non-empty
+    /// ⇒ keep ONLY these ids (intersected with whatever else passes). Empty ⇒
+    /// no include constraint. These are SNP IDs (.snp column 1), not indices.
+    std::vector<std::string> include_snp_ids;
+
+    /// Explicit SNP-id drop set (the `--exclude` analogue). Any id here is
+    /// dropped even if it would otherwise pass. Empty ⇒ no exclude constraint.
+    std::vector<std::string> exclude_snp_ids;
+
+    /// Path to an external prune.in file (one SNP id per line) of LD-pruned SNPs
+    /// to KEEP. READ, never computed (architecture.md §1: we accept only an
+    /// externally supplied prune.in and never compute LD). Empty ⇒ unused. When
+    /// set it composes with `include_snp_ids` as an additional keep set.
+    std::string prune_in_path;
 };
 
 }  // namespace steppe

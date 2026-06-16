@@ -28,12 +28,15 @@
 namespace steppe::io {
 
 /// Per-SNP metadata read from the .snp, parallel arrays in file order (SNP `s` is
-/// element `s` of each vector). `chrom` is the chromosome code (only equality
-/// between adjacent SNPs matters to the block rule); `genpos_morgans` is column 3
-/// as-read (Morgans), fed to the shared block_partition_rule. `ref`/`alt` are the
-/// single-character allele codes (col 5 = reference fixing Q's polarity, col 6 =
-/// alternate). All vectors have the same length `count` (== number of SNPs read).
+/// element `s` of each vector). `id` is the SNP id (column 1, e.g. an rs number) —
+/// the key the M2 include/exclude + prune.in membership resolves against. `chrom`
+/// is the chromosome code (only equality between adjacent SNPs matters to the
+/// block rule); `genpos_morgans` is column 3 as-read (Morgans), fed to the shared
+/// block_partition_rule. `ref`/`alt` are the single-character allele codes (col 5
+/// = reference fixing Q's polarity, col 6 = alternate). All vectors have the same
+/// length `count` (== number of SNPs read).
 struct SnpTable {
+    std::vector<std::string> id;            ///< SNP id (col 1) — M2 membership key
     std::vector<int> chrom;                 ///< chromosome code per SNP (file order)
     std::vector<double> genpos_morgans;     ///< genetic position, Morgans, as-read
     std::vector<char> ref;                  ///< reference allele (Q polarity)
