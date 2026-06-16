@@ -67,6 +67,8 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 ---
 
 ## 🧹 Cleanup / tech-debt backlog
+
+> **Phase 1 ✅ COMPLETE (2026-06-16)** — B7, B1, B2, B3, B4, B5, B6 all fixed, build + `ctest` green (**13/13**, +5 new tests), committed `659a8e5`→`23bb873` on `m4-perblock-f2`, each gated by an independent verdict re-verified on the box. Highlights: **§12 determinism now *actually holds*** (B1 — `cublasSetStream` no longer discards the workspace; new `f2_determinism` test asserts bit-identical `f2`+`vpair` run-to-run on M0 *and* M4 at `EmulatedFp64{40}`); **EmulatedFp64 dynamic-mantissa trap closed** (B2 — observable downgrade-with-tag, verified both build lanes); **VRAM budget counts both `f2`+`vpair`+workspace** (B5/B26); **M0 diagonal fixed + mutation-tested** (B4); `block_ranges` single-homed+validated (B3); grid-dim clamps + feeder re-orient (B6); real `launch_config.hpp`/`host_device.hpp`/`log.hpp` homes, duplicate `cdiv` gone (B7). **B5/B6 at-scale validation deferred to a PRO-6000 session.** Authoritative master backlog: `docs/cleanup/00-overview.md` (B1–B27 / L1–L19). **Next: Phase 2 = B8–B27** (MED fail-fast / parser-robustness; incl. B17 HIGH heap-overflow).
 *From the `wn01sl1wz` review (5 lenses + synthesis). Verdict: M0–M4 is **unusually disciplined** (layering compiler-enforced, RAII textbook, shared `__host__ __device__` primitives prevent oracle/GPU divergence, config.hpp exemplary); debt is **concentrated, not pervasive** and clusters into two themes M4.5 would calcify. **No folder reorg needed.** Full findings: workflow `wn01sl1wz` result.*
 
 ### A. Before M4.5 (pay first — sets the standard; M4.5 replicates/calcifies these)
