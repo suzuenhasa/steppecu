@@ -36,12 +36,21 @@
 #include <system_error>
 #include <vector>
 
-#include "io/snp_reader.hpp"  // read_snp, SnpTable
+#include "io/eigenstrat_format.hpp"  // kChromCodeX / kChromCodeY / kChromCodeMt (B16)
+#include "io/snp_reader.hpp"         // read_snp, SnpTable
 
 namespace {
 
 using steppe::io::SnpTable;
 using steppe::io::read_snp;
+
+// B16 verdict gate: the X/Y/MT chromosome codes are single-homed in
+// eigenstrat_format.hpp (NOT bare 23/24/90 literals at the parse site), and the
+// autosomes-only filter (config.hpp 1..22) drops exactly these. Pin the values at
+// compile time so a future edit to the named constants is caught here.
+static_assert(steppe::io::kChromCodeX == 23, "EIGENSTRAT X chrom code is 23");
+static_assert(steppe::io::kChromCodeY == 24, "EIGENSTRAT Y chrom code is 24");
+static_assert(steppe::io::kChromCodeMt == 90, "EIGENSTRAT MT chrom code is 90");
 
 // A unique temp path per fixture so parallel ctest invocations do not collide.
 [[nodiscard]] std::filesystem::path temp_snp(const char* tag) {
@@ -91,34 +100,47 @@ struct ThrowResult {
 }
 
 // ---- (1) WELL-FORMED file → correct chrom + Morgan genpos (verdict gate) ------
-// Three records: a numeric chromosome, a sex label (X→23), and a full 6-field
-// record with explicit alleles. genpos is surfaced unchanged in Morgans.
+// Records: a numeric chromosome, the three non-autosomal sex/MT labels
+// (X→kChromCodeX, Y→kChromCodeY, MT→kChromCodeMt), and a full 6-field record with
+// explicit alleles. genpos is surfaced unchanged in Morgans. The X/Y/MT asserts
+// reference the SINGLE-HOMED named constants (B16), not bare 23/24/90 literals,
+// so this case is the runtime verdict gate that `chrom_code` maps X→kChromCodeX,
+// Y→kChromCodeY, MT→kChromCodeMt (complementing the compile-time static_asserts).
 [[nodiscard]] bool test_wellformed_chrom_and_genpos() {
+    using steppe::io::kChromCodeMt;
+    using steppe::io::kChromCodeX;
+    using steppe::io::kChromCodeY;
+
     TempFile f("wellformed");
     write_text(f.path,
                "rs1 1 0.020130 752566 G A\n"   // numeric chrom, full 6 fields
-               "rs2 X 0.500000 999999 C T\n"   // sex label X -> 23
-               "rs3 22 1.250000 12345 A G\n");  // numeric chrom 22
+               "rs2 X 0.500000 999999 C T\n"   // sex label X  -> kChromCodeX (23)
+               "rs3 Y 0.600000 888888 A T\n"   // sex label Y  -> kChromCodeY (24)
+               "rs4 MT 0.700000 777777 G C\n"  // MT label     -> kChromCodeMt (90)
+               "rs5 22 1.250000 12345 A G\n");  // numeric chrom 22
 
     SnpTable t = read_snp(f.path.string(), SIZE_MAX);
 
-    if (t.count != 3) return false;
-    if (t.id.size() != 3 || t.chrom.size() != 3 || t.genpos_morgans.size() != 3) {
+    if (t.count != 5) return false;
+    if (t.id.size() != 5 || t.chrom.size() != 5 || t.genpos_morgans.size() != 5) {
         return false;
     }
-    // Chromosome codes: numeric pass-through and the X->23 EIGENSTRAT mapping.
+    // Chromosome codes: numeric pass-through and the X/Y/MT EIGENSTRAT mapping,
+    // asserted against the single-homed named constants (B16 verdict gate).
     if (t.chrom[0] != 1) return false;
-    if (t.chrom[1] != 23) return false;
-    if (t.chrom[2] != 22) return false;
+    if (t.chrom[1] != kChromCodeX) return false;   // X
+    if (t.chrom[2] != kChromCodeY) return false;   // Y
+    if (t.chrom[3] != kChromCodeMt) return false;  // MT
+    if (t.chrom[4] != 22) return false;
     // genpos surfaced as-read in Morgans (correctly-rounded decimal->double).
     if (t.genpos_morgans[0] != 0.020130) return false;
     if (t.genpos_morgans[1] != 0.500000) return false;
-    if (t.genpos_morgans[2] != 1.250000) return false;
+    if (t.genpos_morgans[4] != 1.250000) return false;
     // Alleles from cols 5,6 (single-char).
     if (t.ref[0] != 'G' || t.alt[0] != 'A') return false;
     if (t.ref[1] != 'C' || t.alt[1] != 'T') return false;
     // ids preserved in file order.
-    if (t.id[0] != "rs1" || t.id[1] != "rs2" || t.id[2] != "rs3") return false;
+    if (t.id[0] != "rs1" || t.id[1] != "rs2" || t.id[4] != "rs5") return false;
     return true;
 }
 

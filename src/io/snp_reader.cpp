@@ -9,6 +9,8 @@
 // core/device dependency.
 #include "io/snp_reader.hpp"
 
+#include "io/eigenstrat_format.hpp"  // kChromCodeX / kChromCodeY / kChromCodeMt
+
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -27,7 +29,9 @@ namespace {
 
 // EIGENSTRAT chromosome-label conventions for the common non-numeric codes, so
 // adjacent-equality (all the block rule consumes) is well-defined. Numeric codes
-// pass through as their integer value; X/Y/MT take the EIGENSOFT codes; any other
+// pass through as their integer value; X/Y/MT take the EIGENSOFT codes named in
+// eigenstrat_format.hpp (kChromCodeX/Y/Mt — single-homed there because the M2
+// autosomes-only filter drops exactly these, cleanup F12/B16); any other
 // non-numeric label (or an all-digit label too large for int) gets a stable,
 // distinct negative sentinel.
 //
@@ -63,9 +67,11 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
             return value;
         }
     }
-    if (tok == "X" || tok == "x") return 23;
-    if (tok == "Y" || tok == "y") return 24;
-    if (tok == "MT" || tok == "mt" || tok == "M") return 90;
+    // X/Y/MT take the EIGENSOFT codes single-homed in eigenstrat_format.hpp
+    // (the autosomes-only filter drops exactly these — config.hpp kAutosomeChromMax).
+    if (tok == "X" || tok == "x") return kChromCodeX;
+    if (tok == "Y" || tok == "y") return kChromCodeY;
+    if (tok == "MT" || tok == "mt" || tok == "M") return kChromCodeMt;
     auto it = other_codes.find(tok);
     if (it != other_codes.end()) return it->second;
     const int code = next_other--;  // distinct negative sentinel per new label

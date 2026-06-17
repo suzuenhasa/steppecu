@@ -123,9 +123,14 @@ inline constexpr double kCentimorgansPerMorgan = 100.0;
 /// Inclusive autosome chromosome-code range for the `autosomes_only` filter
 /// (M2). ADMIXTOOLS 2's `extract_f2` default is `auto_only = TRUE` ("keep only
 /// SNPs on chromosomes 1 to 22"), so AT2 parity = chromosomes 1..22 — the sex
-/// chromosomes (X→23, Y→24 in the EIGENSTRAT codes snp_reader emits) and MT/other
-/// non-autosomal codes are dropped. Named here (not a bare 22) so the single AT2
-/// autosome definition lives in one place and the filter predicate reads it.
+/// chromosomes (X, Y) and MT/other non-autosomal codes are dropped. The exact
+/// EIGENSTRAT codes those non-autosomal labels map to (X→23, Y→24, MT→90) are
+/// single-homed as `kChromCodeX`/`kChromCodeY`/`kChromCodeMt` in
+/// src/io/eigenstrat_format.hpp — `read_snp` EMITS them and this 1..22 range is
+/// the complement that DROPS them, so the filter's correctness depends on the two
+/// agreeing on those codes (cleanup X-8/B16). Named here (not a bare 22) so the
+/// single AT2 autosome definition lives in one place and the filter predicate
+/// reads it.
 /// (Verified against the AT2 extract_f2 reference: auto_only default TRUE = chr
 /// 1-22. The M3 real-AADR finding — chr 1-24 → 757 blocks, chr 1-23 → 756 —
 /// is consistent: dropping chr 23 AND 24 here is the AT2-parity autosome set.)

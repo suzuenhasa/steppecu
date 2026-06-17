@@ -61,6 +61,34 @@ inline constexpr int kBitsPerCode = 2;
 /// the oracle). Excluded from BOTH numerator and denominator of the allele freq.
 inline constexpr std::uint8_t kMissingCode = 3;
 
+// ---------------------------------------------------------------------------
+// EIGENSTRAT .snp non-autosomal chromosome codes — the single home for the
+// sex/mitochondrial label→code convention (ROADMAP §4 "io format constants";
+// architecture.md §8 single-home). These are FORMAT conventions (the EIGENSOFT
+// integer codes), NOT mathematical constants, so they live here once rather than
+// as bare literals at the `.snp` parse site (cleanup snp_reader F12 / B16, X-8).
+//
+// CORRECTNESS COUPLING — the M2 `autosomes_only` filter depends on these EXACT
+// codes: AT2 parity = autosomes 1..22 (config.hpp `kAutosomeChromMin/Max`), so
+// the sex chromosomes X→23 and Y→24 (and MT/other non-autosomal codes) are the
+// ones the inclusive 1..22 range drops. The `.snp` reader EMITS these codes and
+// the autosome filter EXCLUDES them by definition; both must agree on the X=23 /
+// Y=24 / MT=90 mapping, so it is single-sourced here. See the cross-reference in
+// `include/steppe/config.hpp` (`kAutosomeChromMax`).
+// ---------------------------------------------------------------------------
+
+/// EIGENSTRAT chromosome code for the X (sex) chromosome. Dropped by the
+/// autosomes-only filter (outside the 1..22 autosome range).
+inline constexpr int kChromCodeX = 23;
+
+/// EIGENSTRAT chromosome code for the Y (sex) chromosome. Dropped by the
+/// autosomes-only filter (outside the 1..22 autosome range).
+inline constexpr int kChromCodeY = 24;
+
+/// EIGENSTRAT chromosome code for the mitochondrial (MT) "chromosome". Dropped by
+/// the autosomes-only filter (outside the 1..22 autosome range).
+inline constexpr int kChromCodeMt = 90;
+
 /// Number of bytes needed to pack `n_codes` 2-bit codes, 4 per byte: ceil(n/4).
 /// This is the `ceil(nsnp/4)` (TGENO) / `ceil(nind/4)` (GENO) record-stride
 /// formula the §4 inventory flags — computed here, never open-coded elsewhere.
