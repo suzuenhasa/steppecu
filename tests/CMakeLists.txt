@@ -487,6 +487,42 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME backend_capabilities_probe COMMAND test_backend_capabilities_probe)
 
+# --- M4.5 UNIT I1 build_resources / Resources / PerGpuResources gate ----------
+# CUDA TU, DATA-FREE (sibling of test_backend_capabilities_probe.cu): drives the
+# M4.5 Resources HOME + builder — steppe::device::build_resources — on live
+# devices. The U5 gate above pins one CudaBackend's capabilities() probe; THIS
+# gate pins that build_resources BINDS one backend PER device in
+# DeviceConfig::devices order (the per-device-instance contract, backend.hpp;
+# the fixed g=0..G-1 combine order, architecture.md §11.4/§12) and stores each
+# device's ONE probe in PerGpuResources::caps (out-of-band, cleanup §(2).1/§(2).2).
+# The I1 verdict gate (architecture.md §9 Resources, §11.4 SPMG, §12 parity):
+#   TIER-INVARIANT (every lane): devices={0} -> exactly 1 entry bound to device 0
+#     with compute_major >= 12 and total_vram > 0; devices={} (auto) -> all visible
+#     ordinals 0..count-1 in order (the §9 DeviceConfig::devices auto-enumerate
+#     contract).
+#   rtxbox VERDICT (2x RTX PRO 6000, count >= 2): devices={0,1} -> exactly 2 entries
+#     bound to devices 0 and 1 IN ORDER, each compute_major >= 12, and — on the PRO
+#     tier (device name contains "PRO") — each can_access_peer == true (the REAL
+#     stock-driver P2P; architecture.md §11.4 capability-tier law). On a budget
+#     GeForce box can_access_peer == false is the EXPECTED tagged degrade to the
+#     host-staged combine baseline (a PASS, not a fault), so the strict peer
+#     assertion is KEYED to the tier and the 2-device build still succeeds — the
+#     ONE sm_120 build serves BOTH boxes (the §0 / ⚡ box-role split). NO real f2
+#     compute; every checked field is parity-NEUTRAL (§12) — the gate asserts the
+#     device BINDING + the PROBE, never a reported number.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device (build_resources + the factory + capabilities()) + steppe::core_internal
+# (the src/ include root resolving "device/resources.hpp") + steppe::api (config.hpp).
+# No io / no data. architecture.md §9, §11.4, §12, §13.
+add_executable(test_resources_build reference/test_resources_build.cu)
+target_link_libraries(test_resources_build
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_resources_build PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# resources.cpp's build_resources reaches the GPU only through the CUDA-free factory
+# + capabilities(); no STEPPE_HAVE_EMU_TUNING-gated symbol is touched here, so no
+# emulation-tuning define is needed for this TU.
+add_test(NAME resources_build COMMAND test_resources_build)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is

@@ -24,8 +24,14 @@ add_library(steppe_device STATIC
     cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
-    cpu/cpu_backend.cpp)          # REFERENCE backend: scalar host oracle
+    cpu/cpu_backend.cpp           # REFERENCE backend: scalar host oracle
+    resources.cpp)                # M4.5: build_resources — one backend+probe PER device (CUDA-free body)
 add_library(steppe::device ALIAS steppe_device)
+
+# resources.cpp is a PLAIN .cpp (not CUDA): build_resources reaches the GPU only
+# through the CUDA-free factory (make_cuda_backend) + the CUDA-free capabilities()
+# probe — it includes no CUDA header (design §1/§7). It links into steppe_device so
+# the make_cuda_backend symbol resolves, but is itself device-toolkit-free.
 
 # backend.hpp (the CUDA-free DI seam) is reached as "device/backend.hpp"; the f2
 # estimator + views come via steppe::core_internal as "core/internal/...". Both
