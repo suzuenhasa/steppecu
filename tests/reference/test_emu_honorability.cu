@@ -45,6 +45,7 @@
 #include "steppe/config.hpp"               // Precision, kDefaultMantissaBits
 #include "core/internal/views.hpp"         // MatView (Q/V/N contract)
 #include "device/backend.hpp"              // ComputeBackend, F2Result
+#include "device/backend_factory.hpp"      // steppe::device::make_cuda_backend (X-9/B8)
 #include "device/cuda/f2_block_kernel.cuh" // emulation_honorable, f2_compute_type (the X-6/B2 SoT)
 
 // Match the device layer's in-file default so this TU has a definite value even
@@ -60,8 +61,6 @@ using steppe::F2Result;
 using steppe::core::MatView;
 using steppe::device::emulation_honorable;
 using steppe::device::f2_compute_type;
-
-namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
 
 namespace {
 

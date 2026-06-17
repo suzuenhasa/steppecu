@@ -12,7 +12,7 @@
 // backends AGREE on real data).
 //
 // PRODUCTION SEAM (cleanup X-2/B4): this test drives the PRODUCTION backends —
-// `steppe::core::make_cpu_backend()` (the long-double oracle, CpuBackend::compute_f2)
+// `steppe::device::make_cpu_backend()` (the long-double oracle, CpuBackend::compute_f2)
 // and `steppe::device::make_cuda_backend()` (the 3-GEMM GPU path,
 // CudaBackend::compute_f2) — through the CUDA-free `ComputeBackend::compute_f2`
 // interface, NOT an inline re-implementation. It previously used an INLINE oracle
@@ -77,18 +77,12 @@
 #include "steppe/config.hpp"            // steppe::Precision, kRelFloor, kAbsFloor, kDefaultMantissaBits
 #include "core/internal/views.hpp"      // steppe::core::MatView (the Q/V/N contract)
 #include "device/backend.hpp"           // steppe::ComputeBackend, steppe::F2Result (the f2/Vpair seam)
+#include "device/backend_factory.hpp"   // steppe::device::make_cpu_backend / make_cuda_backend (X-9/B8)
 #include "device/cuda/f2_block_kernel.cuh"  // steppe::device::emulation_honorable (X-6/B2 predicate)
 
 using steppe::Precision;
 using steppe::core::MatView;
 using steppe::F2Result;
-
-// Backend factories (declared where defined: CPU in steppe::core, CUDA in
-// steppe::device — mirrors tests/reference/test_f2_blocks_equivalence.cu and
-// test_decode_equivalence.cu). Declared in no header today (cleanup X-9/B8); the
-// reference tests hand-declare the one prototype each they call.
-namespace steppe::core   { std::unique_ptr<steppe::ComputeBackend> make_cpu_backend(); }
-namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
 
 namespace {
 
@@ -242,7 +236,7 @@ int main(int argc, char** argv) {
     const MatView N{N_raw.data(), P, M};
 
     // ---- PRODUCTION backends through the CUDA-free seam ---------------------
-    auto cpu = steppe::core::make_cpu_backend();
+    auto cpu = steppe::device::make_cpu_backend();
     auto gpu = steppe::device::make_cuda_backend();
 
     const Precision precNat{Precision::Kind::Fp64, steppe::kDefaultMantissaBits};

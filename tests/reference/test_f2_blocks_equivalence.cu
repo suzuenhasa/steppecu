@@ -60,6 +60,7 @@
 #include "core/domain/block_partition_rule.hpp" // assign_blocks, BlockPartition, block_size_cm_to_morgans
 #include "core/fstats/f2_from_blocks.hpp"       // compute_f2_block, compute_f2_blocks (the seam)
 #include "device/backend.hpp"                   // ComputeBackend, F2Result
+#include "device/backend_factory.hpp"           // steppe::device::make_cpu_backend / make_cuda_backend (X-9/B8)
 #include "device/cuda/f2_block_kernel.cuh"      // emulation_honorable (the PRODUCTION honorability predicate, X-6/B2)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
@@ -68,11 +69,6 @@ using steppe::F2BlockTensor;
 using steppe::F2Result;
 using steppe::core::MatView;
 using steppe::core::BlockPartition;
-
-// Backend factories (declared where defined: CPU in steppe::core, CUDA in
-// steppe::device — mirrors tests/reference/test_decode_equivalence.cu).
-namespace steppe::core   { std::unique_ptr<steppe::ComputeBackend> make_cpu_backend(); }
-namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
 
 namespace {
 
@@ -224,7 +220,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[load] derived_acc P=%d M=%ld -> n_block=%d (blgsize=%.3f Morgans) — REAL AADR\n",
                  P, M, part.n_block, bs_morgans);
 
-    auto cpu = steppe::core::make_cpu_backend();
+    auto cpu = steppe::device::make_cpu_backend();
     auto gpu = steppe::device::make_cuda_backend();
 
     const Precision precNat{Precision::Kind::Fp64, steppe::kDefaultMantissaBits};

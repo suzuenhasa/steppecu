@@ -47,6 +47,7 @@
 #include "core/internal/views.hpp"      // steppe::core::MatView
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
 #include "device/backend.hpp"           // ComputeBackend, DecodeTileView, DecodeResult, F2Result
+#include "device/backend_factory.hpp"   // steppe::device::make_cpu_backend (X-9/B8)
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
@@ -67,10 +68,10 @@ using steppe::Precision;
 using steppe::core::MatView;
 namespace flt = steppe::io::filter;
 
-// CPU reference backend factory (src/device/cpu/cpu_backend.cpp). We use the CPU
-// oracle for decode + compute_f2 so the drop-equals-mask comparison is two
-// long-double-accumulated host computations — BIT-IDENTICAL is meaningful.
-namespace steppe::core { std::unique_ptr<ComputeBackend> make_cpu_backend(); }
+// We use the CPU oracle (steppe::device::make_cpu_backend, decl in
+// device/backend_factory.hpp; X-9/B8) for decode + compute_f2 so the drop-equals-
+// mask comparison is two long-double-accumulated host computations — BIT-IDENTICAL
+// is meaningful.
 
 namespace {
 
@@ -238,7 +239,7 @@ int main(int argc, char** argv) {
     view.n_pop = P;
     view.ploidy = ploidy;
 
-    auto cpu = steppe::core::make_cpu_backend();
+    auto cpu = steppe::device::make_cpu_backend();
     const DecodeResult dec = cpu->decode_af(view);
 
     flt::DecodedTileSummaryInput fin;

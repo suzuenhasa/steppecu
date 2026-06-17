@@ -56,9 +56,17 @@
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
 #include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult
+#include "device/backend_factory.hpp"      // steppe::device::make_cpu_backend (the single-source decl, X-9/B8)
 #include "steppe/config.hpp"               // steppe::Precision
 
-namespace steppe::core {
+// CpuBackend + make_cpu_backend live in steppe::device alongside the GPU backend:
+// both implement the ONE CUDA-free ComputeBackend interface and both compile into
+// steppe_device, so they share ONE namespace (cleanup X-9/B8 — the old steppe::core
+// placement was a namespace/layer mismatch: this TU never depended on CUDA, it just
+// builds into the CUDA-private target). The shared host primitives it consumes still
+// live in steppe::core (block_ranges, genotype_code, finalize_af, …) and resolve via
+// the explicit `core::` qualifications below.
+namespace steppe::device {
 
 namespace {
 
@@ -89,9 +97,9 @@ namespace {
 /// deleted copy/move (architecture.md §9).
 class CpuBackend final : public ComputeBackend {
 public:
-    [[nodiscard]] F2Result compute_f2(const MatView& Q,
-                                      const MatView& V,
-                                      const MatView& N,
+    [[nodiscard]] F2Result compute_f2(const core::MatView& Q,
+                                      const core::MatView& V,
+                                      const core::MatView& N,
                                       const Precision& precision) override {
         // The matmul precision mode governs the GPU GEMMs only; the oracle is
         // always the (long-double-accumulated) native reference (architecture.md
@@ -149,8 +157,8 @@ public:
                     // HAPLOID count from the Q/V/N contract (2 × diploids, or
                     // 1 × pseudo-haploids for ancient DNA). Both entries are valid
                     // here, so `valid = true`.
-                    const double hc_i = het_correction(p_i, N.element(i, s), true);
-                    const double hc_j = het_correction(p_j, N.element(j, s), true);
+                    const double hc_i = core::het_correction(p_i, N.element(i, s), true);
+                    const double hc_j = core::het_correction(p_j, N.element(j, s), true);
 
                     // The unbiased per-SNP f2 summand (p_i - p_j)² - hc_i - hc_j,
                     // via the SHARED primitive in its cancellation-free form (it
@@ -158,7 +166,7 @@ public:
                     // LONG DOUBLE: the summand is small, and the cross-SNP sum is
                     // where oracle accuracy is won (see file header).
                     terms[static_cast<std::size_t>(count)] =
-                        static_cast<long double>(f2_term(p_i, p_j, hc_i, hc_j));
+                        static_cast<long double>(core::f2_term(p_i, p_j, hc_i, hc_j));
                     ++count;
                 }
 
@@ -171,7 +179,7 @@ public:
                     pairwise_sum(terms.data(), static_cast<std::size_t>(count));
                 const double vpair = static_cast<double>(count);
                 const double f2_ij =
-                    finalize_f2(static_cast<double>(numerator), vpair);
+                    core::finalize_f2(static_cast<double>(numerator), vpair);
 
                 // Mirror into both triangles of the symmetric column-major outputs.
                 const std::size_t ij =
@@ -200,8 +208,8 @@ public:
     ///
     /// Output layout matches F2BlockTensor: f2/vpair are n_block stacked
     /// column-major [P × P] slabs, entry (i,j,b) at `i + P·j + P·P·b`.
-    [[nodiscard]] F2BlockTensor compute_f2_blocks(const MatView& Q, const MatView& V,
-                                                  const MatView& N, const int* block_id,
+    [[nodiscard]] F2BlockTensor compute_f2_blocks(const core::MatView& Q, const core::MatView& V,
+                                                  const core::MatView& N, const int* block_id,
                                                   int n_block,
                                                   const Precision& precision) override {
         (void)precision;  // oracle is always the long-double native reference (§12)
@@ -261,17 +269,17 @@ public:
                         if (!vi || !vj) continue;
                         const double p_i = Q.element(i, s);
                         const double p_j = Q.element(j, s);
-                        const double hc_i = het_correction(p_i, N.element(i, s), true);
-                        const double hc_j = het_correction(p_j, N.element(j, s), true);
+                        const double hc_i = core::het_correction(p_i, N.element(i, s), true);
+                        const double hc_j = core::het_correction(p_j, N.element(j, s), true);
                         terms[static_cast<std::size_t>(count)] =
-                            static_cast<long double>(f2_term(p_i, p_j, hc_i, hc_j));
+                            static_cast<long double>(core::f2_term(p_i, p_j, hc_i, hc_j));
                         ++count;
                     }
                     const long double numerator =
                         pairwise_sum(terms.data(), static_cast<std::size_t>(count));
                     const double vpair = static_cast<double>(count);
                     const double f2_ij =
-                        finalize_f2(static_cast<double>(numerator), vpair);
+                        core::finalize_f2(static_cast<double>(numerator), vpair);
                     const std::size_t ij = base +
                         static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(j);
                     const std::size_t ji = base +
@@ -346,12 +354,13 @@ public:
 
 }  // namespace
 
-/// Factory for the CPU reference backend. Returned as a base-class pointer so
-/// callers depend only on the CUDA-free `ComputeBackend` interface (the DI seam,
-/// architecture.md §8; injected into `Resources`, §9). The GPU factory mirrors
-/// this signature in the device layer.
+/// Factory for the CPU reference backend (declared in device/backend_factory.hpp,
+/// X-9/B8). Returned as a base-class pointer so callers depend only on the CUDA-free
+/// `ComputeBackend` interface (the DI seam, architecture.md §8; injected into
+/// `Resources`, §9). The GPU factory `make_cuda_backend` mirrors this signature in
+/// the same namespace.
 [[nodiscard]] std::unique_ptr<ComputeBackend> make_cpu_backend() {
     return std::make_unique<CpuBackend>();
 }
 
-}  // namespace steppe::core
+}  // namespace steppe::device

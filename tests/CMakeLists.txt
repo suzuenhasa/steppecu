@@ -23,15 +23,16 @@ fallback (returns non-zero on failure; CTest gates on exit code)")
 endif()
 
 # --- GPU-vs-CPU equivalence test (the central M0 trust seam) -----------------
-# CUDA TU: drives the PRODUCTION backends — steppe::core::make_cpu_backend() (the
+# CUDA TU: drives the PRODUCTION backends — steppe::device::make_cpu_backend() (the
 # long-double oracle) and steppe::device::make_cuda_backend() (the 3-GEMM GPU
 # path) — through the CUDA-free ComputeBackend::compute_f2 seam, NOT an inline
 # re-implementation (cleanup X-2/B4: the old inline oracle walked j=i+1 and hid the
-# M0 diagonal divergence). It diffs the FULL [P × P] matrix INCLUDING the diagonal
-# and exits non-zero on any mismatch. Links steppe::core (make_cpu_backend) +
-# steppe::device (make_cuda_backend + the device-private kernel header for the X-6/
-# B2 emulation_honorable predicate); CUDA::cublas is transitively-private through
-# steppe_device.
+# M0 diagonal divergence). Both factories are declared in the CUDA-free
+# device/backend_factory.hpp (X-9/B8) and now share namespace steppe::device. It
+# diffs the FULL [P × P] matrix INCLUDING the diagonal and exits non-zero on any
+# mismatch. Links steppe::core (transitively) + steppe::device (both factories +
+# the device-private kernel header for the X-6/B2 emulation_honorable predicate);
+# CUDA::cublas is transitively-private through steppe_device.
 #
 # This test has its OWN main() and is NOT a GoogleTest-style TU (it self-checks
 # and exits non-zero on failure), so it does NOT link gtest_main or define
@@ -179,6 +180,26 @@ if(STEPPE_HAVE_GTEST)
   target_compile_definitions(test_launch_config PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
 add_test(NAME launch_config_unit COMMAND test_launch_config)
+
+# --- Host-only unit test of the backend-factory single source (X-9/B8) --------
+# Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend_factory.hpp
+# and static_asserts that BOTH factories — make_cpu_backend AND make_cuda_backend —
+# are declared in the ONE namespace steppe::device with the documented
+# std::unique_ptr<ComputeBackend>() signature, reached THROUGH the header (no ad-hoc
+# forward declaration). The checks are decltype-only (they never ODR-use the
+# factory), so this TU compiles + links WITHOUT steppe::device / its PRIVATE CUDA
+# toolkit — which is itself the proof the header is CUDA-free (a CUDA leak would
+# fail this host compile). The end-to-end link-through-the-header path is exercised
+# by the six reference .cu tests that now reach both factories through this header
+# with their forward declarations deleted. architecture.md §4, §8, §13; cleanup X-9/B8.
+add_executable(test_backend_factory unit/test_backend_factory.cpp)
+target_link_libraries(test_backend_factory
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_backend_factory PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_backend_factory PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME backend_factory_unit COMMAND test_backend_factory)
 
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure

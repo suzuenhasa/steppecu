@@ -42,6 +42,7 @@
 #include "steppe/config.hpp"            // steppe::Precision, kDefaultMantissaBits, kRelFloor, kAbsFloor
 #include "core/internal/views.hpp"      // steppe::core::MatView
 #include "device/backend.hpp"           // ComputeBackend, DecodeTileView, DecodeResult, F2Result
+#include "device/backend_factory.hpp"   // steppe::device::make_cpu_backend / make_cuda_backend (X-9/B8)
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
@@ -55,11 +56,6 @@ using steppe::DecodeTileView;
 using steppe::F2Result;
 using steppe::Precision;
 using steppe::core::MatView;
-
-// The backend factories (defined in src/device/{cpu/cpu_backend.cpp,
-// cuda/cuda_backend.cu}). Declared here; no public factory header exists yet.
-namespace steppe::core { std::unique_ptr<ComputeBackend> make_cpu_backend(); }
-namespace steppe::device { std::unique_ptr<ComputeBackend> make_cuda_backend(); }
 
 namespace {
 
@@ -215,7 +211,7 @@ int main(int argc, char** argv) {
     const std::size_t pm = static_cast<std::size_t>(P) * M;
 
     // ---- (1) Decode via both backends ---------------------------------------
-    auto cpu = steppe::core::make_cpu_backend();
+    auto cpu = steppe::device::make_cpu_backend();
     auto gpu = steppe::device::make_cuda_backend();
 
     const DecodeResult dec_cpu = cpu->decode_af(view);

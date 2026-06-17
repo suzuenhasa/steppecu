@@ -31,6 +31,7 @@
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
+#include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
@@ -367,9 +368,10 @@ private:
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
 };
 
-/// Factory for the GPU backend (architecture.md §9 — backend chosen at build()).
-/// Returns the abstract interface so `core` / `Resources` never name the concrete
-/// type or touch a CUDA header (architecture.md §4, §8).
+/// Factory for the GPU backend (declared in device/backend_factory.hpp, X-9/B8;
+/// architecture.md §9 — backend chosen at build()). Returns the abstract interface
+/// so `core` / `Resources` never name the concrete type or touch a CUDA header
+/// (architecture.md §4, §8).
 [[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend() {
     return std::make_unique<CudaBackend>();
 }

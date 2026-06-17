@@ -50,6 +50,7 @@
 #include "core/domain/block_partition_rule.hpp" // assign_blocks, BlockPartition, block_size_cm_to_morgans
 #include "core/fstats/f2_from_blocks.hpp"       // compute_f2_block, compute_f2_blocks (the seam)
 #include "device/backend.hpp"                   // ComputeBackend, F2Result
+#include "device/backend_factory.hpp"           // steppe::device::make_cuda_backend (X-9/B8)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
 using steppe::Precision;
@@ -57,10 +58,6 @@ using steppe::F2BlockTensor;
 using steppe::F2Result;
 using steppe::core::BlockPartition;
 using steppe::core::MatView;
-
-// Backend factory (declared where defined: CUDA in steppe::device — mirrors
-// tests/reference/test_f2_blocks_equivalence.cu).
-namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
 
 namespace {
 
