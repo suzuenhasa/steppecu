@@ -2,7 +2,7 @@
 
 Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationale**) and [`architecture.md`](architecture.md) (the **design & standards**). This is the **granular next-steps checklist for future-us** — keep it current as milestones land. Update the checkboxes; move finished items to "Done".
 
-**Big picture (2026-06-16):** the **precompute half exists** — M0–M4 done (validated 3-GEMM f2 kernel → data front-end → filters → per-block `f2_blocks` tensor), all green on the box. The **fit engine (Phase 2) does not exist yet**, and the precompute still has scale/robustness milestones (M4.5–M7). Everything below sits on branch `m4-perblock-f2` until M4 is merged to `main`.
+**Big picture (2026-06-17):** the **precompute half exists** — M0–M4 done (validated 3-GEMM f2 kernel → data front-end → filters → per-block `f2_blocks` tensor) **+ the entire before-M4.5 cleanup (B1–B27)**, all merged to `main` @ `1fbb417`, clean from-scratch build 24/24 ctest green, codebase ~9.5/10 on the fixed axes. The **fit engine (Phase 2) does not exist yet**, and the precompute still has scale/robustness milestones (M4.5–M7). **Next = M4.5** (single-node multi-GPU) — the moment to spin up the **RTX PRO 6000**.
 
 ---
 
@@ -16,15 +16,33 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 ---
 
 ## ▶ Next: M4.5 — Single-node multi-GPU precompute
-*Depends: M4. Composes with M5. Refs: architecture §11.4 (the design), §9 (Resources/PerGpuResources), §12 (parity/determinism).*
-- [ ] `Resources` / `PerGpuResources` structs (§9): per-device id, StreamPool, allocator, `CublasHandle`, optional `NcclComm` — one per `DeviceConfig::devices`.
-- [ ] SPMG orchestration: one host thread + per-device stream per GPU, `cudaSetDevice` to switch, opportunistic `cudaDeviceEnablePeerAccess` (gated on `enable_peer_access` + `canAccessPeer`).
-- [ ] SNP-range shard across G devices (static range to start; tile round-robin later with M5).
-- [ ] Each device computes a **full-shape partial** `f2_blocks` + `Vpair` over its shard.
-- [ ] Host-side combine: sum the G partials in **fixed device order** (`g=0..G-1`), reference precision — **NOT NCCL AllReduce** (§12 parity).
-- [ ] Broadcast result to all devices (NCCL Broadcast or `cudaMemcpy` — order-independent).
-- [ ] **Parity test:** result bit-identical across G (1 vs 2 GPUs) AND to the single-GPU reference, on real AADR.
+*Depends: M4. Composes with M5. Refs: architecture §11.4 (design), §9 (Resources/PerGpuResources), §12 (parity); the audit `docs/cleanup/00-overview.md` §(2) "CAPABILITY-TIER COHERENCE — the ONE unified design"; the ⚡ section's capability-tier table + box-role split; full plan = `handoff-1fbb417.md` §5.*
+
+**Goal.** Shard SNP work across the G devices; each computes a full-shape **partial** `f2_blocks`+`Vpair`; combine the partials **once, host-side, in fixed device order** (`g=0..G-1` = `DeviceConfig::devices` order) in reference precision; broadcast back. **Bit-identical across G AND to the single-GPU reference (§12).** This is *the* milestone that introduces the **capability-tier machinery** — it's the first capable-vs-budget fork (P2P device-combine vs host-staged). **Build the host-staged baseline first; P2P is an opt-in fast-path.**
+
+*Resources / device threading (Theme-1 debt M4.5 calcifies — these land here):*
+- [ ] **`Resources` / `PerGpuResources`** (§9), one per `DeviceConfig::devices`, all RAII: `{int device_id; Stream stream; CublasHandle blas; DeviceAllocator* allocator; (NcclComm comm);}`. Each binds `cudaSetDevice(device_id)`; **replicate B1's (stream,workspace)-owning `CublasHandle` per device.**
+- [ ] **`CudaBackend` device_id threading** — thread `device_id` into the ctor + `cudaSetDevice` (audit F19/F20: cleanup left the backend single-current-device). The SPMG prerequisite.
+
+*Capability probe = the §(2) unified design, lands HERE:*
+- [ ] **`BackendCapabilities` probe** at `Resources`/`build()` assembly, per device: compute capability + free/**total** VRAM (`cuda_backend` already calls `cudaMemGetInfo` and **discards `total_b`** — capture it), `cudaDeviceCanAccessPeer` (P2P), emulated-FP64-honorable state (B2's predicate). Result = a small value in `Resources`.
+- [ ] **Non-throwing, tagged-degrade path DISTINCT from `STEPPE_CUDA_CHECK`** (the `device-cuda-check` CAP-1/CAP-2 finding) — `canAccessPeer="no"` / `cudaErrorPeerAccessAlreadyEnabled` are EXPECTED on the budget box ⇒ `STEPPE_LOG_WARN`-and-degrade, **NEVER throw**. Add a `STEPPE_CUDA_WARN`-style variant alongside `check.cuh` (uses the `log.hpp` from B7).
+
+*Shard → partials → combine:*
+- [ ] **SNP-range shard** across G devices (static range to start; tile round-robin later with M5); each device runs `compute_f2_blocks` on its shard → its own **full-shape partial** `f2_blocks`+`Vpair`.
+- [ ] **Host-side fixed-order combine = the PORTABLE PARITY BASELINE** (works on the budget 5090): gather G partials to host, sum in fixed device order, reference precision — **NOT NCCL AllReduce** (its order varies with G, breaks §12). Broadcast back (NCCL Broadcast or `cudaMemcpy`, order-independent).
+- [ ] **Optional capable-path P2P device-combine** (gated on `prefer_p2p_combine` + `cudaDeviceCanAccessPeer`): device 0 pulls each peer's partial via `cudaMemcpyPeer` (byte-exact DMA) and sums in the SAME fixed `g=0..G-1` order **on-device — bit-identical** to host-staged (transport only moves bytes; never NCCL AllReduce). **Tagged fallback** on the budget box: log *"P2P combine unavailable (no peer access) → host-staged fixed-order combine"*. Clean stock-driver on the **PRO 6000** (IOMMU/ACS off, no NVLink this SKU); aikitoria-patch-only on 2× 5090 (dev-only, NEVER production). steppe is P2P/NVLink-insensitive by design (combine is kB–MB, off critical path).
 - [ ] Confirm NCCL present on the box (else `cudaMemcpy` broadcast).
+
+*Knob separation (audit §(2).3) + the gate:*
+- [ ] **Two knob types:** override-intent → `DeviceConfig` (`enable_peer_access` exists; **add `prefer_p2p_combine`**); discovered-capability + which-path tag → `Resources`/result metadata (**NEVER on `F2BlockTensor`** — keep it pure numeric).
+- [ ] **Parity test (the GATE):** multi-GPU combine bit-identical across G (1 vs 2 GPUs) AND to the single-GPU reference, on real AADR (`derived_full` P=768). Extend the `f2_determinism` pattern to the multi-device combine.
+
+**Files that change (audit §(2)):** `config.hpp` (override-knob banner + `prefer_p2p_combine`; `deterministic` landed in B9) · `backend.hpp` (`BackendCapabilities probe()` + per-device contract) · `cuda_backend.cu` (probe + capture `total_b` + `cudaSetDevice`/`device_id` + EmulatedFp64-not-honorable tagged degrade) · `f2_from_blocks.cpp` (thread `Resources`, host the `canAccessPeer`-gated combine *policy*) · `handles.hpp` (record device ordinal) · `log.hpp` (tagged-warn sink, exists from B7) · `device/cuda/check.cuh` (the non-throwing `STEPPE_CUDA_WARN` probe variant).
+
+**VRAM note (B26):** `f2_blocks`+`Vpair` = `2·P²·n_block·8`. Multi-GPU **REPLICATES the full-shape partial per device** — it shards the **input (SNP) work** for throughput + the combine, it does NOT reduce the per-device **output** footprint. Per-device `f2_blocks` ceiling stays P-bound (~P=1360 @70% on a 5090, ~P=2356 on the 96 GB PRO 6000). Large-P input streaming is M5.
+
+**Where it's testable:** the **host-staged combine + parity test works on the budget 2× 5090** (do the bulk there). The **P2P device-combine path needs the PRO 6000** (clean stock-driver P2P). Start with a short design step (Resources + capability-probe + the combine seam) before code.
 
 ## M5 — Out-of-core SNP-tile streaming
 *Depends: M1 + M4. Refs: architecture §11.1 (mechanism), §11.2 (VRAM budget), §7 (streams/pools).*
@@ -141,8 +159,8 @@ Shared `__host__ __device__` per-element primitives (oracle≡GPU) · every cons
 **Per-milestone design changes:** M4.5 — add the optional `canAccessPeer`-gated P2P device-combine (host-staged stays the baseline) · M5 — runtime-probed GDS lane (NOT `gdscheck`) + `build()` RLIMIT_MEMLOCK probe · M7 — GDS for the `.f64` cache + nvCOMP SM-decompress · **cross-cutting — a capability probe + capability-tagged results** (every run records which path it took + why it degraded), slotting into `DeviceConfig`/`Resources`; `--dry-run` reports per-box P_max.
 
 ## 🔧 Cross-cutting tracked tasks
-- [ ] **Merge M4 → `main`** (after the pre-M4.5 cleanup lands).
-- [ ] **Install R + admixtools** on the box → AT2 goldens (gates M7 parity).
+- [x] **Merge M4 → `main`** — DONE @ `1fbb417` (M0–M4 + before-M4.5 cleanup B1–B27, 24/24 ctest green).
+- [ ] **Install R + admixtools** on the box → AT2 goldens (gates M7 parity) → the PRO-6000 session.
 - [x] **GPU-dominant perf research** (`wqd0a9o0l`) — DONE; results folded into the ⚡ section (M5 pinned ingest, M4.5 filter-fusion, Phase 2 graphs, M7 nvCOMP; GDS ruled out on vast).
 - [ ] **[adopt now] Nsight Systems measure-first gate** (§11.3) — classify ingest/launch/orchestration-bound before building any perf lever (see ⚡ section). The prerequisite that orders the perf work.
-- [ ] Prune merged feature branches (`m0-f2-scaffold`, `m1-decode-af`, `m2-filters`, `m3-block-partition`) once merged to `main`.
+- [ ] Prune the merged feature branches (`m0-f2-scaffold`, `m1-decode-af`, `m2-filters`, `m3-block-partition`, `m4-perblock-f2`) — all merged to `main`.
