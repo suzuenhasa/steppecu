@@ -191,6 +191,28 @@ target_link_libraries(test_f2_int_max_guard
 set_target_properties(test_f2_int_max_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME f2_int_max_guard COMMAND test_f2_int_max_guard)
 
+# --- B23 DeviceBuffer<T> n*sizeof(T) overflow guard gate (device_buffer 1.1/7.5)
+# CUDA TU, DATA-FREE (sibling of test_f2_int_max_guard.cu): exercises the
+# device-private DeviceBuffer<T> RAII owner directly. device_buffer.cuh is a `.cuh`
+# (includes <cuda_runtime.h>) — PRIVATE to steppe_device (architecture.md §4) — so
+# unlike the host-only unit tests this gate is a CUDA TU. The B23 verdict gate:
+# DeviceBuffer<T>(n) with `n` near SIZE_MAX/sizeof(T) must THROW a typed CudaError
+# (status cudaErrorMemoryAllocation -> STEPPE_ERR_DEVICE_OOM, §10) rather than
+# SILENTLY WRAP the `n * sizeof(T)` size_t multiply and under-allocate (the guard
+# fires before cudaMalloc). It also pins the TIGHT inequality (n==SIZE_MAX/sizeof(T)
+# is NOT rejected — it fails later on the genuine cudaMalloc, a different DeviceOom),
+# the untouched happy path (small alloc is non-null with exact size()/bytes(),
+# zero-size is {nullptr,0,0}), and the move-only RAII shape (move-construct nulls
+# source, move-assign frees-then-steals, self-move no-op) the §13 compute-sanitizer
+# protects. Self-checking main() (not a GoogleTest TU); CTest gates on the exit code.
+# Links steppe::device only (no io / no data). architecture.md §2 fail-fast, §11.2,
+# §13; cleanup device_buffer 1.1/7.5, B23.
+add_executable(test_device_buffer reference/test_device_buffer.cu)
+target_link_libraries(test_device_buffer
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_device_buffer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME device_buffer_unit COMMAND test_device_buffer)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.
