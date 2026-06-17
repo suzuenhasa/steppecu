@@ -287,6 +287,28 @@ target_link_libraries(test_device_buffer
 set_target_properties(test_device_buffer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME device_buffer_unit COMMAND test_device_buffer)
 
+# --- M4.5 CAP-1/CAP-2 non-throwing tagged-degrade check gate (device-cuda-check)
+# CUDA TU, DATA-FREE and NO GPU work (sibling of test_device_buffer.cu): drives the
+# device-private check.cuh (a .cuh — PRIVATE to steppe_device, architecture.md §4 —
+# so this gate is a CUDA TU) on chosen cudaError_t values, never touching a device.
+# The verify gate (cleanup device-cuda-check CAP-1/CAP-2; architecture.md §10, §11.4,
+# §12; TODO M4.5): STEPPE_CUDA_WARN on the EXPECTED capability-degrade statuses
+# (cudaErrorPeerAccessAlreadyEnabled / cudaErrorPeerAccessNotEnabled) does NOT throw,
+# logs one line, and YIELDS the status the multi-GPU probe branches on — while
+# STEPPE_CUDA_CHECK on the SAME status DOES throw a CudaError carrying it (the two are
+# distinct paths; routing a graceful degrade through the throwing checker would fault
+# the budget tier). Also pins the success quiet-pass-through and the source_location
+# capture (the A-4 nvcc-fragility regression guard). The runtime's
+# cudaGetErrorName/String are host-side string lookups needing no device context, so
+# this runs on EVERY lane with no GPU and no data. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::device (check.cuh) +
+# steppe::core_internal (the STEPPE_LOG_WARN sink). No io / no data / no GPU.
+add_executable(test_cuda_check reference/test_cuda_check.cu)
+target_link_libraries(test_cuda_check
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_cuda_check PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME cuda_check_unit COMMAND test_cuda_check)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.
