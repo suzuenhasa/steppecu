@@ -154,6 +154,22 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME emu_honorability COMMAND test_emu_honorability)
 
+# --- B12 compute_f2 degenerate-extent guard gate (X-7/E-3) -------------------
+# CUDA TU, DATA-FREE (mirrors test_emu_honorability.cu): drives the production seam
+# (make_cuda_backend -> compute_f2) on degenerate extents to assert the X-7/E-3
+# fail-fast guard. The B12 verdict gate: compute_f2 with P<=0 || M<=0 returns an
+# EMPTY F2Result CLEANLY (no cuBLAS / CUDA throw from deep in the runtime), matching
+# its siblings compute_f2_blocks / decode_af which already early-return; plus a
+# positive control that a tiny VALID block still produces a populated [P x P] result
+# (the guard did not break the happy path). Self-checking main() (not a GoogleTest
+# TU); CTest gates on the exit code. Links steppe::device only (no io / no data).
+# architecture.md §2 fail-fast, §13; cleanup X-7/E-3, B12.
+add_executable(test_f2_empty_guard reference/test_f2_empty_guard.cu)
+target_link_libraries(test_f2_empty_guard
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_empty_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME f2_empty_guard COMMAND test_f2_empty_guard)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.

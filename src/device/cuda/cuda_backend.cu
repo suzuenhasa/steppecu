@@ -68,6 +68,28 @@ public:
                                       const Precision& precision) override {
         const int P = Q.P;
         const long M = Q.M;
+
+        // ---- Degenerate-extent early return (cleanup X-7/E-3, B12) -----------
+        // Sibling-consistency: compute_f2_blocks and decode_af both early-return
+        // an empty result on a zero/negative extent (architecture.md §2 fail-
+        // fast). Without this guard a zero/negative P or M throws from deep in
+        // the runtime / cuBLAS instead of returning cleanly: M==0 makes
+        // core::cdiv(0,16)==0, a zero-extent grid the CUDA driver rejects with
+        // cudaErrorInvalidConfiguration (CUDA Runtime API §kernel-launch: a grid
+        // dimension of 0 is an invalid launch configuration), and a non-negative
+        // M==0 feeds k==0 into cublasGemmEx → CUBLAS_STATUS_INVALID_VALUE (cuBLAS
+        // §2.x: k must be >= 0 and the GEMM is a no-op only for k==0 with defined
+        // alpha/beta, but our downstream assemble assumes a populated G). A
+        // negative P/M would also wrap the size_t extent products below into a
+        // ~1.8e19 allocation reported as DeviceOom, not the InvalidConfig the
+        // contract intends. Returning an empty F2Result (out.P carries the given
+        // P, f2/vpair empty) makes the degenerate case a clean no-op — the shape
+        // M4.5 multi-GPU sharding needs when a device is handed an empty SNP
+        // shard.
+        F2Result out;
+        out.P = P;
+        if (P <= 0 || M <= 0) return out;
+
         const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
         const std::size_t two_pm = 2u * pm;
         const std::size_t pp = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
@@ -102,8 +124,7 @@ public:
         launch_assemble_f2(dG.data(), dVpair.data(), dR.data(), dF2.data(), P, stream_);
 
         // ---- Copy results back across the CUDA-free seam --------------------
-        F2Result out;
-        out.P = P;
+        // `out` (with out.P set) was constructed before the degenerate guard.
         out.f2.resize(pp);
         out.vpair.resize(pp);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2.data(), pp * sizeof(double),

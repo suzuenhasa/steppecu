@@ -31,6 +31,10 @@ namespace steppe::device {
 /// Hc uses the SHARED `het_correction` primitive (core/internal/f2_estimator.hpp)
 /// so the CPU oracle and this feeder cannot diverge on the formula
 /// (architecture.md §13). All native FP64. `M` is `long` (SNP-count scale).
+/// PRECONDITION: `P >= 1, M >= 1` — a zero/negative extent yields a zero-extent
+/// grid the CUDA driver rejects (cudaErrorInvalidConfiguration). The caller
+/// (compute_f2) guards the degenerate case with an empty-result early return
+/// (cleanup E-3/B12), so this wrapper is never reached with `P<=0 || M<=0`.
 void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* dN_raw,
                       double* dQ_masked, double* dV_out, double* dS,
                       int P, long M, cudaStream_t stream);
@@ -83,6 +87,10 @@ void engage_f2_precision(cublasHandle_t handle, const Precision& precision);
 /// cleanup X-1/B1). This routine deliberately takes NO stream and never calls
 /// `cublasSetStream` — doing so would reset the workspace to the default pool
 /// (cuBLAS §2.4.7) and defeat the §12 determinism guarantee.
+/// PRECONDITION: `P >= 1, M >= 1` — `M` becomes the GEMM contraction extent `k`,
+/// and cuBLAS requires `k >= 0` (k==0 would be a degenerate no-op leaving dG/dR
+/// unpopulated). The caller (compute_f2) guards `P<=0 || M<=0` with an empty
+/// result before this is reached (cleanup E-3/B12).
 void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
                   int P, long M,
                   const double* dQ, const double* dV, const double* dS,
