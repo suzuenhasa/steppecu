@@ -7,6 +7,7 @@
 #include "io/filter/snp_filter.hpp"
 
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 
 #include "io/filter/filter_decision.hpp"  // the shared predicates (single source)
@@ -20,6 +21,23 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
     std::vector<PerSnpSummary> out(static_cast<std::size_t>(M < 0 ? 0 : M));
     if (P <= 0 || M <= 0) return out;
 
+    // Fail-fast on a nonsensical ploidy (architecture.md §2 fail-fast; cleanup
+    // B10/F5/X-11). Ploidy is METADATA, never auto-detected, and {1, 2} are the
+    // only meaningful values (decode_af.hpp). A non-positive / out-of-range ploidy
+    // is a config/wiring error: the previous silent clamp-to-1 produced a
+    // plausible-but-wrong missing fraction (it doubles nonmissing_indiv vs the
+    // diploid truth) rather than surfacing the bug. This RECONCILES the illegal-
+    // ploidy contract with the decode primitive: the device-side finalize_af has
+    // no throw path on the GPU so it masks the cell OUT ({0,0,0}); this host `io`
+    // leaf has a throw path, so it rejects up front — both refuse to fabricate a
+    // trustworthy N from a bad ploidy. std::invalid_argument is the io-leaf idiom
+    // (cf. include_exclude.cpp's runtime_error on a bad read).
+    if (in.ploidy != 1 && in.ploidy != 2) {
+        throw std::invalid_argument(
+            "snp_filter: ploidy must be 1 (pseudo-haploid) or 2 (diploid); got " +
+            std::to_string(in.ploidy));
+    }
+
     // Total kept individuals across the kept pops (the missing-fraction
     // denominator). SNP-independent: the sample axis is fixed for the tile.
     std::size_t total_indiv = 0;
@@ -27,7 +45,7 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
         total_indiv += in.pop_individuals[static_cast<std::size_t>(p)];
     }
     const double total_indiv_d = static_cast<double>(total_indiv);
-    const double ploidy_d = static_cast<double>(in.ploidy > 0 ? in.ploidy : 1);
+    const double ploidy_d = static_cast<double>(in.ploidy);
 
     for (long s = 0; s < M; ++s) {
         // Reduce ACROSS the kept populations into SNP-global scalars (the §1, §5

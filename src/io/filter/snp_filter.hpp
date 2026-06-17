@@ -54,6 +54,10 @@ struct DecodedTileSummaryInput {
     /// Per-sample ploidy (2 diploid / 1 pseudo-haploid), to convert N (haploid
     /// count) back to the non-missing INDIVIDUAL count for the missing fraction:
     /// nonmissing_individuals_pop = N_pop / ploidy. Default 2 (the AADR case).
+    /// Must be 1 or 2 — `derive_per_snp_summary`/`build_snp_keep_mask` throw
+    /// std::invalid_argument on any other value (fail-fast on misset metadata;
+    /// cleanup B10/X-11), reconciling with decode_af.hpp::finalize_af which masks
+    /// out a cell decoded with a non-positive ploidy.
     int ploidy = 2;
 };
 
@@ -76,7 +80,8 @@ struct PerSnpSummary {
 ///   nonmissing_indiv   = Σ_pop N(pop,s) / ploidy
 ///   total_indiv        = Σ_pop pop_individuals[pop]
 ///   missing_frac       = 1 - nonmissing_indiv / total_indiv       (1 if total 0)
-/// Length-M result, parallel to the SNP axis.
+/// Length-M result, parallel to the SNP axis. Throws std::invalid_argument if
+/// `in.ploidy` is not 1 or 2 (fail-fast on misset metadata; cleanup B10/X-11).
 [[nodiscard]] std::vector<PerSnpSummary> derive_per_snp_summary(
     const DecodedTileSummaryInput& in);
 
@@ -97,7 +102,8 @@ struct PerSnpSummary {
 /// so the no-op-when-default parity property holds there.
 ///
 /// `snps.count` must be >= `in.M` (the first M ids/alleles are used). Returns a
-/// length-M std::vector<bool>.
+/// length-M std::vector<bool>. Throws std::invalid_argument (via
+/// derive_per_snp_summary) if `in.ploidy` is not 1 or 2 and M > 0 (cleanup B10).
 [[nodiscard]] std::vector<bool> build_snp_keep_mask(
     const DecodedTileSummaryInput& in,
     const SnpTable& snps,

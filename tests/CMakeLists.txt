@@ -166,6 +166,24 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME f2_estimator_unit COMMAND test_f2_estimator)
 
+# --- Host-only unit test of the shared decode/allele-frequency primitive ------
+# Pure C++ TU (no CUDA, no data): proves the __host__ __device__ decode primitives
+# in core/internal/decode_af.hpp (genotype_code, genotype_valid, finalize_af)
+# compile and are correct on the host path (STEPPE_HD == empty under g++), the
+# §13-mandated direct test of the single-source decode primitive (previously only
+# covered transitively by the GPU/4GB-data .cu). The B10 verdict gate: finalize_af
+# with ploidy=0 -> masked-out {0,0,0} (not NaN/Inf-with-validity), ploidy=1 ->
+# haploid (N == 1*AN), ploidy=2 -> diploid (N == 2*AN). architecture.md §13;
+# cleanup B10/X-11/T-1. Links only steppe::core_internal (the header-only home).
+add_executable(test_decode unit/test_decode.cpp)
+target_link_libraries(test_decode
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_decode PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_decode PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME decode_unit COMMAND test_decode)
+
 # --- Host-only unit test of the B7 single-source-home headers ----------------
 # Pure C++ TU (no CUDA): pins the launch-math home (core/internal/launch_config.hpp
 # — cdiv int+long, grid_for, the warp-justified 32×8 decode block dims) and the

@@ -25,7 +25,9 @@
 //     genotypes; ROADMAP Q/V/N contract):
 //       N = ploidy * AN       (non-missing HAPLOID count: 2×non-missing diploids)
 //       Q = AC / N            (ref-allele frequency in [0,1]; 0 where AN == 0)
-//       V = (AN > 0) ? 1 : 0  (validity mask)
+//       V = (AN > 0 && ploidy > 0) ? 1 : 0  (validity mask; a non-positive ploidy
+//                             is misset metadata and masks the cell OUT — see
+//                             finalize_af, cleanup B10/X-11)
 //     For the real AADR data every sample is diploid (ploidy == 2), so every N is
 //     even — exactly the oracle's `N = 2*non-missing`, `Q = AC/(2*AN)`.
 //
@@ -85,14 +87,30 @@ struct AfResult {
 ///   `ac` = Σ genotype codes over NON-missing individuals (ref-allele copies),
 ///   `an` = count of NON-missing INDIVIDUALS,
 ///   `ploidy` = per-sample haploid multiplier (2 diploid, 1 pseudo-haploid — a
-///              metadata parameter, never inferred from genotypes).
+///              metadata parameter, never inferred from genotypes; the only
+///              meaningful values are {1, 2}).
 /// Yields N = ploidy*an, Q = ac/N (0 where an==0), V = (an>0). This is the EXACT
 /// oracle math (`N = 2*an`, `Q = ac/(2*an)`, `V = an>0` for ploidy 2). The single
 /// FP64 divide here is what keeps Q exact: AC/AN are integer-accumulated, divided
 /// once. Used by BOTH the CPU reference and the GPU kernel.
+///
+/// PLOIDY VALIDITY (fail-soft, the single home of the Q/V/N contract — cleanup
+/// B10/X-11): `ploidy` is folded INTO the validity test, so a non-positive ploidy
+/// (`ploidy <= 0` — uninitialized/misset metadata) degrades to the masked-out
+/// `{q:0, n:0, v:0}` result, NOT a NaN/Inf-with-validity. Without this guard,
+/// `ploidy == 0` with `an > 0` would give `n == 0` and `q = ac/0` — well-defined
+/// IEEE-754 (this target is `is_iec559`): `+inf`/`NaN` — while still reporting
+/// `v == 1`, so a non-finite Q would slip past the `an > 0` "we have data" branch
+/// UNMASKED and poison every f2 GEMM touching that column (architecture.md §2
+/// fail-fast: degrade, never silently corrupt). The upstream `io` filter leaf
+/// REJECTS a bad ploidy outright (snp_filter.cpp validates `ploidy ∈ {1, 2}` and
+/// throws), so the two single-source primitives now AGREE on the illegal-ploidy
+/// contract: this device-side per-element primitive — which has no throw path on
+/// the GPU and no `ConfigBuilder::build()`-time validation (ploidy lives on the
+/// per-call DecodeTileView, not RunConfig) — masks out; the host filter throws.
 [[nodiscard]] STEPPE_HD inline AfResult finalize_af(long ac, long an, int ploidy) noexcept {
     AfResult r;
-    if (an > 0) {
+    if (an > 0 && ploidy > 0) {
         const double n = static_cast<double>(ploidy) * static_cast<double>(an);
         r.n = n;
         r.q = static_cast<double>(ac) / n;
