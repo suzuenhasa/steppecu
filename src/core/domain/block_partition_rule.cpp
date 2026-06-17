@@ -17,6 +17,25 @@ BlockPartition assign_blocks(std::span<const int> chrom,
                              double block_size_morgans) {
     BlockPartition out;
 
+    // FAIL-FAST guard on the block width (architecture.md §2; cleanup X-3/B13).
+    // block_of divides by block_size_morgans, so a non-positive width is a hard
+    // contract violation: 0.0 makes the quotient ±Inf (or NaN for 0/0) and a
+    // negative width silently INVERTS the bin order (floor of a negative
+    // quotient) — both then reach static_cast<int>(...) in block_of, which for
+    // ±Inf / NaN is UNDEFINED BEHAVIOR ([conv.fpint]: "if the truncated value
+    // cannot be represented in the destination type, the behavior is
+    // undefined"), and for a negative width is a silent WRONG partition that
+    // still LOOKS dense — defeating the single-source rule that must match AT2.
+    // The !(x > 0.0) form rejects 0.0, every negative, AND NaN in one test
+    // (NaN > 0.0 is false, so its complement is true), closing the float→int UB
+    // and the silent-inversion path here, the only enforceable site today (the
+    // ConfigBuilder::build() that would normally validate this does not exist
+    // yet). The illegal width yields an empty partition (n_block == 0), the same
+    // defined, harmless result as empty input.
+    if (!(block_size_morgans > 0.0)) {
+        return out;  // 0 / negative / NaN width → empty block_id, n_block == 0.
+    }
+
     // Parallel arrays, one entry per SNP: a length mismatch is a programming
     // error upstream. Be defensive against it (use the shorter extent) rather
     // than reading out of bounds; an honest caller always passes equal lengths.

@@ -15,8 +15,10 @@
 // On the SYNTHETIC LAYOUTS: the "no synthetic data" rule (ROADMAP §0) forbids
 // synthetic data for PRECISION/ACCURACY claims. These cases assert no statistic —
 // they exercise the CONTROL FLOW of block assignment (chromosome reset, empty-bin
-// absorption, negative-position handling, dense renumbering), which is exactly the
-// allowed use of a hand-built layout. The numerical-parity gate is the real-AADR
+// absorption, negative-position handling, dense renumbering, and the fail-fast
+// rejection of an illegal block width — 0 / negative / NaN — that would otherwise
+// be float→int UB or a silently-inverted partition; cleanup X-3/B13), which is
+// exactly the allowed use of a hand-built layout. The numerical-parity gate is the real-AADR
 // check (consistency only — counts and ordering, never a statistic) plus, when the
 // toolchain exists, ADMIXTOOLS 2 goldens (ROADMAP §6, deferred).
 //
@@ -148,6 +150,54 @@ const double kBs = block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
     return bp.n_block == 0 && bp.block_id.empty() && dense_and_nondecreasing(bp);
 }
 
+// --- ILLEGAL block widths → DEFINED behavior (empty partition), NO UB --------
+// The B13 verdict gate (cleanup X-3/B13): block_of divides by the width and then
+// static_cast<int>s the floored quotient, so a non-positive or NaN width would
+// otherwise be:
+//   * 0.0       → genpos/0 = ±Inf (or NaN for 0/0); static_cast<int>(±Inf/NaN)
+//                 is UNDEFINED BEHAVIOR ([conv.fpint]);
+//   * negative  → floor of a negative quotient INVERTS the bin order — a silent
+//                 WRONG partition that still looks dense;
+//   * NaN       → genpos/NaN = NaN; static_cast<int>(NaN) is UB.
+// assign_blocks now guards with !(width > 0.0) and returns an EMPTY partition
+// (n_block == 0) for all three. These cases pass a NON-EMPTY (chrom, genpos) so
+// the guard is what produces the empty result — not the empty-input early-out —
+// proving the illegal width alone is rejected. dense_and_nondecreasing on an
+// empty result requires n_block == 0, so it doubles as the "defined" assertion.
+[[nodiscard]] bool test_zero_block_size_empty() {
+    const std::vector<int> chrom = {1, 1, 1};
+    const std::vector<double> gp = {0.0, 0.06, 0.12};  // would span >1 bin at a legal width
+    const BlockPartition bp = assign_blocks(chrom, gp, 0.0);
+    return bp.n_block == 0 && bp.block_id.empty() && dense_and_nondecreasing(bp);
+}
+
+[[nodiscard]] bool test_negative_block_size_empty() {
+    const std::vector<int> chrom = {1, 1, 1};
+    const std::vector<double> gp = {0.0, 0.06, 0.12};
+    const BlockPartition bp = assign_blocks(chrom, gp, -0.05);
+    return bp.n_block == 0 && bp.block_id.empty() && dense_and_nondecreasing(bp);
+}
+
+[[nodiscard]] bool test_nan_block_size_empty() {
+    const std::vector<int> chrom = {1, 1, 1};
+    const std::vector<double> gp = {0.0, 0.06, 0.12};
+    const double nan_bs = std::nan("");  // quiet NaN; nan_bs > 0.0 is false
+    const BlockPartition bp = assign_blocks(chrom, gp, nan_bs);
+    return bp.n_block == 0 && bp.block_id.empty() && dense_and_nondecreasing(bp);
+}
+
+// --- positive control: a TINY but VALID width still partitions --------------
+// The !(width > 0.0) guard must NOT reject a legal positive width — even a
+// denormal-small one. With bs = 1e-6 the three genpos 0.0/0.06/0.12 fall in three
+// distinct local bins, so the guard did not break the happy path.
+[[nodiscard]] bool test_tiny_positive_block_size_ok() {
+    const std::vector<int> chrom = {1, 1, 1};
+    const std::vector<double> gp = {0.0, 0.06, 0.12};
+    const BlockPartition bp = assign_blocks(chrom, gp, 1e-6);
+    return bp.n_block == 3 && dense_and_nondecreasing(bp) &&
+           bp.block_id == std::vector<int>{0, 1, 2};
+}
+
 struct Case {
     const char* name;
     bool (*fn)();
@@ -161,6 +211,10 @@ constexpr Case kCases[] = {
     {"all-zero chromosome -> one block", test_all_zero_chrom_one_block},
     {"negative position -> own block, no alias of bin 0", test_negative_position_own_block},
     {"empty input -> empty partition", test_empty_input},
+    {"block_size 0 -> empty partition (no float->int UB) [B13]", test_zero_block_size_empty},
+    {"block_size negative -> empty partition (no inverted bins) [B13]", test_negative_block_size_empty},
+    {"block_size NaN -> empty partition (no float->int UB) [B13]", test_nan_block_size_empty},
+    {"block_size tiny-positive -> still partitions (guard not over-broad) [B13]", test_tiny_positive_block_size_ok},
 };
 
 // ---------------------------------------------------------------------------

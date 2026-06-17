@@ -46,11 +46,19 @@ namespace steppe::core {
 /// block_size_morgans)`. Same arithmetic on host and device; no SNP-block
 /// assignment is ever re-derived elsewhere.
 ///
+/// PRECONDITION: `block_size_morgans > 0` (it is the divisor). This per-SNP
+/// primitive does NOT validate it — the guard lives in `assign_blocks` (which
+/// rejects 0 / negative / NaN before ever calling this; cleanup X-3/B13), and
+/// will also live in `ConfigBuilder::build()` if/when it lands. Calling this
+/// directly with a non-positive width is UB at the `static_cast<int>` of the
+/// resulting ±Inf / NaN ([conv.fpint]).
+///
 /// @param genpos_morgans     genetic position in Morgans (>= 0 within a
 ///                           chromosome; callers supply per-chromosome positions
 ///                           and handle chromosome boundaries — M3).
 /// @param block_size_morgans block width in Morgans (AT2 `blgsize`, default 0.05
-///                           = 5 cM via kDefaultBlockSizeCm). Must be > 0.
+///                           = 5 cM via kDefaultBlockSizeCm). Must be > 0 (caller
+///                           guaranteed; see precondition above).
 /// @return                   zero-based block index (>= 0 for non-negative
 ///                           position).
 ///
@@ -122,10 +130,15 @@ struct BlockPartition {
 ///                        length; mismatched lengths are a programming error).
 /// @param block_size_morgans  block width in Morgans (use
 ///                        `block_size_cm_to_morgans(RunConfig::block_size_cm)`).
-///                        Must be > 0.
+///                        Must be > 0; a non-positive or NaN width is rejected
+///                        fail-fast (see the empty-partition note below).
 /// @return  a BlockPartition with `block_id` of length M (dense 0..n_block-1,
 ///          non-decreasing) and `n_block` set. Empty input → empty `block_id`,
-///          `n_block == 0`.
+///          `n_block == 0`. An ILLEGAL `block_size_morgans` (0, negative, or NaN)
+///          likewise yields the empty partition (`n_block == 0`) rather than the
+///          float→int UB / silently-inverted bins it would otherwise produce
+///          (architecture.md §2 fail-fast; cleanup X-3/B13) — this is the only
+///          enforceable site today, as `ConfigBuilder::build()` does not exist.
 [[nodiscard]] BlockPartition assign_blocks(std::span<const int> chrom,
                                            std::span<const double> genpos_morgans,
                                            double block_size_morgans);
