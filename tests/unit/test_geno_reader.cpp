@@ -283,6 +283,114 @@ struct TempFile {
     return true;
 }
 
+// ---- (6) OVERSIZED tile allocation surfaces as std::runtime_error (B18 2.1) ---
+// The checked-multiply guard rules out a SILENT size_t WRAP, but a large-but-
+// NON-wrapping tile (n_ind * bytes_per_record below SIZE_MAX yet far beyond any
+// machine's RAM) still makes `tile.packed.resize` throw — and the stdlib throws
+// std::length_error (a logic_error, when sz > vector::max_size()) or
+// std::bad_alloc, NEITHER of which derives from std::runtime_error. The header
+// contract (geno_reader.hpp:17-18) promises "I/O failures surface as
+// std::runtime_error", so the B18 fix translates BOTH into std::runtime_error.
+// This pins that contract: a multi-terabyte tile request (every row VALID and
+// below records_present_, the product NON-wrapping) must throw a
+// std::runtime_error, not leak a raw std::bad_alloc / std::length_error.
+//
+// Construction: a 1 MB/record file (n_snp = 4,000,000 -> bytes_per_record =
+// packed_bytes = 1,000,000) with 2 records on disk (~2 MB temp file). A partition
+// of 8,000,000 DUPLICATE valid rows (row 0, < records_present_ == 2) gives
+// n_ind * bytes_per_record = 8e6 * 1e6 = 8e12 bytes (~8 TB): non-wrapping (8e12 <
+// SIZE_MAX / 1e6 -> wrap guard passes it through) and far above any test box's RAM
+// (the box has 251 GB) -> the resize allocation fails -> translated runtime_error.
+[[nodiscard]] bool test_oversized_tile_alloc_throws_runtime_error() {
+    const std::size_t n_ind_hdr = 2, n_snp = 4'000'000;
+    const std::size_t bpr = packed_bytes(n_snp);  // 1,000,000 bytes/record
+    if (bpr != 1'000'000) return false;            // pin the fixture geometry
+    TempFile f("oversize");
+    write_tgeno(f.path, n_ind_hdr, n_snp, /*records_on_disk=*/n_ind_hdr);
+
+    GenoReader reader(f.path.string());
+    if (reader.records_present() != n_ind_hdr) return false;  // 2 records present
+
+    // 8,000,000 copies of the VALID row 0 (< records_present_): the row-bound and
+    // checked-multiply guards both PASS, so control reaches `resize(8e12)`.
+    constexpr std::size_t kDupRows = 8'000'000;
+    IndPartition big;
+    big.groups.push_back(group("pop", std::vector<std::size_t>(kDupRows, 0)));
+
+    // The ~8 TB allocation must fail and surface as a std::runtime_error (the B18
+    // exception-type contract), NOT a raw std::bad_alloc / std::length_error.
+    return threw_runtime_error([&] { (void)reader.read_tile(big, 0, n_snp); });
+}
+
+// ---- (7) Malformed-header decimal digits are handled (B18 eigenstrat C2) ------
+// `parse_geno_header` accumulates the two counts as `v = v*10 + digit` over a
+// std::size_t, which WRAPS modulo 2^64 (well-defined-but-SILENT). A malformed /
+// adversarial header whose count is a digit run far longer than any real 48-byte
+// file could hold would otherwise yield a wrapped-but-plausible n_ind/n_snp that
+// flows into packed_bytes()/the size validation as a wrong-but-plausible stride.
+// The B18 fix detects the wrap (v > (SIZE_MAX - d)/10) and routes the whole header
+// to GenoFormat::Unknown. This pins: (a) a normal TGENO header parses both counts;
+// (b) an overflowing count -> Unknown; (c) the GenoReader ctor on an overflowing-
+// count header throws std::runtime_error ("unrecognized magic" path, since
+// Unknown), not a silent wrong stride.
+[[nodiscard]] bool test_malformed_header_digits_handled() {
+    using steppe::io::GenoFormat;
+    using steppe::io::GenoHeader;
+    using steppe::io::parse_geno_header;
+
+    auto make_head = [](const std::string& text) {
+        std::array<char, kGenoHeaderBytes> head{};  // NUL-padded
+        for (std::size_t i = 0; i < text.size() && i < kGenoHeaderBytes; ++i) {
+            head[i] = text[i];
+        }
+        return head;
+    };
+
+    // (a) a well-formed header parses both counts and the derived stride.
+    {
+        const GenoHeader h = parse_geno_header(make_head("TGENO 6 10 h1 h2"));
+        if (h.format != GenoFormat::Tgeno) return false;
+        if (h.n_ind != 6 || h.n_snp != 10) return false;
+        if (h.bytes_per_record != packed_bytes(10)) return false;
+    }
+
+    // (b) an n_ind digit run that overflows size_t -> Unknown (NOT a wrapped count).
+    {
+        // 25 nines: 9.99...e24, far above SIZE_MAX (1.8e19). Fits the 48-byte header.
+        const std::string overflow_nine(25, '9');
+        const GenoHeader h =
+            parse_geno_header(make_head("TGENO " + overflow_nine + " 10 h1 h2"));
+        if (h.format != GenoFormat::Unknown) return false;
+    }
+
+    // (b') an n_snp overflow (second count) is caught too -> Unknown.
+    {
+        const std::string overflow_nine(30, '9');
+        const GenoHeader h =
+            parse_geno_header(make_head("TGENO 6 " + overflow_nine + " h1 h2"));
+        if (h.format != GenoFormat::Unknown) return false;
+    }
+
+    // (c) a header whose count overflows surfaces through the GenoReader ctor as a
+    // std::runtime_error (Unknown -> the "unrecognized magic" reject), not a
+    // silently-wrapped stride that would mis-validate the file size.
+    {
+        const std::string overflow_nine(25, '9');
+        TempFile f("ovflhdr");
+        std::array<char, kGenoHeaderBytes> head =
+            make_head("TGENO " + overflow_nine + " 10 h1 h2");
+        std::ofstream out(f.path, std::ios::binary | std::ios::trunc);
+        out.write(head.data(), static_cast<std::streamsize>(kGenoHeaderBytes));
+        // a few data bytes so the file is not rejected merely for being short.
+        const char pad[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        out.write(pad, sizeof(pad));
+        out.close();
+        if (!threw_runtime_error([&] { GenoReader r(f.path.string()); })) return false;
+    }
+
+    return true;
+}
+
 struct Case { const char* name; bool (*fn)(); };
 
 constexpr Case kCases[] = {
@@ -292,6 +400,10 @@ constexpr Case kCases[] = {
     {"empty partition THROWS", test_empty_partition_throws},
     {"SNP-range / partial-file edges", test_range_and_partial_edges},
     {"constructor fail-fast (missing/short/degenerate)", test_ctor_failures},
+    {"oversized tile alloc -> std::runtime_error (B18 exception-type contract)",
+     test_oversized_tile_alloc_throws_runtime_error},
+    {"malformed header decimal digits handled (B18 overflow guard)",
+     test_malformed_header_digits_handled},
 };
 
 }  // namespace

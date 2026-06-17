@@ -66,9 +66,16 @@ public:
     /// REJECTED with a thrown std::runtime_error rather than producing a wrong
     /// gather or a silent heap-buffer-overflow write.
     ///
+    /// EXCEPTION-TYPE CONTRACT (cleanup geno_reader 2.1): a large-but-non-wrapping
+    /// tile whose backing-buffer allocation fails — `std::vector::resize` throwing
+    /// std::length_error (sz > max_size()) or std::bad_alloc — is TRANSLATED into
+    /// std::runtime_error, so EVERY failure of this function surfaces as the
+    /// documented std::runtime_error (no raw std::bad_alloc / std::logic_error
+    /// escapes to a caller written to catch(std::runtime_error&)).
+    ///
     /// Throws std::runtime_error on a read error, an out-of-range SNP range, a
-    /// non-TGENO file (the M1 decode path targets TGENO), or a malformed partition
-    /// (empty / row out of range / size overflow).
+    /// non-TGENO file (the M1 decode path targets TGENO), a malformed partition
+    /// (empty / row out of range / size overflow), or a failed tile allocation.
     [[nodiscard]] GenotypeTile read_tile(const IndPartition& part,
                                          std::size_t snp_begin,
                                          std::size_t snp_end);

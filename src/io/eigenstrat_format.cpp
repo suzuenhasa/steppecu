@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace steppe::io {
@@ -53,10 +54,32 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
         if (i >= text.size()) break;
         std::size_t v = 0;
         bool any = false;
+        bool overflow = false;
         while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
-            v = v * 10u + static_cast<std::size_t>(text[i] - '0');
+            // OVERFLOW-GUARD the decimal accumulation (cleanup eigenstrat_format
+            // C2). `v = v*10 + d` on a std::size_t WRAPS modulo 2^N (well-defined
+            // unsigned modular arithmetic, [basic.fundamental] — but SILENT), so a
+            // malformed/adversarial header like "TGENO 9999...9 ..." (a digit run
+            // far longer than any 48-byte file could legitimately hold) would
+            // otherwise yield a wrapped-but-plausible n_ind/n_snp that flows into
+            // packed_bytes() and geno_reader's size validation as a wrong-but-
+            // plausible stride, NOT the documented Unknown. Detect the wrap up
+            // front (v > (MAX - d)/10 ⇒ v*10 + d would exceed SIZE_MAX) and route
+            // the whole header to Unknown so the caller fails loudly (fail-fast,
+            // architecture.md §2; STEPPE_ERR_IO_FORMAT, §10).
+            const std::size_t d = static_cast<std::size_t>(text[i] - '0');
+            constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+            if (v > (kMax - d) / 10u) {
+                overflow = true;
+            } else {
+                v = v * 10u + d;
+            }
             any = true;
             ++i;
+        }
+        if (overflow) {  // an unrepresentable count is a malformed header → Unknown
+            h.format = GenoFormat::Unknown;
+            return h;
         }
         if (any) ints[got++] = v;
     }

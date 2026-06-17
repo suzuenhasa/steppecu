@@ -22,6 +22,14 @@
 
 namespace steppe::io {
 
+// The record OFFSET (header_bytes + row * bytes_per_record) is computed in
+// std::streamoff to keep the multiply 64-bit at AADR scale (~4e9; cleanup
+// geno_reader 2.5). std::streamoff is implementation-defined signed; pin the
+// ≥64-bit width the offset arithmetic assumes so a hypothetical 32-bit-offset
+// platform fails to BUILD rather than silently truncating a seek target.
+static_assert(sizeof(std::streamoff) >= 8,
+              "GenoReader assumes a >=64-bit std::streamoff for record-offset math");
+
 GenoReader::GenoReader(const std::string& geno_path) : path_(geno_path) {
     std::ifstream in(path_, std::ios::binary);
     if (!in) {
@@ -140,7 +148,31 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
     tile.bytes_per_record = bytes_per_rec;
     tile.n_snp = tile_snps;
     tile.n_individuals = n_ind;
-    tile.packed.resize(n_ind * bytes_per_rec);
+    // EXCEPTION-TYPE CONTRACT (cleanup geno_reader 2.1). The checked-multiply
+    // above rules out a SILENT size_t WRAP; but a large-but-NON-wrapping request
+    // (an AADR-scale ~4 GB tile, or an over-budget gather) still makes `resize`
+    // throw — and `std::vector::resize` throws `std::length_error` (a
+    // std::logic_error, when sz > max_size(), [vector.capacity]/[container.alloc])
+    // or `std::bad_alloc` (allocation failure), NEITHER of which derives from
+    // std::runtime_error. The header (geno_reader.hpp:17-18) and ind_reader/
+    // genotype_tile promise "I/O failures surface as std::runtime_error", so an
+    // `app` caller written to the literal contract (catch(std::runtime_error&))
+    // would miss the raw bad_alloc/length_error → unhandled → std::terminate.
+    // Translate both into the documented runtime_error so the contract holds BY
+    // CONSTRUCTION for ANY allocation-failure cause (architecture.md §2 fail-fast).
+    try {
+        tile.packed.resize(n_ind * bytes_per_rec);
+    } catch (const std::bad_alloc&) {
+        throw std::runtime_error(
+            "io::GenoReader::read_tile: out of memory allocating tile (" +
+            std::to_string(n_ind) + " individuals * " + std::to_string(bytes_per_rec) +
+            " bytes/record) for " + path_);
+    } catch (const std::length_error&) {
+        throw std::runtime_error(
+            "io::GenoReader::read_tile: tile too large for the allocator (" +
+            std::to_string(n_ind) + " individuals * " + std::to_string(bytes_per_rec) +
+            " bytes/record exceeds vector::max_size()) for " + path_);
+    }
     tile.pop_offsets.reserve(part.groups.size() + 1);
     tile.pop_labels.reserve(part.groups.size());
 
