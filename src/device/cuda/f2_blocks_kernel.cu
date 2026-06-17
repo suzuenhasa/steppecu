@@ -41,6 +41,7 @@
 #include <library_types.h>
 
 #include "core/internal/f2_estimator.hpp"  // assemble_f2_numerator, finalize_f2
+#include "core/internal/host_device.hpp"   // STEPPE_ASSERT (the §2 fail-fast facility)
 #include "core/internal/launch_config.hpp" // grid_for, grid_z_extent, kMaxGridZ (launch-math home)
 #include "device/cuda/check.cuh"           // STEPPE_CUDA_CHECK, CUBLAS_CHECK, STEPPE_CUDA_CHECK_KERNEL
 #include "device/cuda/f2_block_kernel.cuh" // engage_f2_precision, f2_compute_type (SHARED policy)
@@ -173,13 +174,25 @@ void launch_gather_group(const double* dQ_all, const double* dV_all, const doubl
                          int P, int s_pad, int n_in_group,
                          double* dQg, double* dVg, double* dSg,
                          cudaStream_t stream) {
+    // s_pad >= 1 precondition (cleanup F6/B24): the bucket width is ceil-pow2 of a
+    // block's SNP count and is always >= kBlockGroupPadBase, so s_pad == 0 cannot
+    // reach here from the sole caller — but s_pad rides gridDim.y via grid_for(s_pad),
+    // and grid_for(0) == 0 is a ZERO y-extent the driver rejects with
+    // cudaErrorInvalidConfiguration (grid_for's own assert only rejects the OVER-limit
+    // case, not a zero extent). Pin the documented invariant fail-fast (architecture.md
+    // §2). n_in_group >= 1 is pinned below by grid_z_extent (a zero gridDim.z is the
+    // same invalid launch).
+    STEPPE_ASSERT(s_pad >= 1,
+                  "launch_gather_group: s_pad must be >= 1 (a zero gridDim.y is an "
+                  "invalid launch; cleanup F6/B24)");
     // Grid math via the single launch-config home (architecture.md §4, §7, §8).
     // x = P-tile, y = s_pad-tile (both square-block axes ⇒ grid_for, which now
     // debug-asserts the y/z 65 535 cap); z = the batch count, which is set DIRECTLY
     // and so bypasses grid_for — it routes through the dedicated grid_z_extent guard
-    // (cleanup X-7/B6: a grid_for clamp alone would miss this direct z-extent). The
-    // backend tiles the batch into chunks of ≤ kMaxGridZ blocks (vram_budget.hpp), so
-    // n_in_group ≤ kMaxGridZ holds at the call site; the assert pins it.
+    // (cleanup X-7/B6: a grid_for clamp alone would miss this direct z-extent, and it
+    // also fail-fasts on n_in_group <= 0 — a zero gridDim.z, F6/B24). The backend tiles
+    // the batch into chunks of ≤ kMaxGridZ blocks (vram_budget.hpp), so n_in_group ≤
+    // kMaxGridZ holds at the call site; the assert pins both bounds.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
                     static_cast<unsigned>(core::grid_for(s_pad)),
@@ -194,6 +207,23 @@ void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
                         int P, int s_pad, int n_in_group,
                         const double* dQg, const double* dVg, const double* dSg,
                         double* dGg, double* dVpairg, double* dRg) {
+    // Degenerate-batch guards (cleanup F6/B24). Unlike the two kernel-launch
+    // wrappers, this routine issues no <<<>>> and so never passes n_in_group through
+    // grid_z_extent — its z-axis equivalent is cublasGemmStridedBatchedEx's
+    // batchCount (= n_in_group) and its contraction extent k (= s_pad). The backend
+    // guards P/M/n_block and the bucket width is always >= kBlockGroupPadBase, so
+    // n_in_group >= 1 and s_pad >= 1 hold from the sole caller — but a batchCount == 0
+    // is a degenerate batched GEMM and a k == 0 (s_pad == 0) GEMM is a beta-only
+    // scale with no contraction; both silently produce a wrong/empty result rather
+    // than the intended one. Pin the documented preconditions fail-fast, mirroring
+    // the gather/assemble wrappers' grid_z_extent assert (architecture.md §2; M4.5
+    // sharding can hand a device an empty SNP shard ⇒ an empty bucket).
+    STEPPE_ASSERT(n_in_group >= 1,
+                  "run_f2_gemms_group: n_in_group (batchCount) must be >= 1 "
+                  "(cleanup F6/B24)");
+    STEPPE_ASSERT(s_pad >= 1,
+                  "run_f2_gemms_group: s_pad (GEMM contraction extent k) must be >= 1 "
+                  "(cleanup F6/B24)");
     // No cublasSetStream here: the handle's stream + emulated-FP64 workspace are
     // bound ONCE at backend construction via CublasHandle::set_stream
     // (architecture.md §12; cleanup X-1/B1). The M4 grouped path is called once
@@ -242,8 +272,10 @@ void launch_assemble_blocks_group(const double* dGg, const double* dVpairg, cons
     // Grid math via the single launch-config home (architecture.md §4, §7, §8).
     // x = y = P-tile (square-block axes ⇒ grid_for, with the y/z-cap assert); z =
     // the batch count, set DIRECTLY and so bypassing grid_for — routed through the
-    // dedicated grid_z_extent guard (cleanup X-7/B6). The backend tiles the batch so
-    // n_in_group ≤ kMaxGridZ holds; the assert pins it.
+    // dedicated grid_z_extent guard (cleanup X-7/B6), which also fail-fasts on
+    // n_in_group <= 0 (a zero gridDim.z is an invalid launch — F6/B24). This wrapper
+    // has no s_pad parameter (its slabs are [P×P], not the s_pad-wide gather slabs).
+    // The backend tiles the batch so n_in_group ≤ kMaxGridZ holds; the assert pins it.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
                     static_cast<unsigned>(core::grid_for(P)),

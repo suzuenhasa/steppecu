@@ -42,6 +42,14 @@ namespace steppe::device {
 /// Outputs are column-major slabs: dQg/dVg are [P × s_pad × n_in_group] (slab
 /// stride P·s_pad), dSg is [2P × s_pad × n_in_group] (slab stride 2P·s_pad).
 /// All native FP64 (a memory-bound gather; reduced precision buys nothing).
+///
+/// PRECONDITIONS (debug-asserted; cleanup F6/B24): `s_pad >= 1` (it rides
+/// gridDim.y, so s_pad == 0 would be a zero y-extent the driver rejects) and
+/// `1 <= n_in_group <= kMaxGridZ` (the gridDim.z batch count, pinned by
+/// grid_z_extent — a zero gridDim.z is an invalid launch). The backend always
+/// satisfies both (bucket width >= kBlockGroupPadBase; the batch is tiled to
+/// kMaxGridZ), so this is a fail-fast on a corrupted call, e.g. an empty SNP shard
+/// under M4.5 sharding. Throws CublasError/CudaError on a CUDA failure (§7, §10).
 void launch_gather_group(const double* dQ_all, const double* dV_all, const double* dS_all,
                          const int* d_block_ids_in_group, const long* d_block_offsets,
                          const int* d_block_sizes,
@@ -64,6 +72,14 @@ void launch_gather_group(const double* dQ_all, const double* dV_all, const doubl
 /// this routine sets only the per-call compute type. It takes NO stream and never
 /// calls `cublasSetStream` — doing so per chunk would reset the workspace to the
 /// default pool (cuBLAS §2.4.7) before every chunk's GEMMs and defeat §12.
+///
+/// PRECONDITIONS (debug-asserted; cleanup F6/B24): `s_pad >= 1` (the GEMM
+/// contraction extent k; k == 0 is a beta-only scale, not the intended product)
+/// and `n_in_group >= 1` (the cublasGemmStridedBatchedEx batchCount; 0 is a
+/// degenerate empty batch). This wrapper issues no <<<>>> launch and so cannot
+/// reuse the gather/assemble wrappers' grid_z_extent guard — it asserts these
+/// directly (architecture.md §2 fail-fast). Throws CublasError on a cuBLAS failure
+/// (§7, §10).
 void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
                         int P, int s_pad, int n_in_group,
                         const double* dQg, const double* dVg, const double* dSg,
@@ -76,6 +92,11 @@ void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
 /// step — architecture.md §12, via the SHARED assemble_f2_numerator/finalize_f2
 /// primitives) and writes the result into dF2_all / dVpair_all at the block's
 /// [P×P] slab `i + P·j + P·P·block_id`. dVpairg is carried through unchanged.
+///
+/// PRECONDITION (debug-asserted; cleanup F6/B24): `1 <= n_in_group <= kMaxGridZ`
+/// (the gridDim.z batch count, pinned by grid_z_extent — a zero gridDim.z is an
+/// invalid launch). This wrapper has no s_pad parameter (its slabs are [P×P]).
+/// Throws CublasError/CudaError on a CUDA failure (§7, §10).
 void launch_assemble_blocks_group(const double* dGg, const double* dVpairg, const double* dRg,
                                   const int* d_block_ids_in_group,
                                   int P, int n_in_group,

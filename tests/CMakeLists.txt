@@ -128,6 +128,42 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_ROOT}")
 
+# --- B24 M4 grouped-batch wrapper empty-guard + gather/scatter gate -----------
+# CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the three
+# device-private M4 wrappers (launch_gather_group / run_f2_gemms_group /
+# launch_assemble_blocks_group, f2_blocks_kernel.cuh) DIRECTLY on a tiny synthetic
+# feeder-output layout. The B24 verdict gate (cleanup f2_blocks_kernel F6, B24):
+#   1. POSITIVE CONTROL — a valid, REORDERED 2-block layout (block_ids_in_group =
+#      {1,0}, sizes {2,3} padded to s_pad=4) gathered -> 3 GEMMs -> scattered, with
+#      the resident [P x P x n_block] f2 + Vpair tensors diffed BLOCK-FOR-BLOCK
+#      against a host oracle built from the SAME shared assemble_f2_numerator /
+#      finalize_f2 the GPU calls. This exercises the gather's pad-column zero-fill
+#      and the scatter-to-arbitrary-id slab offset (the M4-specific index math; the
+#      B25 gather coverage the B24 gate references, folded in so this gate stands
+#      alone).
+#   2. DEATH CASES (only when STEPPE_ASSERT is active — !NDEBUG; under NDEBUG the
+#      guard is compiled out by contract and they are SKIPPED): each wrapper called
+#      with a degenerate extent (n_in_group <= 0 — a zero gridDim.z invalid launch;
+#      s_pad <= 0 — a zero gridDim.y / k==0 GEMM) must ABORT (SIGABRT from the fired
+#      STEPPE_ASSERT) in a forked child, mirroring tests/unit/test_f2_from_blocks.cpp's
+#      death harness.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device (the wrappers + the CublasHandle/DeviceBuffer RAII) +
+# steppe::core_internal (the shared f2 primitive oracle). No io / no data.
+# architecture.md §2 fail-fast, §13; cleanup f2_blocks_kernel F6, B24.
+add_executable(test_f2_blocks_group reference/test_f2_blocks_group.cu)
+target_link_libraries(test_f2_blocks_group
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_blocks_group PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# The wrappers run native Fp64 here (the gather/scatter index math + the guards are
+# precision-neutral), so the fixed-slice Ozaki tuning is not required; match the
+# library's define anyway when the option is on (the box build) so any #if-guarded
+# include agrees with steppe_device.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_blocks_group PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group)
+
 # --- X-6/B2 EmulatedFp64 honorability gate (the dynamic-mantissa-trap close-out)
 # CUDA TU, DATA-FREE: drives the production seam (make_cuda_backend → compute_f2)
 # on a tiny SYNTHETIC Q/V/N to assert the engaged MODE, not a precision value. It
