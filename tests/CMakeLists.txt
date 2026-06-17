@@ -309,6 +309,37 @@ target_link_libraries(test_cuda_check
 set_target_properties(test_cuda_check PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME cuda_check_unit COMMAND test_cuda_check)
 
+# --- M4.5 U4/L10 CublasHandle MathModeScope + device-ordinal scaffold gate -----
+# CUDA TU, DATA-FREE (sibling of test_device_buffer.cu): exercises the device-
+# private handles.hpp RAII cuBLAS-handle wrapper directly. handles.hpp includes
+# <cublas_v2.h> — PRIVATE to steppe_device (architecture.md §4) — so this gate is a
+# CUDA TU. Unlike test_cuda_check (no GPU), this NEEDS a live device: cublasCreate
+# / cublasGetMathMode require a cuBLAS context. The U4/L10 verdict gate (cleanup
+# device-cuda-handles 2.3/11.x, L10; overview §(2).1; architecture.md §7, §9,
+# §11.4, §12; TODO M4.5):
+#   (a) MathModeScope (L10 / f2_block_kernel N-5) captures the live cuBLAS math
+#       mode on construction and RESTORES it at scope exit — proven across nesting
+#       (inner restores to outer, so the ctor captures the live mode, not a default)
+#       and a moved-from scope (which restores NOTHING, so the mode is restored
+#       exactly once). This is the M4.5 Fp64-parity-recompute-coexisting-with-
+#       EmulatedFp64 scaffold: the §12 oracle pass can engage PEDANTIC for its scope
+#       and leave the shared handle exactly as it found it. Parity-NEUTRAL (it only
+#       restores state already set imperatively, §12).
+#   (b) CublasHandle records the device ordinal current at construction
+#       (cudaGetDevice — query only, NEVER cudaSetDevice inside the wrapper; cuBLAS
+#       §2.1.2 couples the context to the creation device) and, in DEBUG, the
+#       context-mutating methods record-and-ASSERT the current device still matches
+#       (the §11.4 multi-GPU precondition; a no-op-true on the single-GPU box).
+# Native Fp64 / no numeric claim (it asserts handle STATE, not a precision value),
+# so no emulation tuning and no real AADR are required. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::device (handles.hpp +
+# check.cuh) + steppe::core_internal (the STEPPE_LOG_WARN sink). No io / no data.
+add_executable(test_handles reference/test_handles.cu)
+target_link_libraries(test_handles
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_handles PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME handles_unit COMMAND test_handles)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.
