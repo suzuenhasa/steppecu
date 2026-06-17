@@ -224,6 +224,29 @@ struct DeviceConfig {
     /// Enable peer access opportunistically (cudaDeviceEnablePeerAccess when
     /// canAccessPeer) for single-node multi-GPU (architecture.md §11.4).
     bool enable_peer_access = true;
+
+    /// Bit-stability INTENT for the statistic path (default ON). When true the
+    /// run is held to the §12 reproducibility contract and `build()` enforces the
+    /// constraints that make it hold (architecture.md §9 build()-validation list,
+    /// §12):
+    ///   * the statistic-bearing reductions run `run_to_run`-deterministic and
+    ///     cuSOLVER runs in its scoped deterministic mode;
+    ///   * `stream_count` is forced to 1 on the statistic path (cuBLAS
+    ///     reproducibility does not hold across concurrent streams, §12) — set
+    ///     >1 explicitly here while `deterministic` is the error `build()` raises;
+    ///   * `precision == Precision::Kind::EmulatedFp64` requires the explicit
+    ///     `cublasSetWorkspace` workspace (`kCublasWorkspaceBytes`), since
+    ///     fixed-point emulation voids the run-to-run guarantee without an
+    ///     adequate workspace (§12);
+    ///   * the multi-GPU partials are combined in the fixed host-side device
+    ///     order pinned by `devices` (§11.4) rather than a non-deterministic
+    ///     AllReduce.
+    /// This is OVERRIDE INTENT, not discovered state: it is the knob the §12
+    /// stream_count/workspace/combine rules the M4.5 parity-recompute path relies
+    /// on are phrased against, and they are inexpressible without it. Set false
+    /// only for throughput-only lanes whose results are recomputed in
+    /// EmulatedFp64/Fp64 before any reported number (§12).
+    bool deterministic = true;
 };
 
 // ---------------------------------------------------------------------------

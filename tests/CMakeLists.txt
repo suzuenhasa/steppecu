@@ -181,6 +181,25 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME launch_config_unit COMMAND test_launch_config)
 
+# --- Host-only unit test of the public config contract (cleanup B9) -----------
+# Pure C++ TU (no CUDA, no GPU): includes the CUDA-free include/steppe/config.hpp
+# and pins the spec-mandated DeviceConfig defaults — above all that the B9
+# `deterministic` field exists, is a bool, and defaults to TRUE (architecture.md
+# §9 build()-validation listing, §12), since the §12 stream_count==1 /
+# EmulatedFp64-workspace / fixed-order multi-GPU-combine rules the M4.5
+# parity-recompute path relies on are inexpressible without it. The checks are
+# compile-time static_asserts plus run-time guards; the TU links only steppe::api
+# (config.hpp) — its CUDA-free host compile is itself the §4-layering proof.
+# architecture.md §4, §9, §12, §13; cleanup include-config 9.1 / B9.
+add_executable(test_config unit/test_config.cpp)
+target_link_libraries(test_config
+    PRIVATE steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_config PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_config PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME config_unit COMMAND test_config)
+
 # --- Host-only unit test of the backend-factory single source (X-9/B8) --------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend_factory.hpp
 # and static_asserts that BOTH factories — make_cpu_backend AND make_cuda_backend —
