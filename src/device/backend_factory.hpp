@@ -38,7 +38,18 @@ namespace steppe::device {
 /// backend chosen at build()). Returned as the abstract interface so `core` /
 /// `Resources` never name the concrete type or touch a CUDA header (architecture
 /// .md §4, §8). Defined in cuda_backend.cu.
-[[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend();
+///
+/// `device_id` BINDS the instance to one physical CUDA device — the per-device-
+/// instance contract (device/backend.hpp; architecture.md §11.4 SPMG: one backend
+/// + one PerGpuResources PER device in `DeviceConfig::devices`, constructed with
+/// that device's id). The backend `cudaSetDevice`-selects it at construction (so
+/// the cuBLAS context binds to it, cuBLAS §2.1.2) and at every compute entry. The
+/// DEFAULT 0 keeps the single-GPU path — and every existing zero-arg call site
+/// (the reference tests + the M4 spike) — bound to device 0, unchanged. SNP
+/// sharding + the host-side fixed-order combine across the G devices are
+/// orchestrated ABOVE this seam by `Resources` (architecture.md §11.4), NOT here —
+/// that combine algorithm is the next workflow.
+[[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend(int device_id = 0);
 
 }  // namespace steppe::device
 

@@ -449,6 +449,44 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME backend_capabilities_unit COMMAND test_backend_capabilities)
 
+# --- M4.5 U5 CUDA capabilities() probe + device_id threading gate -------------
+# CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the PRODUCTION
+# CUDA path — make_cuda_backend(device_id) + CudaBackend::capabilities() — on a live
+# device. The U2 host-only gate (tests/unit/test_backend_capabilities.cpp) pins the
+# BackendCapabilities POD SHAPE + the value-initialized "unknown" base default; THIS
+# gate pins the REAL probe VALUES the CUDA override reports, plus the device_id
+# binding (F19/F20). The U5 verdict gate (cleanup device-cuda-cuda_backend F19/F20 +
+# X-6/B2; architecture.md §9, §11.4, §12; 00-overview §(2).1):
+#   TIER-INVARIANT (every lane): compute_major >= 12 (sm_120), total_vram_bytes > 0
+#     (the captured `total` the M0/M4 path discarded), free <= total, device_count
+#     matches cudaGetDeviceCount, emulated_fp64_honorable == the LIBRARY's X-6/B2
+#     emulation_honorable predicate (the probe + GEMM path can never disagree), and a
+#     backend constructs on device 0 reporting itself.
+#   rtxbox VERDICT (2× RTX PRO 6000): device_count == 2, a backend constructs on
+#     device 1 too, and can_access_peer == true (the REAL stock-driver P2P this box
+#     has — MEASURED 55.6 GB/s; architecture.md §11.4 capability-tier law). The
+#     strict peer assertion is KEYED to the tier (device name contains "PRO"): on the
+#     budget GeForce box can_access_peer == false is the EXPECTED tagged degrade to
+#     the host-staged combine baseline (a PASS, not a fault), so the ONE sm_120 build
+#     serves BOTH boxes (the §0 / ⚡ box-role split). Every field is parity-NEUTRAL
+#     (§12) — the gate asserts the PROBE, never a reported number.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device (the factory + capabilities()) + steppe::core_internal (the
+# STEPPE_LOG_WARN / STEPPE_CUDA_WARN sink) + the device-private f2_block_kernel.cuh
+# for emulation_honorable. No io / no data. architecture.md §9, §11.4, §12, §13.
+add_executable(test_backend_capabilities_probe reference/test_backend_capabilities_probe.cu)
+target_link_libraries(test_backend_capabilities_probe
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_backend_capabilities_probe PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# emulated_fp64_honorable reflects steppe_device's own STEPPE_HAVE_EMU_TUNING; the
+# end-to-end check trusts the LIBRARY's compiled emulation_honorable() regardless of
+# this target's define. Match the library's define anyway (both flow from the one
+# cmake option; the box build turns it on) so this TU's #if-guarded include agrees.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_backend_capabilities_probe PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME backend_capabilities_probe COMMAND test_backend_capabilities_probe)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is

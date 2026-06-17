@@ -59,11 +59,11 @@
 #include <library_types.h>
 
 #include <atomic>   // std::atomic_flag — one-shot capability-tag emission
-#include <cstdio>   // std::fprintf — interim log sink (until internal/log.hpp, B7)
 #include <limits>   // std::numeric_limits<int>::max — the M0 k-narrowing assert (B22)
 
 #include "core/internal/f2_estimator.hpp"  // het_correction, assemble_f2_numerator,
                                            //   finalize_f2, grid_for, kCdivBlock
+#include "core/internal/log.hpp"           // STEPPE_LOG_WARN (the one warn sink, B7/X-4)
 #include "device/cuda/check.cuh"           // STEPPE_CUDA_CHECK, CUBLAS_CHECK,
                                            //   STEPPE_CUDA_CHECK_KERNEL
 
@@ -210,21 +210,22 @@ namespace {
 // downgrade is OBSERVABLE without spamming the per-call hot path (cleanup X-6/B2,
 // T-CAP-1). Compiled ONLY on the no-tuning lane — the only build where an
 // EmulatedFp64 request is downgraded — so the default (tuning-ON) build carries no
-// unused helper (warnings-as-errors clean). INTERIM SINK: a guarded
-// `std::fprintf(stderr, …)` until the phantom `internal/log.hpp` (cleanup X-4/B7)
-// lands a real `STEPPE_LOG_WARN`; the §10 "no printf in library code" rule is
-// satisfied by routing through that sink once it exists. The std::atomic_flag
-// makes the one-shot guard thread-safe (M4.5 multi-GPU may engage from more than
-// one host thread).
+// unused helper (warnings-as-errors clean). Routes through the ONE warn sink
+// (STEPPE_LOG_WARN, core/internal/log.hpp, B7/X-4) now that it exists — satisfying
+// the §10 "no printf in library code" rule (this replaces the earlier interim
+// `std::fprintf(stderr, …)`). STEPPE_LOG_WARN prefixes `[steppe][warn] ` and is
+// debug-only (NDEBUG-silent, matching the sink's teardown-warn contract); the
+// std::atomic_flag makes the one-shot guard thread-safe (M4.5 multi-GPU may engage
+// from more than one host thread), and the test_and_set runs even under NDEBUG so a
+// future verbose sink still fires at most once.
 void warn_emulated_fp64_downgraded_once() {
     static std::atomic_flag emitted = ATOMIC_FLAG_INIT;
     if (!emitted.test_and_set(std::memory_order_relaxed)) {
-        std::fprintf(stderr,
-            "[steppe][capability] EmulatedFp64 requested but the FIXED-slice Ozaki "
-            "tuning is unavailable (built without -DSTEPPE_HAVE_EMU_TUNING) -> "
-            "downgraded to native Fp64 [tag: emu_tuning_unavailable]. The reported "
-            "precision is native FP64, NOT emulated (architecture.md §9, §12; "
-            "cleanup X-6/B2).\n");
+        STEPPE_LOG_WARN(
+            "[capability] EmulatedFp64 requested but the FIXED-slice Ozaki tuning is "
+            "unavailable (built without -DSTEPPE_HAVE_EMU_TUNING) -> downgraded to "
+            "native Fp64 [tag: emu_tuning_unavailable]. The reported precision is "
+            "native FP64, NOT emulated (architecture.md §9, §12; cleanup X-6/B2).");
     }
 }
 

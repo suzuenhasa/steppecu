@@ -6,15 +6,32 @@
 // numerator/divide (f2_block_kernel.cu), and copy f2 + Vpair back across the
 // CUDA-free ComputeBackend seam (architecture.md §4).
 //
+// MULTI-GPU-READY (M4.5 capability-tier SCAFFOLD; architecture.md §9, §11.4, §12;
+// cleanup device-cuda-cuda_backend F19/F20, X-6/B2; 00-overview §(2)). One backend
+// instance is BOUND to ONE CUDA device (the per-device-instance contract,
+// backend.hpp): the ctor takes an `int device_id` (default 0 ⇒ single-GPU,
+// unchanged), `cudaSetDevice`-selects it (so the cuBLAS context binds there, cuBLAS
+// §2.1.2), and every compute entry re-selects it (`guard_device`). `capabilities()`
+// probes the bound device — compute capability, total+free VRAM, P2P reachability
+// (the NON-throwing tagged degrade: "no peer access" is EXPECTED on the budget
+// tier, not a fault), and EmulatedFp64-honorability (the X-6/B2 predicate). This is
+// the SCAFFOLD only: SNP sharding + the host-side fixed-order combine across the G
+// devices are orchestrated ABOVE this seam by `Resources` (architecture.md §11.4) —
+// that combine algorithm is the NEXT workflow, not implemented here.
+//
 // STANDARDS (ROADMAP §1, §5):
 //   * RAII for ALL device memory and handles — DeviceBuffer<T> + CublasHandle, no
 //     raw cudaMalloc / cublasCreate here (architecture.md §2, §7). This TU is NOT
 //     on the allocation allowlist.
 //   * Precision is typed config: forwarded unchanged into run_f2_gemms, which
-//     engages FIXED-slice Ozaki / native FP64 (architecture.md §12; ROADMAP §0).
+//     engages FIXED-slice Ozaki / native FP64 via the ONE honorability predicate —
+//     an unhonorable EmulatedFp64 request DEGRADES to native Fp64 with a logged
+//     capability tag, never silently runs DYNAMIC (architecture.md §12; X-6/B2).
 //   * The numerator/divide stays native FP64 (in the assemble kernel).
 //   * The formula lives ONCE in core/internal/f2_estimator.hpp, shared with the
 //     CPU oracle, so CPU and GPU cannot diverge (architecture.md §13).
+//   * Every capability lever is PARITY-NEUTRAL (data-movement / observability only),
+//     so §12 parity holds identically on both tiers (architecture.md §11.4, §12).
 //
 // This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It is the only
 // place a host caller meets the GPU f2 path; `core` reaches it solely through the
@@ -38,11 +55,11 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
-#include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision
+#include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
-#include "steppe/config.hpp"                // Precision, kBlockGroupPadBase, kMaxVramUtilizationFraction
+#include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction
 #include "steppe/fstats.hpp"                // F2BlockTensor
 
 namespace steppe::device {
@@ -52,14 +69,39 @@ namespace steppe::device {
 /// determinism. Move-only via the ComputeBackend base (architecture.md §8).
 class CudaBackend final : public ComputeBackend {
 public:
-    CudaBackend() {
-        // RAII handle, created once. Bind the (stream, workspace) invariant ONCE
-        // here (architecture.md §12; cleanup X-1/B1): the workspace pins emulated-
-        // FP64 reproducibility (cuBLAS §2.1.4) and the single statistic stream is
-        // bound through `set_stream`, which re-applies the workspace after the
-        // `cublasSetStream` reset (cuBLAS §2.4.7). The GEMM routines never touch
-        // the stream again, so the workspace survives for every GEMM batch on
-        // BOTH the M0 and M4 paths. Order matters: bind the workspace FIRST so the
+    /// Construct a backend BOUND to one CUDA device (the per-device-instance
+    /// contract, backend.hpp; architecture.md §9 PerGpuResources, §11.4 SPMG).
+    /// `device_id` is the physical CUDA ordinal this instance owns — `Resources`
+    /// passes `DeviceConfig::devices[g]`; the default 0 keeps the single-GPU path
+    /// (and every existing zero-arg call site) bound to device 0, unchanged.
+    ///
+    /// RECORD-AND-SET (architecture.md §7 — the wrapper RAII types record-and-ASSERT
+    /// the device, never `cudaSetDevice`; the BACKEND is the owner that legitimately
+    /// SELECTS it). The `cudaSetDevice(device_id)` must run BEFORE the `blas_` /
+    /// `workspace_` members construct, because "a cuBLAS library context is tightly
+    /// coupled with the CUDA context that is current at the time of the
+    /// `cublasCreate()` call" (cuBLAS §2.1.2, CUDA 13.x), and `DeviceBuffer`'s
+    /// `cudaMalloc` allocates on the current device — so both must see `device_id`
+    /// current, not the ambient entry device. C++ initializes members in DECLARATION
+    /// order, and `device_id_` is declared FIRST (below); we set the device while
+    /// initializing it via `set_and_return_device`, so the set is sequenced before
+    /// `blas_`/`workspace_` are built. Result: the handle's cuBLAS context (and
+    /// `CublasHandle::device_id()`, which records `cudaGetDevice` at creation) and the
+    /// workspace VRAM are both bound to `device_id`, and the per-call `guard_device()`
+    /// re-selects it on every compute entry (so a later ambient-device change cannot
+    /// run this backend's work on the wrong GPU, and the §11.4 CublasHandle
+    /// device-ordinal debug assert holds).
+    explicit CudaBackend(int device_id = 0)
+        : device_id_(set_and_return_device(device_id)) {
+        // RAII handle, created once ON device_id_ (its cuBLAS context binds here,
+        // cuBLAS §2.1.2, because device_id_'s initializer set the device first). Bind
+        // the (stream, workspace) invariant ONCE here
+        // (architecture.md §12; cleanup X-1/B1): the workspace pins emulated-FP64
+        // reproducibility (cuBLAS §2.1.4) and the single statistic stream is bound
+        // through `set_stream`, which re-applies the workspace after the
+        // `cublasSetStream` reset (cuBLAS §2.4.7). The GEMM routines never touch the
+        // stream again, so the workspace survives for every GEMM batch on BOTH the
+        // M0 and M4 paths. Order matters: bind the workspace FIRST so the
         // `set_stream` re-apply has it.
         blas_.set_workspace(workspace_.data(), workspace_.bytes());
         blas_.set_stream(stream_);
@@ -69,6 +111,7 @@ public:
                                       const core::MatView& V,
                                       const core::MatView& N,
                                       const Precision& precision) override {
+        guard_device();
         const int P = Q.P;
         const long M = Q.M;
 
@@ -181,6 +224,7 @@ public:
                                                   const int* block_id,
                                                   int n_block,
                                                   const Precision& precision) override {
+        guard_device();
         const int P = Q.P;
         const long M = Q.M;
 
@@ -355,6 +399,7 @@ public:
     }
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
+        guard_device();
         const int P = tile.n_pop;
         const long M = static_cast<long>(tile.n_snp);
 
@@ -402,7 +447,140 @@ public:
         return out;
     }
 
+    /// Probe the capability tier of THE device this backend is bound to (the
+    /// per-device-instance contract, backend.hpp; architecture.md §9, §11.4, §12;
+    /// cleanup 00-overview §(2).1; device-cuda-cuda_backend F20). Pure observability
+    /// + data-movement enablement — every field is PARITY-NEUTRAL (§12), so this is
+    /// never on the statistic path and never changes a reported number.
+    ///
+    /// NON-THROWING TAGGED-DEGRADE for the P2P probe (the capability-tier law,
+    /// architecture.md §11.4; workflow wxz1fiiln; cleanup 00-overview §(2).4):
+    /// `cudaDeviceCanAccessPeer` answering "no" is EXPECTED on the budget GeForce
+    /// tier (P2P driver-disabled) and on this device vs itself — it is a tagged
+    /// degrade, not a fault, so it routes through the NON-throwing STEPPE_CUDA_WARN
+    /// (U1, check.cuh CAP-1/CAP-2), never the throwing STEPPE_CUDA_CHECK. The genuine
+    /// faults (device-count / properties / mem-info queries on the bound device) DO
+    /// throw — a backend that cannot read its own device is a real error.
+    ///
+    /// `const` + DEVICE-NEUTRAL: the probe makes `device_id_` current only for the
+    /// duration of the queries and RESTORES the entry device, so calling it never
+    /// leaks a `cudaSetDevice` side effect (it is a pure query of THIS backend's
+    /// device, callable from any ambient-device context — e.g. `Resources` probing
+    /// each per-device backend in turn).
+    [[nodiscard]] BackendCapabilities capabilities() const override {
+        BackendCapabilities caps;
+
+        // Visible CUDA devices in this process — the SPMG combine fans out over the
+        // subset pinned by DeviceConfig::devices (architecture.md §9, §11.4); this is
+        // the upper bound the probe saw. A failure here is a real fault (a process
+        // with a CUDA backend must be able to enumerate its devices).
+        int count = 0;
+        STEPPE_CUDA_CHECK(cudaGetDeviceCount(&count));
+        caps.device_count = count;
+
+        // Probe THIS backend's device. Save/restore the ambient device so the const
+        // probe leaves no cudaSetDevice side effect (it is a query, not a select).
+        int entry_device = 0;
+        STEPPE_CUDA_CHECK(cudaGetDevice(&entry_device));
+        STEPPE_CUDA_CHECK(cudaSetDevice(device_id_));
+
+        // Compute capability (sm_120 ⇒ {12, 0} on the Blackwell box). One sm_120
+        // build serves both boxes (architecture.md §0), so this is observability,
+        // not a dispatch key (cleanup ⚡ box-role split).
+        cudaDeviceProp prop{};
+        STEPPE_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id_));
+        caps.compute_major = prop.major;
+        caps.compute_minor = prop.minor;
+
+        // Total + free VRAM. `cudaMemGetInfo` yields BOTH — the M0/M4 paths
+        // (cuda_backend.cu) historically captured only `free` and DISCARDED `total`
+        // (cleanup 00-overview §(2).1: "exactly the datum needed"); the probe keeps
+        // both. `total` feeds the §11.2 VRAM budget / per-box P_max; `free` is the
+        // live headroom (CUDA Runtime API: cudaMemGetInfo writes free then total).
+        std::size_t free_b = 0, total_b = 0;
+        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        caps.free_vram_bytes = free_b;
+        caps.total_vram_bytes = total_b;
+
+        // P2P reachability from THIS device to every OTHER visible device. The
+        // capability-tier law (architecture.md §11.4; measured on rtxbox: both
+        // directions == 1, byte-exact, 55.6 GB/s): a "yes" enables the device-
+        // resident cudaMemcpyPeer combine fast-path; a "no" (EXPECTED on consumer
+        // GeForce — P2P driver-disabled) is a tagged degrade to the host-staged
+        // fixed-order baseline, NOT a fault. We report can_access_peer == true iff
+        // the bound device can reach AT LEAST ONE peer (the combine root needs a
+        // peer to pull from; a lone device, or all-isolated devices, ⇒ false ⇒
+        // host-staged baseline). The self-pair (peer == device_id_) is skipped:
+        // cudaDeviceCanAccessPeer is defined for distinct devices.
+        bool can_peer = false;
+        for (int peer = 0; peer < count; ++peer) {
+            if (peer == device_id_) continue;
+            int access = 0;
+            // NON-throwing: a probe failure / "cannot access" is an expected degrade
+            // (U1; check.cuh CAP-1). On a non-success status `access` is left 0 and
+            // the WARN line tags it; we never throw out of the capability probe.
+            const cudaError_t s =
+                STEPPE_CUDA_WARN(cudaDeviceCanAccessPeer(&access, device_id_, peer));
+            if (s == cudaSuccess && access != 0) {
+                can_peer = true;
+                break;
+            }
+        }
+        caps.can_access_peer = can_peer;
+
+        // EmulatedFp64 honorable on THIS build? Routes through the ONE predicate
+        // (emulation_honorable, f2_block_kernel.cu X-6/B2) — true iff the fixed-slice
+        // Ozaki tuning API is compiled in (STEPPE_HAVE_EMU_TUNING); false ⇒ an
+        // EmulatedFp64 request DEGRADES to native Fp64 with a logged capability tag
+        // (never the rejected DYNAMIC ~60-bit trap; architecture.md §12). Probing
+        // with a default EmulatedFp64 Precision asks exactly "would an EmulatedFp64
+        // run be honored as fixed-slice Ozaki, or downgraded?" — the same predicate
+        // the GEMM path consults, so the probe and the compute path can never report
+        // different honorability.
+        const Precision emu_probe{Precision::Kind::EmulatedFp64,
+                                  steppe::kDefaultMantissaBits};
+        caps.emulated_fp64_honorable = emulation_honorable(emu_probe);
+
+        // Restore the device current at entry (no side effect leaks from the probe).
+        STEPPE_CUDA_CHECK(cudaSetDevice(entry_device));
+        return caps;
+    }
+
 private:
+    /// Make THIS backend's device current at every compute entry (architecture.md
+    /// §11.4 SPMG: `cudaSetDevice` to switch per device). One backend is bound to one
+    /// device (backend.hpp per-device-instance contract); a single host process may
+    /// hold one backend per device and interleave their calls, so each entry
+    /// re-selects its own device rather than trusting the ambient current device.
+    /// On the single-GPU path this re-selects device 0 — a cheap no-op-equivalent
+    /// (the runtime short-circuits a redundant set) and ZERO behavior change. It also
+    /// satisfies the `CublasHandle` debug device-ordinal assert (handles.hpp): the
+    /// handle's cuBLAS context is bound to `device_id_`, and this makes that device
+    /// current before any GEMM. Parity-NEUTRAL (device selection moves no bits of the
+    /// arithmetic; §12).
+    void guard_device() const { STEPPE_CUDA_CHECK(cudaSetDevice(device_id_)); }
+
+    /// Make `device_id` the current CUDA device and RETURN it — the member-init-list
+    /// hook that selects the device BEFORE `blas_`/`workspace_` construct (see the
+    /// ctor). `static` so it is callable while initializing the first member (no
+    /// `this`/no other member touched yet). Throws (STEPPE_CUDA_CHECK) on an invalid
+    /// ordinal — fail-fast: a backend cannot be bound to a device that does not exist
+    /// (architecture.md §2; the §9 build() device-id validation is the layer above).
+    [[nodiscard]] static int set_and_return_device(int device_id) {
+        STEPPE_CUDA_CHECK(cudaSetDevice(device_id));
+        return device_id;
+    }
+
+    // The physical CUDA device this backend instance is bound to (backend.hpp
+    // per-device-instance contract; architecture.md §9, §11.4). Set once in the
+    // ctor (from the factory arg; default 0 = single-GPU), then `cudaSetDevice`-
+    // selected at every compute entry (`guard_device`) and recorded into the
+    // capability probe. Declared FIRST so it is initialized before the ctor body's
+    // `cudaSetDevice(device_id_)` and before `blas_` (whose cuBLAS context binds to
+    // the device current at that set, cuBLAS §2.1.2). A plain int — no teardown
+    // ordering concern.
+    int device_id_ = 0;
+
     // Single statistic stream for bit-stability (architecture.md §12). The
     // default stream suffices at M0 (one f2 call at a time); a dedicated RAII
     // Stream lands with the streaming pipeline (architecture.md §11.1). The
@@ -423,9 +601,13 @@ private:
 /// Factory for the GPU backend (declared in device/backend_factory.hpp, X-9/B8;
 /// architecture.md §9 — backend chosen at build()). Returns the abstract interface
 /// so `core` / `Resources` never name the concrete type or touch a CUDA header
-/// (architecture.md §4, §8).
-[[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend() {
-    return std::make_unique<CudaBackend>();
+/// (architecture.md §4, §8). `device_id` BINDS the backend to one physical CUDA
+/// device (the per-device-instance contract, backend.hpp; architecture.md §11.4
+/// SPMG — `Resources` passes `DeviceConfig::devices[g]`). The default 0 keeps the
+/// single-GPU path and every existing zero-arg call site bound to device 0,
+/// unchanged (ZERO regression).
+[[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend(int device_id) {
+    return std::make_unique<CudaBackend>(device_id);
 }
 
 }  // namespace steppe::device
