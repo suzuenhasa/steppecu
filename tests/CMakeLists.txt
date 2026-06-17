@@ -381,7 +381,7 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME geno_reader_unit COMMAND test_geno_reader)
 
-# --- Host-only unit test of io::read_snp (cleanup snp_reader B14) -------------
+# --- Host-only unit test of io::read_snp (cleanup snp_reader B14 + B15) --------
 # Pure C++ TU (no CUDA, no real AADR data): writes tiny SYNTHETIC .snp fixtures to
 # a temp path and exercises read_snp's TOKEN-COUNT column decision plus its FAIL-
 # FAST behavior on malformed records. The B14 verdict gate: a MALFORMED record (too
@@ -389,8 +389,12 @@ add_test(NAME geno_reader_unit COMMAND test_geno_reader)
 # std::runtime_error with the offending 1-based LINE NUMBER rather than silently
 # dropping the row (the old extraction-failure fall-through desynced the SNP axis
 # from the .geno); a WELL-FORMED file yields the correct chrom codes (numeric pass-
-# through + X->23 mapping) and the Morgan genpos as-read. Also pins the >=3-but-<6
-# field allele defaulting, max_snps truncation, and the interior-blank-throws /
+# through + X->23 mapping) and the Morgan genpos as-read. The B15 verdict gate: an
+# all-digit chromosome code too large for int (e.g. "99999999999") routes to the
+# negative-sentinel path with NO uncaught throw — chrom_code now parses with
+# std::from_chars, not std::stoi (whose out_of_range is a logic_error, not the
+# runtime_error the header contract promises). Also pins the >=3-but-<6 field
+# allele defaulting, max_snps truncation, and the interior-blank-throws /
 # trailing-blank-tolerated policy. Links steppe::io only (the reader leaf),
 # mirroring tests/unit/test_geno_reader.cpp. architecture.md §2 fail-fast, §12, §13.
 add_executable(test_snp_reader unit/test_snp_reader.cpp)

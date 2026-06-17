@@ -219,7 +219,50 @@ struct ThrowResult {
     return true;
 }
 
-// ---- (6) max_snps truncation: read only the first N records in file order -----
+// ---- (6) OVERFLOW / garbage chromosome code -> negative sentinel, NO throw -----
+// The verdict gate (cleanup snp_reader F2 / B15): an all-digit chromosome token
+// that exceeds INT_MAX (e.g. "99999999999") must NOT escape as an uncaught throw.
+// The old chrom_code used std::stoi, which throws std::out_of_range — a logic_error,
+// NOT the std::runtime_error the header's contract promises — leaking an opaque,
+// uncontextualized exception out of read_snp on a single absurd label. With
+// std::from_chars the overflowing token instead routes to the negative-sentinel
+// path (only adjacent-equality matters to the block rule). This test pins: (a)
+// read_snp does NOT throw on overflow/garbage-numeric chrom labels; (b) an
+// overflowing label gets a NEGATIVE sentinel code; (c) two DISTINCT overflowing
+// labels get two DISTINCT stable sentinels; and (d) an in-range numeric chrom on
+// the same file still passes through as its integer value (the from_chars swap did
+// not regress the happy path).
+[[nodiscard]] bool test_overflow_chrom_maps_to_sentinel_no_throw() {
+    TempFile f("chromoverflow");
+    write_text(f.path,
+               "rs1 1 0.10 1000 G A\n"             // in-range numeric chrom -> 1
+               "rs2 99999999999 0.20 2000 C T\n"   // > INT_MAX -> sentinel (no throw)
+               "rs3 88888888888 0.30 3000 A G\n"   // distinct overflow -> distinct sentinel
+               "rs4 99999999999 0.40 4000 T C\n");  // repeat of rs2's label -> SAME sentinel
+
+    SnpTable t;
+    // (a) must not throw any exception (the std::stoi out_of_range escape is the bug).
+    try {
+        t = read_snp(f.path.string(), SIZE_MAX);
+    } catch (...) {
+        return false;
+    }
+
+    if (t.count != 4) return false;
+    // (d) in-range numeric still passes through.
+    if (t.chrom[0] != 1) return false;
+    // (b) the overflowing labels map to NEGATIVE sentinels (distinct from any real
+    // numeric code, which is non-negative by EIGENSTRAT convention).
+    if (t.chrom[1] >= 0) return false;
+    if (t.chrom[2] >= 0) return false;
+    // (c) two DISTINCT overflow labels -> two DISTINCT sentinels; a REPEAT of the
+    // first label -> the SAME sentinel (stable per distinct label).
+    if (t.chrom[1] == t.chrom[2]) return false;
+    if (t.chrom[3] != t.chrom[1]) return false;
+    return true;
+}
+
+// ---- (7) max_snps truncation: read only the first N records in file order -----
 [[nodiscard]] bool test_max_snps_truncation() {
     TempFile f("trunc");
     write_text(f.path,
@@ -245,6 +288,8 @@ constexpr Case kCases[] = {
     {"interior blank THROWS / trailing blank tolerated", test_blank_line_policy},
     {"3-field record -> alleles default 'N' (token-count column decision)",
      test_three_field_record_defaults_alleles},
+    {"overflow/garbage chrom -> negative sentinel, NO uncaught throw (B15 gate)",
+     test_overflow_chrom_maps_to_sentinel_no_throw},
     {"max_snps truncation (first N in file order)", test_max_snps_truncation},
 };
 

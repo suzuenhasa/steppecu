@@ -28,7 +28,22 @@ namespace {
 // EIGENSTRAT chromosome-label conventions for the common non-numeric codes, so
 // adjacent-equality (all the block rule consumes) is well-defined. Numeric codes
 // pass through as their integer value; X/Y/MT take the EIGENSOFT codes; any other
-// non-numeric label gets a stable, distinct negative sentinel.
+// non-numeric label (or an all-digit label too large for int) gets a stable,
+// distinct negative sentinel.
+//
+// The numeric parse uses std::from_chars, NOT std::stoi: [charconv.from.chars] is
+// locale-free, allocation-free, and — load-bearing for read_snp's documented
+// `runtime_error`-only contract — reports failure through an out-parameter rather
+// than THROWING. std::stoi throws std::out_of_range (a logic_error, NOT a
+// runtime_error) on an all-digit token that exceeds INT_MAX, e.g. "99999999999",
+// which would escape read_snp uncaught and uncontextualized — violating the §10
+// fail-fast "io malformed-input carries context" contract and the header's
+// "Throws std::runtime_error on …" promise (cleanup snp_reader F2/B15;
+// https://en.cppreference.com/cpp/string/basic_string/stol). With from_chars an
+// overflowing all-digit token (errc::result_out_of_range) instead falls through to
+// the negative-sentinel path: only adjacent-equality between SNPs matters to the
+// block rule (block_partition_rule.hpp), so a stable distinct sentinel for a
+// pathological code is correct and never throws.
 int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
                int& next_other) {
     bool numeric = !tok.empty();
@@ -36,7 +51,17 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
         if (!std::isdigit(static_cast<unsigned char>(c))) { numeric = false; break; }
     }
     if (numeric) {
-        return std::stoi(tok);
+        int value = 0;
+        const char* begin = tok.data();
+        const char* end = tok.data() + tok.size();
+        const auto [ptr, ec] = std::from_chars(begin, end, value);
+        // The all-digit check above guarantees a non-empty, sign-free, fully-
+        // consumed run, so the only possible failure is errc::result_out_of_range
+        // (token > INT_MAX). On success return the integer; on overflow fall
+        // through to the sentinel path below (never throw — B15).
+        if (ec == std::errc{} && ptr == end) {
+            return value;
+        }
     }
     if (tok == "X" || tok == "x") return 23;
     if (tok == "Y" || tok == "y") return 24;

@@ -49,10 +49,13 @@ struct SnpTable {
 /// derived_acc `--snp-cap 100000` (the first 100k SNPs in file order), the SAME
 /// prefix the oracle decodes.
 ///
-/// Chromosome codes are parsed as integers when numeric; the common
-/// non-numeric/sex labels (X→23, Y→24, MT→90 — EIGENSTRAT conventions) are mapped
-/// so adjacent-equality (all the block rule needs) is well-defined. Any other
-/// non-numeric code maps to a stable negative sentinel per distinct label.
+/// Chromosome codes are parsed as integers when numeric (via std::from_chars, so
+/// the parse itself never throws); the common non-numeric/sex labels (X→23, Y→24,
+/// MT→90 — EIGENSTRAT conventions) are mapped so adjacent-equality (all the block
+/// rule needs) is well-defined. Any other non-numeric code — and an all-digit code
+/// too large for int (overflow) — maps to a stable negative sentinel per distinct
+/// label, never an uncaught throw (only adjacent-equality matters to the block
+/// rule, so a sentinel for a pathological code is correct).
 ///
 /// Each record is classified by its whitespace-separated TOKEN COUNT: a well-formed
 /// record has >= 3 fields (`<id> <chrom> <genpos>`); a full 6-field record carries
