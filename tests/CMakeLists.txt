@@ -164,6 +164,44 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group)
 
+# --- B25 M4 gather/scatter FOCUSED index-math gate (f2_blocks_kernel F24) ------
+# CUDA TU, DATA-FREE (sibling of test_f2_blocks_group.cu): drives the M4 gather +
+# scatter wrappers (launch_gather_group / run_f2_gemms_group /
+# launch_assemble_blocks_group, f2_blocks_kernel.cuh) on a tiny synthetic REORDERED
+# 2-block layout and reads back the INTERMEDIATE buffers to pin the M4-specific
+# index math DIRECTLY — coverage that today is only TRANSITIVE (the single-block==M0
+# arm of test_f2_blocks_equivalence.cu exercises only the IDENTITY scatter and never
+# a pad column; the B24 f2_blocks_group gate diffs only the FINAL assembled tensors,
+# inferring the pad/copy contracts rather than asserting them on the slab bytes). The
+# B25 verdict gate (cleanup f2_blocks_kernel F24):
+#   (i)   PAD-COLUMN ZERO — after launch_gather_group, every pad column c >= sz of
+#         dQg/dVg/dSg (both the Qsq and Hc halves of the [2P×s_pad] S slab) is EXACTLY
+#         0.0 (bit pattern; the slabs are pre-filled with a nonzero sentinel so the
+#         zero-fill is a real kernel write, not zero-init residue).
+#   (ii)  GATHERED == FEEDER — every real column c < sz of slab k equals the feeder
+#         columns at block_offsets[block_ids_in_group[k]]+c, BIT-FOR-BIT (a pure copy).
+#   (iii) SCATTER TO BLOCK-id SLAB — with a reordered block_ids_in_group = {1,0} and
+#         two blocks of DIFFERENT size (2 vs 3, hence different f2/Vpair), each resident
+#         [P×P×n_block] slab matches ITS OWN block's oracle AND (negative control) NOT
+#         the other block's — so a scatter to slab-k instead of block-id (the identity
+#         single-block==M0 cannot distinguish) fails.
+# Native Fp64 (the gather/scatter index math is precision-neutral), so no emulation
+# tuning is required. Self-checking main() (not a GoogleTest TU); CTest gates on the
+# exit code. Links steppe::device (the wrappers + the CublasHandle/DeviceBuffer RAII)
+# + steppe::core_internal (the shared f2 primitive oracle). No io / no data.
+# architecture.md §13; cleanup f2_blocks_kernel F24, B25.
+add_executable(test_f2_blocks_gather reference/test_f2_blocks_gather.cu)
+target_link_libraries(test_f2_blocks_gather
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_blocks_gather PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Match the library's STEPPE_HAVE_EMU_TUNING define when the option is on (the box
+# build) so any #if-guarded include agrees with steppe_device, even though this test
+# runs native Fp64.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_blocks_gather PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_blocks_gather COMMAND test_f2_blocks_gather)
+
 # --- X-6/B2 EmulatedFp64 honorability gate (the dynamic-mantissa-trap close-out)
 # CUDA TU, DATA-FREE: drives the production seam (make_cuda_backend → compute_f2)
 # on a tiny SYNTHETIC Q/V/N to assert the engaged MODE, not a precision value. It
