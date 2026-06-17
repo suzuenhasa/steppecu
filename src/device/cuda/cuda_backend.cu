@@ -25,8 +25,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>     // std::numeric_limits<int>::max — the M0 k-narrowing guard (B22)
 #include <memory>
 #include <span>
+#include <stdexcept>  // std::runtime_error — the M0 M>INT_MAX fail-fast (B22)
+#include <string>     // std::to_string — diagnostic message for the B22 guard
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
@@ -89,6 +92,34 @@ public:
         F2Result out;
         out.P = P;
         if (P <= 0 || M <= 0) return out;
+
+        // ---- M0 contraction-extent narrowing guard (cleanup f2_block_kernel E-1,
+        //      B22) -------------------------------------------------------------
+        // This is the M0 WHOLE-matrix path: run_f2_gemms issues the three GEMMs over
+        // ALL M SNPs in one shot via cublasGemmEx, whose contraction extent `k` is a
+        // signed `int` (cuBLAS Library API: cublasGemmEx takes `int m, n, k`; only
+        // the cublas*Ex_64 variants take int64_t). MatView::M is deliberately `long`
+        // (views.hpp: "so a large SNP block does not overflow 32-bit"), and the M0
+        // path does NOT tile — it uploads all M — so at AADR/streaming scale (§11.1
+        // pushes 1e6-1e7 SNPs; the only ceiling here is VRAM for the [P×M] uploads,
+        // which at P=768 admits M well past 2^31) the `static_cast<int>(M)` in
+        // run_f2_gemms is reachable. For M > INT_MAX that conversion is
+        // implementation-defined (a wrapped/negative `k`) → cuBLAS either rejects
+        // with CUBLAS_STATUS_INVALID_VALUE or, worse, silently contracts over fewer
+        // SNPs → a wrong-but-plausible f2. Fail FAST here (architecture.md §2) BEFORE
+        // any device allocation or the narrowing, with a typed, descriptive error —
+        // never a silent overflow. (The M4 compute_f2_blocks path is NOT affected:
+        // its cublasGemmStridedBatchedEx contracts over `s_pad` = one block's padded
+        // SNP count, which is small by construction.)
+        if (M > static_cast<long>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error(
+                "steppe::device::CudaBackend::compute_f2: SNP count M=" +
+                std::to_string(M) + " exceeds INT_MAX (" +
+                std::to_string(std::numeric_limits<int>::max()) +
+                "); the M0 whole-matrix cublasGemmEx contraction extent k is a 32-bit "
+                "int. Tile the SNP axis or route this path through cublasGemmEx_64 "
+                "(cleanup B22).");
+        }
 
         const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
         const std::size_t two_pm = 2u * pm;

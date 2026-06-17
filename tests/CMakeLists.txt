@@ -170,6 +170,27 @@ target_link_libraries(test_f2_empty_guard
 set_target_properties(test_f2_empty_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME f2_empty_guard COMMAND test_f2_empty_guard)
 
+# --- B22 compute_f2 M>INT_MAX narrowing guard gate (f2_block_kernel E-1) ------
+# CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the production seam
+# (make_cuda_backend -> compute_f2) with an SNP count M > INT_MAX to assert the B22
+# fail-fast guard. The M0 WHOLE-matrix path issues the three f2 GEMMs over ALL M
+# SNPs via cublasGemmEx, whose contraction extent `k` is a signed 32-bit int (only
+# the cublas*Ex_64 variants take int64_t); MatView::M is `long`, so an unguarded
+# static_cast<int>(M) wraps/negates `k` for M > INT_MAX → cuBLAS rejects, or worse
+# SILENTLY contracts over fewer SNPs (a wrong-but-plausible f2). The B22 verdict
+# gate: compute_f2 with M == INT_MAX+1 THROWS std::runtime_error naming INT_MAX
+# (a typed fail-fast, never a silent overflow), the guard is a TIGHT `M > INT_MAX`
+# (M == INT_MAX is NOT B22-rejected), and a valid tiny block still computes (the
+# guard did not break the happy path). data == nullptr for the over-limit cases:
+# the guard fires before any allocation/dereference. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::device only (no io /
+# no data). architecture.md §2 fail-fast, §13; cleanup f2_block_kernel E-1, B22.
+add_executable(test_f2_int_max_guard reference/test_f2_int_max_guard.cu)
+target_link_libraries(test_f2_int_max_guard
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_int_max_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME f2_int_max_guard COMMAND test_f2_int_max_guard)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.

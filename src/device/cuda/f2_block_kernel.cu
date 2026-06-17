@@ -60,6 +60,7 @@
 
 #include <atomic>   // std::atomic_flag — one-shot capability-tag emission
 #include <cstdio>   // std::fprintf — interim log sink (until internal/log.hpp, B7)
+#include <limits>   // std::numeric_limits<int>::max — the M0 k-narrowing assert (B22)
 
 #include "core/internal/f2_estimator.hpp"  // het_correction, assemble_f2_numerator,
                                            //   finalize_f2, grid_for, kCdivBlock
@@ -337,7 +338,17 @@ void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
     const cublasComputeType_t ct = f2_compute_type(precision);
     const double one = 1.0;
     const double zero = 0.0;
-    const int Mi = static_cast<int>(M);   // cublasGemmEx takes int k; M fits a tile
+    // cublasGemmEx's contraction extent `k` is a signed `int` (only the _64
+    // variants take int64_t). M is `long` (the M0 path uploads ALL SNPs and does
+    // NOT tile), so M > INT_MAX would make this narrowing yield a wrapped/negative
+    // k → cuBLAS rejects or silently contracts over fewer SNPs. The sole caller,
+    // CudaBackend::compute_f2 (cuda_backend.cu), GUARDS `M <= INT_MAX` and throws a
+    // typed error BEFORE this point (cleanup f2_block_kernel E-1, B22); the
+    // debug-only assert pins that invariant at the narrowing itself.
+    STEPPE_ASSERT(M <= static_cast<long>(std::numeric_limits<int>::max()),
+                  "run_f2_gemms: M exceeds INT_MAX; cublasGemmEx k is a 32-bit int "
+                  "(guarded by CudaBackend::compute_f2, B22)");
+    const int Mi = static_cast<int>(M);   // safe: M <= INT_MAX (guarded upstream)
     const int twoP = 2 * P;
 
     // G[P × P] = Q · Qᵀ.  C(i,j) = Σ_s Q(i,s) Q(j,s).
