@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -84,12 +85,56 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
             std::to_string(header_.n_snp) + ")");
     }
 
+    // FAIL-FAST on a degenerate partition (architecture.md §2). `read_ind` already
+    // throws on an empty selection, but `read_tile` accepts an ARBITRARY
+    // IndPartition, so a zero-population partition would otherwise produce a
+    // silent n_pop()==0 tile the downstream decode short-circuits into an empty
+    // Q/V/N (cleanup geno_reader 2.2).
+    if (part.groups.empty()) {
+        throw std::runtime_error(
+            "io::GenoReader::read_tile: empty partition (no selected populations) for " +
+            path_);
+    }
+
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t bytes_per_rec = packed_bytes(tile_snps);  // ceil(tile_snps/4)
 
-    // Count the gathered individuals (sum of selected segment sizes).
+    // Count the gathered individuals (sum of selected segment sizes) and validate
+    // each requested row is actually present on disk. A row >= records_present_
+    // would otherwise seek into trailing junk / a concatenated file and read a
+    // COMPLETE record of the WRONG individual silently (cleanup geno_reader 1.2);
+    // bounding every row by records_present_ also caps n_ind <= records_present_,
+    // which defangs the size-multiply wrap below in practice.
     std::size_t n_ind = 0;
-    for (const auto& g : part.groups) n_ind += g.rows.size();
+    for (const auto& g : part.groups) {
+        for (std::size_t row : g.rows) {
+            if (row >= records_present_) {
+                throw std::runtime_error(
+                    "io::GenoReader::read_tile: individual row " + std::to_string(row) +
+                    " out of range (records_present=" + std::to_string(records_present_) +
+                    ") in " + path_);
+            }
+        }
+        n_ind += g.rows.size();
+    }
+
+    // CHECKED MULTIPLY before resize (cleanup geno_reader 1.5, the dominant item).
+    // `n_ind * bytes_per_rec` is a std::size_t product; std::size_t arithmetic
+    // wraps modulo 2^N (well-defined-but-SILENT, [basic.fundamental]). On a
+    // hostile/stale partition the product can wrap to a SMALL value, `resize`
+    // then allocates a too-small buffer, and the gather loop writes past the
+    // allocation at `tile.packed.data() + out_ind * bytes_per_rec` for out_ind up
+    // to the true (un-wrapped) n_ind — a silent heap-buffer-overflow WRITE, not an
+    // exception. The row<records_present_ guard above bounds this in practice; this
+    // is the direct, defense-in-depth fail-fast guard (architecture.md §2). The
+    // idiom is the standard `a > MAX/b` overflow test (bytes_per_rec is provably
+    // nonzero here: tile_snps >= 1 ⇒ packed_bytes(tile_snps) >= 1).
+    if (n_ind > std::numeric_limits<std::size_t>::max() / bytes_per_rec) {
+        throw std::runtime_error(
+            "io::GenoReader::read_tile: tile size overflow (n_ind=" +
+            std::to_string(n_ind) + " * bytes_per_record=" +
+            std::to_string(bytes_per_rec) + " exceeds size_t) for " + path_);
+    }
 
     GenotypeTile tile;
     tile.bytes_per_record = bytes_per_rec;

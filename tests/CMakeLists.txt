@@ -263,6 +263,25 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME filters_unit COMMAND test_filters)
 
+# --- Host-only unit test of io::GenoReader (cleanup geno_reader B17) ----------
+# Pure C++ TU (no CUDA, no real AADR data): writes tiny SYNTHETIC TGENO .geno
+# fixtures to a temp path and exercises GenoReader's happy-path gather plus its
+# FAIL-FAST boundary checks. The B17 verdict gate: a HOSTILE / OVERSIZED partition
+# (row >= records_present_, or one that would wrap the n_ind*bytes_per_rec size
+# multiply) must THROW std::runtime_error rather than silently corrupting the heap
+# (pre-fix: a too-small resize + a gather write PAST the allocation). Also pins a
+# normal partition decoding correctly, empty-partition reject, SNP-range/partial-
+# file edges, and constructor fail-fast. Links steppe::io only (the reader leaf),
+# mirroring tests/unit/test_filters.cpp. architecture.md §2 fail-fast, §13.
+add_executable(test_geno_reader unit/test_geno_reader.cpp)
+target_link_libraries(test_geno_reader
+    PRIVATE steppe::io steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_geno_reader PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_geno_reader PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME geno_reader_unit COMMAND test_geno_reader)
+
 # --- M2 filter ORACLE test (real AADR; the M2 trust seam) --------------------
 # CUDA TU (mirrors test_decode_equivalence.cu): reads the raw TGENO triple via the
 # io leaf, decodes via the CPU reference backend, builds the filter keep-mask via

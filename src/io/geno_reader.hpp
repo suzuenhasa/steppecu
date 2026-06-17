@@ -60,8 +60,15 @@ public:
     /// expects); a nonzero begin is reserved for the M5 tile loop and rejected
     /// here so a future caller does not silently get mis-aligned codes.
     ///
-    /// Throws std::runtime_error on a read error, an out-of-range SNP range, or
-    /// a non-TGENO file (the M1 decode path targets TGENO).
+    /// The partition is VALIDATED at the boundary (fail-fast, architecture.md §2):
+    /// an empty `part.groups`, any individual row >= records_present() (a stale /
+    /// wrong-dataset partition), or a gathered size that would overflow size_t are
+    /// REJECTED with a thrown std::runtime_error rather than producing a wrong
+    /// gather or a silent heap-buffer-overflow write.
+    ///
+    /// Throws std::runtime_error on a read error, an out-of-range SNP range, a
+    /// non-TGENO file (the M1 decode path targets TGENO), or a malformed partition
+    /// (empty / row out of range / size overflow).
     [[nodiscard]] GenotypeTile read_tile(const IndPartition& part,
                                          std::size_t snp_begin,
                                          std::size_t snp_end);
