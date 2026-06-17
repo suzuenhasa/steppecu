@@ -25,6 +25,21 @@ void read_snp_id_list(const std::string& path, std::vector<std::string>& out) {
             out.push_back(id);
         }
     }
+    // Fail-fast on an openable-but-unreadable node (architecture.md §2). On
+    // libstdc++/POSIX, constructing an ifstream on a DIRECTORY (or a FIFO/socket
+    // the process can open() but not read()) succeeds — `if (!in)` above passes —
+    // and the failure only surfaces on the first read, which sets badbit. A normal
+    // end-of-input instead sets eofbit|failbit (std::getline extracts no characters
+    // at EOF) but NOT badbit, so the post-loop guard must distinguish them: badbit
+    // is a hard stream error, and (fail && !eof) is a read that failed for a reason
+    // other than reaching EOF. Without this guard a directory path silently yields
+    // an EMPTY keep-set, violating the "cannot be opened ⇒ throws" contract and
+    // dropping the user's prune.in constraint on a parity run (cleanup B19 / 1.1).
+    if (in.bad() || (in.fail() && !in.eof())) {
+        throw std::runtime_error(
+            "io::filter::read_snp_id_list: read failed on SNP-id list "
+            "(not a regular file?): " + path);
+    }
 }
 
 SnpMembership::SnpMembership(const FilterConfig& cfg) {

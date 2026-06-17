@@ -10,13 +10,28 @@
 // 'G','T' is logic). The numerical-accuracy gate is the real-AADR oracle test
 // (tests/reference/test_filter_oracle.cu).
 //
+// B19 verdict gate (cleanup include_exclude 1.1): the prune.in file branch of
+// read_snp_id_list / SnpMembership had ZERO test coverage. These add a temp-file
+// round-trip (first-token-per-line, blank-skip, CRLF '\r' stripped, trailing
+// columns tolerated, append semantics), a throw-on-missing-file check, and — the
+// fix itself — a throw-on-DIRECTORY check: a directory opens but read-fails on
+// POSIX, which pre-fix yielded a silently-empty keep-set (fail-open) and now
+// fail-fasts (architecture.md §2). The membership test pins prune.in ∪ include
+// with exclude overriding a prune-supplied id, and that a directory prune_in_path
+// propagates the throw out of the SnpMembership constructor.
+//
 // Dual harness (identical to tests/unit/test_f2.cpp): with -DSTEPPE_TEST_WITH_GTEST
 // it uses GoogleTest; otherwise a self-checking main() returning non-zero on the
 // first failure — all CTest needs to gate. No CUDA here.
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "io/filter/filter_decision.hpp"   // the shared predicates (single source)
@@ -33,6 +48,47 @@ using steppe::FilterConfig;
 constexpr double kEps = 1e-12;
 [[nodiscard]] bool close(double a, double b, double eps = kEps) {
     return std::fabs(a - b) <= eps * std::fmax(std::fabs(b), 1.0);
+}
+
+// ---- temp-file helpers for the prune.in file-branch tests --------------------
+// Mirror the RAII temp-file convention in tests/unit/test_snp_reader.cpp: a
+// unique path per fixture (so parallel ctest invocations do not collide) and a
+// scope-bound cleanup. Used only by the read_snp_id_list / prune.in tests below.
+[[nodiscard]] std::filesystem::path temp_prune(const char* tag) {
+    static int counter = 0;
+    auto p = std::filesystem::temp_directory_path();
+    p /= ("steppe_prune_in_test_" + std::string(tag) + "_" +
+          std::to_string(++counter) + ".in");
+    return p;
+}
+
+struct TempFile {
+    std::filesystem::path path;
+    explicit TempFile(const char* tag) : path(temp_prune(tag)) {}
+    ~TempFile() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+};
+
+void write_text(const std::filesystem::path& path, const std::string& body) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(body.data(), static_cast<std::streamsize>(body.size()));
+    out.close();
+}
+
+// Whether `fn` throws std::runtime_error (the documented prune.in failure mode).
+[[nodiscard]] bool throws_runtime_error(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const std::runtime_error&) {
+        return true;
+    } catch (...) {
+        return false;  // a different exception type is NOT the documented contract
+    }
+    return false;
 }
 
 // ---- MAF boundary: PINNED >= side --------------------------------------------
@@ -188,6 +244,102 @@ constexpr double kEps = 1e-12;
     return true;
 }
 
+// ---- read_snp_id_list: valid-file branch (the previously-zero file coverage) --
+// Pins the documented parse contract on a real temp file: first whitespace token
+// of each non-blank line is the id, trailing columns are tolerated, blank lines
+// are skipped, and a CRLF (Windows-origin) line has its trailing '\r' delimited
+// off the token (the token-extraction reader is CRLF-robust by construction).
+[[nodiscard]] bool test_read_snp_id_list_valid() {
+    TempFile f("valid");
+    // Line 2 carries a trailing column (tolerated); line 3 is blank (skipped);
+    // line 4 is whitespace-only (skipped); line 5 is CRLF-terminated.
+    write_text(f.path,
+               "rs100\n"
+               "rs200 extra_column_ignored\n"
+               "\n"
+               "   \n"
+               "rs300\r\n"
+               "rs400\n");
+    std::vector<std::string> ids;
+    read_snp_id_list(f.path.string(), ids);
+    // Exactly the four real ids, in file order, with NO trailing '\r' on rs300.
+    const std::vector<std::string> want = {"rs100", "rs200", "rs300", "rs400"};
+    if (ids != want) return false;
+
+    // read_snp_id_list APPENDS (documented out-param semantics): a second read
+    // accumulates rather than replacing.
+    read_snp_id_list(f.path.string(), ids);
+    if (ids.size() != 8) return false;
+    return true;
+}
+
+// ---- read_snp_id_list: missing file throws (open-failure contract) -----------
+[[nodiscard]] bool test_read_snp_id_list_missing_throws() {
+    auto missing = temp_prune("missing");  // path NOT created
+    std::error_code ec;
+    if (std::filesystem::exists(missing, ec)) return false;  // sanity: truly absent
+    std::vector<std::string> ids;
+    return throws_runtime_error(
+        [&] { read_snp_id_list(missing.string(), ids); });
+}
+
+// ---- read_snp_id_list: directory throws (the B19 fix — opens but read-fails) --
+// A directory path constructs an ifstream successfully on POSIX/libstdc++ (the
+// `if (!in)` open guard passes), but the first read sets badbit. Pre-B19 this was
+// silently swallowed (empty list, fail-open); the post-loop bad()/fail()-without-
+// eof() guard now fail-fasts. This case FAILED before the fix.
+[[nodiscard]] bool test_read_snp_id_list_directory_throws() {
+    auto dir = temp_prune("dir");
+    std::error_code ec;
+    std::filesystem::create_directory(dir, ec);
+    if (ec) return false;  // could not stage the fixture
+    std::vector<std::string> ids;
+    const bool threw = throws_runtime_error(
+        [&] { read_snp_id_list(dir.string(), ids); });
+    // The fail-fast must NOT leave a partially-populated list masquerading as data.
+    const bool clean = ids.empty();
+    std::filesystem::remove(dir, ec);
+    return threw && clean;
+}
+
+// ---- SnpMembership: prune.in unions with include, exclude overrides ----------
+// The constructor's prune.in file branch (cfg.prune_in_path) had zero coverage.
+// Pin: (1) prune ids contribute to the keep-set, (2) include ids union with them,
+// (3) exclude overrides a prune-supplied id (exclude wins), and (4) a directory
+// prune_in_path makes the CONSTRUCTOR fail-fast (the B19 contract end-to-end).
+[[nodiscard]] bool test_membership_prune_in() {
+    {
+        TempFile f("membership");
+        write_text(f.path, "rsP1\nrsP2\nrsBoth\n");  // rsBoth also excluded below
+        FilterConfig cfg;
+        cfg.prune_in_path = f.path.string();
+        cfg.include_snp_ids = {"rsI1"};      // unions with the prune ids
+        cfg.exclude_snp_ids = {"rsBoth"};    // overrides the prune-supplied id
+        SnpMembership m(cfg);
+
+        if (m.is_noop()) return false;                 // a real constraint exists
+        if (m.keep_count() != 4) return false;         // rsP1, rsP2, rsBoth, rsI1
+        if (m.drop_count() != 1) return false;         // rsBoth
+        if (!m.passes("rsP1") || !m.passes("rsP2")) return false;  // prune ids kept
+        if (!m.passes("rsI1")) return false;                       // include id kept
+        if (m.passes("rsBoth")) return false;          // exclude wins over prune
+        if (m.passes("rsOther")) return false;         // not in the keep-set union
+    }
+    // A directory prune_in_path must propagate the read-fail throw out of the ctor.
+    {
+        auto dir = temp_prune("ctor_dir");
+        std::error_code ec;
+        std::filesystem::create_directory(dir, ec);
+        if (ec) return false;
+        FilterConfig cfg;
+        cfg.prune_in_path = dir.string();
+        const bool threw = throws_runtime_error([&] { SnpMembership m(cfg); });
+        std::filesystem::remove(dir, ec);
+        if (!threw) return false;
+    }
+    return true;
+}
+
 // ---- --mind per-sample predicate over a hand-packed tile ----------------------
 // Pack 3 individuals × 4 SNPs (1 byte/record). Sample 0: all non-missing; sample 1:
 // 2 of 4 missing (frac 0.5); sample 2: all missing. Pin the kept set at a 0.4 cap.
@@ -253,6 +405,13 @@ constexpr Case kCases[] = {
     {"transition/transversion split (GT/AC vs GA/CT)", test_transition_transversion},
     {"is_autosome (chr 1..22, AT2 auto_only)", test_is_autosome},
     {"include/exclude membership (exclude wins)", test_membership},
+    {"read_snp_id_list valid file (first token; blank/CRLF; append)",
+     test_read_snp_id_list_valid},
+    {"read_snp_id_list missing file throws", test_read_snp_id_list_missing_throws},
+    {"read_snp_id_list directory throws (B19 fail-fast)",
+     test_read_snp_id_list_directory_throws},
+    {"SnpMembership prune.in ∪ include; exclude overrides; ctor dir throws",
+     test_membership_prune_in},
     {"--mind per-sample predicate + no-op", test_mind_prepass},
 };
 

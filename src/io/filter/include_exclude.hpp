@@ -36,7 +36,9 @@ public:
     /// the prune.in path in `cfg`. The prune.in file is READ (one SNP id per
     /// whitespace-delimited line; blank lines skipped), its ids unioned into the
     /// keep-set. Throws std::runtime_error if `cfg.prune_in_path` is set but the
-    /// file cannot be opened. When include_snp_ids, exclude_snp_ids, and
+    /// file cannot be opened OR cannot be read (e.g. it is a directory, which opens
+    /// but read-fails — fail-fast rather than a silently-empty keep-set; see
+    /// read_snp_id_list). When include_snp_ids, exclude_snp_ids, and
     /// prune_in_path are all empty/unset, the membership is a NO-OP (`passes`
     /// returns true for every id) — the parity-path default.
     explicit SnpMembership(const FilterConfig& cfg);
@@ -63,8 +65,11 @@ private:
 
 /// Read a prune.in-style SNP-id list file: one id per whitespace-delimited token,
 /// blank lines skipped, into `out` (appended). Exposed for tests / reuse. Throws
-/// std::runtime_error if the file cannot be opened. (The first whitespace token of
-/// each line is taken as the id, tolerating trailing columns.)
+/// std::runtime_error if the file cannot be opened, OR if it opens but read-fails
+/// (a directory / FIFO / other non-regular node opens on POSIX but sets badbit on
+/// the first read — fail-fast instead of silently returning an empty list). (The
+/// first whitespace token of each line is taken as the id, tolerating trailing
+/// columns.)
 void read_snp_id_list(const std::string& path, std::vector<std::string>& out);
 
 }  // namespace steppe::io::filter
