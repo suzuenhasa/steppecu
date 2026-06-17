@@ -393,6 +393,31 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME backend_factory_unit COMMAND test_backend_factory)
 
+# --- Host-only unit test of the M4.5 BackendCapabilities POD (U2) -------------
+# Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend.hpp and
+# pins the SHAPE + value-initialized "unknown" defaults of the BackendCapabilities
+# POD the M4.5 capability-tier scaffold adds (architecture.md §9 Resources, §11.4
+# SPMG capability-tiered combine, §12 parity; cleanup 00-overview §(2).1). The U2
+# verdict gate: BackendCapabilities is an aggregate / trivially-copyable /
+# standard-layout POD whose every field defaults to the documented zero/false
+# ("unknown" tier), AND ComputeBackend::capabilities() has a usable base default
+# returning that unknown (so CpuBackend need not override it and backend.hpp
+# compiles standalone). The REAL probe values are asserted in U5, not here. The
+# checks are compile-time static_asserts plus run-time guards. Like
+# test_backend_factory, this links ONLY steppe::core_internal (which exposes the
+# src/ include root resolving "device/backend.hpp") + steppe::api — NOT
+# steppe::device / its PRIVATE CUDA toolkit; a CUDA leak in the capability struct
+# would fail this host compile, which is itself the §4-layering proof.
+# architecture.md §4, §9, §11.4, §12, §13.
+add_executable(test_backend_capabilities unit/test_backend_capabilities.cpp)
+target_link_libraries(test_backend_capabilities
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_backend_capabilities PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_backend_capabilities PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME backend_capabilities_unit COMMAND test_backend_capabilities)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is

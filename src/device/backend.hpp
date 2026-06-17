@@ -18,7 +18,10 @@
 // from the Q/V/N contract at a given Precision, returning f2 [P × P] and the
 // pairwise-valid-SNP count Vpair [P × P]. Vpair is RETAINED, not discarded: it
 // is the weighted-block-jackknife weight at S4 (architecture.md §5 S2 caveat
-// (a)). Later milestones add decode / gemm / jackknife / svd methods here.
+// (a)). M1/M4 add `decode_af` / `compute_f2_blocks`; M4.5 adds the CUDA-free
+// `capabilities()` probe + `BackendCapabilities` POD that make this seam
+// single-node-multi-GPU-ready (architecture.md §9, §11.4; cleanup 00-overview
+// §(2)). Later milestones add gemm / jackknife / svd methods here.
 #ifndef STEPPE_DEVICE_BACKEND_HPP
 #define STEPPE_DEVICE_BACKEND_HPP
 
@@ -112,11 +115,91 @@ struct DecodeResult {
     long M = 0;
 };
 
+/// CUDA-FREE probe result describing the ONE device a backend instance is bound
+/// to, plus whether that device can peer-access the other visible devices — the
+/// capability-tier datum the M4.5 single-node multi-GPU machinery reads
+/// (architecture.md §9 DeviceConfig/Resources, §11.4 SPMG capability-tiered
+/// combine, §12 parity; cleanup 00-overview §(2).1 "the ONE unified design",
+/// device-backend §11.1/§11.2). Plain old data so it crosses the CUDA-free seam
+/// (architecture.md §4) and slots by value into `Resources`/a result envelope.
+///
+/// WHY OUT-OF-BAND, NEVER ON `F2BlockTensor`. The capability TAG (which combine
+/// path a run took, why it degraded) is recorded in `Resources`/the run record,
+/// NEVER on the numeric payload (`F2BlockTensor` stays pure numeric storage so
+/// the §12 parity diff compares only bits that the math produced). This struct is
+/// the *probe input* to that out-of-band tag; it carries no statistic.
+///
+/// PARITY-NEUTRAL BY CONSTRUCTION. Every field here drives a data-movement /
+/// observability lever only (which combine transport, which precision lane is
+/// honorable) — never the arithmetic. §12 parity holds identically whether
+/// `can_access_peer` is true (PRO 6000 device-resident `cudaMemcpyPeer` combine)
+/// or false (the host-staged fixed-order combine baseline): both sum the same
+/// fixed `g=0..G-1` device order, so the reported numbers are bit-identical on
+/// both tiers (architecture.md §11.4, §12).
+///
+/// The real probe (the values these fields actually take on a device) is asserted
+/// in the CUDA path's probe test; this header only fixes the SHAPE and the
+/// value-initialized "unknown" defaults (every field zero/false ⇒ "nothing
+/// probed yet", the contract `ComputeBackend::capabilities()`'s base returns).
+struct BackendCapabilities {
+    /// Number of CUDA devices VISIBLE to this process (`cudaGetDeviceCount`). The
+    /// SPMG combine fans out over the subset pinned by `DeviceConfig::devices`
+    /// (architecture.md §9, §11.4); this is the upper bound the probe saw. 0 ⇒
+    /// unknown / no CUDA device (the CPU backend / value-initialized default).
+    int device_count = 0;
+
+    /// Compute capability of THE device this backend instance is bound to
+    /// (`cudaDeviceProp::major`/`minor`; sm_120 ⇒ {12, 0} on the Blackwell box).
+    /// One build (sm_120) serves both boxes (architecture.md §0; cleanup ⚡
+    /// box-role split), so this is observability, not a dispatch key. {0,0} ⇒
+    /// unknown.
+    int compute_major = 0;
+    int compute_minor = 0;
+
+    /// Total / currently-free VRAM in bytes on the bound device (`cudaMemGetInfo`,
+    /// which yields BOTH — `cuda_backend.cu` historically discarded `total`; the
+    /// M4.5 probe captures it, cleanup 00-overview §(2).1). `total` feeds the
+    /// §11.2 VRAM budget / per-box P_max; `free` is the live headroom. 0 ⇒ unknown.
+    std::size_t total_vram_bytes = 0;
+    std::size_t free_vram_bytes  = 0;
+
+    /// Whether the bound device (conventionally GPU 0, the combine root) can
+    /// PEER-ACCESS the other visible devices — `cudaDeviceCanAccessPeer`
+    /// (architecture.md §11.4, §9 `enable_peer_access`). The capability-tier law
+    /// (architecture.md §11.4; workflow wxz1fiiln): true is the PRO 6000 /
+    /// datacenter-Blackwell stock-driver case (the device-resident `cudaMemcpyPeer`
+    /// combine fast-path); false is EXPECTED on consumer GeForce (P2P
+    /// driver-disabled) and triggers the NON-throwing tagged degrade to the
+    /// host-staged fixed-order combine baseline — never a fault. false ⇒ no peer
+    /// access (also the value-initialized default).
+    bool can_access_peer = false;
+
+    /// Whether `EmulatedFp64` is HONORABLE on this build/device — i.e. the
+    /// fixed-slice Ozaki tuning API is present so cuBLAS pins the FIXED mantissa
+    /// rather than silently falling back to the DYNAMIC ~60-bit trap (architecture
+    /// .md §12; cleanup X-6/B2 `emulation_honorable`, `STEPPE_HAVE_EMU_TUNING`).
+    /// false ⇒ an `EmulatedFp64` request must degrade to native `Fp64` with a
+    /// logged capability tag (never run dynamic under the `EmulatedFp64` tag).
+    /// false is also the value-initialized "unknown" default.
+    bool emulated_fp64_honorable = false;
+};
+
 /// Abstract compute backend. One interface, two implementations (CUDA, CPU
 /// reference). All device operations route through here; `core` never issues a
 /// GEMM/SVD/Cholesky itself (architecture.md §2, §8). Move-only ownership of
 /// concrete backends is by `std::unique_ptr<ComputeBackend>` in `Resources`
 /// (architecture.md §9).
+///
+/// PER-DEVICE-INSTANCE CONTRACT (architecture.md §9 PerGpuResources, §11.4 SPMG;
+/// cleanup device-backend §11.2). One backend instance is bound to exactly ONE
+/// CUDA device — the single-process-multi-GPU model is ONE backend (and one
+/// `PerGpuResources`: stream + cuBLAS/cuSOLVER handle) PER device in
+/// `DeviceConfig::devices`, constructed with that device's id and
+/// `cudaSetDevice`-bound to it. The interface is therefore SINGLE-DEVICE: SNP
+/// sharding across the G devices and the host-side fixed-order combine of their
+/// per-device full-shape partials are orchestrated ABOVE this seam (by
+/// `Resources`/the streamer, architecture.md §11.4), NOT inside any one method —
+/// that combine algorithm is the next workflow, not implemented here.
 class ComputeBackend {
 public:
     ComputeBackend() = default;
@@ -198,6 +281,29 @@ public:
     ///         (N, V integer-valued ⇒ zero diff; Q via integer-accumulate AC/AN +
     ///         single FP64 divide ⇒ exact is the goal/gate).
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
+
+    /// Probe the capability tier of THE device this backend instance is bound to
+    /// (the per-device-instance contract above): compute capability, total/free
+    /// VRAM, whether this device can peer-access the other visible devices, and
+    /// whether `EmulatedFp64` is honorable on this build (architecture.md §9,
+    /// §11.4, §12; cleanup 00-overview §(2).1; device-backend §11.1). The result
+    /// is recorded OUT-OF-BAND in `Resources`/the run record so the M4.5 combine
+    /// picks the device-resident `cudaMemcpyPeer` fast-path vs the host-staged
+    /// fixed-order baseline and logs which/why — the TAG never lands on the
+    /// numeric `F2BlockTensor` (kept pure; see `BackendCapabilities`).
+    ///
+    /// NON-VIRTUAL-PURE on purpose: this has a DEFAULT base implementation
+    /// returning a value-initialized (all-zero/false ⇒ "unknown") `BackendCapabilities`,
+    /// so (a) `CpuBackend` — which has no device tier to report — need not override
+    /// it, and (b) `backend.hpp` compiles standalone with no CUDA. Only the CUDA
+    /// backend overrides it with the real probe (the probe values are asserted in
+    /// the CUDA path's probe test, not here). The probe is NON-throwing: a
+    /// "no peer access" answer (`cudaDeviceCanAccessPeer` == 0, EXPECTED on the
+    /// budget GeForce tier) is a tagged degrade, not a fault (architecture.md
+    /// §11.4 capability-tier law; cleanup 00-overview §(2).4).
+    [[nodiscard]] virtual BackendCapabilities capabilities() const {
+        return BackendCapabilities{};
+    }
 };
 
 }  // namespace steppe
