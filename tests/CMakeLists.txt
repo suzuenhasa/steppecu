@@ -381,6 +381,27 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME geno_reader_unit COMMAND test_geno_reader)
 
+# --- Host-only unit test of io::read_snp (cleanup snp_reader B14) -------------
+# Pure C++ TU (no CUDA, no real AADR data): writes tiny SYNTHETIC .snp fixtures to
+# a temp path and exercises read_snp's TOKEN-COUNT column decision plus its FAIL-
+# FAST behavior on malformed records. The B14 verdict gate: a MALFORMED record (too
+# few fields, or a non-finite/garbage genpos that std::from_chars rejects) THROWS
+# std::runtime_error with the offending 1-based LINE NUMBER rather than silently
+# dropping the row (the old extraction-failure fall-through desynced the SNP axis
+# from the .geno); a WELL-FORMED file yields the correct chrom codes (numeric pass-
+# through + X->23 mapping) and the Morgan genpos as-read. Also pins the >=3-but-<6
+# field allele defaulting, max_snps truncation, and the interior-blank-throws /
+# trailing-blank-tolerated policy. Links steppe::io only (the reader leaf),
+# mirroring tests/unit/test_geno_reader.cpp. architecture.md §2 fail-fast, §12, §13.
+add_executable(test_snp_reader unit/test_snp_reader.cpp)
+target_link_libraries(test_snp_reader
+    PRIVATE steppe::io steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_snp_reader PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_snp_reader PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME snp_reader_unit COMMAND test_snp_reader)
+
 # --- M2 filter ORACLE test (real AADR; the M2 trust seam) --------------------
 # CUDA TU (mirrors test_decode_equivalence.cu): reads the raw TGENO triple via the
 # io leaf, decodes via the CPU reference backend, builds the filter keep-mask via

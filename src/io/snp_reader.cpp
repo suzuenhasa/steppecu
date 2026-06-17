@@ -10,12 +10,16 @@
 #include "io/snp_reader.hpp"
 
 #include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <vector>
 
 namespace steppe::io {
 
@@ -44,6 +48,48 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
     return code;
 }
 
+// Split a .snp line into whitespace-separated tokens (the oracle uses line.split(),
+// any-whitespace; operator>> skips any whitespace run identically — see the
+// "Considered & rejected" note in docs/cleanup/io-snp_reader.md). The token COUNT
+// then drives the column decision deterministically (B14), replacing the old
+// extraction-failure fall-through that silently `continue`d on a short line and
+// could desync the SNP axis from the .geno.
+[[nodiscard]] std::vector<std::string> split_ws(const std::string& line) {
+    std::vector<std::string> tokens;
+    std::istringstream ls(line);
+    std::string tok;
+    while (ls >> tok) tokens.push_back(tok);
+    return tokens;
+}
+
+// Parse the genetic-position token (Morgans, as-read) with std::from_chars: it is
+// locale-free, allocation-free, and throws nothing (architecture.md §12 wants a
+// correctly-rounded decimal→double parse matching the oracle/AT2; libstdc++'s
+// from_chars float backend is correctly-rounded). The whole token must be consumed
+// (ptr == end), so trailing garbage like "0.5x" and overflow (errc::result_out_of_
+// range, e.g. "1e400") are rejected.
+//
+// NON-FINITE guard is EXPLICIT, not delegated to from_chars: [charconv.from.chars]
+// does not forbid the C99 "inf"/"nan" forms, and libstdc++ (GCC 13) DOES accept
+// them (verified on the box: from_chars("nan"/"inf") returns errc{} with the whole
+// token consumed). A non-finite genpos must never reach core::block_of, where
+// static_cast<int>(std::floor(NaN_or_Inf / bs)) is undefined behavior that
+// silently corrupts the parity-critical block partition. So after a successful
+// parse we reject !std::isfinite(value) outright (this also catches the overflowed
+// HUGE_VAL on implementations that map overflow to ±inf rather than out_of_range).
+[[nodiscard]] double parse_genpos(const std::string& tok, std::size_t line_no) {
+    double value = 0.0;
+    const char* begin = tok.data();
+    const char* end = tok.data() + tok.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end || !std::isfinite(value)) {
+        throw std::runtime_error(
+            "io::read_snp: malformed genetic position \"" + tok +
+            "\" at line " + std::to_string(line_no));
+    }
+    return value;
+}
+
 }  // namespace
 
 SnpTable read_snp(const std::string& path, std::size_t max_snps) {
@@ -56,25 +102,52 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
     std::map<std::string, int> other_codes;
     int next_other = -1;
     std::string line;
+    std::size_t line_no = 0;  // 1-based, counts EVERY physical line for diagnostics
     while (t.count < max_snps && std::getline(in, line)) {
-        std::istringstream ls(line);
-        std::string id, chrom_tok;
-        double genpos = 0.0;
-        std::string physpos;
-        std::string ref_tok, alt_tok;
-        if (!(ls >> id >> chrom_tok >> genpos >> physpos >> ref_tok >> alt_tok)) {
-            // Tolerate a record without explicit alleles (rare); require at least
-            // id, chrom, genpos. Missing alleles default to 'N'.
-            std::istringstream ls2(line);
-            if (!(ls2 >> id >> chrom_tok >> genpos)) continue;  // blank/short → skip
-            ref_tok = "N";
-            alt_tok = "N";
+        ++line_no;
+        const std::vector<std::string> fields = split_ws(line);
+
+        // A truly empty/whitespace-only line carries no SNP record. The .snp row
+        // index IS the SNP index (positional), so we tolerate a blank line ONLY at
+        // EOF (a common trailing newline); a blank line followed by more records
+        // would desync the SNP axis from the .geno, so it is a format error.
+        if (fields.empty()) {
+            if (in.peek() == std::char_traits<char>::eof()) break;  // trailing blank
+            throw std::runtime_error(
+                "io::read_snp: blank line at line " + std::to_string(line_no) +
+                " (interior blank lines desync the SNP axis from the .geno)");
         }
+
+        // Token-count column decision (B14): EIGENSTRAT .snp is
+        //   <id> <chrom> <genpos> [<physpos> <ref> <alt>]
+        // so a well-formed record has >= 3 fields. A record with all 6 columns
+        // carries explicit alleles (cols 5,6); a >=3-but-<6 record legitimately
+        // omits the alleles (they default to 'N'). Fewer than 3 fields is a
+        // malformed record — fail-fast with the line number rather than the old
+        // silent `continue` (which dropped the row and shifted every later SNP's
+        // metadata relative to its genotype).
+        if (fields.size() < 3) {
+            throw std::runtime_error(
+                "io::read_snp: malformed record (expected >= 3 whitespace-separated"
+                " fields <id> <chrom> <genpos>, got " +
+                std::to_string(fields.size()) + ") at line " +
+                std::to_string(line_no));
+        }
+
+        const std::string& id = fields[0];
+        const std::string& chrom_tok = fields[1];
+        const double genpos = parse_genpos(fields[2], line_no);  // throws if non-finite/garbage
+        // Alleles present only when the full 6-column record is given (cols 5,6);
+        // otherwise default to the EIGENSTRAT "missing/unknown base" 'N'.
+        const bool has_alleles = fields.size() >= 6;
+        const char ref = has_alleles && !fields[4].empty() ? fields[4][0] : 'N';
+        const char alt = has_alleles && !fields[5].empty() ? fields[5][0] : 'N';
+
         t.id.push_back(id);
         t.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
         t.genpos_morgans.push_back(genpos);
-        t.ref.push_back(ref_tok.empty() ? 'N' : ref_tok[0]);
-        t.alt.push_back(alt_tok.empty() ? 'N' : alt_tok[0]);
+        t.ref.push_back(ref);
+        t.alt.push_back(alt);
         ++t.count;
     }
     return t;

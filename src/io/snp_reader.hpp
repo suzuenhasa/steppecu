@@ -54,8 +54,22 @@ struct SnpTable {
 /// so adjacent-equality (all the block rule needs) is well-defined. Any other
 /// non-numeric code maps to a stable negative sentinel per distinct label.
 ///
-/// Throws std::runtime_error on a missing/unreadable file (the `io` leaf surfaces
-/// I/O failures as exceptions to its caller; architecture.md §4).
+/// Each record is classified by its whitespace-separated TOKEN COUNT: a well-formed
+/// record has >= 3 fields (`<id> <chrom> <genpos>`); a full 6-field record carries
+/// explicit alleles (cols 5,6), otherwise ref/alt default to 'N'. The genetic
+/// position (col 3) is parsed with std::from_chars (locale-free, correctly-rounded
+/// decimal→double, the whole token consumed) so block boundaries match the
+/// oracle/AT2 exactly (architecture.md §12), then explicitly checked with
+/// std::isfinite — so a NaN/Inf genpos can never reach the static_cast<int> in
+/// core::block_of (libstdc++ from_chars accepts "inf"/"nan", hence the explicit
+/// finite guard rather than relying on the parser to reject them).
+///
+/// Throws std::runtime_error on: a missing/unreadable file; a malformed record
+/// (fewer than 3 fields, or a non-finite/garbage genetic position); or an interior
+/// blank line — the .snp row index IS the SNP index, so a silently-skipped record
+/// would desync the SNP axis from the .geno (architecture.md §2 fail-fast, §4 the
+/// `io` leaf surfaces I/O failures as exceptions). The diagnostic carries the
+/// 1-based line number. A single trailing blank line at EOF is tolerated.
 [[nodiscard]] SnpTable read_snp(const std::string& path, std::size_t max_snps);
 
 }  // namespace steppe::io
