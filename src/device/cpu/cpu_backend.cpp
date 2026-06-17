@@ -52,7 +52,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
-#include "core/internal/decode_af.hpp"     // genotype_code, genotype_valid, finalize_af (shared)
+#include "core/internal/decode_af.hpp"     // genotype_code, accumulate_genotype, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
 #include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult
@@ -300,9 +300,9 @@ public:
     /// (segment of gathered individuals) and SNP s, sum the ref-allele codes (AC)
     /// and count non-missing individuals (AN) over the segment, then finalize via
     /// the SHARED primitive (core/internal/decode_af.hpp `genotype_code`,
-    /// `genotype_valid`, `finalize_af`) so the GPU kernel and this oracle cannot
-    /// diverge on the unpack / missing-handling / divide. Integer accumulators,
-    /// single FP64 divide ⇒ Q exact; N, V integer-valued ⇒ exact.
+    /// `accumulate_genotype`, `finalize_af`) so the GPU kernel and this oracle
+    /// cannot diverge on the unpack / accumulation / missing-handling / divide.
+    /// Integer accumulators, single FP64 divide ⇒ Q exact; N, V integer-valued ⇒ exact.
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
         const int P = tile.n_pop;
         const long M = static_cast<long>(tile.n_snp);
@@ -327,17 +327,14 @@ public:
             for (long s = 0; s < M; ++s) {
                 const std::size_t byte_in_rec = static_cast<std::size_t>(s) / 4u;
                 const int pos_in_byte = static_cast<int>(s & 3);
-                long ac = 0;  // Σ ref-allele copies over non-missing individuals
-                long an = 0;  // count of non-missing individuals
+                std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
+                std::int64_t an = 0;  // count of non-missing individuals
 
                 for (std::size_t g = seg_begin; g < seg_end; ++g) {
                     const std::uint8_t byte =
                         tile.packed[g * tile.bytes_per_record + byte_in_rec];
                     const std::uint8_t code = core::genotype_code(byte, pos_in_byte);
-                    if (core::genotype_valid(code)) {
-                        ac += static_cast<long>(code);
-                        ++an;
-                    }
+                    core::accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
                 }
 
                 const core::AfResult r = core::finalize_af(ac, an, tile.ploidy);

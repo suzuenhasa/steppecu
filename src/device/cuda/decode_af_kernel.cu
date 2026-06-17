@@ -32,16 +32,16 @@
 
 #include <cuda_runtime.h>
 
-#include "core/internal/decode_af.hpp"       // genotype_code, genotype_valid, finalize_af
+#include "core/internal/decode_af.hpp"       // genotype_code, accumulate_genotype, finalize_af
 #include "core/internal/launch_config.hpp"   // cdiv, kDecodeBlockX/Y (the launch-math home)
 #include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
 
 namespace steppe::device {
 
+using core::accumulate_genotype;
 using core::AfResult;
 using core::finalize_af;
 using core::genotype_code;
-using core::genotype_valid;
 using core::kDecodeBlockX;  // SNP axis (32 = one warp, warp-aligned for coalescing)
 using core::kDecodeBlockY;  // population axis (32*8 = 256 threads/block)
 
@@ -50,8 +50,9 @@ namespace {
 /// Decode one (population, SNP) entry. One thread owns (i = population row, s =
 /// SNP). It reduces over population i's individual segment [seg_begin, seg_end),
 /// unpacking SNP s's 2-bit code from each record's byte (s/4) at position (s%4),
-/// accumulating AC (ref-allele copies) / AN (non-missing individuals), then writes
-/// Q/V/N via the SHARED finalize. Column-major [P × M]: element (i,s) at i + P·s.
+/// folding it into AC (ref-allele copies) / AN (non-missing individuals) via the
+/// SHARED accumulate_genotype, then writing Q/V/N via the SHARED finalize.
+/// Column-major [P × M]: element (i,s) at i + P·s.
 __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
                                  std::size_t bytes_per_record,
                                  const std::size_t* __restrict__ pop_offsets,
@@ -68,15 +69,12 @@ __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
     const std::size_t byte_in_rec = static_cast<std::size_t>(s) / 4u;
     const int pos_in_byte = static_cast<int>(s & 3);
 
-    long ac = 0;  // Σ ref-allele copies over non-missing individuals
-    long an = 0;  // count of non-missing individuals
+    std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
+    std::int64_t an = 0;  // count of non-missing individuals
     for (std::size_t g = seg_begin; g < seg_end; ++g) {
         const std::uint8_t byte = packed[g * bytes_per_record + byte_in_rec];
         const std::uint8_t code = genotype_code(byte, pos_in_byte);
-        if (genotype_valid(code)) {
-            ac += static_cast<long>(code);
-            ++an;
-        }
+        accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
     }
 
     const AfResult r = finalize_af(ac, an, ploidy);

@@ -74,6 +74,25 @@ inline constexpr std::uint8_t kMissingGenotypeCode = 3;
     return code != kMissingGenotypeCode;
 }
 
+/// Fold one individual's 2-bit `code` into the per-(population, SNP) integer
+/// accumulators: a NON-MISSING code adds its raw value to `ac` (Σ ref-allele
+/// copies) and increments `an` (count of non-missing individuals); a MISSING code
+/// is excluded from BOTH. This is THE accumulation convention of the decode
+/// reduction's inner step — single-homed here so the GPU kernel's segmented
+/// reduction and the CPU oracle's scalar loop CANNOT diverge on it (the last
+/// per-element decode semantic to join genotype_code/genotype_valid/finalize_af in
+/// the shared primitive; architecture.md §8 single-source, §13; cleanup A-1/B27).
+/// `std::int64_t` accumulators (== `long` on the LP64 target) give ample headroom:
+/// max AC = ploidy·n_individuals ≪ 2^53 (cleanup E-3 width note).
+STEPPE_HD inline void accumulate_genotype(std::uint8_t code,
+                                          std::int64_t& ac,
+                                          std::int64_t& an) noexcept {
+    if (genotype_valid(code)) {
+        ac += static_cast<std::int64_t>(code);
+        ++an;
+    }
+}
+
 /// The decoded per-(population, SNP) result: reference-allele frequency Q in
 /// [0,1] (0 where no data), the non-missing HAPLOID count N, and the validity V.
 /// Plain POD so it crosses the CUDA-free seam unchanged.

@@ -3,12 +3,13 @@
 // Host-only unit test of the SHARED genotype-decode / allele-frequency primitive
 // (architecture.md §13 "Unit tests"; ROADMAP §5; cleanup B10/T-1). Pure C++ TU,
 // NO GPU and NO data: it proves the `__host__ __device__` per-element primitives
-// in core/internal/decode_af.hpp (genotype_code, genotype_valid, finalize_af)
-// compile and are correct on the host path (STEPPE_HD expands to empty under the
-// host compiler), so the same functions the GPU decode kernel and the CPU oracle
-// share are independently pinned — the divergence-prevention thesis the header
-// rests on, tested directly rather than only through the GPU/4GB-data equivalence
-// .cu (the §13 gap this closes; sibling test_f2.cpp does the same for f2_estimator).
+// in core/internal/decode_af.hpp (genotype_code, genotype_valid,
+// accumulate_genotype, finalize_af) compile and are correct on the host path
+// (STEPPE_HD expands to empty under the host compiler), so the same functions the
+// GPU decode kernel and the CPU oracle share are independently pinned — the
+// divergence-prevention thesis the header rests on, tested directly rather than
+// only through the GPU/4GB-data equivalence .cu (the §13 gap this closes; sibling
+// test_f2.cpp does the same for f2_estimator).
 //
 // THE B10 VERDICT GATE (cleanup B10/X-11 — ploidy folded into finalize_af
 // validity): finalize_af must produce
@@ -20,12 +21,14 @@
 // Dual harness (build contract, matches test_f2.cpp): with -DSTEPPE_TEST_WITH_GTEST
 // it uses GoogleTest; otherwise it is a self-checking main() that returns non-zero
 // on the first failure — all CTest needs to gate (tests/CMakeLists.txt). No CUDA.
+#include <cstdint>
 #include <cstdio>
 
-#include "core/internal/decode_af.hpp"  // genotype_code, genotype_valid, finalize_af, AfResult, kMissingGenotypeCode
+#include "core/internal/decode_af.hpp"  // genotype_code, genotype_valid, accumulate_genotype, finalize_af, AfResult, kMissingGenotypeCode
 
 namespace {
 
+using steppe::core::accumulate_genotype;
 using steppe::core::AfResult;
 using steppe::core::finalize_af;
 using steppe::core::genotype_code;
@@ -56,6 +59,59 @@ using steppe::core::kMissingGenotypeCode;
 [[nodiscard]] bool test_genotype_valid_mapping() {
     return genotype_valid(0) && genotype_valid(1) && genotype_valid(2) &&
            !genotype_valid(kMissingGenotypeCode) && kMissingGenotypeCode == 3u;
+}
+
+// ---- accumulate_genotype: the AC/AN inner-step convention (A-1/B27) ----------
+// The shared accumulation step both decode loops now call: a NON-MISSING code
+// adds its raw value to ac and bumps an by 1; a MISSING code touches neither. This
+// is the last per-element decode semantic that used to be hand-duplicated in the
+// GPU kernel and the CPU oracle — pinning it here closes that divergence surface.
+
+// A valid code adds its raw value to ac and increments an by exactly 1.
+[[nodiscard]] bool test_accumulate_valid_adds_code() {
+    std::int64_t ac = 0;
+    std::int64_t an = 0;
+    accumulate_genotype(2u, ac, an);
+    return ac == 2 && an == 1;
+}
+
+// code 0 is VALID (a homozygous-ref individual): an increments, ac stays 0. Pins
+// that "missing" is the sentinel 3, not "code == 0".
+[[nodiscard]] bool test_accumulate_code0_is_valid() {
+    std::int64_t ac = 7;  // pre-loaded to prove ac is unchanged by a 0-code
+    std::int64_t an = 0;
+    accumulate_genotype(0u, ac, an);
+    return ac == 7 && an == 1;
+}
+
+// A MISSING code (3) is excluded from BOTH accumulators — neither moves.
+[[nodiscard]] bool test_accumulate_missing_excluded() {
+    std::int64_t ac = 5;
+    std::int64_t an = 4;
+    accumulate_genotype(kMissingGenotypeCode, ac, an);
+    return ac == 5 && an == 4;
+}
+
+// Running accumulation over a segment matches the convention AC = Σ valid codes,
+// AN = count of valid: codes {0,1,2,3,2} -> ac = 0+1+2+2 = 5, an = 4 (the 3 skipped).
+[[nodiscard]] bool test_accumulate_segment_running() {
+    const std::uint8_t seg[] = {0u, 1u, 2u, kMissingGenotypeCode, 2u};
+    std::int64_t ac = 0;
+    std::int64_t an = 0;
+    for (const std::uint8_t code : seg) accumulate_genotype(code, ac, an);
+    return ac == 5 && an == 4;
+}
+
+// The whole inner step composes to the SAME AfResult as feeding the convention's
+// AC/AN straight into finalize_af — accumulate then finalize == the decode contract.
+[[nodiscard]] bool test_accumulate_then_finalize() {
+    const std::uint8_t seg[] = {2u, 2u, kMissingGenotypeCode, 1u};  // ac=5, an=3
+    std::int64_t ac = 0;
+    std::int64_t an = 0;
+    for (const std::uint8_t code : seg) accumulate_genotype(code, ac, an);
+    const AfResult got = finalize_af(ac, an, /*ploidy=*/2);
+    const AfResult want = finalize_af(/*ac=*/5, /*an=*/3, /*ploidy=*/2);  // N=6, Q=5/6
+    return ac == 5 && an == 3 && got.q == want.q && got.n == want.n && got.v == want.v;
 }
 
 // ---- finalize_af: the B10 verdict gate ---------------------------------------
@@ -128,6 +184,11 @@ constexpr Case kCases[] = {
     {"genotype_code MSB-first positions 0..3", test_genotype_code_positions},
     {"genotype_code k taken mod 4", test_genotype_code_mod4},
     {"genotype_valid raw-value mapping (3 == missing)", test_genotype_valid_mapping},
+    {"accumulate_genotype valid code adds raw value", test_accumulate_valid_adds_code},
+    {"accumulate_genotype code 0 is valid (an++, ac stays)", test_accumulate_code0_is_valid},
+    {"accumulate_genotype missing excluded from ac and an", test_accumulate_missing_excluded},
+    {"accumulate_genotype running segment AC/AN convention", test_accumulate_segment_running},
+    {"accumulate_genotype then finalize == decode contract", test_accumulate_then_finalize},
     {"finalize_af ploidy=0 -> masked {0,0,0}", test_finalize_ploidy0_masked},
     {"finalize_af ploidy=0, ac=0 -> masked (no NaN)", test_finalize_ploidy0_zeroac_masked},
     {"finalize_af negative ploidy -> masked {0,0,0}", test_finalize_negative_ploidy_masked},
