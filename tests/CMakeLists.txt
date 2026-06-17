@@ -523,6 +523,45 @@ set_target_properties(test_resources_build PROPERTIES CUDA_SEPARABLE_COMPILATION
 # emulation-tuning define is needed for this TU.
 add_test(NAME resources_build COMMAND test_resources_build)
 
+# --- M4.5 MULTI-GPU PARITY GATE (the §12 PARITY LAW; THE verify gate) ----------
+# CUDA TU (mirrors test_f2_blocks_equivalence.cu's data loading): loads real
+# derived_acc (P=50, fast) AND derived_full (P=768, scale) Q/V/N + the .snp prefix
+# via the io leaf, runs the SHARED assign_blocks, and asserts the MULTI-GPU combined
+# f2_blocks AND Vpair are BIT-IDENTICAL (exact std::memcmp / ==, NOT a tolerance) to
+# the single-GPU reference (core::compute_f2_blocks over the full inputs), across G:
+#   (1) G==1 (devices={0}) multi-GPU == single-GPU reference  (the bit-identity floor)
+#   (2) G==2 (devices={0,1}, prefer_p2p_combine=false) host-staged == single-GPU
+#       reference  (THE core parity claim, architecture.md §11.4 SPMG host-side
+#       fixed-order combine, §12 — bit-identical across G AND to single-GPU; NEVER an
+#       NCCL AllReduce). The device-resident P2P combine arm is a separate unit.
+# Bit-identity holds because the sharding is BLOCK-ALIGNED (each block computed
+# entirely on one device from its own contiguous SNP columns ⇒ same slab bits as
+# single-GPU) and the combine sums in fixed g=0..G-1 order onto a zero tensor
+# (design §0). On a single-GPU box the G==2 lane is skipped (logged); an absent
+# dataset directory is skipped so the fast gate runs without derived_full. Capability
+# tag (can_access_peer) is asserted out-of-band on the PRO tier (rtxbox). Self-checking
+# main() (not a GoogleTest TU); CTest gates on the exit code. Links steppe::io
+# (read_snp) + steppe::core (assign_blocks + compute_f2_blocks + the multi-GPU entry
+# point + the host-staged combine) + steppe::device (build_resources + the per-device
+# backends + plan_block_shards). architecture.md §11.4, §12, §13; design §6.
+add_executable(test_f2_multigpu_parity reference/test_f2_multigpu_parity.cu)
+target_link_libraries(test_f2_multigpu_parity
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+# Separable compilation so the executable device-links steppe_device's RDC kernels
+# directly (the same path the M4 / U5 reference tests use). steppe_core carries no
+# device link object of its own (CUDA_RESOLVE_DEVICE_SYMBOLS OFF, src/core/CMakeLists.txt),
+# so there is exactly one device-link of steppe_device — here.
+set_target_properties(test_f2_multigpu_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# The parity assertion is BIT-IDENTITY (single-GPU vs sharded, SAME precision), which
+# holds on BOTH lanes; match steppe_device's STEPPE_HAVE_EMU_TUNING when the option is
+# on (the box build) so the EmulatedFp64 arm exercises the FIXED-slice Ozaki path that
+# the per-device compute_f2_blocks engages (it must produce identical bits sharded vs
+# not), and so this TU's #if-guarded includes agree with the library.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_multigpu_parity PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is
