@@ -307,6 +307,31 @@ if(NOT STEPPE_HAVE_GTEST)
            COMMAND test_block_partition "${STEPPE_AADR_SNP}")
 endif()
 
+# --- Host-only unit test of the f2 composition root (cleanup B11) -------------
+# Pure C++ TU (no CUDA, no GPU, no io, no data): drives the f2 orchestration
+# (core::compute_f2_block / core::compute_f2_blocks) through a CUDA-FREE recording
+# MockBackend — the GPU-free seam test §13 designed the ComputeBackend injection
+# point to admit but that did not exist (f2_from_blocks F-12). The B11 verdict
+# gate: (1) the orchestration forwards Q/V/N + precision + (M4) block_id.data()/
+# n_block to the backend BYTE-FOR-BYTE and returns its result unchanged, and
+# (2) a MALFORMED contract — Q/V/N disagreeing on P/M, a short/null block_id, an
+# n_block out of range, or a non-decreasing block_id — FAILS FAST (STEPPE_ASSERT
+# abort) BEFORE reaching the backend, instead of a silent OOB read/write deep in a
+# backend (the death cases are skipped under NDEBUG by contract). Links
+# steppe::core for the out-of-line orchestration (f2_from_blocks.cpp); steppe_core
+# links steppe::device PRIVATE with CUDA_RESOLVE_DEVICE_SYMBOLS OFF, and this TU
+# names only the ABSTRACT ComputeBackend (the mock is its concrete override), so no
+# GPU/CUDA symbol is pulled — the CUDA-free host link is itself the §4 proof.
+# architecture.md §2 fail-fast, §8 DRY, §13.
+add_executable(test_f2_from_blocks unit/test_f2_from_blocks.cpp)
+target_link_libraries(test_f2_from_blocks
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_f2_from_blocks PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_f2_from_blocks PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME f2_from_blocks_unit COMMAND test_f2_from_blocks)
+
 # --- Host-only unit test of the SHARED M2 filter predicates (no GPU, no data) -
 # Pure C++ TU: exercises the host-pure filter_decision.hpp predicates + the
 # include/exclude membership + the --mind per-sample resolution on hand-built

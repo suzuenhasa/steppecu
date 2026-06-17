@@ -23,6 +23,12 @@ namespace steppe::core {
 /// governs only the GPU matmul-heavy GEMMs (architecture.md §12); the CPU oracle
 /// ignores it. Returns f2 [P × P] + Vpair [P × P] (column-major), the latter
 /// retained as the S4 jackknife weight (architecture.md §5 S2 caveat (a)).
+///
+/// PRECONDITION (debug fail-fast, cleanup B11): Q, V, N must share the same P and
+/// M and have non-negative extents (the documented backend.hpp contract). In a
+/// debug build a violation aborts here (STEPPE_ASSERT, file/line) rather than
+/// reading past a short view inside the backend; under NDEBUG the check is
+/// compiled out and the caller owns the contract.
 [[nodiscard]] F2Result compute_f2_block(ComputeBackend& backend, const MatView& Q,
                                         const MatView& V, const MatView& N,
                                         const Precision& precision);
@@ -35,6 +41,14 @@ namespace steppe::core {
 /// (the spike-chosen size-grouped strided-batched design) vs the CPU per-block
 /// long-double oracle. `precision` governs only the matmul-heavy GEMMs. This stays
 /// CUDA-free: it names only the ComputeBackend seam + the host-pure block rule.
+///
+/// PRECONDITION (debug fail-fast, cleanup B11): in addition to the Q/V/N contract
+/// (same P/M, non-negative), the `partition` must describe exactly the M columns —
+/// `partition.block_id.size() == Q.M` (catches a short/null block_id, which the
+/// backend's `block_ranges` cannot see across the length-erasing `(const int*,
+/// int)` seam), `0 < n_block <= M`, and `block_id` dense/non-decreasing in
+/// `[0, n_block)`. A violation aborts here in debug rather than driving a silent
+/// out-of-bounds host-vector write / device read in the backend.
 [[nodiscard]] F2BlockTensor compute_f2_blocks(ComputeBackend& backend, const MatView& Q,
                                               const MatView& V, const MatView& N,
                                               const BlockPartition& partition,
