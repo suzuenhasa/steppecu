@@ -13,6 +13,13 @@
 // fixed-order multi-GPU-combine rules the M4.5 parity-recompute path relies on. Those
 // rules are inexpressible without this field.
 //
+// VERDICT GATE for U3 (M4.5 capability-tier scaffold): DeviceConfig must also carry
+// `bool prefer_p2p_combine` defaulting to TRUE, with `enable_peer_access` staying TRUE
+// — the two independent override-INTENT P2P levers (architecture.md §11.4; cleanup
+// overview (2).3 / include-config 11.1). prefer_p2p_combine selects the device-resident
+// `cudaMemcpyPeer` combine WHEN peer access is available, distinct from whether peer
+// access MAY be enabled at all; both combine paths are bit-identical (parity-neutral).
+//
 // Dual harness (build contract, identical to the sibling host-only tests): with
 // -DSTEPPE_TEST_WITH_GTEST it uses GoogleTest; otherwise it is a self-checking main()
 // that returns non-zero on the first failure — all CTest needs to gate
@@ -61,13 +68,39 @@ static_assert(steppe::DeviceConfig{}.precision.kind == steppe::Precision::Kind::
            cfg.precision.mantissa_bits == steppe::kDefaultMantissaBits;
 }
 
+// ---- U3 (M4.5 capability-tier scaffold): the `prefer_p2p_combine` knob -----------
+// include-config finding 11.1 / cleanup overview (2).3 / TODO M4.5. The M4.5
+// device-resident P2P combine (cudaMemcpyPeer, fixed `g=0..G-1` order) is selected by
+// a knob DISTINCT from `enable_peer_access`:
+//   * enable_peer_access  = MAY we call cudaDeviceEnablePeerAccess at all;
+//   * prefer_p2p_combine  = WHEN peer access is available, prefer the device-resident
+//                           combine over the host-staged combine (both bit-identical,
+//                           §11.4 — parity-neutral, data-movement only).
+// It must be a bool and default TRUE (capable-first: prefer P2P when probed, else
+// non-throwing tagged-degrade to the host-staged baseline). enable_peer_access must
+// STAY TRUE alongside it (the two are independent override-INTENT levers, §11.4).
+static_assert(std::is_same_v<decltype(steppe::DeviceConfig::prefer_p2p_combine), bool>,
+              "DeviceConfig::prefer_p2p_combine must be a bool (override INTENT, §11.4)");
+static_assert(steppe::DeviceConfig{}.prefer_p2p_combine == true,
+              "DeviceConfig::prefer_p2p_combine must default to TRUE (architecture.md §11.4)");
+static_assert(steppe::DeviceConfig{}.enable_peer_access == true,
+              "DeviceConfig::enable_peer_access must stay TRUE (architecture.md §11.4)");
+
+[[nodiscard]] bool test_prefer_p2p_combine_default_true() {
+    const steppe::DeviceConfig cfg{};
+    // The two override-INTENT P2P levers are independent and both default capable-first:
+    // peer access permitted (MAY) AND the device-resident combine preferred (WHICH-PATH).
+    return cfg.prefer_p2p_combine == true && cfg.enable_peer_access == true;
+}
+
 // ---- the rest of the DeviceConfig default surface (regression pins) ------------
 [[nodiscard]] bool test_other_device_defaults() {
     const steppe::DeviceConfig cfg{};
-    return cfg.devices.empty() &&          // empty ⇒ auto-enumerate (§9)
-           cfg.search_streams == 4u &&     // throughput-only search lanes (S8)
-           cfg.use_mem_pool == true &&     // pool-backed allocator (§7, §11.2)
-           cfg.enable_peer_access == true; // opportunistic P2P (§11.4)
+    return cfg.devices.empty() &&            // empty ⇒ auto-enumerate (§9)
+           cfg.search_streams == 4u &&       // throughput-only search lanes (S8)
+           cfg.use_mem_pool == true &&       // pool-backed allocator (§7, §11.2)
+           cfg.enable_peer_access == true && // opportunistic P2P (§11.4)
+           cfg.prefer_p2p_combine == true;   // prefer device-resident combine (§11.4)
 }
 
 struct Case {
@@ -78,6 +111,8 @@ struct Case {
 constexpr Case kCases[] = {
     {"DeviceConfig::deterministic defaults to true (B9)", test_deterministic_default_true},
     {"deterministic-consistent statistic-path defaults", test_statistic_path_defaults},
+    {"DeviceConfig::prefer_p2p_combine defaults to true; enable_peer_access stays true (U3)",
+     test_prefer_p2p_combine_default_true},
     {"DeviceConfig remaining defaults (devices/search/pool/p2p)", test_other_device_defaults},
 };
 
