@@ -38,8 +38,13 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
             const std::uint8_t* rec = in.packed + g * in.bytes_per_record;
             std::size_t nm = 0;
             for (std::size_t s = 0; s < n_snp; ++s) {
-                const std::uint8_t byte = rec[s / 4u];
-                const std::uint8_t code = code_in_byte(byte, static_cast<int>(s % 4u));
+                // Byte index s/kCodesPerByte and in-byte position s%kCodesPerByte:
+                // the packing radix is single-homed in io::kCodesPerByte (the same 4
+                // that packed_bytes / code_in_byte derive from), never re-spelled here.
+                constexpr auto kPerByte = static_cast<std::size_t>(io::kCodesPerByte);
+                const std::uint8_t byte = rec[s / kPerByte];
+                const std::uint8_t code =
+                    code_in_byte(byte, static_cast<int>(s % kPerByte));
                 if (code != kMissingCode) ++nm;
             }
             out.nonmissing[g] = nm;
@@ -47,9 +52,15 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
                 1.0 - static_cast<double>(nm) / static_cast<double>(n_snp);
         }
     } else {
-        // No SNPs (or no data): missing fraction is undefined; treat as 0 missing so
-        // the no-op default keeps everyone, and an active filter sees frac 0 too
-        // (nothing to base a drop on without SNPs).
+        // No SNPs (or no data): the missing fraction is UNDEFINED. We treat every
+        // sample as 0-missing so the no-op default keeps everyone AND an active
+        // filter still keeps everyone (frac 0 <= any threshold) — the no-data
+        // fail-safe is keep-all, never drop-all: with zero SNPs there is no evidence
+        // to drop a sample on. This is the OPPOSITE of snp_filter's empty-denominator
+        // convention (frac 1.0 ⇒ drop) and the divergence is intentional (the header
+        // documents why). `nonmissing` stays 0 (already assigned) and `missing_frac`
+        // is the default 0.0 (already assigned), so this loop is a no-op kept only as
+        // an explicit statement of the convention.
         for (std::size_t g = 0; g < n_ind; ++g) out.missing_frac[g] = 0.0;
     }
 

@@ -55,9 +55,13 @@ struct MindSummary {
 /// kept-sample set against `cfg.mind_max_missing` via the shared predicate. When
 /// `cfg.mind_max_missing >= 1.0` the pre-pass is a NO-OP: `kept` is every sample
 /// index 0..n_individuals-1 and the missing fractions are still reported (so the
-/// caller can observe them) but nothing is dropped. With n_snp == 0 every sample
-/// is treated as fully missing only if a filter is active; at the no-op default all
-/// are kept.
+/// caller can observe them) but nothing is dropped. With n_snp == 0 (or no packed
+/// data) the missing fraction is UNDEFINED — there is no SNP to base a drop on — so
+/// every sample reports `missing_frac = 0` and is KEPT, even under an active filter
+/// (the no-data fail-safe is keep-all, never drop-all; see the .cpp). This is the
+/// opposite of snp_filter's empty-denominator convention (frac 1.0 ⇒ drop) and the
+/// divergence is intentional: --mind asks "does this sample have data across SNPs?",
+/// which is unanswerable with zero SNPs.
 [[nodiscard]] MindSummary run_mind_prepass(const MindPrepassInput& in,
                                            const FilterConfig& cfg);
 

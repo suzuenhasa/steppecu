@@ -410,6 +410,74 @@ void write_text(const std::filesystem::path& path, const std::string& body) {
     return true;
 }
 
+// ---- --mind no-data fail-safe: n_snp == 0 under an ACTIVE filter (B21) --------
+// The header/.cpp contradiction B21 fixed: the no-data convention is KEEP-ALL, even
+// under an active mind filter. With zero SNPs the per-sample missing fraction is
+// undefined, so every sample reports missing_frac == 0 and is kept (frac 0 <= any
+// threshold) — the OPPOSITE of snp_filter's empty-denominator (frac 1.0 ⇒ drop). We
+// pin this on BOTH the no-op default and a maximally-strict active cap so a future
+// edit that "drops on no SNPs" (the wording the old header wrongly implied) fails
+// here. Also covers packed == nullptr (the other arm of the no-data branch).
+[[nodiscard]] bool test_mind_prepass_no_snps() {
+    // n_snp == 0 with real samples; packed present but spanning zero SNPs.
+    std::vector<std::uint8_t> packed = {0x00, 0x00, 0x00};  // bytes irrelevant: n_snp==0
+    MindPrepassInput in;
+    in.packed = packed.data();
+    in.bytes_per_record = 1;
+    in.n_snp = 0;
+    in.n_individuals = 3;
+
+    // No-op default (mind_max_missing == 1.0): all kept, frac 0 (undefined ⇒ 0).
+    {
+        FilterConfig cfg;  // default 1.0
+        const MindSummary s = run_mind_prepass(in, cfg);
+        if (s.kept.size() != 3) return false;
+        for (std::size_t g = 0; g < 3; ++g) {
+            if (s.nonmissing[g] != 0) return false;        // no SNPs counted
+            if (!close(s.missing_frac[g], 0.0)) return false;  // undefined ⇒ 0
+        }
+        if (s.kept[0] != 0 || s.kept[1] != 1 || s.kept[2] != 2) return false;
+    }
+    // ACTIVE filter, maximally strict (cap 0.0): STILL keeps all 3 — the keep-all
+    // fail-safe. This is the load-bearing B21 assertion (the old header implied
+    // "drop all when active"; the code keeps all, and now the doc agrees).
+    {
+        FilterConfig cfg;
+        cfg.mind_max_missing = 0.0;  // would drop any sample with frac > 0
+        const MindSummary s = run_mind_prepass(in, cfg);
+        if (s.kept.size() != 3) return false;
+        if (s.kept[0] != 0 || s.kept[1] != 1 || s.kept[2] != 2) return false;
+        for (std::size_t g = 0; g < 3; ++g) {
+            if (!close(s.missing_frac[g], 0.0)) return false;
+        }
+    }
+    // packed == nullptr with n_snp > 0 hits the SAME no-data branch (the other arm
+    // of `packed != nullptr && n_snp > 0`): active filter still keeps all.
+    {
+        MindPrepassInput nul = in;
+        nul.packed = nullptr;
+        nul.n_snp = 8;  // claims SNPs but no buffer ⇒ no-data branch, keep-all
+        FilterConfig cfg;
+        cfg.mind_max_missing = 0.0;
+        const MindSummary s = run_mind_prepass(nul, cfg);
+        if (s.kept.size() != 3) return false;
+    }
+    // n_individuals == 0 with n_snp == 0: empty summary, no throw, empty kept set.
+    {
+        MindPrepassInput empt;
+        empt.packed = nullptr;
+        empt.n_snp = 0;
+        empt.n_individuals = 0;
+        FilterConfig cfg;
+        cfg.mind_max_missing = 0.0;
+        const MindSummary s = run_mind_prepass(empt, cfg);
+        if (!s.kept.empty() || !s.nonmissing.empty() || !s.missing_frac.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ============================================================================
 // snp_filter HOST tests (cleanup B20). Previously the ONLY coverage of
 // derive_per_snp_summary / build_snp_keep_mask was the GPU/real-AADR .cu oracle
@@ -677,6 +745,8 @@ constexpr Case kCases[] = {
     {"SnpMembership prune.in ∪ include; exclude overrides; ctor dir throws",
      test_membership_prune_in},
     {"--mind per-sample predicate + no-op", test_mind_prepass},
+    {"--mind no-data fail-safe (n_snp==0 + active keeps all; B21)",
+     test_mind_prepass_no_snps},
     {"derive_per_snp_summary (pooled ref-af/MAF/missing; mono + all-missing)",
      test_derive_per_snp_summary},
     {"snp_keep_decision primitive (drop-not-flip; gated filters; membership)",
