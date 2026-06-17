@@ -35,8 +35,10 @@
 #include <vector>
 
 #include "io/filter/filter_decision.hpp"   // the shared predicates (single source)
+#include "io/filter/snp_filter.hpp"        // derive_per_snp_summary / build_snp_keep_mask / snp_keep_decision
 #include "io/filter/include_exclude.hpp"   // SnpMembership
 #include "io/filter/mind_prepass.hpp"      // run_mind_prepass
+#include "io/snp_reader.hpp"               // SnpTable
 #include "io/eigenstrat_format.hpp"        // code_in_byte (to hand-pack a --mind input)
 #include "steppe/config.hpp"               // FilterConfig, kAutosomeChromMin/Max
 
@@ -44,6 +46,7 @@ namespace {
 
 using namespace steppe::io::filter;
 using steppe::FilterConfig;
+using steppe::io::SnpTable;
 
 constexpr double kEps = 1e-12;
 [[nodiscard]] bool close(double a, double b, double eps = kEps) {
@@ -87,6 +90,20 @@ void write_text(const std::filesystem::path& path, const std::string& body) {
         return true;
     } catch (...) {
         return false;  // a different exception type is NOT the documented contract
+    }
+    return false;
+}
+
+// Whether `fn` throws std::invalid_argument (the snp_filter B20 fail-fast contract:
+// bad ploidy / short pop_individuals / null q-n / short SnpTable). A DIFFERENT
+// exception type is NOT the contract.
+[[nodiscard]] bool throws_invalid_argument(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const std::invalid_argument&) {
+        return true;
+    } catch (...) {
+        return false;
     }
     return false;
 }
@@ -393,6 +410,253 @@ void write_text(const std::filesystem::path& path, const std::string& body) {
     return true;
 }
 
+// ============================================================================
+// snp_filter HOST tests (cleanup B20). Previously the ONLY coverage of
+// derive_per_snp_summary / build_snp_keep_mask was the GPU/real-AADR .cu oracle
+// (a §13 violation — these are pure host functions). These hand-built cases pin:
+// (a) the per-SNP summary arithmetic (pooled ref-af, folded MAF, missing frac,
+// pooled allele count) on a tiny 2-pop × 3-SNP tile incl. a monomorphic and an
+// all-missing SNP; (b) the extracted snp_keep_decision primitive (drop-not-flip
+// order, no-op default, each gated filter, membership); (c) the new fail-fast
+// guards (ploidy ∉ {1,2}, short pop_individuals, null q/n, short SnpTable); and
+// (d) the is_monomorphic UNFOLDED-ref-af contract end-to-end via drop_monomorphic.
+// ============================================================================
+
+// A tiny well-formed tile: P=2 pops, M=3 SNPs, column-major (i + P*s), ploidy 2,
+// pop_individuals {3, 2} (total 5). SNP0 polymorphic (ref-af 0.5, 0 missing);
+// SNP1 monomorphic (ref-af 0, 0 missing); SNP2 all-missing (N==0 ⇒ missing 1.0).
+[[nodiscard]] DecodedTileSummaryInput make_tile(const std::vector<double>& q,
+                                                const std::vector<double>& n) {
+    DecodedTileSummaryInput in;
+    in.q = q.data();
+    in.n = n.data();
+    in.P = 2;
+    in.M = 3;
+    in.pop_individuals = {3, 2};
+    in.ploidy = 2;
+    return in;
+}
+
+[[nodiscard]] bool test_derive_per_snp_summary() {
+    // index = p + 2*s : s0[p0,p1], s1[p0,p1], s2[p0,p1].
+    const std::vector<double> q = {0.5, 0.5, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> n = {6.0, 4.0, 6.0, 4.0, 0.0, 0.0};
+    const DecodedTileSummaryInput in = make_tile(q, n);
+    const std::vector<PerSnpSummary> s = derive_per_snp_summary(in);
+    if (s.size() != 3) return false;
+    // SNP0: pooled_ref_count = 0.5*6 + 0.5*4 = 5; allele = 10; ref-af 0.5; MAF 0.5;
+    //       nonmissing = 6/2 + 4/2 = 5; missing = 1 - 5/5 = 0.
+    if (!close(s[0].pooled_ref_af, 0.5) || !close(s[0].pooled_minor_af, 0.5)) return false;
+    if (!close(s[0].missing_frac, 0.0) || !close(s[0].pooled_allele_count, 10.0)) return false;
+    // SNP1: monomorphic (all Q==0) ⇒ ref-af 0, MAF 0; 0 missing.
+    if (!close(s[1].pooled_ref_af, 0.0) || !close(s[1].pooled_minor_af, 0.0)) return false;
+    if (!close(s[1].missing_frac, 0.0) || !close(s[1].pooled_allele_count, 10.0)) return false;
+    // SNP2: all-missing (N==0) ⇒ pooled_allele_count 0, ref-af 0 (denom guard),
+    //       missing_frac 1.0.
+    if (!close(s[2].pooled_allele_count, 0.0) || !close(s[2].pooled_ref_af, 0.0)) return false;
+    if (!close(s[2].missing_frac, 1.0)) return false;
+    // ploidy=1 path: nonmissing_indiv = Σ N (no /2). Make total match so missing=0.
+    {
+        DecodedTileSummaryInput h = in;
+        h.ploidy = 1;
+        h.pop_individuals = {6, 4};  // = N at SNP0, so missing_frac 0 there
+        const std::vector<PerSnpSummary> sh = derive_per_snp_summary(h);
+        if (!close(sh[0].missing_frac, 0.0)) return false;  // nonmissing 10 / total 10
+    }
+    return true;
+}
+
+// The extracted shared per-SNP decision primitive (B20/F28). Build summaries via
+// the public derivation, then exercise snp_keep_decision directly.
+[[nodiscard]] bool test_snp_keep_decision() {
+    const std::vector<double> q = {0.5, 0.5, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> n = {6.0, 4.0, 6.0, 4.0, 0.0, 0.0};
+    const std::vector<PerSnpSummary> s = derive_per_snp_summary(make_tile(q, n));
+    const PerSnpSummary& poly = s[0];   // ref-af 0.5, MAF 0.5, missing 0
+    const PerSnpSummary& mono = s[1];   // ref-af 0.0, MAF 0.0, missing 0
+    const PerSnpSummary& miss = s[2];   // all-missing, missing 1.0
+
+    // No-op default: a clean biallelic ACGT transversion SNP is KEPT.
+    {
+        FilterConfig cfg;  // maf_min 0, geno 1, all flags off
+        if (!snp_keep_decision(poly, 'A', 'C', 1, cfg, true)) return false;
+        // membership bit false ⇒ dropped even on the no-op path.
+        if (snp_keep_decision(poly, 'A', 'C', 1, cfg, false)) return false;
+    }
+    // Unconditional DROP-NOT-FLIP: multiallelic / strand-ambiguous dropped REGARDLESS
+    // of every threshold (membership true, default thresholds).
+    {
+        FilterConfig cfg;
+        if (snp_keep_decision(poly, 'A', 'A', 1, cfg, true)) return false;  // ref==alt
+        if (snp_keep_decision(poly, 'A', 'N', 1, cfg, true)) return false;  // non-ACGT
+        if (snp_keep_decision(poly, 'A', 'T', 1, cfg, true)) return false;  // palindrome
+    }
+    // MAF filter (>= inclusive): a monomorphic SNP (MAF 0) drops at maf_min>0, the
+    // polymorphic one (MAF 0.5) survives.
+    {
+        FilterConfig cfg; cfg.maf_min = 0.01;
+        if (snp_keep_decision(mono, 'A', 'C', 1, cfg, true)) return false;
+        if (!snp_keep_decision(poly, 'A', 'C', 1, cfg, true)) return false;
+    }
+    // geno filter (<= inclusive): the all-missing SNP (missing 1.0) drops at
+    // geno_max_missing<1, survives at the no-op 1.0.
+    {
+        FilterConfig cfg; cfg.geno_max_missing = 0.5;
+        if (snp_keep_decision(miss, 'A', 'C', 1, cfg, true)) return false;
+        FilterConfig dflt;
+        if (!snp_keep_decision(miss, 'A', 'C', 1, dflt, true)) return false;  // missing<=1
+    }
+    // drop_monomorphic: takes the UNFOLDED pooled_ref_af inside the primitive
+    // (B20/F21). The monomorphic SNP (ref-af 0) drops; the polymorphic one does not.
+    {
+        FilterConfig cfg; cfg.drop_monomorphic = true;
+        if (snp_keep_decision(mono, 'A', 'C', 1, cfg, true)) return false;
+        if (!snp_keep_decision(poly, 'A', 'C', 1, cfg, true)) return false;
+    }
+    // transversions_only: keep a transversion (A/C), drop a transition (A/G).
+    {
+        FilterConfig cfg; cfg.transversions_only = true;
+        if (!snp_keep_decision(poly, 'A', 'C', 1, cfg, true)) return false;
+        if (snp_keep_decision(poly, 'A', 'G', 1, cfg, true)) return false;
+    }
+    // autosomes_only: keep chr 1..22, drop chr 23 (X).
+    {
+        FilterConfig cfg; cfg.autosomes_only = true;
+        if (!snp_keep_decision(poly, 'A', 'C', 22, cfg, true)) return false;
+        if (snp_keep_decision(poly, 'A', 'C', 23, cfg, true)) return false;
+    }
+    return true;
+}
+
+// build_snp_keep_mask end-to-end on the tiny tile + a matching SnpTable.
+[[nodiscard]] bool test_build_snp_keep_mask() {
+    const std::vector<double> q = {0.5, 0.5, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> n = {6.0, 4.0, 6.0, 4.0, 0.0, 0.0};
+    const DecodedTileSummaryInput in = make_tile(q, n);
+
+    SnpTable snps;
+    snps.id = {"rs0", "rs1", "rs2"};
+    snps.chrom = {1, 1, 23};                 // SNP2 on X
+    snps.ref = {'A', 'A', 'A'};
+    snps.alt = {'C', 'C', 'C'};              // all clean transversions
+    snps.count = 3;
+
+    // No-op default keeps every clean biallelic ACGT SNP (incl. the monomorphic and
+    // all-missing ones — the documented no-op-when-default property).
+    {
+        FilterConfig cfg;
+        SnpMembership mem(cfg);
+        const std::vector<bool> keep = build_snp_keep_mask(in, snps, cfg, mem);
+        if (keep.size() != 3) return false;
+        if (!keep[0] || !keep[1] || !keep[2]) return false;
+    }
+    // maf_min>0 drops the monomorphic (SNP1) and the all-missing (SNP2, MAF 0).
+    {
+        FilterConfig cfg; cfg.maf_min = 0.01;
+        SnpMembership mem(cfg);
+        const std::vector<bool> keep = build_snp_keep_mask(in, snps, cfg, mem);
+        if (!keep[0] || keep[1] || keep[2]) return false;
+    }
+    // autosomes_only drops the X-chromosome SNP2 only.
+    {
+        FilterConfig cfg; cfg.autosomes_only = true;
+        SnpMembership mem(cfg);
+        const std::vector<bool> keep = build_snp_keep_mask(in, snps, cfg, mem);
+        if (!keep[0] || !keep[1] || keep[2]) return false;
+    }
+    // include-set membership keeps only the listed id (rs0).
+    {
+        FilterConfig cfg; cfg.include_snp_ids = {"rs0"};
+        SnpMembership mem(cfg);
+        const std::vector<bool> keep = build_snp_keep_mask(in, snps, cfg, mem);
+        if (!keep[0] || keep[1] || keep[2]) return false;
+    }
+    return true;
+}
+
+// The B20 fail-fast guards: ploidy ∉ {1,2}, short pop_individuals, null q/n, short
+// SnpTable — each a std::invalid_argument, not a silent wrong answer / segfault.
+[[nodiscard]] bool test_snp_filter_fail_fast() {
+    const std::vector<double> q = {0.5, 0.5, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> n = {6.0, 4.0, 6.0, 4.0, 0.0, 0.0};
+
+    // ploidy ∉ {1,2} (B10/B20).
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n); in.ploidy = 0;
+            (void)derive_per_snp_summary(in);
+        })) return false;
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n); in.ploidy = 3;
+            (void)derive_per_snp_summary(in);
+        })) return false;
+
+    // Short pop_individuals (B20/F1) — the spurious-negative-missing-frac path.
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n);
+            in.pop_individuals = {3};  // size 1 != P==2
+            (void)derive_per_snp_summary(in);
+        })) return false;
+    // Over-long pop_individuals is ALSO rejected (size must EQUAL P, not just >=).
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n);
+            in.pop_individuals = {3, 2, 1};
+            (void)derive_per_snp_summary(in);
+        })) return false;
+
+    // Null q / null n with P>0 && M>0 (B20/F6).
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n); in.q = nullptr;
+            (void)derive_per_snp_summary(in);
+        })) return false;
+    if (!throws_invalid_argument([&] {
+            DecodedTileSummaryInput in = make_tile(q, n); in.n = nullptr;
+            (void)derive_per_snp_summary(in);
+        })) return false;
+
+    // Short SnpTable ref/alt (B20/F3) via build_snp_keep_mask.
+    if (!throws_invalid_argument([&] {
+            const DecodedTileSummaryInput in = make_tile(q, n);
+            SnpTable snps;
+            snps.ref = {'A', 'C'};   // size 2 < M==3
+            snps.alt = {'A', 'C'};
+            FilterConfig cfg; SnpMembership mem(cfg);
+            (void)build_snp_keep_mask(in, snps, cfg, mem);
+        })) return false;
+    // Short chrom only matters when autosomes_only is active.
+    if (!throws_invalid_argument([&] {
+            const DecodedTileSummaryInput in = make_tile(q, n);
+            SnpTable snps;
+            snps.ref = {'A', 'C', 'A'};
+            snps.alt = {'C', 'A', 'C'};
+            snps.chrom = {1, 1};     // size 2 < M==3
+            FilterConfig cfg; cfg.autosomes_only = true;
+            SnpMembership mem(cfg);
+            (void)build_snp_keep_mask(in, snps, cfg, mem);
+        })) return false;
+    // Short id only matters when membership is active.
+    if (!throws_invalid_argument([&] {
+            const DecodedTileSummaryInput in = make_tile(q, n);
+            SnpTable snps;
+            snps.ref = {'A', 'C', 'A'};
+            snps.alt = {'C', 'A', 'C'};
+            snps.id = {"rs0", "rs1"};  // size 2 < M==3
+            FilterConfig cfg; cfg.include_snp_ids = {"rs0"};
+            SnpMembership mem(cfg);
+            (void)build_snp_keep_mask(in, snps, cfg, mem);
+        })) return false;
+
+    // The degenerate empty cases must NOT throw (M<=0 / P<=0 short-circuit BEFORE
+    // the guards — no data to validate). Empty pop_individuals is fine when P<=0.
+    {
+        DecodedTileSummaryInput in;
+        in.P = 0; in.M = 0;  // q/n null, pop_individuals empty
+        if (derive_per_snp_summary(in).size() != 0) return false;  // no throw
+        SnpTable snps; FilterConfig cfg; SnpMembership mem(cfg);
+        if (build_snp_keep_mask(in, snps, cfg, mem).size() != 0) return false;  // no throw
+    }
+    return true;
+}
+
 struct Case { const char* name; bool (*fn)(); };
 
 constexpr Case kCases[] = {
@@ -413,6 +677,14 @@ constexpr Case kCases[] = {
     {"SnpMembership prune.in ∪ include; exclude overrides; ctor dir throws",
      test_membership_prune_in},
     {"--mind per-sample predicate + no-op", test_mind_prepass},
+    {"derive_per_snp_summary (pooled ref-af/MAF/missing; mono + all-missing)",
+     test_derive_per_snp_summary},
+    {"snp_keep_decision primitive (drop-not-flip; gated filters; membership)",
+     test_snp_keep_decision},
+    {"build_snp_keep_mask end-to-end (no-op default; maf; autosomes; include)",
+     test_build_snp_keep_mask},
+    {"snp_filter B20 fail-fast (ploidy; short pop_individuals; null q/n; short SnpTable)",
+     test_snp_filter_fail_fast},
 };
 
 }  // namespace

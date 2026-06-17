@@ -103,12 +103,25 @@ namespace steppe::io::filter {
 }
 
 /// Monomorphic test: a SNP is monomorphic iff its pooled folded MAF is exactly 0
-/// (no variation across the kept samples). Used by the drop_monomorphic flag.
-/// Exact-zero by design: a SNP with a single minor allele copy is NOT
-/// monomorphic. (This is the strict-positive boundary of the MAF filter, kept as
-/// a separate named predicate per the FilterConfig flag.)
-[[nodiscard]] inline bool is_monomorphic(double pooled_minor_af) noexcept {
-    return folded_maf(pooled_minor_af) == 0.0;
+/// (no variation across the kept samples), i.e. its pooled REF-allele frequency is
+/// exactly 0.0 or exactly 1.0. Used by the drop_monomorphic flag. Exact-zero by
+/// design: a SNP with a single minor allele copy is NOT monomorphic. (This is the
+/// strict-positive boundary of the MAF filter, kept as a separate named predicate
+/// per the FilterConfig flag.)
+///
+/// CONTRACT (cleanup B20 / filter_decision 1.1, snp_filter F21): the parameter is
+/// the POOLED REF-AF (unfolded, in [0,1]) — this predicate FOLDS it once. This
+/// makes the parameter name honest about what the body does and ends the prior
+/// double-fold trap, where the call site passed an already-folded minor-af into a
+/// re-folding body (idempotent only because folding is the identity on [0,0.5] —
+/// exactly the "two places assume different conventions" §8 single-source means to
+/// prevent). Pass the UNFOLDED `pooled_ref_af` (e.g. PerSnpSummary::pooled_ref_af),
+/// NOT the already-folded `pooled_minor_af`. The `== 0.0` is exact on the real
+/// path: a truly monomorphic site has each per-pop Q exactly 0.0 or 1.0, so Q·N is
+/// exact and the pooled ref-af is exactly 0.0 or 1.0 — do NOT change the upstream
+/// pooling to a mean-of-frequencies, which rounds and would break the exactness.
+[[nodiscard]] inline bool is_monomorphic(double pooled_ref_af) noexcept {
+    return folded_maf(pooled_ref_af) == 0.0;
 }
 
 // ===========================================================================

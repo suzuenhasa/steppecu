@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "io/filter/filter_decision.hpp"  // the shared per-SNP predicates (single source)
 #include "io/filter/include_exclude.hpp"  // SnpMembership
 #include "io/snp_reader.hpp"              // SnpTable (id / chrom / ref / alt)
 #include "steppe/config.hpp"              // FilterConfig
@@ -80,10 +81,60 @@ struct PerSnpSummary {
 ///   nonmissing_indiv   = Σ_pop N(pop,s) / ploidy
 ///   total_indiv        = Σ_pop pop_individuals[pop]
 ///   missing_frac       = 1 - nonmissing_indiv / total_indiv       (1 if total 0)
-/// Length-M result, parallel to the SNP axis. Throws std::invalid_argument if
-/// `in.ploidy` is not 1 or 2 (fail-fast on misset metadata; cleanup B10/X-11).
+/// Length-M result, parallel to the SNP axis.
+///
+/// PRECONDITIONS (fail-fast with std::invalid_argument — the `io`-leaf idiom, cf.
+/// include_exclude.cpp; architecture.md §2; cleanup B20). When P>0 && M>0:
+///   * `in.ploidy` must be 1 or 2 (B10/X-11; a misset ploidy fabricates a wrong
+///     missing fraction otherwise);
+///   * `in.pop_individuals.size()` must equal P (B20/F1): the prior code guarded
+///     only the DENOMINATOR loop and ran the NUMERATOR loop over all P pops, so a
+///     short `pop_individuals` understated the missing-fraction denominator and
+///     could yield a NEGATIVE missing_frac that SPURIOUSLY PASSES the geno filter
+///     (a missing-heavy SNP wrongly KEPT) — a silent wrong answer, not an error;
+///   * `in.q` and `in.n` must be non-null (B20/F6): the reduction dereferences both
+///     per cell, so a null pointer otherwise segfaults three frames deep instead of
+///     surfacing a diagnosable error.
+/// (`in.v` is intentionally unused: N==0 ⇔ V==0 ⇔ missing by the decode contract —
+/// decode_af.hpp finalize_af — so V is redundant for these reductions.)
 [[nodiscard]] std::vector<PerSnpSummary> derive_per_snp_summary(
     const DecodedTileSummaryInput& in);
+
+/// The SINGLE per-SNP keep/drop decision, shared by build_snp_keep_mask and (the
+/// M4.5 device fusion target) the future decode_af kernel so the host mask-builder
+/// and the GPU path cannot diverge on a boundary — the decode_af.hpp pattern (one
+/// __host__ __device__ per-element primitive both paths call). Pure: it takes the
+/// per-SNP derived summary, the allele pair + chromosome, the thresholds (FROM
+/// cfg), and a PRECOMPUTED membership bit (true ⇒ the id passes include/exclude/
+/// prune.in, or membership is a no-op), and returns the keep decision for ONE SNP.
+///
+/// KEEP iff the SNP passes EVERY active filter, in this DROP-NOT-FLIP order
+/// (architecture.md §1): (1) unconditional class drop — strand-ambiguous (A/T, C/G
+/// palindrome) or multiallelic/non-clean-ACGT is dropped regardless of any flag and
+/// never strand-flipped; (2) MAF (>= cfg.maf_min); (3) geno (<= cfg.geno_max_missing);
+/// (4) flag-gated drop_monomorphic / transversions_only / autosomes_only; (5) the
+/// membership bit. Every decision delegates to a filter_decision.hpp predicate (the
+/// §8 single source). `inline` so it is shareable with a future device TU without an
+/// out-of-line definition; `noexcept` (all callees are noexcept, no allocation).
+[[nodiscard]] inline bool snp_keep_decision(const PerSnpSummary& sm,
+                                            char ref,
+                                            char alt,
+                                            int chrom,
+                                            const FilterConfig& cfg,
+                                            bool membership_ok) noexcept {
+    // (1) Unconditional DROP-NOT-FLIP class drops (architecture.md §1).
+    if (is_multiallelic(ref, alt) || is_strand_ambiguous(ref, alt)) return false;
+    // (2)+(3) Threshold filters (thresholds FROM cfg, predicates SHARED).
+    if (!snp_passes_maf(sm.pooled_minor_af, cfg.maf_min)) return false;
+    if (!snp_passes_geno(sm.missing_frac, cfg.geno_max_missing)) return false;
+    // (4) Flag-gated additions (each off by default ⇒ no-op). is_monomorphic takes
+    // the UNFOLDED pooled ref-af (B20/F21: ends the double-fold).
+    if (cfg.drop_monomorphic && is_monomorphic(sm.pooled_ref_af)) return false;
+    if (cfg.transversions_only && !is_transversion(ref, alt)) return false;
+    if (cfg.autosomes_only && !is_autosome(chrom)) return false;
+    // (5) Include/exclude + prune.in membership (precomputed by the caller).
+    return membership_ok;
+}
 
 /// Build the per-SNP keep mask for the tile: a SNP is KEPT iff it passes EVERY
 /// active filter — MAF (>= maf_min), geno (<= geno_max_missing), include/exclude
@@ -101,9 +152,17 @@ struct PerSnpSummary {
 /// drop-not-flip behavior; the oracle test confirms it drops zero on the HO panel,
 /// so the no-op-when-default parity property holds there.
 ///
-/// `snps.count` must be >= `in.M` (the first M ids/alleles are used). Returns a
-/// length-M std::vector<bool>. Throws std::invalid_argument (via
-/// derive_per_snp_summary) if `in.ploidy` is not 1 or 2 and M > 0 (cleanup B10).
+/// PRECONDITIONS (fail-fast with std::invalid_argument; architecture.md §2;
+/// cleanup B20/F3). When M>0: `snps.ref.size() >= M` and `snps.alt.size() >= M`
+/// (the allele pair drives the unconditional class drop for EVERY SNP), and — when
+/// the corresponding filter / membership is active — `snps.chrom.size() >= M`
+/// (autosomes_only) and `snps.id.size() >= M` (non-no-op membership). The prior
+/// code silently substituted 'N'/0/empty-id for a too-short SnpTable, which made
+/// is_multiallelic('N','N') true and DROPPED the tail of the tile (or altered
+/// membership) — a silent wrong answer for a mismatched .snp/decode length, which
+/// is a wiring/data bug that must abort with context. Also throws (via
+/// derive_per_snp_summary) on the B10/B20 preconditions there (ploidy ∉ {1,2},
+/// pop_individuals.size() != P, null q/n). Returns a length-M std::vector<bool>.
 [[nodiscard]] std::vector<bool> build_snp_keep_mask(
     const DecodedTileSummaryInput& in,
     const SnpTable& snps,

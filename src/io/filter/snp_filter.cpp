@@ -38,10 +38,39 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
             std::to_string(in.ploidy));
     }
 
+    // Fail-fast on a short `pop_individuals` (cleanup B20/F1). The header documents
+    // it as "length P"; the prior code guarded only the DENOMINATOR loop below
+    // (`p < pop_individuals.size()`) while the per-SNP NUMERATOR loop ran over ALL
+    // P pops. A short vector then understated `total_indiv` (the denominator)
+    // without dropping numerator terms, so `nonmissing_indiv > total_indiv` and
+    // `missing_frac = 1 - nonmissing/total` went NEGATIVE — and snp_passes_geno
+    // (negative <= geno_max_missing) is TRUE, spuriously KEEPING a missing-heavy
+    // SNP. A SNP-axis sharding bug must surface here, not silently corrupt the geno
+    // filter. (This also subsumes the static_cast<int>(size()) INT_MAX-truncation
+    // footgun B20/F22: with size() == P the denominator loop is unconditional.)
+    if (in.pop_individuals.size() != static_cast<std::size_t>(P)) {
+        throw std::invalid_argument(
+            "snp_filter: pop_individuals.size() (" +
+            std::to_string(in.pop_individuals.size()) +
+            ") must equal P (" + std::to_string(P) + ")");
+    }
+
+    // Fail-fast on null Q/N (cleanup B20/F6). The reduction dereferences both per
+    // (pop, snp) cell; with P>0 && M>0 a null pointer (the struct's nullptr
+    // defaults make this an easy caller mistake) would SIGSEGV three frames deep
+    // rather than surface a diagnosable error (architecture.md §2). `v` is NOT
+    // required: N==0 ⇔ V==0 ⇔ missing by the decode contract (finalize_af), so the
+    // reduction uses N and never reads V.
+    if (in.q == nullptr || in.n == nullptr) {
+        throw std::invalid_argument(
+            "snp_filter: q and n must be non-null when P>0 && M>0");
+    }
+
     // Total kept individuals across the kept pops (the missing-fraction
     // denominator). SNP-independent: the sample axis is fixed for the tile.
+    // `pop_individuals.size() == P` is pinned above, so this loop is unconditional.
     std::size_t total_indiv = 0;
-    for (int p = 0; p < P && p < static_cast<int>(in.pop_individuals.size()); ++p) {
+    for (int p = 0; p < P; ++p) {
         total_indiv += in.pop_individuals[static_cast<std::size_t>(p)];
     }
     const double total_indiv_d = static_cast<double>(total_indiv);
@@ -84,43 +113,49 @@ std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
     std::vector<bool> keep(static_cast<std::size_t>(M < 0 ? 0 : M), false);
     if (M <= 0) return keep;
 
-    const std::vector<PerSnpSummary> summary = derive_per_snp_summary(in);
+    const std::size_t Mu = static_cast<std::size_t>(M);
+
+    // Fail-fast on a too-short SnpTable (cleanup B20/F3). The allele pair drives the
+    // unconditional class drop for EVERY SNP, so ref/alt must cover all M; chrom and
+    // id are required only when their filter / membership is active. The prior code
+    // silently substituted 'N'/0/empty-id for a short table — which made
+    // is_multiallelic('N','N') true and DROPPED the tile tail (or altered
+    // membership) for a mismatched .snp/decode length, a silent wrong answer for a
+    // wiring/data bug that must abort with context (architecture.md §2 fail-fast).
     const bool mem_noop = mem.is_noop();
+    if (snps.ref.size() < Mu || snps.alt.size() < Mu) {
+        throw std::invalid_argument(
+            "snp_filter: snps.ref/alt must have >= M (" + std::to_string(M) +
+            ") entries; got ref=" + std::to_string(snps.ref.size()) +
+            " alt=" + std::to_string(snps.alt.size()));
+    }
+    if (cfg.autosomes_only && snps.chrom.size() < Mu) {
+        throw std::invalid_argument(
+            "snp_filter: autosomes_only requires snps.chrom >= M (" +
+            std::to_string(M) + "); got " + std::to_string(snps.chrom.size()));
+    }
+    if (!mem_noop && snps.id.size() < Mu) {
+        throw std::invalid_argument(
+            "snp_filter: active membership requires snps.id >= M (" +
+            std::to_string(M) + "); got " + std::to_string(snps.id.size()));
+    }
+
+    const std::vector<PerSnpSummary> summary = derive_per_snp_summary(in);
 
     for (long s = 0; s < M; ++s) {
         const std::size_t si = static_cast<std::size_t>(s);
-        const PerSnpSummary& sm = summary[si];
 
-        const char ref = (si < snps.ref.size()) ? snps.ref[si] : 'N';
-        const char alt = (si < snps.alt.size()) ? snps.alt[si] : 'N';
+        // chrom is read only when autosomes_only is active (and then guaranteed
+        // present by the precondition above); 0 is an inert placeholder otherwise.
+        const int chrom = cfg.autosomes_only ? snps.chrom[si] : 0;
+        // Membership is precomputed here (the decision primitive is pure and takes a
+        // bool) so the future M4.5 device kernel can share snp_keep_decision without
+        // a SnpMembership dependency. A no-op membership ⇒ always passes.
+        const bool membership_ok = mem_noop ? true : mem.passes(snps.id[si]);
 
-        // ---- Unconditional DROP-NOT-FLIP class drops (architecture.md §1). A
-        // strand-ambiguous (A/T, C/G palindrome) or multiallelic / non-clean-ACGT
-        // SNP is dropped regardless of any flag and is NEVER strand-flipped. -----
-        if (is_multiallelic(ref, alt) || is_strand_ambiguous(ref, alt)) {
-            continue;  // keep[s] stays false
-        }
-
-        // ---- Threshold filters (thresholds FROM cfg, predicates SHARED). -------
-        if (!snp_passes_maf(sm.pooled_minor_af, cfg.maf_min)) continue;
-        if (!snp_passes_geno(sm.missing_frac, cfg.geno_max_missing)) continue;
-
-        // ---- Flag-gated additions (each off by default ⇒ no-op). ---------------
-        if (cfg.drop_monomorphic && is_monomorphic(sm.pooled_minor_af)) continue;
-        if (cfg.transversions_only && !is_transversion(ref, alt)) continue;
-        if (cfg.autosomes_only) {
-            const int chrom = (si < snps.chrom.size()) ? snps.chrom[si] : 0;
-            if (!is_autosome(chrom)) continue;
-        }
-
-        // ---- Include/exclude + prune.in membership. ----------------------------
-        if (!mem_noop) {
-            static const std::string kEmptyId;  // id for an alleles-only/short record
-            const std::string& id = (si < snps.id.size()) ? snps.id[si] : kEmptyId;
-            if (!mem.passes(id)) continue;
-        }
-
-        keep[si] = true;  // survived every active filter
+        // The SINGLE shared per-SNP decision (drop-not-flip; §1, §8 single source).
+        keep[si] = snp_keep_decision(summary[si], snps.ref[si], snps.alt[si], chrom,
+                                     cfg, membership_ok);
     }
     return keep;
 }
