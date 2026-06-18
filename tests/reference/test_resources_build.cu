@@ -22,6 +22,11 @@
 //   * Auto-enumerate (empty devices) resolves to all visible ordinals 0..count-1
 //     in order — the §9 DeviceConfig::devices contract — verified to match the
 //     explicit {0,..,count-1} build.
+//   * §9 build()-validation fail-fast (cleanup B8/C1): a DUPLICATE ordinal
+//     (devices={0,0}) and an OUT-OF-RANGE ordinal (devices={0,99}) each make
+//     build_resources THROW — the duplicate was previously NOT rejected (it
+//     silently built two combine lanes on one GPU). The pure validator itself is
+//     unit-tested GPU-free in tests/unit/test_validate_device_order.cpp (T1).
 //
 // NO real f2 compute is exercised here (the OBJECTIVE TEST asks only for the
 // Resources binding + probe), so this TU is DATA-FREE. Every checked field is
@@ -210,6 +215,45 @@ int main() {
     } else {
         std::printf("  single-GPU lane (count == 1): skipping the {0,1} 2-device "
                     "build verdict (device 1 does not exist)\n");
+    }
+
+    // ---- LANE D: §9 fail-fast on a DUPLICATE ordinal (cleanup B8/C1) ------------
+    // devices={0,0} is ill-formed — the fixed g=0..G-1 combine order must pin
+    // DISTINCT devices (architecture.md §9, §11.4/§12). Before B8 this SILENTLY built
+    // a G==2 Resources with both entries on device 0 (two lanes on one GPU); now it
+    // must throw fail-fast. End-to-end check that build_resources enforces the §9
+    // validation the host-only test_validate_device_order pins in isolation.
+    {
+        bool threw = false;
+        try {
+            DeviceConfig cfg_dup;
+            cfg_dup.devices = {0, 0};
+            Resources r_dup = build_resources(cfg_dup);
+            (void)r_dup;
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        check("devices={0,0} -> build_resources THROWS (§9 duplicate-ordinal reject)",
+              threw);
+    }
+
+    // ---- LANE E: §9 fail-fast on an OUT-OF-RANGE ordinal (cleanup B8/C1) --------
+    // devices={0,99} names a device not among the `count` visible devices — §9
+    // rejects it BEFORE binding any device (the validate_device_order step), with a
+    // §9-grade message naming the visible count (better than the old deep cudaSetDevice
+    // "invalid device ordinal" throw). 99 is out of range on any box this runs on.
+    {
+        bool threw = false;
+        try {
+            DeviceConfig cfg_oor;
+            cfg_oor.devices = {0, 99};
+            Resources r_oor = build_resources(cfg_oor);
+            (void)r_oor;
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        check("devices={0,99} -> build_resources THROWS (§9 out-of-range-ordinal reject)",
+              threw);
     }
 
     if (g_failures != 0) {

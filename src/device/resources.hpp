@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "steppe/config.hpp"   // steppe::DeviceConfig (CUDA-free)
@@ -45,9 +46,12 @@ namespace steppe::device {
 /// inspecting the numeric tensor (the parity test reads it to verify the P2P arm
 /// actually exercised P2P rather than silently falling back).
 enum class CombinePath {
-    /// No multi-GPU combine has run on this Resources yet (the value-initialized
-    /// default), OR the last run was the G==1 single-GPU fast path (no shard, no
-    /// combine — the lone backend's compute_f2_blocks returned directly).
+    /// No multi-GPU combine has run on this Resources yet — the value-initialized
+    /// default. The G==1 single-GPU fast path (no shard, no combine) does NOT touch
+    /// this field, so it is NOT reset to `None` by a G==1 run (the entry point only
+    /// ever ASSIGNS `HostStaged` / `P2pDeviceResident`, never `None`): after a prior
+    /// G>=2 run on the same Resources the tag stale-reads the last combine, which is
+    /// correct since a G==1 run combines nothing.
     None,
     /// The last G>=2 run combined via the host-staged fixed-order combine
     /// (combine_f2_partials_host) — the portable parity baseline (architecture.md
@@ -119,8 +123,34 @@ struct Resources {
     [[nodiscard]] std::size_t device_count() const noexcept { return gpus.size(); }
 };
 
+/// Validate a resolved device ordering against the visible device count — the §9
+/// build()-validation contract realized as a PURE, CUDA-FREE, GPU-free predicate
+/// (architecture.md §9 "Validation at build() rejects ... any device id in
+/// DeviceConfig::devices that is absent or duplicated"; §2 fail-fast). It rejects:
+///   * an OUT-OF-RANGE ordinal (`ord < 0 || ord >= visible`) — a configured device
+///     that is not among the `visible` CUDA devices the process sees; and
+///   * a DUPLICATE ordinal — the fixed g=0..G-1 combine order must pin DISTINCT
+///     devices (architecture.md §11.4/§12); a repeated member would silently run two
+///     lanes serially on ONE GPU, masking a real second device and ignoring the
+///     user's intent (config.hpp DeviceConfig::devices "PINS both the set AND the
+///     ordering"). §9 lists "duplicated" as a reject; this is the enforcing site
+///     until ConfigBuilder::build() exists.
+/// It is `noexcept(false)` on purpose (it THROWS std::runtime_error fail-fast on a
+/// bad ordinal). EMPTY `order` is NOT rejected here (the empty-order fail-fast lives
+/// in build_resources, which carries the §9 "at least one device" message); this is
+/// a no-op for an empty span. Factored out (vs inlined in build_resources) so the
+/// §13 validation logic is unit-testable GPU-free over (order, visible) — it touches
+/// no CUDA and no device (T1).
+///
+/// @throws std::runtime_error if any ordinal is out-of-range or duplicated.
+void validate_device_order(std::span<const int> order, int visible);
+
 /// Build the G-device Resources for the SPMG precompute (cleanup 00-overview §(2).1
-/// "One capability probe, owned at Resources construction"). For each ordinal in
+/// "One capability probe, owned at Resources construction"). The visible CUDA device
+/// count is read ONCE via the CUDA-free visible_device_count() factory query
+/// (backend_factory.hpp; cleanup B8 — replacing the old throwaway device-0 backend
+/// build) and the resolved ordering is validated against it (validate_device_order:
+/// reject out-of-range / duplicate ordinals, §9 fail-fast). Then, for each ordinal in
 /// `config.devices` (in order; empty ⇒ auto-enumerate every visible CUDA device in
 /// cudaGetDeviceCount order — the §9 DeviceConfig::devices contract) it constructs a
 /// CudaBackend bound to that ordinal (make_cuda_backend(ordinal)) and probes its
@@ -133,6 +163,15 @@ struct Resources {
 /// combine sums g=0..G-1 (architecture.md §12). devices=={0} (or empty on a 1-GPU
 /// box) yields a single-entry Resources whose one backend is the exact current
 /// single-GPU path.
+///
+/// STRONGLY EXCEPTION-SAFE: a mid-loop fail-fast (e.g. ordinal 1 of {0,1} cannot be
+/// bound) unwinds all already-bound backends via RAII (the partial `Resources` local
+/// + the in-progress entry destruct), leaking no device handle or VRAM (§7).
+///
+/// @throws std::runtime_error on an empty resolved order, no visible device, or a
+///         duplicate/out-of-range ordinal (validate_device_order, §9).
+/// @throws steppe::device::CudaError if a configured ordinal cannot be cudaSetDevice-
+///         bound / a backend constructed on it (via make_cuda_backend, fail-fast §2).
 [[nodiscard]] Resources build_resources(const DeviceConfig& config);
 
 }  // namespace steppe::device

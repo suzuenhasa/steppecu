@@ -51,6 +51,23 @@ namespace steppe::device {
 /// that combine algorithm is the next workflow.
 [[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend(int device_id = 0);
 
+/// Number of CUDA devices VISIBLE to this process — a CUDA-free, process-global
+/// count query (one `cudaGetDeviceCount`, defined in cuda_backend.cu) that needs NO
+/// bound backend (cleanup B8). `Resources` auto-enumeration uses this to size the
+/// dense 0..count-1 ordering and to validate configured ordinals (§9), WITHOUT
+/// building a throwaway device-0 backend just to read the count — so it keeps
+/// resources.cpp CUDA-free while removing that backend's 64 MiB workspace alloc/free,
+/// its cuBLAS create/destroy, the discarded second capability probe, AND the leaked
+/// `cudaSetDevice(0)` ambient side effect the throwaway ctor left behind (resources
+/// P1/P5/E5). Unlike `make_cuda_backend`, `cudaGetDeviceCount` neither creates a
+/// cuBLAS context, allocates the workspace, nor changes the current device.
+///
+/// @throws steppe::device::CudaError if the runtime cannot enumerate its devices
+///         (a process with the CUDA backend linked must be able to; fail-fast §2).
+///         A zero count is returned as 0 (NOT a throw); the "no visible device"
+///         policy decision is the caller's (build_resources fails fast on it, §9).
+[[nodiscard]] int visible_device_count();
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_BACKEND_FACTORY_HPP

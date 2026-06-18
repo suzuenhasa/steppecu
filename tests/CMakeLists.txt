@@ -704,6 +704,39 @@ target_link_libraries(test_shard_plan
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 add_test(NAME shard_plan_unit COMMAND test_shard_plan)
 
+# --- Host-only unit test of the §9 device-ordinal validator (cleanup B8/C1/T1) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the §9 build()-validation
+# predicate steppe::device::validate_device_order(span<const int>, int) the B8
+# cleanup factored out of build_resources — reject DUPLICATE or OUT-OF-RANGE device
+# ordinals fail-fast (architecture.md §9 "Validation at build() rejects ... any
+# device id in DeviceConfig::devices that is absent or duplicated", §2). Before B8
+# the duplicate case ({0,0}) was NOT validated at all (it silently ran two combine
+# lanes on ONE GPU), and the validation was entangled with a real device probe so
+# its only coverage was a GPU `.cu` — the §13 "exercisable GPU-free" duty unmet. The
+# B8/C1/T1 verdict gate: every g=0..G-1 order build_resources produces PASSES; every
+# duplicate ({0,0}, {0,1,0}) and every out-of-range (>=visible, negative, device on a
+# zero-visible box) THROWS std::runtime_error; out-of-range is checked BEFORE the
+# `seen` duplicate index (no OOB). Parity-NEUTRAL: it asserts INPUT rejection, never a
+# reached path or a number, so the locked f2_multigpu_parity bit-identity is untouched.
+#
+# validate_device_order is out-of-line in steppe_device (resources.cpp) and is itself
+# CUDA-FREE host arithmetic over (order, visible) — it makes NO CUDA call and touches
+# no device. This TU links steppe::device to RESOLVE the out-of-line symbol (like
+# test_shard_plan does for plan_block_shards) but calls only validate_device_order, so
+# it needs NO GPU at run time. resources.hpp is reached as "device/resources.hpp" via
+# the src/ root on steppe::device's PUBLIC include dir; steppe::api carries config.hpp.
+# Dual harness (gtest when present, else self-checking main()); CTest gates on the exit
+# code. architecture.md §2 fail-fast, §9, §11.4, §12, §13; cleanup device-resources
+# C1/T1, B8.
+add_executable(test_validate_device_order unit/test_validate_device_order.cpp)
+target_link_libraries(test_validate_device_order
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_validate_device_order PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_validate_device_order PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME validate_device_order_unit COMMAND test_validate_device_order)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is

@@ -610,4 +610,20 @@ private:
     return std::make_unique<CudaBackend>(device_id);
 }
 
+/// Visible CUDA device count (declared CUDA-free in device/backend_factory.hpp, B8).
+/// A single `cudaGetDeviceCount` — it does NOT create a context/cuBLAS handle, does
+/// NOT allocate the workspace, and does NOT change the current device, so it is the
+/// cheap process-global count query `Resources` auto-enumeration + the §9 ordinal
+/// validation need (replacing the old throwaway device-0 backend build, resources
+/// P1/P5/E5). Returns the same value `capabilities().device_count` reports
+/// (cudaGetDeviceCount, cuda_backend.cu capabilities()). A query FAILURE is a real
+/// fault (a process with a CUDA backend must enumerate its devices) and throws via
+/// STEPPE_CUDA_CHECK; a zero count is returned as 0 (the no-device policy is the
+/// caller's, §9).
+[[nodiscard]] int visible_device_count() {
+    int count = 0;
+    STEPPE_CUDA_CHECK(cudaGetDeviceCount(&count));
+    return count;
+}
+
 }  // namespace steppe::device
