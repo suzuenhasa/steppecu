@@ -73,6 +73,8 @@ ssh <alias> 'cd /workspace/steppe && export PATH=/usr/local/cuda/bin:$PATH && ex
 ```
 Expect: clean build (warnings-as-errors) + all ctest green (36/36 on `m4.5-multigpu`). On `box5090` ctest ≈ 178 s (the CPU `filter_oracle` ≈ 88 s — slow box CPU, not a regression).
 
+**⚠ PERF / BENCHMARKING — ALWAYS use a RELEASE build, NOT the raw `cmake -GNinja` above.** The plain `cmake -GNinja` (no `CMAKE_BUILD_TYPE`) is a **debug build (no `NDEBUG`)**, so `STEPPE_CUDA_CHECK_KERNEL` fires a `cudaDeviceSynchronize` **after every kernel launch** (check.cuh, gated by `STEPPE_DEBUG_ONLY`) — which serializes streams and dominated (~42% of API time in an nsys) the "multi-GPU is slower" finding. For any timing/bench, build **Release**: `cmake --preset release` (or `--preset ci` for tests too; or `-DCMAKE_BUILD_TYPE=Release` in a separate dir) — `NDEBUG` drops the per-kernel sync, "no forced sync in the hot path" (check.cuh doc). Correctness/ctest is fine on the debug build; **PERF NUMBERS ARE ONLY MEANINGFUL ON RELEASE.**
+
 ## 7. ⚠ LONG-JOB DETACHED RUN (box5090's network drops long ssh connections)
 A >~3 min ssh (clean build + ctest, a big bench) can be silently cut. Run detached on the box + poll a logfile:
 ```
