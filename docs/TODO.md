@@ -21,6 +21,10 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 
 *Refs: architecture §11.4 (design), §9 (Resources/PerGpuResources), §12 (parity); the audit `docs/cleanup/00-overview.md` §(2) "CAPABILITY-TIER COHERENCE — the ONE unified design"; the ⚡ section's capability-tier table + box-role split.*
 
+### M4.5 cleanup (audit `docs/cleanup/m4.5/` — overall 8.4/10, all parity-safe)
+- **5090 fix-pass** (`agentscripts/m4.5-fix-pass.js`) — the 5090-validatable before-M5 backlog, fixer+verdict gated by the locked `f2_multigpu_parity` bit-identity: **T1** parity-test VRAM-gate (skip `derived_full` gracefully on 32 GB) + **B1** per-device fan-out (the unrealized speedup) + **B3** wire the dead `enable_peer_access` gate + **B4** 3-term gate doc + **B5** single-home `validate_partials` + **B6** drop redundant `block_sizes` + **B7** host-combine `std::copy_n` (perf + −0.0 fix) + **B8** drop throwaway probe backend + **B9** GPU-free host tests.
+- **B2 — P2P transport rework — STAGED for a PRO-6000 session, NOT runnable on a stock consumer 5090** (`can_access_peer==false` ⇒ the P2P path never executes ⇒ can't validate). Workflow: **`agentscripts/m4.5-b2-p2p-fix-pass.js`** (P1 grid-stride+fuse · P2 hoist peer-enable · P3 kill the host→peer→root double-bounce via device-resident partials · P4 streamed P2P). Trigger on rtxbox AFTER the 5090 fix-pass lands + after updating the `rtxbox` SSH alias to the new (ephemeral) instance. Gated by P2P-exercised bit-identity (P2P == host-staged == single-GPU at P=768 on 96 GB).
+
 **Goal.** Shard SNP work across the G devices; each computes a full-shape **partial** `f2_blocks`+`Vpair`; combine the partials **once, host-side, in fixed device order** (`g=0..G-1` = `DeviceConfig::devices` order) in reference precision; broadcast back. **Bit-identical across G AND to the single-GPU reference (§12).** This is *the* milestone that introduces the **capability-tier machinery** — it's the first capable-vs-budget fork (P2P device-combine vs host-staged). **Build the host-staged baseline first; P2P is an opt-in fast-path.**
 
 *Resources / device threading (Theme-1 debt M4.5 calcifies — these land here):*
