@@ -49,7 +49,7 @@ struct DeviceShard {
 /// Partition the `n_block` jackknife blocks into G CONTIGUOUS block ranges,
 /// balanced by SNP count (architecture.md §11.4 SPMG tile sharding; design §2).
 ///
-/// DETERMINISTIC PURE FUNCTION of `(block_sizes, G)`: the SAME plan for a given
+/// DETERMINISTIC PURE FUNCTION of `(ranges, G)`: the SAME plan for a given
 /// (partition, G) regardless of device speed / residency, so the shard assignment
 /// — and therefore the combine layout — is reproducible. This is what lets the
 /// §12 parity hold: a block lands on the same device every run, so its bits are
@@ -60,9 +60,13 @@ struct DeviceShard {
 /// block count would imbalance the GEMM work. Greedy single pass: target
 /// ~`total_snps / G` SNPs per device; CLOSE a device's range once its cumulative
 /// SNP count crosses the target (NEVER splitting a block — the block-aligned
-/// invariant that makes a block computed entirely on one device). The target is
-/// DERIVED from the inputs (no magic number; design §8). Every block lands in
-/// exactly one device's range; the ranges are contiguous and tile `[0, n_block)`.
+/// invariant that makes a block computed entirely on one device). The per-block
+/// SNP count is `ranges[b].size()` (`end - begin`, a `long` ≥ 0 for any validated
+/// `block_ranges` output) — it is the SINGLE source of both the balance math AND
+/// each shard's `[s0, s1)`, so there is no parallel array to drift or to narrow
+/// (cleanup B6 / X1 / shard_plan D-1). The target is DERIVED from the inputs (no
+/// magic number; design §8). Every block lands in exactly one device's range; the
+/// ranges are contiguous and tile `[0, n_block)`.
 ///
 /// EDGE CASES (fail-fast / clean degenerate, architecture.md §2):
 ///   * G == 0 ⇒ throws (a shard plan needs at least one device — the caller
@@ -77,21 +81,21 @@ struct DeviceShard {
 ///     contiguous few), and TRAILING devices get EMPTY shards (`b0 == b1`) — a
 ///     device handed no blocks early-returns an empty partial (design §2/§5).
 ///
-/// @param block_sizes  per-block SNP count (each `BlockRange::size()` /
-///                     `F2BlockTensor::block_sizes`); length `n_block`.
 /// @param ranges       the per-block half-open column ranges from
-///                     `core::block_ranges` (length `n_block`); supplies each
-///                     shard's `[s0, s1)`. MUST be parallel to `block_sizes`
-///                     (`ranges[b].size() == block_sizes[b]`) — both derive from
-///                     the same partition.
+///                     `core::block_ranges` (length `n_block == ranges.size()`).
+///                     The SOLE input describing the partition: each shard's
+///                     `[s0, s1)` is `[ranges[b0].begin, ranges[b1-1].end)`, and
+///                     the per-block SNP count for the balance is `ranges[b].size()`
+///                     (`end - begin`). There is no separate `block_sizes` array —
+///                     it was redundant with `ranges[b].size()` and is derived here
+///                     (cleanup B6 / X1).
 /// @param G            number of devices (`Resources::device_count()`); must be
 ///                     >= 1.
 /// @return  exactly G `DeviceShard` entries; `plan[g]` is the range device g owns,
 ///          in g=0..G-1 order. Contiguous and covering `[0, n_block)` (the union
 ///          of the non-empty ranges).
-/// @throws std::runtime_error if G == 0, or if `block_sizes.size() != ranges.size()`.
+/// @throws std::runtime_error if G == 0.
 [[nodiscard]] std::vector<DeviceShard> plan_block_shards(
-    std::span<const int> block_sizes,
     std::span<const steppe::core::BlockRange> ranges,
     std::size_t G);
 

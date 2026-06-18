@@ -11,15 +11,14 @@
 
 #include <cstddef>
 #include <stdexcept>
-#include <string>
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"  // steppe::core::BlockRange
+#include "core/internal/launch_config.hpp"        // steppe::core::cdiv (the single home of ceiling division)
 
 namespace steppe::device {
 
 std::vector<DeviceShard> plan_block_shards(
-    std::span<const int> block_sizes,
     std::span<const steppe::core::BlockRange> ranges,
     std::size_t G) {
     // ---- Fail-fast preconditions (architecture.md §2) -----------------------
@@ -30,16 +29,11 @@ std::vector<DeviceShard> plan_block_shards(
             "steppe::device::plan_block_shards: G == 0 — the SPMG shard plan "
             "requires at least one device (architecture.md §9)");
     }
-    // block_sizes and ranges are parallel views of the same partition; a length
-    // mismatch is a programming error (the caller built one from the other).
-    if (block_sizes.size() != ranges.size()) {
-        throw std::runtime_error(
-            "steppe::device::plan_block_shards: block_sizes length (" +
-            std::to_string(block_sizes.size()) + ") != ranges length (" +
-            std::to_string(ranges.size()) + ") — they must describe the same partition");
-    }
+    // `ranges` is the SOLE description of the partition (no parallel block_sizes
+    // array to drift, cleanup B6 / X1): each block's SNP count is `ranges[b].size()`
+    // (`end - begin`, a non-negative `long` for any validated block_ranges output).
 
-    const std::size_t n_block = block_sizes.size();
+    const std::size_t n_block = ranges.size();
     std::vector<DeviceShard> plan(G);  // value-initialized: every entry {0,0,0,0} (empty)
 
     // ---- Degenerate: nothing to shard ---------------------------------------
@@ -50,22 +44,25 @@ std::vector<DeviceShard> plan_block_shards(
     }
 
     // ---- Total SNP count and the DERIVED per-device balance target ----------
-    // Balance by SNP count (blocks vary in size; design §2). The target is the
-    // even split total_snps / G, derived from the inputs — NOT a magic number
-    // (§8). long accumulators: total SNPs is the whole-genome M (~6e5), well
-    // within long; the sum cannot overflow for any realistic partition.
+    // Balance by SNP count (blocks vary in size; design §2). Each block's count is
+    // `ranges[b].size()` (already `long`, ≥ 0). The target is the even split
+    // total_snps / G, derived from the inputs — NOT a magic number (§8). long
+    // accumulators: total SNPs is the whole-genome M (~6e5), well within long; the
+    // sum cannot overflow for any realistic partition.
     long total_snps = 0;
     for (std::size_t b = 0; b < n_block; ++b) {
-        total_snps += static_cast<long>(block_sizes[b]);
+        total_snps += ranges[b].size();
     }
     // Ceiling division so G devices cover total_snps with the LAST device taking
     // the remainder rather than overflowing into a (G+1)-th: target * G >= total.
     // With target == ceil(total/G) the greedy close-on-cross below never needs
     // more than G ranges (proof: each closed range holds >= ~target SNPs minus one
-    // block's worth, so the cumulative reaches total within G closes).
+    // block's worth, so the cumulative reaches total within G closes). core::cdiv
+    // is the single home of ceiling division (§8; launch_config.hpp); the long
+    // overload computes the identical (total + G - 1) / G with no overflow here.
     const long G_signed = static_cast<long>(G);
     const long target_per_device =
-        (total_snps + G_signed - 1) / G_signed;  // >= 1 when total_snps >= 1
+        core::cdiv(total_snps, G_signed);  // >= 1 when total_snps >= 1
 
     // ---- Greedy block-aligned assignment ------------------------------------
     // Walk blocks in order, accumulating SNP count into the current device's range.
@@ -79,7 +76,7 @@ std::vector<DeviceShard> plan_block_shards(
     long device_snps = 0;       // SNPs accumulated into the current device
 
     for (std::size_t b = 0; b < n_block; ++b) {
-        device_snps += static_cast<long>(block_sizes[b]);
+        device_snps += ranges[b].size();
 
         // Close the current device's range when it has reached its SNP target and
         // we are NOT yet on the last device (the last device takes the rest). The

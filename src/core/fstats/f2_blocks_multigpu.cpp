@@ -102,15 +102,12 @@ F2BlockTensor compute_f2_blocks_multigpu(
         std::span<const int>(partition.block_id.data(), static_cast<std::size_t>(M < 0 ? 0 : M)),
         M, n_block);
 
-    std::vector<int> block_sizes(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
-    for (int b = 0; b < n_block; ++b) {
-        block_sizes[static_cast<std::size_t>(b)] =
-            static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
-    }
-
+    // `ranges` is the SOLE input to the planner: it carries each block's SNP count
+    // (`ranges[b].size()`, a `long`) for the balance AND each shard's [s0, s1). No
+    // redundant block_sizes vector (cleanup B6 / X1): building one only narrowed the
+    // `long` size() to `int` and forced a parallel-array contract on the planner.
     const std::vector<steppe::device::DeviceShard> shards =
         steppe::device::plan_block_shards(
-            std::span<const int>(block_sizes.data(), block_sizes.size()),
             std::span<const BlockRange>(ranges.data(), ranges.size()),
             G);
 

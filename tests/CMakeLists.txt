@@ -635,6 +635,36 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate)
 
+# --- Host-only unit test of the SPMG block-aligned shard PLANNER (cleanup TST-1) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the host-pure deterministic
+# planner steppe::device::plan_block_shards (src/device/shard_plan.{hpp,cpp}) — the
+# block→device mapping that is the STRUCTURAL parity floor (whole-block-on-one-device)
+# under BOTH combine tiers (architecture.md §11.4, §12). The unit was covered ONLY
+# transitively through the GPU parity test (test_f2_multigpu_parity.cu), which on
+# near-uniform AADR blocks can never hit the skew/edge cases; this test realizes the
+# header's own "exercisable host-only" promise.
+#
+# THE FIX UNDER TEST (B6 / X1 / shard_plan D-1): plan_block_shards dropped its redundant
+# `block_sizes` parameter and now derives each block's SNP count from `ranges[b].size()`
+# (a `long`; the single source of both balance + each shard's [s0,s1)). The plan MUST
+# stay BYTE-IDENTICAL to the old (block_sizes, ranges, G) signature — each case asserts
+# plan == an independent greedy reference + the documented exact layout, so a divergence
+# (which would change the SPMG combine layout and break the locked f2_multigpu_parity
+# bit-identity) fails fast here on the cheap host path, before the slow GPU run.
+#
+# plan_block_shards is host-pure CUDA-FREE (it names only core::BlockRange + std types,
+# its TU shard_plan.cpp is a plain .cpp in steppe_device that references no CUDA symbol),
+# so this links the out-of-line symbol from steppe::device + the CUDA-free seam via
+# steppe::core_internal (the src/ include root that resolves "device/shard_plan.hpp" +
+# "core/domain/block_partition_rule.hpp"); steppe::api carries config.hpp. Only
+# shard_plan.cpp.o is pulled (no kernel object), so no GPU/CUDA code links — a CUDA leak
+# in the planner would fail this host link (the §4 layering proof). Self-checking main()
+# (no gtest); CTest gates on the exit code. architecture.md §8, §11.4, §12, §13.
+add_executable(test_shard_plan unit/test_shard_plan.cpp)
+target_link_libraries(test_shard_plan
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME shard_plan_unit COMMAND test_shard_plan)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is
