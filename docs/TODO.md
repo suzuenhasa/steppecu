@@ -15,8 +15,11 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 
 ---
 
-## ▶ Next: M4.5 — Single-node multi-GPU precompute
-*Depends: M4. Composes with M5. Refs: architecture §11.4 (design), §9 (Resources/PerGpuResources), §12 (parity); the audit `docs/cleanup/00-overview.md` §(2) "CAPABILITY-TIER COHERENCE — the ONE unified design"; the ⚡ section's capability-tier table + box-role split; full plan = `handoff-1fbb417.md` §5.*
+## ✅ M4.5 — Single-node multi-GPU precompute — DONE (2026-06-17, branch `m4.5-multigpu`)
+
+> **COMPLETE & bit-identity-proven on rtxbox (2× RTX PRO 6000).** Built via two sequenced per-file workflows (`agentscripts/m4.5-scaffold.js` → `agentscripts/m4.5-multigpu.js`), 8 commits `d81d2a1`→`18b7801`, clean from-scratch build, **30/30 ctest green**. Scaffold: `STEPPE_CUDA_WARN` (non-throwing tagged degrade), `BackendCapabilities`+probe, `prefer_p2p_combine`, device-ordinal+`MathModeScope`, `CudaBackend(device_id)`+`cudaSetDevice`. Algorithm: `Resources`/`PerGpuResources`+builder, **block-aligned shard** (whole contiguous block ranges → each block computed on one device), **host-staged fixed-order combine** (portable baseline), **opt-in `cudaMemcpyPeer` P2P device-combine** (real stock-driver P2P, ran on rtxbox). **Parity (test_f2_multigpu_parity):** for the production `EmulatedFp64{40}` path, G==2 host-staged AND P2P are **bit-identical** to single-GPU on `derived_acc`+`derived_full`; native `Fp64` at G≥2 matches to oracle tol (rel ≤2.87e-15 = §12 `[UNCERTAIN]` batched-GEMM batchCount-sensitivity, correctly scoped). NEVER NCCL AllReduce. **NOT yet done: the consumer-5090 graceful-degrade validation** (`can_access_peer==false` → host-staged + tag) = the "5090 after" job; the parity test's tier-assertions are PRO-specific and need a tier branch to run on the vast box. **Pending: merge `m4.5-multigpu` → `main`.**
+
+*Refs: architecture §11.4 (design), §9 (Resources/PerGpuResources), §12 (parity); the audit `docs/cleanup/00-overview.md` §(2) "CAPABILITY-TIER COHERENCE — the ONE unified design"; the ⚡ section's capability-tier table + box-role split.*
 
 **Goal.** Shard SNP work across the G devices; each computes a full-shape **partial** `f2_blocks`+`Vpair`; combine the partials **once, host-side, in fixed device order** (`g=0..G-1` = `DeviceConfig::devices` order) in reference precision; broadcast back. **Bit-identical across G AND to the single-GPU reference (§12).** This is *the* milestone that introduces the **capability-tier machinery** — it's the first capable-vs-budget fork (P2P device-combine vs host-staged). **Build the host-staged baseline first; P2P is an opt-in fast-path.**
 
