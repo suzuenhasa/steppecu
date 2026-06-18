@@ -588,6 +588,16 @@ private:
     // never re-`cublasSetStream`'d (cleanup X-1/B1), so the emulated-FP64
     // determinism workspace persists for every GEMM (cuBLAS §2.4.7).
     //
+    // NOTE (M4.5 SPMG, perf-discovery.md F1): this is the NULL *legacy default*
+    // stream, and the build is NOT compiled `--default-stream per-thread`, so it
+    // does NOT give each per-device worker an independent, concurrently-issuing
+    // stream — under the multi-GPU fan-out the two workers' launches implicitly
+    // serialize against the single legacy default stream (CUDA C Programming Guide
+    // §3.2.8.5.2 "Default Stream"). Replacing this with an owning per-device RAII
+    // `Stream` is fix P2; it is NOT done here (P0 is the build-clean baseline). Do
+    // NOT read this comment as a claim that the default stream overlaps across
+    // devices — it does not in this compile mode.
+    //
     // Declaration order is load-bearing at teardown (reverse-order destruction):
     // `blas_` holds a NON-owning pointer into `workspace_`, so `workspace_` must
     // be declared AFTER `blas_` to be freed first — `cublasDestroy` only
