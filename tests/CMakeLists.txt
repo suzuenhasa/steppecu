@@ -573,6 +573,18 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
 
+# --- M4.5 SPMG single-GPU vs 2-GPU wall-clock BENCH (cleanup B1 fan-out) -------------
+# Manual bench (NOT a ctest gate): times core::compute_f2_blocks_multigpu G==1 vs G==2
+# end-to-end on real AADR; reports the speedup and catches the single-GPU OOM (large-P
+# only fits when sharded on a 32 GB card). Mirrors the parity target's links + emu def.
+add_executable(bench_f2_multigpu reference/bench_f2_multigpu.cu)
+target_link_libraries(bench_f2_multigpu
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(bench_f2_multigpu PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(bench_f2_multigpu PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+
 # --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
 # HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
 # core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
