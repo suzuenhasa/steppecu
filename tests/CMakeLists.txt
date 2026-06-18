@@ -704,6 +704,50 @@ target_link_libraries(test_shard_plan
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 add_test(NAME shard_plan_unit COMMAND test_shard_plan)
 
+# --- Host-only unit test of the SPMG ORCHESTRATOR CORE (cleanup D1/T1, B9) -----
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the HOST-PURE, P2P-FREE
+# core of the multi-GPU precompute orchestrator — core::plan_multigpu_shards (the
+# block-aligned shard plan) + core::compute_multigpu_partials (the per-device
+# concurrent std::jthread fan-out) — factored out of the public entry point
+# compute_f2_blocks_multigpu into src/core/fstats/f2_blocks_multigpu_core.{hpp,cpp}
+# (the audit's D1 extraction that unlocks the T1 host test). The orchestrator's host
+# logic — the zero-copy column sub-view, the dense zero-based local block_id
+# transform, the empty-/n_block<G-shard handling, the exception_ptr rethrow — was
+# exercised ONLY end-to-end on a GPU (test_f2_multigpu_parity.cu) or through the §4
+# gate .cu (test_f2_multigpu_gate.cu, which must device-link steppe::device for the
+# RDC P2P symbol). This realizes the §13 "GPU-free-testable seam" promise on the cheap
+# host path. The B9/T1 verdict gate:
+#   (1) SUB-VIEW + LOCAL-ID — each device g is handed EXACTLY its shard's columns
+#       (Q.data + P*s0, M == s1-s0) and a DENSE ZERO-BASED local block_id
+#       (block_id[s0+k] - b0), recorded + asserted by a fake backend;
+#   (2) FAN-OUT + COMBINE — the G partials, keyed on the GLOBAL block id, recombine via
+#       the host-staged fixed-order combine into the full tensor BIT-FOR-BIT vs an
+#       independent reference (driven over G=1/2/4 incl. an uneven 8-block/4-device
+#       case — the concurrent fan-out writing 4 distinct partials[g] slots, also
+#       TSan-checkable for race-freedom);
+#   (3) G==1 IDENTITY — the single full shard with local==global ids;
+#   (4) EMPTY / n_block<G — trailing empty shards place nothing, prefix still exact;
+#   (5) EXCEPTION PROPAGATION — a faulting worker surfaces as a normal throw (the
+#       exception_ptr rethrow), never std::terminate from an escaped thread exception.
+# Parity-NEUTRAL: it asserts the host-pure transform + placement, never a number — the
+# locked f2_multigpu_parity bit-identity is untouched (the extraction is a pure refactor).
+#
+# WHY THIS LINKS NO CUDA / NEEDS NO device-link. The extracted core references ONLY the
+# CUDA-free ComputeBackend seam, plan_block_shards (a plain .cpp symbol in steppe_device,
+# the same one test_shard_plan resolves), block_ranges (header-inline), and the
+# host-staged combine_f2_partials_host (steppe_core) — NEVER combine_f2_partials_p2p
+# (the device-RDC symbol the public entry point references). So this TU links
+# steppe::core (the core TU + the host-staged combine) + steppe::device (resolve the
+# plain plan_block_shards.o — NO kernel object pulled, NO CUDA_SEPARABLE_COMPILATION) +
+# steppe::core_internal (the src/ include root) + steppe::api (config.hpp). A CUDA leak
+# in the extracted core would fail this host link (the §4 layering proof). Self-checking
+# main() (no gtest); CTest gates on the exit code. architecture.md §2, §4, §7, §11.4,
+# §12, §13; cleanup D1/T1, B9.
+add_executable(test_f2_blocks_multigpu unit/test_f2_blocks_multigpu.cpp)
+target_link_libraries(test_f2_blocks_multigpu
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME f2_blocks_multigpu_unit COMMAND test_f2_blocks_multigpu)
+
 # --- Host-only unit test of the §9 device-ordinal validator (cleanup B8/C1/T1) -
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the §9 build()-validation
 # predicate steppe::device::validate_device_order(span<const int>, int) the B8

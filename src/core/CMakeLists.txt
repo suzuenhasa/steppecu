@@ -56,10 +56,19 @@ target_compile_features(steppe_core_internal INTERFACE cxx_std_20)
 # DeviceShard + the CUDA-free combine decls and stays CUDA-free. Both
 # plan_block_shards and combine_f2_partials_p2p resolve through the PRIVATE
 # steppe::device link below.
+#
+# The HOST-PURE, P2P-FREE core of that orchestrator — the block-aligned shard PLAN
+# (plan_multigpu_shards) + the per-device concurrent FAN-OUT (compute_multigpu_partials)
+# — is factored into fstats/f2_blocks_multigpu_core.cpp (cleanup D1/T1, B9): it
+# references ONLY the CUDA-free ComputeBackend seam + plan_block_shards + block_ranges,
+# NEVER the device-RDC combine_f2_partials_p2p, so a GPU-FREE host test
+# (tests/unit/test_f2_blocks_multigpu.cpp) drives it against a fake backend with no
+# device-link. The entry-point TU composes that core with the §4 combine fork.
 add_library(steppe_core STATIC
     fstats/f2_from_blocks.cpp
     fstats/f2_combine.cpp
     fstats/f2_blocks_multigpu.cpp
+    fstats/f2_blocks_multigpu_core.cpp
     domain/block_partition_rule.cpp)
 add_library(steppe::core ALIAS steppe_core)
 

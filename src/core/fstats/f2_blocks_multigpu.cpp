@@ -29,20 +29,18 @@
 #include "core/fstats/f2_blocks_multigpu.hpp"
 
 #include <cstddef>
-#include <exception>
 #include <span>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
+#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials (host-pure, P2P-free)
 #include "core/fstats/f2_combine.hpp"            // steppe::core::combine_f2_partials_host (the baseline)
 #include "core/internal/views.hpp"               // steppe::core::MatView
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
-#include "core/domain/block_partition_rule.hpp"  // steppe::core::block_ranges, BlockRange
 #include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_p2p (CUDA-free decl of the P2P fast-path)
 #include "device/resources.hpp"                  // steppe::device::Resources, CombinePath
-#include "device/shard_plan.hpp"                 // steppe::device::plan_block_shards, DeviceShard
+#include "device/shard_plan.hpp"                 // steppe::device::DeviceShard
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 
@@ -91,121 +89,27 @@ F2BlockTensor compute_f2_blocks_multigpu(
             Q, V, N, partition.block_id.data(), n_block, precision);
     }
 
-    // ---- G >= 2: BLOCK-ALIGNED shard plan ------------------------------------
-    // Per-block column ranges via the SINGLE-SOURCE inverse of assign_blocks
-    // (core::block_ranges; validates the partition contract ONCE). block_id
-    // non-decreasing ⇒ each block's columns are contiguous, so a contiguous block
-    // range maps to a contiguous SNP-column span (design §2). Then plan_block_shards
-    // assigns contiguous whole-block ranges to the G devices, balanced by SNP count
-    // — the single home of the block→device mapping (DRY, §8).
-    const std::vector<BlockRange> ranges = core::block_ranges(
-        std::span<const int>(partition.block_id.data(), static_cast<std::size_t>(M < 0 ? 0 : M)),
-        M, n_block);
-
-    // `ranges` is the SOLE input to the planner: it carries each block's SNP count
-    // (`ranges[b].size()`, a `long`) for the balance AND each shard's [s0, s1). No
-    // redundant block_sizes vector (cleanup B6 / X1): building one only narrowed the
-    // `long` size() to `int` and forced a parallel-array contract on the planner.
+    // ---- G >= 2: BLOCK-ALIGNED shard plan + per-device CONCURRENT fan-out ----
+    // Both steps are the HOST-PURE, P2P-FREE core of the orchestrator, factored into
+    // f2_blocks_multigpu_core.{hpp,cpp} (cleanup D1/T1, B9) so a GPU-FREE host test
+    // can drive them against a fake backend without device-linking the CUDA P2P
+    // symbol. This is a pure composition — the plan + the partials are byte-for-byte
+    // what the former inline body produced (§12 bit-identity untouched):
+    //   * plan_multigpu_shards: block_ranges (the single-source partition inverse) →
+    //     plan_block_shards (the single home of the block→device mapping, §8), the
+    //     block-aligned whole-block shard the parity floor rests on (design §0/§2).
+    //   * compute_multigpu_partials: one std::jthread per device, each computing its
+    //     compact partial over a zero-copy column sub-view + dense local block_id via
+    //     the UNMODIFIED ComputeBackend::compute_f2_blocks, joined before the combine;
+    //     PARITY-NEUTRAL (the GEMM bits are fixed by the shard, not the wall-clock
+    //     slot; the combine reads partials[g] in fixed g=0..G-1 order AFTER the join).
     const std::vector<steppe::device::DeviceShard> shards =
-        steppe::device::plan_block_shards(
-            std::span<const BlockRange>(ranges.data(), ranges.size()),
-            G);
+        core::plan_multigpu_shards(partition, M, n_block, G);
 
-    // ---- Per-device partials over zero-copy sub-views (CONCURRENT fan-out) ----
-    // Each device g computes its compact [P × P × (b1-b0)] partial from a column
-    // SUB-VIEW of Q/V/N and a LOCAL, dense, zero-based block_id (design §2):
-    //   * sub-view: columns [s0, s1) are the contiguous span data + P*s0 of length
-    //     P*(s1-s0) — a pointer offset + adjusted M, ZERO COPY. The same s0/s1 for
-    //     Q, V, N (they share P/M).
-    //   * local block_id: the global block_id[s0 .. s1) shifted down by b0, so the
-    //     backend's [P × P × n_block_local] tensor is indexed 0..n_block_local-1
-    //     (block_id_local[k] = block_id[s0+k] - b0). n_block_local = b1 - b0.
-    // An EMPTY shard (b0 == b1) hands the backend n_block_local == 0 / M_local == 0,
-    // and the backend early-returns an empty F2BlockTensor (its degenerate guard) —
-    // the combine then places nothing for that device. The per-block GEMM is the
-    // UNMODIFIED compute_f2_blocks — NOT reimplemented here (design §0).
-    //
-    // CONCURRENCY (architecture.md §7, §11.4 — the SPMG speedup): the G devices run
-    // their GEMMs CONCURRENTLY, one host thread per device. CudaBackend::compute_f2_blocks
-    // is self-contained and blocking — it guard_device()s its OWN device, owns its OWN
-    // stream/handle/buffers, and ends on its own cudaStreamSynchronize — so the host
-    // loop that issued them one-at-a-time (each blocking on its trailing sync before
-    // the next was even issued) serialized work the hardware can overlap: each device
-    // has its own default stream and commands on distinct devices' default streams run
-    // concurrently (CUDA Programming Guide §3.4, "Programming Systems with Multiple
-    // GPUs"). Wall-clock was Σ_g time(g); fanned out it is max_g time(g).
-    //
-    // No shared mutable state: each worker writes ONLY its own pre-sized partials[g]
-    // slot (distinct elements of a vector sized to G before any thread starts — no
-    // resize, no aliasing), builds its own block_id_local, and drives its own backend
-    // gpus[g] bound to its own device. cudaSetDevice sets the calling HOST THREAD's
-    // current device (CUDA Runtime API: the current device is a per-host-thread
-    // property), so a worker's guard_device() cannot clobber another worker's current
-    // device. The combine reads partials[g] in fixed g=0..G-1 order AFTER the join
-    // barrier; the per-device GEMM bits are fixed by the block-aligned shard and are
-    // INDEPENDENT of which wall-clock slot ran them (§12) — so the fan-out is
-    // PARITY-NEUTRAL: bit-identical to the former serial drive.
-    //
-    // EXCEPTION SAFETY: a std::thread/std::jthread whose entry function lets an
-    // exception escape calls std::terminate ([thread.thread.constr]). Each worker
-    // therefore CATCHES everything into its own std::exception_ptr slot; after the
-    // join barrier the orchestrator rethrows the FIRST captured exception (lowest g),
-    // so a backend / device fault still propagates to the caller as a normal throw
-    // (R3: runtime_error on a malformed sub-partition, CudaError on a device fault).
-    std::vector<F2BlockTensor>     partials(G);
-    std::vector<std::exception_ptr> worker_errors(G);  // value-init to nullptr
-    {
-        // jthread joins in its destructor (RAII §2), so every worker is joined before
-        // worker_errors / partials are read below — the join is the happens-before
-        // barrier the fixed-order combine depends on. Reserve so the launch loop does
-        // not reallocate the vector (which would move not-yet-joined threads).
-        std::vector<std::jthread> workers;
-        workers.reserve(G);
-        for (std::size_t g = 0; g < G; ++g) {
-            workers.emplace_back([&, g]() {
-                try {
-                    const steppe::device::DeviceShard& sh = shards[g];
-                    const long s0 = sh.s0;
-                    const long s1 = sh.s1;
-                    const long M_local = s1 - s0;
-                    const int  n_block_local = sh.b1 - sh.b0;
-
-                    // Zero-copy column sub-views (data + P*s0). For an empty shard
-                    // M_local == 0 and the offset is harmless (the backend early-
-                    // returns before any deref).
-                    const std::size_t col_off =
-                        static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
-                    const MatView Qg{Q.data + col_off, P, M_local};
-                    const MatView Vg{V.data + col_off, P, M_local};
-                    const MatView Ng{N.data + col_off, P, M_local};
-
-                    // Dense, zero-based LOCAL block_id of length M_local. Built in the
-                    // worker (off the issue-critical path; owns its own slice).
-                    std::vector<int> block_id_local(
-                        static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
-                    for (long k = 0; k < M_local; ++k) {
-                        block_id_local[static_cast<std::size_t>(k)] =
-                            partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
-                    }
-
-                    partials[g] = resources.gpus[g].backend->compute_f2_blocks(
-                        Qg, Vg, Ng, block_id_local.data(), n_block_local, precision);
-                } catch (...) {
-                    // NEVER let it escape the thread (std::terminate); surface it on join.
-                    worker_errors[g] = std::current_exception();
-                }
-            });
-        }
-    }  // <-- join barrier: all workers joined here (jthread dtors)
-
-    // Rethrow the FIRST worker failure (lowest g) so a device/backend fault propagates
-    // as a normal exception to the caller, deterministically (independent of which
-    // worker raced to fail first).
-    for (std::size_t g = 0; g < G; ++g) {
-        if (worker_errors[g]) {
-            std::rethrow_exception(worker_errors[g]);
-        }
-    }
+    const std::vector<F2BlockTensor> partials = core::compute_multigpu_partials(
+        resources, Q, V, N, partition,
+        std::span<const steppe::device::DeviceShard>(shards.data(), shards.size()),
+        precision);
 
     // ---- Fixed-order combine, capability-gated (THE §4 fork) -----------------
     //
