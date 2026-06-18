@@ -51,19 +51,30 @@
 //         bit-identical for BOTH precisions: both combine tiers consume the SAME
 //         per-device partials and sum the SAME fixed order, so they agree bit-for-bit
 //         regardless of the per-device GEMM precision.)
-//     5. Capability + which-path tag sanity (out-of-band, never on the tensor):
-//          * on the PRO tier (device name contains "PRO" — the rtxbox) resources_G2
-//            .gpus[0].caps.can_access_peer MUST be true, AND resG2p.last_combine_path
-//            MUST be P2pDeviceResident (confirms the P2P arm ACTUALLY exercised P2P,
-//            not a silent host-staged fallback). On a budget GeForce
-//            can_access_peer==false is the EXPECTED degrade: resG2p degrades to
-//            HostStaged (tagged) and (3) is skipped while (1)/(2)/(4) still hold.
+//     5. EmulatedFp64 ENGAGED + capability/which-path tag sanity (out-of-band, never
+//        on the tensor):
+//          * (F-COV-1) under STEPPE_HAVE_EMU_TUNING the EmulatedFp64 lane MUST be
+//            honorable (resG1.gpus[0].caps.emulated_fp64_honorable == true) AND its
+//            single-GPU reference MUST DIFFER bit-for-bit from native Fp64 — so the
+//            §12 fixed-slice Ozaki path actually engaged and the EmuFp64 bit-identity
+//            claims did not silently certify a native fallback.
+//          * (L8 capability BICONDITIONAL — NOT a device-name match) for resG2p
+//            (prefer_p2p_combine=true): can_access_peer ⇔ last_combine_path ==
+//            P2pDeviceResident, and !can_access_peer ⇔ last_combine_path == HostStaged.
+//            This is the SAME field the production §4 fork gates on, so it holds on
+//            EVERY tier — the PRO 6000 (stock-driver P2P) AND the consumer 5090 (P2P
+//            driver-disabled), with no marketing-string coupling.
 //          * resG2h.last_combine_path MUST be HostStaged (prefer_p2p_combine=false
 //            forces the baseline — the explicit workflow ask, on every tier).
 //
 // SKIP POLICY: a 2-GPU lane needs >= 2 visible devices; on a 1-GPU box the G==2
-// candidate is skipped (logged), the G==1 floor still runs. A dataset directory
-// that is absent is skipped (logged) so the fast gate runs without the full matrix.
+// candidate is skipped (logged), the G==1 floor still runs. A dataset directory that
+// is ABSENT is skipped (logged); a dataset that is PRESENT-but-MALFORMED is a FAIL
+// (F-BUG-2 — never a silent skip on a parity gate). A dataset whose estimated device-0
+// peak does NOT fit free VRAM (cudaMemGetInfo) is skipped with an EXPLICIT reason
+// ("[skip] <name> P=.. : insufficient VRAM (need ~X MiB, free ~Y MiB)") rather than
+// OOMing — so derived_full (P=768, ~36 GB) is cleanly skipped on a 32 GB consumer 5090
+// while derived_acc (P=50) runs, and a 96 GB PRO box clears both.
 //
 // Build (REMOTE sm_120 / CUDA 13 box; NOT locally). Built by CMake/CTest as the
 // `f2_multigpu_parity` test (tests/CMakeLists.txt) linking steppe::io + steppe::core
@@ -93,6 +104,7 @@
 #include "device/backend.hpp"                   // ComputeBackend, BackendCapabilities
 #include "device/backend_factory.hpp"           // steppe::device::make_cuda_backend
 #include "device/resources.hpp"                 // steppe::device::Resources, build_resources
+#include "device/vram_budget.hpp"               // resident_tensor_bytes (the §11.2 footprint home — VRAM gate)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
 using steppe::Precision;
@@ -137,29 +149,83 @@ bool read_f64(const std::string& path, std::vector<double>& out, std::size_t cou
     return got == count;
 }
 
-// Load a derived_* Q/V/N directory. Returns false (no error) if the directory's
-// shape.txt is absent — the SKIP-when-absent policy (so the fast gate runs without
-// derived_full). On a PRESENT-but-malformed directory it reports the failure and
-// returns false.
-bool load_qvn(const std::string& dir, int& P, long& M,
-              std::vector<double>& Q, std::vector<double>& V, std::vector<double>& N) {
+// Outcome of loading a derived_* Q/V/N directory — the F-BUG-2 absent-vs-malformed
+// distinction. ABSENT (no shape.txt) is the intended SKIP (so the fast gate runs
+// without derived_full); MALFORMED (present but unparseable shape, non-positive P/M,
+// or unreadable/wrong-size Q/V/N) is a real ERROR the caller MUST count as a failure —
+// NOT a silent skip. A parity gate that advertises a scale dataset must FAIL, never
+// quietly pass, if that dataset is present-but-truncated (§2 fail-fast).
+enum class LoadResult { Absent, Malformed, Ok };
+
+// Load a derived_* Q/V/N directory. Distinguishes ABSENT (skip) from MALFORMED
+// (error) per LoadResult — closing the F-BUG-2 silent-skip-of-the-scale-dataset hole.
+// A non-positive P or M is rejected up front (F-BUG-3) so a negative M can never wrap
+// `count` into a huge size_t and bad_alloc instead of reporting a clean malformed-shape
+// diagnostic.
+LoadResult load_qvn(const std::string& dir, int& P, long& M,
+                    std::vector<double>& Q, std::vector<double>& V, std::vector<double>& N) {
     const std::string shapePath = dir + "/shape.txt";
     FILE* sf = std::fopen(shapePath.c_str(), "r");
-    if (!sf) return false;  // absent dataset -> skip (not a failure)
+    if (!sf) return LoadResult::Absent;  // absent dataset -> intended skip (not a failure)
     if (std::fscanf(sf, "%d %ld", &P, &M) != 2) {
         std::fprintf(stderr, "ERROR: %s must contain 'P M'\n", shapePath.c_str());
         std::fclose(sf);
-        return false;
+        return LoadResult::Malformed;
     }
     std::fclose(sf);
+    if (P <= 0 || M <= 0) {  // F-BUG-3: a non-positive shape is malformed, not absent
+        std::fprintf(stderr, "ERROR: %s has non-positive shape P=%d M=%ld\n",
+                     shapePath.c_str(), P, M);
+        return LoadResult::Malformed;
+    }
     const std::size_t count = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     if (!read_f64(dir + "/Q.f64", Q, count) ||
         !read_f64(dir + "/V.f64", V, count) ||
         !read_f64(dir + "/N.f64", N, count)) {
         std::fprintf(stderr, "ERROR: %s present but Q/V/N.f64 unreadable / wrong size\n", dir.c_str());
-        return false;
+        return LoadResult::Malformed;
     }
-    return true;
+    return LoadResult::Ok;
+}
+
+// Safety headroom applied to the raw peak estimate before the skip decision. The raw
+// term below is the SUM of the documented co-resident DeviceBuffers; the real high-
+// water is HIGHER because of (a) the CUDA caching allocator's fragmentation/rounding,
+// (b) the up-to-three concurrent idle backend workspaces device 0 holds (resG1,
+// resG2h[0], resG2p[0]) while a full-M compute runs, and (c) the per-chunk slabs that,
+// although they reuse the freed-raw VRAM, can transiently exceed it. A skip decision
+// must err HIGH (skipping a dataset that might just barely fit is correct; an OOM that
+// crashes the whole gate is not), so the estimate is inflated by this factor. Tuned so
+// derived_full (P=768, raw ~32.0 GiB) is gated OFF a 32 GB 5090 (~31.6 GiB free) while
+// derived_acc (P=50, raw ~0.33 GiB) clears trivially and a 96 GB PRO box clears both.
+constexpr double kVramHeadroomFactor = 1.15;
+
+// Peak device-0 VRAM (bytes) one dataset's parity battery needs, used to GATE the
+// scale dataset against a 32 GB consumer 5090 (cudaMemGetInfo) so derived_full is
+// SKIPPED-WITH-REASON rather than OOMing (F-COV-1/L8 VRAM gate). The per-precision
+// reference + G==1 candidate each run the SINGLE-GPU compute_f2_blocks over the FULL
+// P×M on device 0 — that full-M call is the binding peak (the G==2 shards each see
+// ~M/2). One such call's co-resident device footprint, mirroring cuda_backend.cu's own
+// budget comment (the FEEDER phase holds the raw inputs dQ_raw+dV_raw+dN_raw = 3·P·M
+// AND the persisted feeder outputs dQ+dV+dS = 4·P·M, on TOP of the two resident
+// f2/Vpair tensors that were allocated before the feeder scope), is:
+//     feeder phase (raw + feeder outputs)  : 7 · P · M · 8 bytes
+//   + resident f2 + Vpair tensors          : resident_tensor_bytes(P, n_block)  (§11.2 home, DRY)
+//   + cuBLAS determinism workspace         : kCublasWorkspaceBytes
+//   ──────────────────────────────────────────────────────────────
+//   × kVramHeadroomFactor (allocator overhead + concurrent idle workspaces; see above)
+// The chunk slabs reuse the freed-raw VRAM (cuda_backend.cu) so they fit under the same
+// envelope. This is a conservative PEAK ESTIMATE for a skip decision, NOT a hard
+// allocator: the headroom factor makes it err toward skipping rather than OOMing. (The
+// pre-headroom 7·P·M+resident sum is ~32.3 GiB at P=768/M=584k, just under the 31.6 GiB
+// free on a 32 GB 5090 — which OOMed in practice; the headroom closes that gap.)
+[[nodiscard]] std::size_t estimate_peak_vram_bytes(int P, long M, int n_block) {
+    if (P <= 0 || M <= 0 || n_block <= 0) return 0;
+    const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+    const std::size_t feeder_peak = 7u * pm * sizeof(double);
+    const std::size_t raw = feeder_peak + steppe::device::resident_tensor_bytes(P, n_block) +
+                            steppe::kCublasWorkspaceBytes;
+    return static_cast<std::size_t>(kVramHeadroomFactor * static_cast<double>(raw));
 }
 
 // BIT-EXACT equality of two F2BlockTensors — the §12 parity predicate. f2 + vpair
@@ -265,27 +331,31 @@ void report_first_diff(const char* tag, const F2BlockTensor& ref, const F2BlockT
     }
 }
 
-// Is device 0 a datacenter / PRO-tier Blackwell (stock-driver P2P) vs a consumer
-// GeForce? The capability-tier law keys the strict peer assertion off this (same
-// rule as test_backend_capabilities_probe.cu): "PRO" in the device name ⇒ the
-// rtxbox tier that MUST report real P2P.
-bool device0_is_pro_tier() {
-    cudaDeviceProp prop{};
-    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) return false;
-    return std::strstr(prop.name, "PRO") != nullptr;
-}
-
 // Run the full parity battery on ONE loaded dataset. Returns true if the dataset
-// was actually exercised (the bit-identity asserts ran); false only when the
-// dataset directory was absent (a logged skip, not a failure).
+// was actually exercised OR a real error was counted (the caller treats both as
+// "covered"); false ONLY when the dataset directory was absent or VRAM-skipped (a
+// logged skip, not a failure). The capability tier is NOT a parameter: the tier
+// dispatch is read in-band from each Resources' probed caps.can_access_peer (L8
+// biconditional below), the SAME field the production §4 fork gates on — no device-
+// name match. `device_name` is observability only (printed, never a dispatch key).
 bool run_dataset(const std::string& label, const std::string& dir, const std::string& snp,
-                 int visible_devices, bool pro_tier) {
+                 int visible_devices, const char* device_name) {
     int P = 0; long M = 0;
     std::vector<double> Qd, Vd, Nd;
-    if (!load_qvn(dir, P, M, Qd, Vd, Nd)) {
-        std::printf("[skip] dataset '%s' (%s) absent or unreadable — not run\n",
+    const LoadResult lr = load_qvn(dir, P, M, Qd, Vd, Nd);
+    if (lr == LoadResult::Absent) {
+        std::printf("[skip] dataset '%s' (%s) absent — not run\n",
                     label.c_str(), dir.c_str());
         return false;
+    }
+    if (lr == LoadResult::Malformed) {
+        // F-BUG-2: present-but-malformed is a real ERROR on a parity gate, NOT a
+        // silent skip. Count it so a truncated derived_full cannot leave the gate
+        // green while the scale dataset it advertises never ran.
+        std::fprintf(stderr, "ERROR: dataset '%s' (%s) PRESENT but malformed — counting as FAIL\n",
+                     label.c_str(), dir.c_str());
+        ++g_failures;
+        return true;
     }
     const MatView Q{Qd.data(), P, M};
     const MatView V{Vd.data(), P, M};
@@ -312,6 +382,45 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         steppe::core::assign_blocks(snptab.chrom, snptab.genpos_morgans, bs_morgans);
     std::printf("\n=== dataset '%s' P=%d M=%ld n_block=%d (blgsize=%.3f Morgans) — REAL AADR ===\n",
                 label.c_str(), P, M, part.n_block, bs_morgans);
+
+    // ---- VRAM GATE (F-COV-1/L8): never OOM, never silent-skip the scale dataset ----
+    // The battery builds several concurrent Resources/backends and drives the
+    // single-GPU compute_f2_blocks over the FULL P×M on device 0 — at P=768/M=584k the
+    // resident envelope (~36 GB) exceeds a 32 GB consumer 5090. Probe device-0 free
+    // VRAM and the estimated peak; if it will not fit, SKIP this dataset with an
+    // EXPLICIT reason (need ~X MiB, free ~Y MiB) — NOT an OOM (a crash would taint the
+    // whole gate), NOT a silent skip (the absent-vs-malformed law is upheld; this is a
+    // third, explicitly-logged outcome). On a 96 GB PRO box both datasets clear the
+    // gate. The skip returns false (a logged skip, like Absent), so a derived_acc-only
+    // run still gates green and `any_dataset_run` reflects what actually ran.
+    {
+        // The estimate is a device-0 peak; build the candidates on device 0, so probe
+        // device 0. cudaMemGetInfo reports the CURRENT device's free/total VRAM
+        // (CUDA Runtime API, group CUDART_MEMORY) — make device 0 current first.
+        if (cudaSetDevice(0) != cudaSuccess) {
+            std::fprintf(stderr, "ERROR: cudaSetDevice(0) failed before the VRAM probe for '%s'\n",
+                         label.c_str());
+            ++g_failures;
+            return true;
+        }
+        std::size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+            std::fprintf(stderr, "ERROR: cudaMemGetInfo failed before the VRAM probe for '%s'\n",
+                         label.c_str());
+            ++g_failures;
+            return true;
+        }
+        const std::size_t need_b = estimate_peak_vram_bytes(P, M, part.n_block);
+        const double need_mib = static_cast<double>(need_b) / (1024.0 * 1024.0);
+        const double free_mib = static_cast<double>(free_b) / (1024.0 * 1024.0);
+        if (need_b > free_b) {
+            std::printf("[skip] %s P=%d : insufficient VRAM (need ~%.0f MiB, free ~%.0f MiB)\n",
+                        label.c_str(), P, need_mib, free_mib);
+            return false;  // logged VRAM skip — not a failure, not silent
+        }
+        std::printf("  VRAM gate OK: need ~%.0f MiB, free ~%.0f MiB on device 0\n",
+                    need_mib, free_mib);
+    }
 
     const Precision precNat{Precision::Kind::Fp64, steppe::kDefaultMantissaBits};
     const Precision precEmu{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
@@ -344,14 +453,25 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         resG2p = steppe::device::build_resources(cfgG2p);
     }
 
+    // F-COV-1 capture: the native (p==0) and EmulatedFp64 (p==1) single-GPU references,
+    // kept so that AFTER the precision loop we can assert the EmulatedFp64 lane actually
+    // ENGAGED the fixed-slice Ozaki path (it must produce DIFFERENT bits than native) —
+    // closing the silent-native-fallback blind spot: every EmuFp64 bit-identity claim
+    // compares sharded-EmuFp64 to single-GPU-EmuFp64, so if both silently ran native
+    // Fp64 they would still match and the gate would certify the WRONG path.
+    F2BlockTensor natRef;
+    F2BlockTensor emuRef;
+
     // ---- Per precision: reference (single-GPU) vs candidates (memcmp) ----------
     for (int p = 0; p < 2; ++p) {
         const Precision& prec = precs[p];
+        const bool is_emu_prec = (prec.kind == Precision::Kind::EmulatedFp64);
 
         // REFERENCE: the existing single-GPU seam (the M4-trusted path).
         auto ref_backend = steppe::device::make_cuda_backend(0);
         const F2BlockTensor ref =
             steppe::core::compute_f2_blocks(*ref_backend, Q, V, N, part, prec);
+        (is_emu_prec ? emuRef : natRef) = ref;  // F-COV-1: capture for the engaged-check
 
         // (1) G==1 multi-GPU == single-GPU reference (the bit-identity FLOOR).
         const F2BlockTensor candG1 =
@@ -462,12 +582,46 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         }
     }
 
+    // ---- (F-COV-1) EmulatedFp64 ACTUALLY ENGAGED — the silent-native-fallback check --
+    // Every EmuFp64 bit-identity claim above compares sharded-EmuFp64 to single-GPU-
+    // EmuFp64; if the EmulatedFp64 request silently degraded to native Fp64 on BOTH
+    // sides, the bits would still match and the gate would print PASS while never
+    // exercising the §12 fixed-slice Ozaki path it exists to certify. So, on a build
+    // where the fixed-mantissa tuning API IS compiled in (STEPPE_HAVE_EMU_TUNING), the
+    // probe field caps.emulated_fp64_honorable MUST be true AND the EmuFp64 reference
+    // MUST differ bit-for-bit from native — exactly the guard the sibling
+    // test_f2_blocks_equivalence makes. Read via the CUDA-FREE caps probe field
+    // (backend.hpp:184), NOT the device-private emulation_honorable() predicate, so this
+    // TU keeps its clean layering (F-LAY-2). When STEPPE_HAVE_EMU_TUNING is NOT defined
+    // (a build without the tuning API) EmulatedFp64 is EXPECTED to honorably degrade to
+    // native, so this check does not apply.
+#ifdef STEPPE_HAVE_EMU_TUNING
+    {
+        check("caps.emulated_fp64_honorable == true under STEPPE_HAVE_EMU_TUNING "
+              "(EmulatedFp64 lane must be honorable, not a silent native fallback)",
+              resG1.gpus[0].caps.emulated_fp64_honorable);
+        const bool emu_differs =
+            emuRef.f2.size() == natRef.f2.size() &&
+            std::memcmp(emuRef.f2.data(), natRef.f2.data(),
+                        emuRef.f2.size() * sizeof(double)) != 0;
+        check("EmulatedFp64 single-GPU ref DIFFERS bit-for-bit from native Fp64 "
+              "(the fixed-slice Ozaki path engaged; not a silent native fallback)",
+              emu_differs);
+        if (!emu_differs) {
+            std::fprintf(stderr,
+                "  [F-COV-1] EmulatedFp64 produced IDENTICAL bits to native Fp64 — the "
+                "§12 emulated-FP64 path did NOT engage (silent native fallback); every "
+                "EmuFp64 bit-identity PASS above certified the WRONG path.\n");
+        }
+    }
+#endif  // STEPPE_HAVE_EMU_TUNING
+
     // ---- (5) Capability + which-path tag sanity (out-of-band; never on the tensor) ----
     if (have_two) {
         const bool peer0 = resG2p.gpus[0].caps.can_access_peer;
-        std::printf("  G2 resources: gpus[0].caps.can_access_peer=%s (tier=%s)\n"
+        std::printf("  G2 resources: gpus[0].caps.can_access_peer=%s (device 0: %s)\n"
                     "    last_combine_path: resG2h=%s  resG2p=%s\n",
-                    peer0 ? "true" : "false", pro_tier ? "PRO" : "GeForce/other",
+                    peer0 ? "true" : "false", device_name,
                     combine_path_name(resG2h.last_combine_path),
                     combine_path_name(resG2p.last_combine_path));
 
@@ -478,21 +632,34 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         check("resG2h.last_combine_path == HostStaged (prefer_p2p_combine=false forces baseline)",
               resG2h.last_combine_path == steppe::device::CombinePath::HostStaged);
 
-        if (pro_tier) {
-            // PRO Blackwell stock driver: real P2P (the rtxbox MEASURED fact). The
-            // box MUST report peer access, AND resG2p MUST have actually taken the
-            // device-resident P2P combine (not a silent host-staged fallback) — so
-            // assertion (3) genuinely exercised the cudaMemcpyPeer path.
-            check("can_access_peer == true on PRO tier (rtxbox stock-driver P2P)", peer0);
-            check("resG2p.last_combine_path == P2pDeviceResident on PRO tier (P2P actually ran)",
+        // L8 / F-IDIOM-2: select the tier by the CAPABILITY BICONDITIONAL, NOT a "PRO"
+        // device-name match. The production §4 fork (f2_blocks_multigpu.cpp:171-172)
+        // takes the device-resident P2P combine IFF prefer_p2p_combine && can_access_peer;
+        // resG2p set prefer_p2p_combine=true, so for it the path is determined SOLELY by
+        // can_access_peer. Assert exactly that invariant — it holds on EVERY tier (the
+        // PRO box with stock-driver P2P AND the consumer 5090 with P2P driver-disabled),
+        // with no marketing-string coupling and no false-FAIL on a future "PRO"-named SKU
+        // that lacks stock P2P:
+        //   can_access_peer  ⇔  last_combine_path == P2pDeviceResident
+        //  !can_access_peer  ⇔  last_combine_path == HostStaged   (the tagged degrade)
+        // This is the SAME field the strict claim-(3) guard reads (line ~485), so the
+        // gate cannot assert P2P where production would not have taken it, nor miss a P2P
+        // that did run silently as host-staged.
+        if (peer0) {
+            // Peer access available (the PRO 6000 / datacenter-Blackwell stock-driver
+            // case): resG2p MUST have actually taken the device-resident cudaMemcpyPeer
+            // combine — so claim (3) genuinely exercised P2P, not a silent fallback.
+            check("can_access_peer ⇒ resG2p.last_combine_path == P2pDeviceResident "
+                  "(P2P actually ran, not a silent host-staged fallback)",
                   resG2p.last_combine_path == steppe::device::CombinePath::P2pDeviceResident);
         } else {
-            // Budget GeForce: peer false is the EXPECTED degrade; resG2p degrades
-            // (tagged) to the host-staged baseline, which is still bit-identical
-            // (assertion (2)/(4)). Confirm the recorded degrade path.
-            std::printf("    (GeForce/other tier: can_access_peer==false is the expected "
+            // No peer access (the consumer GeForce / stock-5090 P2P-driver-disabled
+            // case): peer false is the EXPECTED degrade; resG2p degrades (tagged) to the
+            // host-staged baseline, which is still bit-identical (claims (2)/(4)).
+            std::printf("    (no peer access: can_access_peer==false is the expected "
                         "tagged degrade to the host-staged baseline)\n");
-            check("resG2p.last_combine_path == HostStaged on no-peer tier (tagged degrade)",
+            check("!can_access_peer ⇒ resG2p.last_combine_path == HostStaged "
+                  "(tagged degrade to the parity baseline)",
                   resG2p.last_combine_path == steppe::device::CombinePath::HostStaged);
         }
     }
@@ -516,17 +683,31 @@ int main(int argc, char** argv) {
                              "(cudaGetDeviceCount); cannot run the parity gate.\n");
         return 1;
     }
-    const bool pro_tier = device0_is_pro_tier();
-    std::printf("  visible CUDA devices: %d  (device 0 tier: %s)\n",
-                visible, pro_tier ? "PRO" : "GeForce/other");
+    // Device-0 name for OBSERVABILITY ONLY — it is printed, never a dispatch key
+    // (L8/F-IDIOM-2: the tier branch is driven by caps.can_access_peer, not the name).
+    // cudaGetDeviceProperties queries by ordinal, no cudaSetDevice needed (CUDA Runtime
+    // API, group CUDART_DEVICE); on failure the name is left "(unknown)" — purely
+    // cosmetic, it cannot mis-classify anything anymore.
+    char device_name[256] = "(unknown)";
+    {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess) {
+            std::snprintf(device_name, sizeof(device_name), "%s", prop.name);
+        } else {
+            std::fprintf(stderr, "WARN: cudaGetDeviceProperties(0) failed; device name unknown "
+                                 "(observability only — tier is driven by can_access_peer)\n");
+        }
+    }
+    std::printf("  visible CUDA devices: %d  (device 0: %s)\n", visible, device_name);
 
     // Both gates: derived_acc (fast, P=50) AND derived_full (scale, P=768). Each is
-    // run if PRESENT; an absent dataset is a logged skip so the fast gate runs on a
-    // box without the full matrix (design §6).
+    // run if PRESENT and it FITS in device-0 VRAM; an absent dataset OR a dataset that
+    // does not fit is a logged skip so the fast gate runs on a box without the full
+    // matrix / on a 32 GB consumer 5090 (design §6; F-COV-1/L8 VRAM gate).
     bool any_dataset_run = false;
     try {
-        any_dataset_run |= run_dataset("derived_acc",  root + "/derived_acc",  snp, visible, pro_tier);
-        any_dataset_run |= run_dataset("derived_full", root + "/derived_full", snp, visible, pro_tier);
+        any_dataset_run |= run_dataset("derived_acc",  root + "/derived_acc",  snp, visible, device_name);
+        any_dataset_run |= run_dataset("derived_full", root + "/derived_full", snp, visible, device_name);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "test_f2_multigpu_parity: unexpected exception: %s\n", e.what());
         return 1;
