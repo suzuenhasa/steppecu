@@ -68,6 +68,7 @@ compaction. Each script is a self-contained JS [Workflow] rerunnable via
 **Non-workflow next steps:** merge `m4.5-multigpu` → `main` (M4.5 is green+proven); prune merged feature branches.
 
 ## RETRIGGER MECHANICS
+- **Setting up / refreshing a box** (new instance, or after a spin-up): follow **`docs/BOX-RUNBOOK.md`** (SSH alias → verify/reject → install tooling → nvcc-PATH → rsync → data → build → P2P probe), or run the automated `scripts/box_bringup.sh <ssh-alias> [--build]`. P2P check: `scripts/p2p_probe.cu`.
 - Run a workflow: `Workflow({scriptPath: "/home/suzunik/steppe/agentscripts/<name>.js"})` (resume a paused one with `resumeFromRunId`). Watch with `/workflows`.
 - **box5090 long jobs (build/ctest/bench):** the vast box drops long ssh connections — run **detached on the box** (`setsid bash -c "... > /tmp/run.log 2>&1; echo DONE >> /tmp/run.log" </dev/null &`) and poll `/tmp/run.log` in short ssh reads (a `tail`/`grep ALLDONE` loop), don't hold one long ssh.
 - **rtxbox:** ephemeral + currently down — `ssh rtxbox` alias in `~/.ssh/config` is stale; update HostName/Port to the new instance, confirm `nvidia-smi -L` = 2×RTX PRO 6000, rsync, confirm `/workspace/data/aadr/{raw,derived_acc,derived_full}` (regen with `build_tgeno_matrix.py --auto-top N` if missing) before any rtxbox workflow.
