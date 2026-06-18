@@ -1,6 +1,6 @@
 # steppe — cold-start handoff @ `m4.5-multigpu` `ba37d95`
 
-Everything a fresh session needs to resume. Canonical spec: `docs/architecture.md`; build order + status: `docs/ROADMAP.md`; living task list: `docs/TODO.md`; the per-file audit + master cleanup backlog: `docs/cleanup/00-overview.md` + `docs/cleanup/m4.5/00-overview.md`. **→ THE WORKFLOW MAP (where we are + every workflow's state/retrigger + the workflows still needed) is `agentscripts/README.md` — read it first. To stand up / refresh a remote box: `docs/BOX-RUNBOOK.md` (+ `scripts/box_bringup.sh`, `scripts/p2p_probe.cu`).** **Read these before writing code.**
+Everything a fresh session needs to resume. **START AT `docs/RESUME.md` (the single entry point — read it first).** Canonical spec: `docs/architecture.md`; build order + status: `docs/ROADMAP.md`; living task list: `docs/TODO.md`; the per-file audit + master cleanup backlog: `docs/cleanup/00-overview.md` + `docs/cleanup/m4.5/00-overview.md`. **→ THE WORKFLOW MAP (where we are + every workflow's state/retrigger + the workflows still needed) is `agentscripts/README.md` — read it first. To stand up / refresh a remote box: `docs/BOX-RUNBOOK.md` (+ `scripts/box_bringup.sh`, `scripts/p2p_probe.cu`).** **Read these before writing code.**
 
 ---
 
