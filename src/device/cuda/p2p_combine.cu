@@ -58,6 +58,7 @@
 #include "device/cuda/device_buffer.cuh"    // steppe::device::DeviceBuffer<double> (the allowlisted RAII owner)
 #include "steppe/fstats.hpp"                // steppe::F2BlockTensor
 #include "device/shard_plan.hpp"            // steppe::device::DeviceShard
+#include "core/fstats/f2_partials_validate.hpp"  // shared validate_f2_partials (cleanup B5)
 
 namespace steppe::device {
 
@@ -91,55 +92,6 @@ __global__ void place_add_f2_kernel(double* __restrict__ acc,
     }
 }
 
-// Fail-fast precondition guard (architecture.md §2) — the SAME contract
-// combine_f2_partials_host validates (design §3): the G partials align with the G
-// shards + the G device ids, agree on P, and tile [0, n_block_full). Validated ONCE
-// up front so a malformed combine is attributed to its inputs with context, before
-// any device allocation or DMA. Kept in lock-step with the host combine's guard so
-// the two tiers reject identically.
-void validate_partials(std::span<const F2BlockTensor> partials,
-                       std::span<const steppe::device::DeviceShard> shards,
-                       std::span<const int> device_ids,
-                       int P, int n_block_full) {
-    if (partials.size() != shards.size() || partials.size() != device_ids.size()) {
-        throw std::runtime_error(
-            "steppe::device::combine_f2_partials_p2p: partials/shards/device_ids "
-            "size mismatch (partials=" + std::to_string(partials.size()) +
-            ", shards=" + std::to_string(shards.size()) +
-            ", device_ids=" + std::to_string(device_ids.size()) + ")");
-    }
-    if (P < 0 || n_block_full < 0) {
-        throw std::runtime_error(
-            "steppe::device::combine_f2_partials_p2p: negative P or n_block_full");
-    }
-    long covered = 0;  // running count of blocks the shards account for
-    for (std::size_t g = 0; g < partials.size(); ++g) {
-        const F2BlockTensor& part = partials[g];
-        const steppe::device::DeviceShard& sh = shards[g];
-        const int span_blocks = sh.b1 - sh.b0;
-        if (part.n_block != span_blocks) {
-            throw std::runtime_error(
-                "steppe::device::combine_f2_partials_p2p: partial[" +
-                std::to_string(g) + "].n_block (" + std::to_string(part.n_block) +
-                ") != shard block span [" + std::to_string(sh.b0) + ", " +
-                std::to_string(sh.b1) + ") = " + std::to_string(span_blocks));
-        }
-        if (part.n_block > 0 && part.P != P) {
-            throw std::runtime_error(
-                "steppe::device::combine_f2_partials_p2p: partial[" +
-                std::to_string(g) + "].P (" + std::to_string(part.P) +
-                ") != combined P (" + std::to_string(P) + ")");
-        }
-        covered += span_blocks;
-    }
-    if (covered != static_cast<long>(n_block_full)) {
-        throw std::runtime_error(
-            "steppe::device::combine_f2_partials_p2p: shards cover " +
-            std::to_string(covered) + " blocks but n_block_full = " +
-            std::to_string(n_block_full) + " (the shards must tile [0, n_block_full))");
-    }
-}
-
 }  // namespace
 
 F2BlockTensor combine_f2_partials_p2p(
@@ -147,7 +99,22 @@ F2BlockTensor combine_f2_partials_p2p(
     std::span<const steppe::device::DeviceShard> shards,
     std::span<const int> device_ids,
     int P, int n_block_full, int root_device_id) {
-    validate_partials(partials, shards, device_ids, P, n_block_full);
+    // Fail-fast precondition guard. The shared validate_f2_partials is the ONE home
+    // of the partial/shard/P/storage/tiling contract — the SAME guard
+    // combine_f2_partials_host calls — so the two tiers reject IDENTICALLY (cleanup
+    // B5; architecture.md §2, §8). Their parity-neutrality (§11.4, §12) requires it:
+    // a drift in which inputs each tier accepts would let one combine bytes the other
+    // refuses. This P2P tier threads a THIRD parallel span (device_ids, a transport
+    // detail core has no notion of), so it adds ONLY that one extra size check here;
+    // everything the two tiers have in common is validated once, shared.
+    if (partials.size() != device_ids.size()) {
+        throw std::runtime_error(
+            "steppe::device::combine_f2_partials_p2p: device_ids count (" +
+            std::to_string(device_ids.size()) + ") != partials count (" +
+            std::to_string(partials.size()) + ")");
+    }
+    steppe::core::validate_f2_partials(
+        "steppe::device::combine_f2_partials_p2p", partials, shards, P, n_block_full);
 
     // ---- The combine root owns the full-shape accumulator --------------------
     // Bind to GPU 0 (the combine root) for the whole routine: the accumulator + the
@@ -168,8 +135,9 @@ F2BlockTensor combine_f2_partials_p2p(
 
     const std::size_t slab =
         static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
-    const std::size_t total =
-        slab * static_cast<std::size_t>(n_block_full < 0 ? 0 : n_block_full);
+    // validate_f2_partials already rejected a negative n_block_full, so the cast is
+    // safe with no clamp (cleanup B5 / C4 — the old `< 0 ? 0 :` ternary was dead).
+    const std::size_t total = slab * static_cast<std::size_t>(n_block_full);
 
     // Full-shape device accumulators, ZERO-initialized — the device-resident
     // counterpart of the host baseline's `out.f2.assign(total, 0.0)` (design §3): the
@@ -211,8 +179,7 @@ F2BlockTensor combine_f2_partials_p2p(
     out.n_block = n_block_full;
     out.f2.assign(total, 0.0);
     out.vpair.assign(total, 0.0);
-    out.block_sizes.assign(
-        static_cast<std::size_t>(n_block_full < 0 ? 0 : n_block_full), 0);
+    out.block_sizes.assign(static_cast<std::size_t>(n_block_full), 0);
 
     // ---- FIXED-ORDER device combine g = 0 .. G-1 (THE parity law) ------------
     // For each device in the FIXED g=0..G-1 order: stage its compact partial onto the

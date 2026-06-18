@@ -10,76 +10,25 @@
 
 #include <cstddef>
 #include <span>
-#include <stdexcept>
-#include <string>
 
-#include "steppe/fstats.hpp"      // steppe::F2BlockTensor
-#include "device/shard_plan.hpp"  // steppe::device::DeviceShard
+#include "steppe/fstats.hpp"                     // steppe::F2BlockTensor
+#include "device/shard_plan.hpp"                 // steppe::device::DeviceShard
+#include "core/fstats/f2_partials_validate.hpp"  // shared validate_f2_partials (cleanup B5)
 
 namespace steppe::core {
-
-namespace {
-
-// Fail-fast precondition guard (architecture.md §2): the G partials must align with
-// the G shards, agree on P, and tile [0, n_block_full) exactly. This runs ONCE up
-// front, before any placement, so a malformed combine is attributed to its own
-// inputs with context rather than silently producing a wrong tensor or reading past
-// a short partial. Cheap O(G) — off the bandwidth critical path (the combine is
-// kB-MB; architecture.md §11.4).
-void validate_partials(std::span<const F2BlockTensor> partials,
-                       std::span<const steppe::device::DeviceShard> shards,
-                       int P, int n_block_full) {
-    if (partials.size() != shards.size()) {
-        throw std::runtime_error(
-            "steppe::core::combine_f2_partials_host: partials count (" +
-            std::to_string(partials.size()) + ") != shards count (" +
-            std::to_string(shards.size()) + ")");
-    }
-    if (P < 0 || n_block_full < 0) {
-        throw std::runtime_error(
-            "steppe::core::combine_f2_partials_host: negative P or n_block_full");
-    }
-
-    // Each non-empty partial must agree on P and span exactly its shard's block
-    // range; together the shards must tile [0, n_block_full) contiguously.
-    long covered = 0;  // running count of blocks the shards account for
-    for (std::size_t g = 0; g < partials.size(); ++g) {
-        const F2BlockTensor& part = partials[g];
-        const steppe::device::DeviceShard& sh = shards[g];
-        const int span_blocks = sh.b1 - sh.b0;  // shard's block count (>= 0)
-
-        if (part.n_block != span_blocks) {
-            throw std::runtime_error(
-                "steppe::core::combine_f2_partials_host: partial[" +
-                std::to_string(g) + "].n_block (" + std::to_string(part.n_block) +
-                ") != shard block span [" + std::to_string(sh.b0) + ", " +
-                std::to_string(sh.b1) + ") = " + std::to_string(span_blocks));
-        }
-        // P is the leading dim of every slab; a non-empty partial must match the
-        // combined P (an empty partial carries no slab and is exempt).
-        if (part.n_block > 0 && part.P != P) {
-            throw std::runtime_error(
-                "steppe::core::combine_f2_partials_host: partial[" +
-                std::to_string(g) + "].P (" + std::to_string(part.P) +
-                ") != combined P (" + std::to_string(P) + ")");
-        }
-        covered += span_blocks;
-    }
-    if (covered != static_cast<long>(n_block_full)) {
-        throw std::runtime_error(
-            "steppe::core::combine_f2_partials_host: shards cover " +
-            std::to_string(covered) + " blocks but n_block_full = " +
-            std::to_string(n_block_full) + " (the shards must tile [0, n_block_full))");
-    }
-}
-
-}  // namespace
 
 F2BlockTensor combine_f2_partials_host(
     std::span<const F2BlockTensor> partials,
     std::span<const steppe::device::DeviceShard> shards,
     int P, int n_block_full) {
-    validate_partials(partials, shards, P, n_block_full);
+    // Fail-fast precondition guard — the ONE validator SHARED with the device P2P
+    // combine (cleanup B5; architecture.md §2, §8): the two tiers MUST reject
+    // identically or their parity-neutrality (§11.4, §12) breaks. It runs ONCE up
+    // front, O(G), off the bandwidth-critical path. validate_f2_partials throws on a
+    // size/P/span/storage/tiling violation; after it, P >= 0 and n_block_full >= 0
+    // are guaranteed.
+    validate_f2_partials("steppe::core::combine_f2_partials_host",
+                         partials, shards, P, n_block_full);
 
     // ---- Allocate the full-shape tensor, ZERO-initialized --------------------
     // f2 + vpair are [P × P × n_block_full] FP64 (the §11.2 resident pair, both
@@ -92,12 +41,12 @@ F2BlockTensor combine_f2_partials_host(
     out.n_block = n_block_full;
     const std::size_t slab =
         static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
-    const std::size_t total =
-        slab * static_cast<std::size_t>(n_block_full < 0 ? 0 : n_block_full);
+    // validate_f2_partials already rejected a negative n_block_full, so the cast is
+    // safe with no clamp (cleanup B5 / C2 — the old `< 0 ? 0 :` ternary was dead).
+    const std::size_t total = slab * static_cast<std::size_t>(n_block_full);
     out.f2.assign(total, 0.0);
     out.vpair.assign(total, 0.0);
-    out.block_sizes.assign(
-        static_cast<std::size_t>(n_block_full < 0 ? 0 : n_block_full), 0);
+    out.block_sizes.assign(static_cast<std::size_t>(n_block_full), 0);
 
     // ---- FIXED-ORDER SUM g = 0 .. G-1 (THE parity law) -----------------------
     // For each device in fixed order, place/sum its compact partial at its block

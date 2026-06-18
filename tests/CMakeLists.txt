@@ -605,6 +605,36 @@ target_link_libraries(test_f2_multigpu_gate
 set_target_properties(test_f2_multigpu_gate PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME f2_multigpu_gate COMMAND test_f2_multigpu_gate)
 
+# --- Host-only unit test of the SHARED f2-combine validator (cleanup B5 / X7) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the new single-home guard
+# core::validate_f2_partials (src/core/fstats/f2_partials_validate.hpp) — the ONE
+# validator BOTH f2 combine tiers (host-staged core::combine_f2_partials_host AND
+# device-resident device::combine_f2_partials_p2p) call, so the two tiers reject
+# malformed inputs IDENTICALLY (their parity-neutrality, architecture.md §11.4/§12).
+# The guard was DUPLICATED byte-for-byte across the two TUs (kept "in lock-step" by a
+# comment); B5 single-homes it AND closes the shared short-partial OOB gap (no
+# validator checked part.f2/vpair/block_sizes.size() == P*P*n_block, so a partial with
+# the right scalar n_block/P but an under-sized vector read out of bounds). The B5
+# verdict gate: every VALID case passes (single/two-shard tiling, empty/trailing-empty
+# degenerates, the n_block_full==0 corner) and EVERY malformed case FAILS FAST (throws
+# std::runtime_error) — count mismatch, negative P/n_block_full, n_block != shard span,
+# P disagreement, the SHORT-PARTIAL storage gap (f2/vpair/block_sizes under-sized), and
+# shards that do not tile [0, n_block_full). validate_f2_partials is header-only INLINE
+# and CUDA-free, reached as "core/fstats/f2_partials_validate.hpp" via
+# steppe::core_internal's src/ include root (the same root that resolves
+# "device/shard_plan.hpp"); steppe::api carries the public steppe/fstats.hpp. NO CUDA /
+# no out-of-line symbol, so this links ONLY steppe::core_internal + steppe::api — a
+# CUDA leak in the shared guard would fail this host compile (the §4-layering proof).
+# architecture.md §2 fail-fast, §4, §8, §13; cleanup B5 / X7 / C1.
+add_executable(test_f2_partials_validate unit/test_f2_partials_validate.cpp)
+target_link_libraries(test_f2_partials_validate
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_f2_partials_validate PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_f2_partials_validate PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is
