@@ -43,11 +43,18 @@ target_compile_features(steppe_core_internal INTERFACE cxx_std_20)
 # M4.5 SPMG precompute (architecture.md §11.4, §12): the multi-GPU entry point
 # (fstats/f2_blocks_multigpu.cpp) shards whole blocks across the G devices of a
 # Resources bundle, drives each per-device backend through the CUDA-free
-# ComputeBackend seam, and combines the partials with the host-staged fixed-order
-# combine (fstats/f2_combine.cpp) — the portable parity baseline. Both are CUDA-free
-# host-pure TUs in steppe::core (they name only F2BlockTensor / Resources /
-# DeviceShard, all CUDA-free). plan_block_shards's symbol lives in steppe_device
-# (shard_plan.cpp), resolved through the PRIVATE steppe::device link below.
+# ComputeBackend seam, and combines the partials in the FIXED g=0..G-1 order — either
+# the host-staged fixed-order combine (fstats/f2_combine.cpp, the portable parity
+# baseline) or, behind the §4 capability gate (prefer_p2p_combine &&
+# can_access_peer && G>=2), the device-resident cudaMemcpyPeer combine
+# (combine_f2_partials_p2p). Both combine tiers are CUDA-free-DECLARED: f2_combine
+# .cpp is itself CUDA-free host-pure in steppe::core, and the P2P combine is reached
+# through the CUDA-free decl device/p2p_combine.hpp (its CUDA definition,
+# cuda/p2p_combine.cu, lives in steppe_device — the same CUDA-free-decl pattern as
+# make_cuda_backend). So this entry-point TU names only F2BlockTensor / Resources /
+# DeviceShard + the CUDA-free combine decls and stays CUDA-free. Both
+# plan_block_shards and combine_f2_partials_p2p resolve through the PRIVATE
+# steppe::device link below.
 add_library(steppe_core STATIC
     fstats/f2_from_blocks.cpp
     fstats/f2_combine.cpp

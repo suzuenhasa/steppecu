@@ -39,7 +39,8 @@
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
 #include "core/domain/block_partition_rule.hpp"  // steppe::core::block_ranges, BlockRange
-#include "device/resources.hpp"                  // steppe::device::Resources
+#include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_p2p (CUDA-free decl of the P2P fast-path)
+#include "device/resources.hpp"                  // steppe::device::Resources, CombinePath
 #include "device/shard_plan.hpp"                 // steppe::device::plan_block_shards, DeviceShard
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
@@ -152,30 +153,52 @@ F2BlockTensor compute_f2_blocks_multigpu(
             Qg, Vg, Ng, block_id_local.data(), n_block_local, precision);
     }
 
-    // ---- Fixed-order combine, capability-gated -------------------------------
-    // The §4 gate selects the device-resident cudaMemcpyPeer combine (a separate
-    // unit) when prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2;
-    // both combine tiers sum the SAME fixed g=0..G-1 order and are bit-identical
-    // (the gate is parity-NEUTRAL, §12). This unit ships the PORTABLE PARITY
-    // BASELINE only — the host-staged fixed-order combine — so it always takes that
-    // path here. The P2P unit wires its arm into this fork; until then a run that
-    // REQUESTED P2P but takes the baseline is logged as the architecture-mandated
-    // tagged degrade (non-throwing), so the which-path tag is observable.
-    const bool requested_p2p =
+    // ---- Fixed-order combine, capability-gated (THE §4 fork) -----------------
+    // The §4 gate selects the OPT-IN device-resident cudaMemcpyPeer combine when
+    //   prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2
+    // (true on rtxbox: PRO 6000 stock-driver P2P, canAccessPeer==1 both ways), else
+    // it DEGRADES to the host-staged fixed-order combine baseline. Both tiers sum the
+    // SAME fixed g=0..G-1 order onto a zero-initialized full tensor and are therefore
+    // BIT-IDENTICAL to each other and to the single-GPU reference (the gate is
+    // parity-NEUTRAL — the transport only moves bytes; software fixes the order;
+    // architecture.md §11.4, §12). NEVER an NCCL AllReduce. The chosen path is
+    // recorded OUT-OF-BAND on Resources (NEVER on the numeric F2BlockTensor; cleanup
+    // §(2).2), and a genuine degrade (P2P requested but peer access unavailable) emits
+    // the architecture-mandated tagged WARN via the non-throwing path.
+    const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
+    const std::span<const steppe::device::DeviceShard> shards_span(shards.data(), shards.size());
+
+    const bool use_p2p =
         resources.config.prefer_p2p_combine && resources.gpus[0].caps.can_access_peer;
-    if (requested_p2p) {
-        // The exact architecture-mandated tag (architecture.md §11.4; config.hpp
-        // prefer_p2p_combine doc). The P2P fast-path is not wired in this baseline
-        // unit; the host-staged combine below is bit-identical to it, so this is a
-        // performance note, not a correctness degrade.
-        STEPPE_LOG_WARN(
-            "P2P combine not yet wired in this unit -> host-staged fixed-order combine "
-            "(bit-identical baseline; architecture.md §11.4)");
+    if (use_p2p) {
+        // device_ids[g] == the physical ordinal that computed partial g (gpus[g] in
+        // the fixed g=0..G-1 == DeviceConfig::devices order; gpus[0] is the root).
+        // The CUDA-free P2P seam needs them to source each cudaMemcpyPeer (the root's
+        // own partial skips the peer hop). Built here, host-side; gpus[0].device_id
+        // is the combine root.
+        std::vector<int> device_ids(G, 0);
+        for (std::size_t g = 0; g < G; ++g) {
+            device_ids[g] = resources.gpus[g].device_id;
+        }
+        resources.last_combine_path = steppe::device::CombinePath::P2pDeviceResident;
+        return steppe::device::combine_f2_partials_p2p(
+            partials_span, shards_span,
+            std::span<const int>(device_ids.data(), device_ids.size()),
+            P, n_block, resources.gpus[0].device_id);
     }
-    return steppe::core::combine_f2_partials_host(
-        std::span<const F2BlockTensor>(partials.data(), partials.size()),
-        std::span<const steppe::device::DeviceShard>(shards.data(), shards.size()),
-        P, n_block);
+
+    // ---- Host-staged baseline (the portable parity baseline) -----------------
+    // Taken when P2P is not preferred, or when peer access is unavailable. Emit the
+    // EXACT architecture-mandated tagged degrade ONLY on a genuine degrade — the user
+    // PREFERRED P2P but the device cannot peer-access (architecture.md §11.4; config
+    // .hpp prefer_p2p_combine doc). A user who set prefer_p2p_combine=false took the
+    // baseline by choice — no WARN. Both outcomes are bit-identical to single-GPU.
+    if (resources.config.prefer_p2p_combine && !resources.gpus[0].caps.can_access_peer) {
+        STEPPE_LOG_WARN(
+            "P2P combine unavailable (no peer access) -> host-staged fixed-order combine");
+    }
+    resources.last_combine_path = steppe::device::CombinePath::HostStaged;
+    return steppe::core::combine_f2_partials_host(partials_span, shards_span, P, n_block);
 }
 
 }  // namespace steppe::core

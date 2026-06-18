@@ -32,6 +32,32 @@
 
 namespace steppe::device {
 
+/// Which combine transport the LAST multi-GPU precompute actually ran — the
+/// OUT-OF-BAND "which path did this run take" tag (architecture.md §11.4 tagged
+/// combine; config.hpp prefer_p2p_combine override-knob banner: "the recorded
+/// which-path tag ... live in Resources / the result metadata, NEVER on
+/// DeviceConfig and NEVER on the pure-numeric F2BlockTensor", cleanup §(2).2). It is
+/// DISCOVERED RUNTIME STATE, not intent: the §4 gate (prefer_p2p_combine &&
+/// can_access_peer && G >= 2) selects P2P; everything else degrades to the
+/// host-staged baseline. Both tiers are BIT-IDENTICAL (parity-NEUTRAL, §12), so this
+/// tag is observability — it lets a caller/test confirm WHICH transport ran without
+/// inspecting the numeric tensor (the parity test reads it to verify the P2P arm
+/// actually exercised P2P rather than silently falling back).
+enum class CombinePath {
+    /// No multi-GPU combine has run on this Resources yet (the value-initialized
+    /// default), OR the last run was the G==1 single-GPU fast path (no shard, no
+    /// combine — the lone backend's compute_f2_blocks returned directly).
+    None,
+    /// The last G>=2 run combined via the host-staged fixed-order combine
+    /// (combine_f2_partials_host) — the portable parity baseline (architecture.md
+    /// §11.4). Taken when prefer_p2p_combine is false OR peer access is unavailable.
+    HostStaged,
+    /// The last G>=2 run combined via the device-resident cudaMemcpyPeer combine
+    /// (combine_f2_partials_p2p) — the opt-in fast-path (architecture.md §11.4).
+    /// Taken when prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2.
+    P2pDeviceResident
+};
+
 /// One per device in DeviceConfig::devices, RAII-owned (architecture.md §9
 /// PerGpuResources). M4.5-precompute-focused: the per-device backend (which itself
 /// owns the device's single statistic stream + cuBLAS handle + emulated-FP64
@@ -74,6 +100,14 @@ struct Resources {
     /// The resolved, frozen device config (the fixed device set/order + the
     /// prefer_p2p_combine / enable_peer_access / deterministic intent levers, §9).
     DeviceConfig config;
+
+    /// Which combine transport the LAST compute_f2_blocks_multigpu run used — the
+    /// out-of-band which-path tag (CombinePath doc above; architecture.md §11.4,
+    /// cleanup §(2).2). DISCOVERED runtime state, recorded by the entry point's §4
+    /// fork, NEVER on the numeric F2BlockTensor. `None` until the first multi-GPU run
+    /// (or after a G==1 fast-path run). Mutated by the entry point (which takes
+    /// `Resources&`); read by callers/tests to confirm the chosen tier.
+    CombinePath last_combine_path = CombinePath::None;
 
     /// Convenience: number of devices G (== gpus.size() == resolved devices count).
     [[nodiscard]] std::size_t device_count() const noexcept { return gpus.size(); }

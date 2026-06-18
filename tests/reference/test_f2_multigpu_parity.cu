@@ -26,20 +26,40 @@
 //     3. CANDIDATES via core::compute_f2_blocks_multigpu over:
 //          * resources_G1  = build_resources({devices={0}})       -> G=1
 //          * resources_G2h = build_resources({devices={0,1}, prefer_p2p_combine=false})
-//            -> G=2 forced HOST-STAGED (the portable parity baseline this unit ships)
-//        (the device-resident P2P combine arm is a separate unit; when it lands its
-//         G=2 candidate is added here and must also be bit-identical.)
+//            -> G=2 forced HOST-STAGED (the portable parity baseline)
+//          * resources_G2p = build_resources({devices={0,1}, prefer_p2p_combine=true})
+//            -> G=2 device-resident cudaMemcpyPeer combine (the OPT-IN P2P fast-path,
+//               exercised when can_access_peer==true — the rtxbox PRO tier). On a box
+//               WITHOUT peer access this candidate degrades (tagged) to host-staged
+//               and is therefore still bit-identical; the last_combine_path tag
+//               records which transport actually ran.
 //     4. For each precision in {Fp64, EmulatedFp64{40}}, assert BIT-IDENTITY
 //        (memcmp f2 + memcmp vpair + == block_sizes + == P/n_block):
 //          (1) G==1 == single-GPU reference   (the bit-identity FLOOR: the multi-GPU
 //              codepath with one device is a no-op)
 //          (2) G==2 host-staged == single-GPU reference  (THE core parity claim:
 //              bit-identical across G AND to single-GPU, architecture.md §12)
-//     5. Capability tag sanity (out-of-band, never on the tensor): on the PRO tier
-//        (device name contains "PRO" — the rtxbox) resources_G2.gpus[0].caps
-//        .can_access_peer MUST be true (so the box CAN do P2P; the P2P arm is a
-//        later unit). On a budget GeForce can_access_peer==false is the EXPECTED
-//        degrade and this sub-check is informational, while (1)/(2) still must hold.
+//          (3) G==2 P2P == single-GPU reference  (the device-resident cudaMemcpyPeer
+//              combine moves the same bytes / sums the same fixed order → identical;
+//              §11.4, §12)  [P2P arm — runs when can_access_peer]
+//          (4) G==2 P2P == G==2 host-staged  (the two-tier NEUTRALITY: both combine
+//              tiers bit-identical to each other, the explicit workflow ask)
+//        (claims (2)-(4) carry the strict bit-identity gate for EmulatedFp64{40}, the
+//         f2 production default; native Fp64 at G>=2 is the documented batched-GEMM
+//         shape-sensitivity cell — checked to the native-FP64 oracle tolerance, see
+//         kNativeFp64ParityRelTol. The P2P vs host-staged neutrality (4) IS strictly
+//         bit-identical for BOTH precisions: both combine tiers consume the SAME
+//         per-device partials and sum the SAME fixed order, so they agree bit-for-bit
+//         regardless of the per-device GEMM precision.)
+//     5. Capability + which-path tag sanity (out-of-band, never on the tensor):
+//          * on the PRO tier (device name contains "PRO" — the rtxbox) resources_G2
+//            .gpus[0].caps.can_access_peer MUST be true, AND resG2p.last_combine_path
+//            MUST be P2pDeviceResident (confirms the P2P arm ACTUALLY exercised P2P,
+//            not a silent host-staged fallback). On a budget GeForce
+//            can_access_peer==false is the EXPECTED degrade: resG2p degrades to
+//            HostStaged (tagged) and (3) is skipped while (1)/(2)/(4) still hold.
+//          * resG2h.last_combine_path MUST be HostStaged (prefer_p2p_combine=false
+//            forces the baseline — the explicit workflow ask, on every tier).
 //
 // SKIP POLICY: a 2-GPU lane needs >= 2 visible devices; on a 1-GPU box the G==2
 // candidate is skipped (logged), the G==1 floor still runs. A dataset directory
@@ -92,6 +112,18 @@ int g_failures = 0;
 void check(const char* label, bool ok) {
     std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", label);
     if (!ok) ++g_failures;
+}
+
+// Human-readable name of the out-of-band which-path tag (Resources::last_combine_path)
+// for the verdict log — confirms WHICH combine transport actually ran (architecture
+// .md §11.4 tagged combine; cleanup §(2).2).
+const char* combine_path_name(steppe::device::CombinePath p) {
+    switch (p) {
+        case steppe::device::CombinePath::None:              return "None";
+        case steppe::device::CombinePath::HostStaged:        return "HostStaged";
+        case steppe::device::CombinePath::P2pDeviceResident: return "P2pDeviceResident";
+    }
+    return "?";
 }
 
 // shape.txt "P M" + Q/V/N.f64 (P*M little-endian doubles, column-major [P×M]).
@@ -287,20 +319,29 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
     const char* precNames[2] = {"Fp64", "EmuFp64{40}"};
 
     // ---- Build the device-resource bundles (ONE probe per device, build time) --
-    // G=1 candidate: devices={0}. G=2 candidate: devices={0,1} with
-    // prefer_p2p_combine=false to FORCE the host-staged baseline this unit ships
-    // (the only combine path here; bit-identical to the future P2P arm, §12).
+    // G=1 candidate: devices={0}. G=2 candidates: devices={0,1} TWICE —
+    //   resG2h: prefer_p2p_combine=false  → FORCES the host-staged baseline,
+    //   resG2p: prefer_p2p_combine=true   → the device-resident cudaMemcpyPeer P2P
+    //           fast-path (exercised when can_access_peer; the rtxbox PRO tier).
+    // Both G=2 candidates must be bit-identical to single-GPU AND to each other (the
+    // two-tier neutrality, architecture.md §11.4 §12).
     DeviceConfig cfgG1;
     cfgG1.devices = {0};
     steppe::device::Resources resG1 = steppe::device::build_resources(cfgG1);
 
     const bool have_two = (visible_devices >= 2);
     steppe::device::Resources resG2h;
+    steppe::device::Resources resG2p;
     if (have_two) {
         DeviceConfig cfgG2h;
         cfgG2h.devices = {0, 1};
         cfgG2h.prefer_p2p_combine = false;  // force the host-staged baseline path
         resG2h = steppe::device::build_resources(cfgG2h);
+
+        DeviceConfig cfgG2p;
+        cfgG2p.devices = {0, 1};
+        cfgG2p.prefer_p2p_combine = true;   // prefer the device-resident P2P combine
+        resG2p = steppe::device::build_resources(cfgG2p);
     }
 
     // ---- Per precision: reference (single-GPU) vs candidates (memcmp) ----------
@@ -334,50 +375,125 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         if (have_two) {
             const F2BlockTensor candG2h =
                 steppe::core::compute_f2_blocks_multigpu(resG2h, Q, V, N, part, prec);
+            // The P2P candidate. On the PRO tier (can_access_peer) this runs the
+            // device-resident cudaMemcpyPeer combine; on a no-peer box it degrades
+            // (tagged) to host-staged — either way bit-identical. last_combine_path
+            // (checked below) records which transport actually ran.
+            const F2BlockTensor candG2p =
+                steppe::core::compute_f2_blocks_multigpu(resG2p, Q, V, N, part, prec);
+
             const bool is_emulated = (prec.kind == Precision::Kind::EmulatedFp64);
             if (is_emulated) {
-                const bool ok = bit_equal(ref, candG2h);
-                std::string lab = std::string("[") + precNames[p] +
-                                  "] G==2 host-staged == single-GPU reference (bit-identical)";
-                check(lab.c_str(), ok);
-                if (!ok) report_first_diff("G2host", ref, candG2h);
+                // (2) G==2 host-staged == single-GPU reference — STRICT bit-identity.
+                {
+                    const bool ok = bit_equal(ref, candG2h);
+                    std::string lab = std::string("[") + precNames[p] +
+                                      "] G==2 host-staged == single-GPU reference (bit-identical)";
+                    check(lab.c_str(), ok);
+                    if (!ok) report_first_diff("G2host", ref, candG2h);
+                }
+                // (3) G==2 P2P == single-GPU reference — STRICT bit-identity. The
+                // device-resident cudaMemcpyPeer combine moves the same bytes and sums
+                // the same fixed g=0..G-1 order ⇒ identical (architecture.md §11.4,
+                // §12). Asserted only when P2P actually ran (PRO tier); on a no-peer
+                // box candG2p IS the host-staged result (already covered by (2)) and
+                // this is informational.
+                if (resG2p.gpus[0].caps.can_access_peer) {
+                    const bool ok = bit_equal(ref, candG2p);
+                    std::string lab = std::string("[") + precNames[p] +
+                                      "] G==2 P2P device-resident == single-GPU reference (bit-identical)";
+                    check(lab.c_str(), ok);
+                    if (!ok) report_first_diff("G2p2p", ref, candG2p);
+                } else {
+                    std::printf("  [skip] [%s] G==2 P2P == single-GPU ref: no peer access "
+                                "(degraded to host-staged — covered by (2))\n", precNames[p]);
+                }
             } else {
                 // Native-FP64 §12-scoped tier: shape + block_sizes EXACT, f2/vpair to
                 // the native-FP64 oracle tolerance (batched-GEMM accumulation order is
                 // implementation-defined across batchCount; §12). Reported with the
                 // observed worst relative deviation so the noise level is visible.
-                const double rel = max_rel_dev(ref, candG2h);
-                const bool ok = (rel <= kNativeFp64ParityRelTol);
-                char lab[256];
-                std::snprintf(lab, sizeof(lab),
-                              "[%s] G==2 host-staged == single-GPU ref to native-FP64 "
-                              "oracle tol (rel=%.3g <= %.0e; §12 batched-GEMM shape-"
-                              "sensitivity, NOT bit-identity)",
-                              precNames[p], rel, kNativeFp64ParityRelTol);
-                check(lab, ok);
-                if (!ok) report_first_diff("G2host", ref, candG2h);
+                {
+                    const double rel = max_rel_dev(ref, candG2h);
+                    const bool ok = (rel <= kNativeFp64ParityRelTol);
+                    char lab[256];
+                    std::snprintf(lab, sizeof(lab),
+                                  "[%s] G==2 host-staged == single-GPU ref to native-FP64 "
+                                  "oracle tol (rel=%.3g <= %.0e; §12 batched-GEMM shape-"
+                                  "sensitivity, NOT bit-identity)",
+                                  precNames[p], rel, kNativeFp64ParityRelTol);
+                    check(lab, ok);
+                    if (!ok) report_first_diff("G2host", ref, candG2h);
+                }
+                if (resG2p.gpus[0].caps.can_access_peer) {
+                    const double rel = max_rel_dev(ref, candG2p);
+                    const bool ok = (rel <= kNativeFp64ParityRelTol);
+                    char lab[256];
+                    std::snprintf(lab, sizeof(lab),
+                                  "[%s] G==2 P2P device-resident == single-GPU ref to "
+                                  "native-FP64 oracle tol (rel=%.3g <= %.0e; §12 batched-GEMM "
+                                  "shape-sensitivity, NOT bit-identity)",
+                                  precNames[p], rel, kNativeFp64ParityRelTol);
+                    check(lab, ok);
+                    if (!ok) report_first_diff("G2p2p", ref, candG2p);
+                }
+            }
+
+            // (4) THE TWO-TIER NEUTRALITY — STRICT bit-identity for BOTH precisions.
+            // Both combine tiers consume the SAME per-device partials and sum the SAME
+            // fixed g=0..G-1 order onto a zero-initialized full tensor; the transport
+            // (host-stage vs cudaMemcpyPeer) only moves bytes (architecture.md §11.4).
+            // So P2P and host-staged agree BIT-FOR-BIT regardless of per-device GEMM
+            // precision — this is the explicit workflow ask, and it is bit-identity
+            // even in the native-Fp64 lane (the §12 batched-GEMM shape-sensitivity
+            // affects the per-device GEMM, which is IDENTICAL in both candidates here,
+            // not the combine). When P2P degraded to host-staged (no peer) this is a
+            // host==host tautology that still must hold.
+            {
+                const bool ok = bit_equal(candG2h, candG2p);
+                std::string lab = std::string("[") + precNames[p] +
+                                  "] G==2 P2P == G==2 host-staged (two-tier neutrality, bit-identical)";
+                check(lab.c_str(), ok);
+                if (!ok) report_first_diff("G2 p2p-vs-host", candG2h, candG2p);
             }
         } else {
-            std::printf("  [skip] [%s] G==2 host-staged: only %d visible device(s) "
+            std::printf("  [skip] [%s] G==2 host-staged/P2P: only %d visible device(s) "
                         "(need 2) — single-GPU box lane\n", precNames[p], visible_devices);
         }
     }
 
-    // ---- (5) Capability-tag sanity (out-of-band; never on the tensor) ----------
+    // ---- (5) Capability + which-path tag sanity (out-of-band; never on the tensor) ----
     if (have_two) {
-        const bool peer0 = resG2h.gpus[0].caps.can_access_peer;
-        std::printf("  G2 resources: gpus[0].caps.can_access_peer=%s (tier=%s)\n",
-                    peer0 ? "true" : "false", pro_tier ? "PRO" : "GeForce/other");
+        const bool peer0 = resG2p.gpus[0].caps.can_access_peer;
+        std::printf("  G2 resources: gpus[0].caps.can_access_peer=%s (tier=%s)\n"
+                    "    last_combine_path: resG2h=%s  resG2p=%s\n",
+                    peer0 ? "true" : "false", pro_tier ? "PRO" : "GeForce/other",
+                    combine_path_name(resG2h.last_combine_path),
+                    combine_path_name(resG2p.last_combine_path));
+
+        // prefer_p2p_combine=false ALWAYS forces the host-staged baseline (the
+        // explicit workflow ask, every tier). The which-path tag is the out-of-band
+        // record (Resources, never on F2BlockTensor; architecture.md §11.4 / cleanup
+        // §(2).2) — confirms the gate honored the user's intent.
+        check("resG2h.last_combine_path == HostStaged (prefer_p2p_combine=false forces baseline)",
+              resG2h.last_combine_path == steppe::device::CombinePath::HostStaged);
+
         if (pro_tier) {
             // PRO Blackwell stock driver: real P2P (the rtxbox MEASURED fact). The
-            // host-staged candidate above is bit-identical regardless; this confirms
-            // the box CAN do P2P (the P2P arm is a later unit). architecture.md §11.4.
+            // box MUST report peer access, AND resG2p MUST have actually taken the
+            // device-resident P2P combine (not a silent host-staged fallback) — so
+            // assertion (3) genuinely exercised the cudaMemcpyPeer path.
             check("can_access_peer == true on PRO tier (rtxbox stock-driver P2P)", peer0);
+            check("resG2p.last_combine_path == P2pDeviceResident on PRO tier (P2P actually ran)",
+                  resG2p.last_combine_path == steppe::device::CombinePath::P2pDeviceResident);
         } else {
-            // Budget GeForce: peer false is the EXPECTED degrade; the host-staged
-            // baseline (assertion 2) is the only path and still must be bit-identical.
+            // Budget GeForce: peer false is the EXPECTED degrade; resG2p degrades
+            // (tagged) to the host-staged baseline, which is still bit-identical
+            // (assertion (2)/(4)). Confirm the recorded degrade path.
             std::printf("    (GeForce/other tier: can_access_peer==false is the expected "
-                        "tagged degrade to the host-staged baseline — informational)\n");
+                        "tagged degrade to the host-staged baseline)\n");
+            check("resG2p.last_combine_path == HostStaged on no-peer tier (tagged degrade)",
+                  resG2p.last_combine_path == steppe::device::CombinePath::HostStaged);
         }
     }
 

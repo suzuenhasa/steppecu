@@ -533,17 +533,28 @@ add_test(NAME resources_build COMMAND test_resources_build)
 #   (2) G==2 (devices={0,1}, prefer_p2p_combine=false) host-staged == single-GPU
 #       reference  (THE core parity claim, architecture.md §11.4 SPMG host-side
 #       fixed-order combine, §12 — bit-identical across G AND to single-GPU; NEVER an
-#       NCCL AllReduce). The device-resident P2P combine arm is a separate unit.
+#       NCCL AllReduce).
+#   (3) G==2 (devices={0,1}, prefer_p2p_combine=true) P2P device-resident
+#       (cudaMemcpyPeer) combine == single-GPU reference  (the OPT-IN fast-path moves
+#       the same bytes / sums the same fixed order ⇒ identical; runs on the PRO tier).
+#   (4) G==2 P2P == G==2 host-staged  (the two-tier NEUTRALITY: both combine tiers
+#       bit-identical to each other — the explicit workflow ask).
 # Bit-identity holds because the sharding is BLOCK-ALIGNED (each block computed
 # entirely on one device from its own contiguous SNP columns ⇒ same slab bits as
-# single-GPU) and the combine sums in fixed g=0..G-1 order onto a zero tensor
-# (design §0). On a single-GPU box the G==2 lane is skipped (logged); an absent
-# dataset directory is skipped so the fast gate runs without derived_full. Capability
-# tag (can_access_peer) is asserted out-of-band on the PRO tier (rtxbox). Self-checking
-# main() (not a GoogleTest TU); CTest gates on the exit code. Links steppe::io
-# (read_snp) + steppe::core (assign_blocks + compute_f2_blocks + the multi-GPU entry
-# point + the host-staged combine) + steppe::device (build_resources + the per-device
-# backends + plan_block_shards). architecture.md §11.4, §12, §13; design §6.
+# single-GPU) and BOTH combine tiers sum in fixed g=0..G-1 order onto a zero tensor
+# (design §0/§3/§4). Strict bit-identity is asserted for EmulatedFp64{40} (the f2
+# production default; (4) is strict for both precisions); native Fp64 at G>=2 is the
+# documented batched-GEMM shape-sensitivity cell (oracle-tolerance, §12). On a
+# single-GPU box the G==2 lane is skipped (logged); an absent dataset directory is
+# skipped so the fast gate runs without derived_full. The out-of-band which-path tag
+# (Resources::last_combine_path) is asserted: prefer_p2p_combine=false ⇒ HostStaged on
+# every tier; on the PRO tier (rtxbox) can_access_peer==true AND the P2P candidate's
+# tag == P2pDeviceResident (confirms (3) actually exercised cudaMemcpyPeer, not a
+# silent fallback). Self-checking main() (not a GoogleTest TU); CTest gates on the
+# exit code. Links steppe::io (read_snp) + steppe::core (assign_blocks +
+# compute_f2_blocks + the multi-GPU entry point + the host-staged combine) +
+# steppe::device (build_resources + the per-device backends + plan_block_shards + the
+# device-resident P2P combine). architecture.md §11.4, §12, §13; design §6.
 add_executable(test_f2_multigpu_parity reference/test_f2_multigpu_parity.cu)
 target_link_libraries(test_f2_multigpu_parity
     PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
