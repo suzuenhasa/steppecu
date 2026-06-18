@@ -30,8 +30,10 @@
 #include "core/fstats/f2_blocks_multigpu.hpp"
 
 #include <cstddef>
+#include <exception>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "core/fstats/f2_combine.hpp"            // steppe::core::combine_f2_partials_host (the baseline)
@@ -113,7 +115,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
             std::span<const BlockRange>(ranges.data(), ranges.size()),
             G);
 
-    // ---- Per-device partials over zero-copy sub-views ------------------------
+    // ---- Per-device partials over zero-copy sub-views (CONCURRENT fan-out) ----
     // Each device g computes its compact [P × P × (b1-b0)] partial from a column
     // SUB-VIEW of Q/V/N and a LOCAL, dense, zero-based block_id (design §2):
     //   * sub-view: columns [s0, s1) are the contiguous span data + P*s0 of length
@@ -126,31 +128,87 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // and the backend early-returns an empty F2BlockTensor (its degenerate guard) —
     // the combine then places nothing for that device. The per-block GEMM is the
     // UNMODIFIED compute_f2_blocks — NOT reimplemented here (design §0).
-    std::vector<F2BlockTensor> partials(G);
-    for (std::size_t g = 0; g < G; ++g) {
-        const steppe::device::DeviceShard& sh = shards[g];
-        const long s0 = sh.s0;
-        const long s1 = sh.s1;
-        const long M_local = s1 - s0;
-        const int  n_block_local = sh.b1 - sh.b0;
+    //
+    // CONCURRENCY (architecture.md §7, §11.4 — the SPMG speedup): the G devices run
+    // their GEMMs CONCURRENTLY, one host thread per device. CudaBackend::compute_f2_blocks
+    // is self-contained and blocking — it guard_device()s its OWN device, owns its OWN
+    // stream/handle/buffers, and ends on its own cudaStreamSynchronize — so the host
+    // loop that issued them one-at-a-time (each blocking on its trailing sync before
+    // the next was even issued) serialized work the hardware can overlap: each device
+    // has its own default stream and commands on distinct devices' default streams run
+    // concurrently (CUDA Programming Guide §3.4, "Programming Systems with Multiple
+    // GPUs"). Wall-clock was Σ_g time(g); fanned out it is max_g time(g).
+    //
+    // No shared mutable state: each worker writes ONLY its own pre-sized partials[g]
+    // slot (distinct elements of a vector sized to G before any thread starts — no
+    // resize, no aliasing), builds its own block_id_local, and drives its own backend
+    // gpus[g] bound to its own device. cudaSetDevice sets the calling HOST THREAD's
+    // current device (CUDA Runtime API: the current device is a per-host-thread
+    // property), so a worker's guard_device() cannot clobber another worker's current
+    // device. The combine reads partials[g] in fixed g=0..G-1 order AFTER the join
+    // barrier; the per-device GEMM bits are fixed by the block-aligned shard and are
+    // INDEPENDENT of which wall-clock slot ran them (§12) — so the fan-out is
+    // PARITY-NEUTRAL: bit-identical to the former serial drive.
+    //
+    // EXCEPTION SAFETY: a std::thread/std::jthread whose entry function lets an
+    // exception escape calls std::terminate ([thread.thread.constr]). Each worker
+    // therefore CATCHES everything into its own std::exception_ptr slot; after the
+    // join barrier the orchestrator rethrows the FIRST captured exception (lowest g),
+    // so a backend / device fault still propagates to the caller as a normal throw
+    // (R3: runtime_error on a malformed sub-partition, CudaError on a device fault).
+    std::vector<F2BlockTensor>     partials(G);
+    std::vector<std::exception_ptr> worker_errors(G);  // value-init to nullptr
+    {
+        // jthread joins in its destructor (RAII §2), so every worker is joined before
+        // worker_errors / partials are read below — the join is the happens-before
+        // barrier the fixed-order combine depends on. Reserve so the launch loop does
+        // not reallocate the vector (which would move not-yet-joined threads).
+        std::vector<std::jthread> workers;
+        workers.reserve(G);
+        for (std::size_t g = 0; g < G; ++g) {
+            workers.emplace_back([&, g]() {
+                try {
+                    const steppe::device::DeviceShard& sh = shards[g];
+                    const long s0 = sh.s0;
+                    const long s1 = sh.s1;
+                    const long M_local = s1 - s0;
+                    const int  n_block_local = sh.b1 - sh.b0;
 
-        // Zero-copy column sub-views (data + P*s0). For an empty shard M_local == 0
-        // and the offset is harmless (the backend early-returns before any deref).
-        const std::size_t col_off =
-            static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
-        const MatView Qg{Q.data + col_off, P, M_local};
-        const MatView Vg{V.data + col_off, P, M_local};
-        const MatView Ng{N.data + col_off, P, M_local};
+                    // Zero-copy column sub-views (data + P*s0). For an empty shard
+                    // M_local == 0 and the offset is harmless (the backend early-
+                    // returns before any deref).
+                    const std::size_t col_off =
+                        static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
+                    const MatView Qg{Q.data + col_off, P, M_local};
+                    const MatView Vg{V.data + col_off, P, M_local};
+                    const MatView Ng{N.data + col_off, P, M_local};
 
-        // Dense, zero-based LOCAL block_id of length M_local. Built once per device.
-        std::vector<int> block_id_local(static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
-        for (long k = 0; k < M_local; ++k) {
-            block_id_local[static_cast<std::size_t>(k)] =
-                partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
+                    // Dense, zero-based LOCAL block_id of length M_local. Built in the
+                    // worker (off the issue-critical path; owns its own slice).
+                    std::vector<int> block_id_local(
+                        static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
+                    for (long k = 0; k < M_local; ++k) {
+                        block_id_local[static_cast<std::size_t>(k)] =
+                            partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
+                    }
+
+                    partials[g] = resources.gpus[g].backend->compute_f2_blocks(
+                        Qg, Vg, Ng, block_id_local.data(), n_block_local, precision);
+                } catch (...) {
+                    // NEVER let it escape the thread (std::terminate); surface it on join.
+                    worker_errors[g] = std::current_exception();
+                }
+            });
         }
+    }  // <-- join barrier: all workers joined here (jthread dtors)
 
-        partials[g] = resources.gpus[g].backend->compute_f2_blocks(
-            Qg, Vg, Ng, block_id_local.data(), n_block_local, precision);
+    // Rethrow the FIRST worker failure (lowest g) so a device/backend fault propagates
+    // as a normal exception to the caller, deterministically (independent of which
+    // worker raced to fail first).
+    for (std::size_t g = 0; g < G; ++g) {
+        if (worker_errors[g]) {
+            std::rethrow_exception(worker_errors[g]);
+        }
     }
 
     // ---- Fixed-order combine, capability-gated (THE §4 fork) -----------------

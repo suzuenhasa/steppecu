@@ -43,11 +43,16 @@ namespace steppe::core {
 /// per-device sub-view compute → host-staged fixed-order combine
 /// (combine_f2_partials_host, the portable parity baseline; architecture.md §11.4).
 ///
-/// The per-device CUDA work is driven SEQUENTIALLY (one host thread) for this unit:
-/// the combine is off the bandwidth critical path (kB-MB; §11.4) and per-device
-/// parallel host threads are a later performance workflow, NOT a parity concern —
-/// parity is independent of execution concurrency (each device's bits are fixed by
-/// its block-aligned shard).
+/// The G per-device GEMMs are driven CONCURRENTLY — one host thread (std::jthread)
+/// per device, each driving its own backend on its own device and writing its own
+/// pre-sized `partials[g]` slot, joined before the combine (architecture.md §11.4,
+/// §7). This is the SPMG speedup: each `CudaBackend::compute_f2_blocks` is blocking
+/// and self-contained (owns its device/stream/handle), so issuing them one-at-a-time
+/// serialized work the hardware overlaps; fanned out the wall-clock is max_g time(g),
+/// not Σ_g. The fan-out is PARITY-NEUTRAL: each device's bits are fixed by its
+/// block-aligned shard and are independent of execution concurrency, and the combine
+/// reads `partials[g]` in the fixed g=0..G-1 order AFTER the join barrier (§12). The
+/// combine itself is off the bandwidth critical path (kB-MB; §11.4) and stays serial.
 ///
 /// @param resources  the G-device bundle (build_resources). `gpus[g]` in the FIXED
 ///                   g=0..G-1 combine order (DeviceConfig::devices order). Non-const

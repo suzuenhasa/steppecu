@@ -64,7 +64,8 @@ add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core
     PUBLIC  steppe::api steppe::core_internal
-    PRIVATE steppe::device steppe::warnings)   # GPU only via ComputeBackend
+    PRIVATE steppe::device steppe::warnings     # GPU only via ComputeBackend
+            Threads::Threads)                   # SPMG per-device fan-out (f2_blocks_multigpu)
 
 # steppe_core has NO CUDA sources of its own (pure host orchestration); it links
 # steppe_device PRIVATE only to reach the GPU through ComputeBackend. Do NOT let it

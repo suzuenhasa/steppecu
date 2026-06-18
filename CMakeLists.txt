@@ -44,6 +44,15 @@ include(SteppeWarnings)    # defines INTERFACE target steppe::warnings
 # --- CUDA toolkit (cuBLAS for the f2 GEMMs; architecture.md §3, §8) ----------
 find_package(CUDAToolkit REQUIRED)
 
+# --- Threads (the SPMG per-device fan-out; architecture.md §11.4) ------------
+# steppe_core drives the G per-device backends concurrently on G host threads
+# (one std::jthread per device — fstats/f2_blocks_multigpu.cpp), so the host
+# orchestration links the platform thread library. THREADS_PREFER_PTHREAD_FLAG
+# makes the imported Threads::Threads target carry -pthread (compile + link) on
+# POSIX, the CMake-documented way to request pthreads (FindThreads).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # --- Targets (one per subdirectory) ------------------------------------------
 # Order matters: api (INTERFACE) → core_internal (INTERFACE) → device → core.
 # io is an ISOLATED LEAF (architecture.md §4): genotype decode front-end, depends
