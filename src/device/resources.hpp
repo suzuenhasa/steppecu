@@ -37,9 +37,10 @@ namespace steppe::device {
 /// combine; config.hpp prefer_p2p_combine override-knob banner: "the recorded
 /// which-path tag ... live in Resources / the result metadata, NEVER on
 /// DeviceConfig and NEVER on the pure-numeric F2BlockTensor", cleanup §(2).2). It is
-/// DISCOVERED RUNTIME STATE, not intent: the §4 gate (prefer_p2p_combine &&
-/// enable_peer_access && can_access_peer && G >= 2) selects P2P; everything else
-/// degrades to the host-staged baseline. Both tiers are BIT-IDENTICAL (parity-NEUTRAL, §12), so this
+/// DISCOVERED RUNTIME STATE, not intent: the §4 gate (defined ONCE at the `use_p2p`
+/// computation in f2_blocks_multigpu.cpp — "THE §4 COMBINE GATE" — §8 single-source)
+/// selects P2P; everything else degrades to the host-staged baseline. Both tiers are
+/// BIT-IDENTICAL (parity-NEUTRAL, §12), so this
 /// tag is observability — it lets a caller/test confirm WHICH transport ran without
 /// inspecting the numeric tensor (the parity test reads it to verify the P2P arm
 /// actually exercised P2P rather than silently falling back).
@@ -56,9 +57,10 @@ enum class CombinePath {
     HostStaged,
     /// The last G>=2 run combined via the device-resident cudaMemcpyPeer combine
     /// (combine_f2_partials_p2p) — the opt-in fast-path (architecture.md §11.4).
-    /// Taken when prefer_p2p_combine && config.enable_peer_access &&
-    /// gpus[0].caps.can_access_peer && G >= 2 (the MAY-WE permission AND the
-    /// WHICH-PATH preference both granted, AND the device can peer).
+    /// Taken when the four-term §4 gate holds (the MAY-WE permission AND the
+    /// WHICH-PATH preference both granted, AND the device can peer, AND G >= 2). The
+    /// gate predicate is defined ONCE — "THE §4 COMBINE GATE" at the `use_p2p`
+    /// computation in f2_blocks_multigpu.cpp (§8 single-source).
     P2pDeviceResident
 };
 

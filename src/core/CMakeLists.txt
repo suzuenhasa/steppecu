@@ -45,8 +45,9 @@ target_compile_features(steppe_core_internal INTERFACE cxx_std_20)
 # Resources bundle, drives each per-device backend through the CUDA-free
 # ComputeBackend seam, and combines the partials in the FIXED g=0..G-1 order — either
 # the host-staged fixed-order combine (fstats/f2_combine.cpp, the portable parity
-# baseline) or, behind the §4 capability gate (prefer_p2p_combine &&
-# can_access_peer && G>=2), the device-resident cudaMemcpyPeer combine
+# baseline) or, behind the §4 capability gate (defined ONCE at the `use_p2p`
+# computation in fstats/f2_blocks_multigpu.cpp — "THE §4 COMBINE GATE", §8
+# single-source), the device-resident cudaMemcpyPeer combine
 # (combine_f2_partials_p2p). Both combine tiers are CUDA-free-DECLARED: f2_combine
 # .cpp is itself CUDA-free host-pure in steppe::core, and the P2P combine is reached
 # through the CUDA-free decl device/p2p_combine.hpp (its CUDA definition,

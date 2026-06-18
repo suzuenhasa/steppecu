@@ -573,18 +573,21 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
 
-# --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2) ------
+# --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
 # HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
 # core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
 # hand-built Resources (no real GPU compute, no io, no real peer access). It asserts
-# the FULL combine-gate truth table — the workflow's REQUIRED objective gate is that
-# enable_peer_access=false forces last_combine_path==HostStaged EVEN IF
-# can_access_peer were true (the row the OLD two-term gate got wrong, which would have
-# selected P2P and called the forbidden cudaDeviceEnablePeerAccess). It also pins:
-# prefer && enable && can_access is the ONLY combo that selects P2P; prefer=false or
-# no-peer degrade to HostStaged; and the G==1 fast path never runs the gate (tag stays
-# None). Parity-NEUTRAL: it asserts WHICH transport the gate picks, never a reported
-# number, so the f2_multigpu_parity bit-identity is untouched.
+# the FULL combine-gate truth table for the FOUR-term §4 gate — the workflow's REQUIRED
+# objective gate is that enable_peer_access=false forces last_combine_path==HostStaged
+# EVEN IF can_access_peer were true (the row the OLD two-term gate got wrong, which
+# would have selected P2P and called the forbidden cudaDeviceEnablePeerAccess). It also
+# pins: prefer && enable && can_access && G>=2 is the ONLY combo that selects P2P;
+# prefer=false or no-peer degrade to HostStaged; the G==1 fast path never runs the gate
+# (tag stays None); and (B4/X6) the `&& G >= 2` term is spelled in the predicate and
+# bites at G==1 — the production code now MATCHES the four-term predicate documented
+# across the seam (it was documented 4-term while shipping 3-term). Parity-NEUTRAL: it
+# asserts WHICH transport the gate picks, never a reported number, so the
+# f2_multigpu_parity bit-identity is untouched (the G>=2 term changes no reached path).
 #
 # It is a .cu (not a host .cpp) because compute_f2_blocks_multigpu references the
 # device-layer symbols plan_block_shards (host) + combine_f2_partials_p2p (CUDA, RDC),

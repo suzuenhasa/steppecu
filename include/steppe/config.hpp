@@ -257,7 +257,8 @@ struct DeviceConfig {
     /// the MAY-WE knob: whether the backend is permitted to call
     /// cudaDeviceEnablePeerAccess at all. DISTINCT from `prefer_p2p_combine`
     /// (which path to take WHEN peer access is available) — see below. The M4.5
-    /// combine gate (`f2_blocks_multigpu.cpp`) ANDs this term in: `false` here forces
+    /// combine gate (the four-term §4 gate defined ONCE in `f2_blocks_multigpu.cpp`,
+    /// "THE §4 COMBINE GATE", §8 single-source) ANDs this term in: `false` here forces
     /// the host-staged baseline (tagged `HostStaged`) even when the device CAN peer
     /// and `prefer_p2p_combine` is true, since the device-resident path would call the
     /// very `cudaDeviceEnablePeerAccess` this veto forbids (cleanup C-1).
@@ -285,10 +286,11 @@ struct DeviceConfig {
     /// BASELINE and the only path on a budget box with peer access disabled
     /// (e.g. stock-driver GeForce). The probe result and the which-path tag are
     /// DISCOVERED state recorded in `Resources`/result metadata, NOT here (see
-    /// the override-knob banner above). The M4.5 multi-GPU combine reads this knob:
-    /// its §4 gate (`f2_blocks_multigpu.cpp`) ANDs BOTH override-intent levers —
-    /// `prefer_p2p_combine` (WHICH-PATH) AND `enable_peer_access` (MAY-WE) — with the
-    /// discovered `can_access_peer` (and `G >= 2`, structural), so a user who FORBIDS
+    /// the override-knob banner above). The M4.5 multi-GPU combine reads this knob in
+    /// its four-term §4 gate — defined ONCE in `f2_blocks_multigpu.cpp` ("THE §4
+    /// COMBINE GATE", §8 single-source), which ANDs BOTH override-intent levers
+    /// (`prefer_p2p_combine` WHICH-PATH AND `enable_peer_access` MAY-WE) with the
+    /// discovered `can_access_peer` and the structural `G >= 2`. So a user who FORBIDS
     /// peer access (`enable_peer_access=false`) takes the host-staged baseline even
     /// when the device CAN peer and P2P is preferred — the device-resident path's
     /// `cudaDeviceEnablePeerAccess` is never reached against the veto (cleanup C-1).

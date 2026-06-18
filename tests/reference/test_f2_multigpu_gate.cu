@@ -19,14 +19,21 @@
 // CUDA_SEPARABLE_COMPILATION pattern test_resources_build.cu uses to reach
 // build_resources without itself running a GPU kernel.
 //
-// THE FIX UNDER TEST (B3 / CT2 / config C-1): the combine gate is
-//     use_p2p = prefer_p2p_combine && enable_peer_access && can_access_peer   (G>=2)
-// — it now ANDs in the MAY-WE knob `enable_peer_access`, which the OLD gate ignored.
-// The device-resident P2P path calls cudaDeviceEnablePeerAccess (cuda/p2p_combine.cu),
-// the exact operation enable_peer_access=false is documented to FORBID; the widened
-// gate honors that veto. Because both combine tiers are bit-identical (parity-NEUTRAL,
-// §12), changing WHICH transport the gate picks can never move a reported number — the
-// locked f2_multigpu_parity bit-identity is unaffected by this fix.
+// THE FIX UNDER TEST (B3 / CT2 / config C-1; B4 / X6): the combine gate is the
+// FOUR-term predicate
+//     use_p2p = prefer_p2p_combine && enable_peer_access && can_access_peer && G >= 2
+// — the four-term §4 gate defined ONCE in f2_blocks_multigpu.cpp ("THE §4 COMBINE
+// GATE", §8 single-source). B3 ANDed in the MAY-WE knob `enable_peer_access` (the OLD
+// gate ignored it); the device-resident P2P path calls cudaDeviceEnablePeerAccess
+// (cuda/p2p_combine.cu), the exact operation enable_peer_access=false is documented to
+// FORBID, so the widened gate honors that veto. B4 ADDED the dead-true `&& G >= 2`
+// term so the shipped CODE MATCHES the predicate documented across five files (cleanup
+// X6: it was documented 4-term while shipping 3-term). `G >= 2` is structurally
+// dead-true at the gate (the G==1 single-GPU fast-path returns before the gate), so the
+// term changes NO reached path — it is identity on every reachable input. Because both
+// combine tiers are bit-identical (parity-NEUTRAL, §12), neither the B3 enable_peer_access
+// term nor the B4 G>=2 term can move a reported number — the locked f2_multigpu_parity
+// bit-identity is unaffected by these fixes.
 //
 // THE REQUIRED OBJECTIVE GATE (the workflow ask): a check that enable_peer_access=false
 // forces last_combine_path==HostStaged EVEN IF can_access_peer were true. Asserted
@@ -161,12 +168,16 @@ public:
 }
 
 // The EXACT host-pure gate predicate the entry point computes (architecture.md §11.4
-// §4; f2_blocks_multigpu.cpp). Kept here as the single boolean under test so the
-// P2P-SELECTING row can be asserted without driving the real cudaMemcpyPeer transport.
-// Mirrors the production expression term-for-term.
+// §4; the four-term "THE §4 COMBINE GATE" in f2_blocks_multigpu.cpp, §8 single-source).
+// Kept here as the single boolean under test so the P2P-SELECTING row can be asserted
+// without driving the real cudaMemcpyPeer transport. MIRRORS THE PRODUCTION EXPRESSION
+// TERM-FOR-TERM, including the B4 `&& G >= 2` term (cleanup X6/B4): code == doc == this
+// mirror. G == r.device_count() (G==1 short-circuits before the gate in production, but
+// the predicate carries the term so a refactor that lifted the gate to be reachable at
+// G==1 would be caught — see g_single_gpu_gate_term_false).
 [[nodiscard]] bool gate_selects_p2p(const Resources& r) {
     return r.config.prefer_p2p_combine && r.config.enable_peer_access &&
-           r.gpus[0].caps.can_access_peer;
+           r.gpus[0].caps.can_access_peer && r.device_count() >= 2;
 }
 
 // Drive the real entry point on the fake resources and return the recorded tag. Only
@@ -202,11 +213,27 @@ public:
     return predicate_ok && tag == CombinePath::HostStaged;
 }
 
-// The ONLY combo that selects P2P: prefer && enable && can_access. Asserted on the
-// predicate (not driven end-to-end — would need a real peer-capable device pair).
+// The ONLY combo that selects P2P: prefer && enable && can_access && G >= 2. Asserted
+// on the predicate (not driven end-to-end — would need a real peer-capable device pair).
 [[nodiscard]] bool g_all_true_selects_p2p() {
     Resources r = make_fake_resources(/*G=*/2, /*prefer=*/true, /*enable=*/true, /*peer=*/true);
     return gate_selects_p2p(r) == true;
+}
+
+// B4 / X6: the `&& G >= 2` term is the FOURTH term of the production gate and this
+// mirror. With prefer && enable && can_access ALL TRUE but G == 1, the four-term gate
+// must be FALSE — proving the G>=2 term is spelled and load-bearing IN the predicate
+// (not merely enforced structurally by the G==1 early return). This is the latent
+// hazard X6 names: a future select_combine_path(resources) lifted out of the entry
+// point could be reached at G==1; carrying the term in the predicate forecloses it.
+// (The production entry point never reaches the gate at G==1 — the G==1 fast-path
+// returns first; g_single_gpu_no_combine proves that path. So adding the term changes
+// NO reached production path: it is identity on every reachable input, G is always >= 2
+// at the gate. This case asserts the term EXISTS and bites at G==1, not that any
+// production path changed.)
+[[nodiscard]] bool g_single_gpu_gate_term_false() {
+    Resources r = make_fake_resources(/*G=*/1, /*prefer=*/true, /*enable=*/true, /*peer=*/true);
+    return gate_selects_p2p(r) == false;  // the G>=2 term alone vetoes it
 }
 
 // prefer_p2p_combine=false -> HostStaged regardless of enable/peer (the explicit
@@ -261,8 +288,10 @@ struct GateCase {
 constexpr GateCase kCases[] = {
     {"enable_peer_access=false forces HostStaged EVEN IF can_access_peer (THE required gate)",
      g_eppr_false_caps_true},
-    {"prefer && enable && can_access_peer -> gate selects P2P (the only P2P combo)",
+    {"prefer && enable && can_access_peer && G>=2 -> gate selects P2P (the only P2P combo)",
      g_all_true_selects_p2p},
+    {"B4/X6: prefer && enable && can_access but G==1 -> gate FALSE (the G>=2 term bites)",
+     g_single_gpu_gate_term_false},
     {"prefer_p2p_combine=false -> HostStaged regardless of enable/peer",
      g_prefer_false_forces_host},
     {"can_access_peer=false -> HostStaged (device-cannot-peer tagged degrade)",
