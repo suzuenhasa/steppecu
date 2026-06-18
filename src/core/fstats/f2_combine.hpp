@@ -29,17 +29,27 @@
 namespace steppe::core {
 
 /// Combine the G per-device COMPACT partials into one full-shape F2BlockTensor by
-/// PLACING each device g's partial at its block offset (`shards[g].b0`) and SUMMING
-/// any overlap in the FIXED g=0..G-1 order (architecture.md §11.4, §12; design §3).
+/// PLACING each device g's partial at its block offset (`shards[g].b0`), visiting
+/// the devices in the FIXED g=0..G-1 order (architecture.md §11.4, §12; design §3).
 ///
 /// With block-aligned sharding the per-device block ranges are DISJOINT, so this is
-/// in effect a PLACEMENT — each global slab is written by exactly one device. But it
-/// is implemented as the general fixed-order ADD onto a ZERO-initialized full tensor
-/// (`out += partial[g]` for g = 0..G-1), which (a) is literally the §12 "sum the
-/// per-device partials host-side in fixed device order", (b) stays EXACT
-/// (`x + 0.0 == x` for all finite x; non-owned slabs remain the 0.0 init), and
-/// (c) is the SAME arithmetic the device-resident P2P combine performs on-device,
-/// so the two combine tiers are bit-identical to each other (design §4).
+/// a PLACEMENT — each global slab is written by exactly one device, exactly once.
+/// Each device's owned slabs are a contiguous run, so the placement is one
+/// `std::copy_n` of `f2`, one of `vpair`, and one of `block_sizes` per device
+/// (memcpy-grade). Visiting the devices in g=0..G-1 order is literally the §12 "sum
+/// the per-device partials host-side in fixed device order"; the device-resident
+/// P2P combine performs the SAME fixed-order placement on-device (onto a
+/// cudaMemset(0) accumulator), so the two combine tiers are bit-identical to each
+/// other (design §4).
+///
+/// The placement is EXACT and bit-identical to the single-GPU reference: that
+/// reference computes each slab DIRECTLY (it never adds the slab onto a zero), so a
+/// faithful copy reproduces its exact bits — INCLUDING a −0.0 element. (A `+= onto
+/// +0.0` would flip −0.0 to +0.0 — IEEE-754: `(+0.0)+(−0.0) == +0.0` under
+/// round-to-nearest, a different bit pattern — so `x + 0.0 == x` holds for finite
+/// x ≠ ±0.0 but NOT for x = −0.0; the `std::copy_n` placement avoids that flip
+/// unconditionally. cleanup B7 / f2_combine N2.) Non-owned slabs remain the +0.0
+/// init, but the disjoint tiling proves none exist on the real path.
 ///
 /// f2, vpair, AND block_sizes are all placed: block_sizes is copied from each
 /// partial at offset b0 (the backend already computed each block's SNP count from

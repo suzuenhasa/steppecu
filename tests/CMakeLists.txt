@@ -635,6 +635,45 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate)
 
+# --- Host-only unit test of the HOST-STAGED f2 combine (cleanup B7 / f2_combine T1)
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the PORTABLE PARITY
+# BASELINE core::combine_f2_partials_host (src/core/fstats/f2_combine.cpp) — the
+# host-staged fixed-order combine that is the ONLY combine path on the budget box
+# (no peer access) and the bit-identity reference the device-resident P2P sibling
+# must match (architecture.md §11.4, §12). The unit was covered ONLY transitively
+# through the GPU-required parity test (test_f2_multigpu_parity.cu); this realizes
+# the header's own "unit-testable host-only" promise on the cheap host path.
+#
+# THE FIX UNDER TEST (B7 / f2_combine N2+P2): the combine PLACES each device's
+# compact partial at its block offset via a contiguous std::copy_n (memcpy-grade),
+# replacing the prior scalar `+=`-onto-+0.0 triple loop. The placement is STRICTLY
+# more faithful to single-GPU: a copy reproduces a −0.0 partial element byte-for-
+# byte, where the `+=` flipped it to +0.0 ((+0.0)+(−0.0)==+0.0). The verdict gate:
+# (1) two disjoint shards place over the full cover BIT-EXACT (f2/vpair/block_sizes);
+# (2) the −0.0 CASE — a −0.0 partial element lands as −0.0 (this case FAILS the old
+# `+=` body and PASSES the std::copy_n body, the N2 hardening proof); (3) the G==1
+# single-full-shard floor; (4) the degenerates (all-empty -> empty tensor, trailing
+# empty shard skipped); (5) fail-fast through the shared validate_f2_partials guard.
+# Bit-level placement + control flow + a bit-pattern fidelity claim, NOT a precision
+# statistic (ROADMAP §0).
+#
+# combine_f2_partials_host is out-of-line in steppe_core (f2_combine.cpp); steppe_core
+# links steppe::device PRIVATE with CUDA_RESOLVE_DEVICE_SYMBOLS OFF, and this TU names
+# only the CUDA-free F2BlockTensor + DeviceShard, so no GPU/CUDA symbol is pulled —
+# the CUDA-free host link is itself the §4-layering proof. Reached as
+# "core/fstats/f2_combine.hpp" / "device/shard_plan.hpp" via steppe::core_internal's
+# src/ include root; steppe::api carries the public steppe/fstats.hpp. Dual harness
+# (gtest when present, else self-checking main()); CTest gates on the exit code.
+# architecture.md §11.4, §12, §13; cleanup B7 / f2_combine N2/P2/T1.
+add_executable(test_f2_combine unit/test_f2_combine.cpp)
+target_link_libraries(test_f2_combine
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_f2_combine PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_f2_combine PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME f2_combine_unit COMMAND test_f2_combine)
+
 # --- Host-only unit test of the SPMG block-aligned shard PLANNER (cleanup TST-1) -
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the host-pure deterministic
 # planner steppe::device::plan_block_shards (src/device/shard_plan.{hpp,cpp}) — the
