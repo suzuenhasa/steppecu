@@ -573,6 +573,35 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
 
+# --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2) ------
+# HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
+# core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
+# hand-built Resources (no real GPU compute, no io, no real peer access). It asserts
+# the FULL combine-gate truth table — the workflow's REQUIRED objective gate is that
+# enable_peer_access=false forces last_combine_path==HostStaged EVEN IF
+# can_access_peer were true (the row the OLD two-term gate got wrong, which would have
+# selected P2P and called the forbidden cudaDeviceEnablePeerAccess). It also pins:
+# prefer && enable && can_access is the ONLY combo that selects P2P; prefer=false or
+# no-peer degrade to HostStaged; and the G==1 fast path never runs the gate (tag stays
+# None). Parity-NEUTRAL: it asserts WHICH transport the gate picks, never a reported
+# number, so the f2_multigpu_parity bit-identity is untouched.
+#
+# It is a .cu (not a host .cpp) because compute_f2_blocks_multigpu references the
+# device-layer symbols plan_block_shards (host) + combine_f2_partials_p2p (CUDA, RDC),
+# so the executable must LINK + device-link steppe::device to RESOLVE them
+# (steppe::core links steppe::device PRIVATE; the P2P symbol is resolved, never called
+# — every driven row resolves to the host-staged baseline). Same .cu +
+# CUDA_SEPARABLE_COMPILATION pattern as test_resources_build.cu. Links steppe::core
+# (the entry point + host-staged combine) + steppe::device (resolve the referenced
+# device symbols) + steppe::core_internal (the src/ include root) + steppe::api
+# (config.hpp). No io / no data / no STEPPE_HAVE_EMU_TUNING (no emulation symbol
+# touched). architecture.md §11.4, §12, §13; cleanup B3 / CT2.
+add_executable(test_f2_multigpu_gate reference/test_f2_multigpu_gate.cu)
+target_link_libraries(test_f2_multigpu_gate
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_multigpu_gate PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME f2_multigpu_gate COMMAND test_f2_multigpu_gate)
+
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
 # chunk-budget arithmetic extracted out of cuda_backend.cu so the budget is

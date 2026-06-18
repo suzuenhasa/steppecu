@@ -38,8 +38,8 @@ namespace steppe::device {
 /// which-path tag ... live in Resources / the result metadata, NEVER on
 /// DeviceConfig and NEVER on the pure-numeric F2BlockTensor", cleanup §(2).2). It is
 /// DISCOVERED RUNTIME STATE, not intent: the §4 gate (prefer_p2p_combine &&
-/// can_access_peer && G >= 2) selects P2P; everything else degrades to the
-/// host-staged baseline. Both tiers are BIT-IDENTICAL (parity-NEUTRAL, §12), so this
+/// enable_peer_access && can_access_peer && G >= 2) selects P2P; everything else
+/// degrades to the host-staged baseline. Both tiers are BIT-IDENTICAL (parity-NEUTRAL, §12), so this
 /// tag is observability — it lets a caller/test confirm WHICH transport ran without
 /// inspecting the numeric tensor (the parity test reads it to verify the P2P arm
 /// actually exercised P2P rather than silently falling back).
@@ -50,11 +50,15 @@ enum class CombinePath {
     None,
     /// The last G>=2 run combined via the host-staged fixed-order combine
     /// (combine_f2_partials_host) — the portable parity baseline (architecture.md
-    /// §11.4). Taken when prefer_p2p_combine is false OR peer access is unavailable.
+    /// §11.4). Taken when prefer_p2p_combine is false, OR enable_peer_access is false
+    /// (the user forbade the cudaDeviceEnablePeerAccess the P2P path needs), OR peer
+    /// access is unavailable on the device.
     HostStaged,
     /// The last G>=2 run combined via the device-resident cudaMemcpyPeer combine
     /// (combine_f2_partials_p2p) — the opt-in fast-path (architecture.md §11.4).
-    /// Taken when prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2.
+    /// Taken when prefer_p2p_combine && config.enable_peer_access &&
+    /// gpus[0].caps.can_access_peer && G >= 2 (the MAY-WE permission AND the
+    /// WHICH-PATH preference both granted, AND the device can peer).
     P2pDeviceResident
 };
 

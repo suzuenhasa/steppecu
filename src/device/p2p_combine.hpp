@@ -63,9 +63,13 @@ namespace steppe::device {
 ///
 /// THE PEER-ACCESS GATE IS THE CALLER'S (architecture.md §11.4 §4): the caller
 /// (`compute_f2_blocks_multigpu`) has ALREADY verified
-/// `config.prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2` before
-/// calling — this routine does NOT re-probe `cudaDeviceCanAccessPeer` (it is the
-/// chosen path). It DOES enable peer access root→each owning peer here via
+/// `config.prefer_p2p_combine && config.enable_peer_access &&
+/// gpus[0].caps.can_access_peer && G >= 2` before calling — this routine does NOT
+/// re-probe `cudaDeviceCanAccessPeer` (it is the chosen path). The
+/// `config.enable_peer_access` term in that gate is the user's PERMISSION (MAY-WE)
+/// for exactly the `cudaDeviceEnablePeerAccess` this routine calls below, so reaching
+/// here implies that permission was granted (cleanup C-1). It DOES enable peer access
+/// root→each owning peer here via
 /// `cudaDeviceEnablePeerAccess` routed through the NON-throwing STEPPE_CUDA_WARN
 /// (check.cuh): `cudaErrorPeerAccessAlreadyEnabled` is an EXPECTED, tagged, non-fatal
 /// status (the device may already be peer-enabled from a prior call). A GENUINE

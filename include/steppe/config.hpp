@@ -256,7 +256,11 @@ struct DeviceConfig {
     /// canAccessPeer) for single-node multi-GPU (architecture.md §11.4). This is
     /// the MAY-WE knob: whether the backend is permitted to call
     /// cudaDeviceEnablePeerAccess at all. DISTINCT from `prefer_p2p_combine`
-    /// (which path to take WHEN peer access is available) — see below.
+    /// (which path to take WHEN peer access is available) — see below. The M4.5
+    /// combine gate (`f2_blocks_multigpu.cpp`) ANDs this term in: `false` here forces
+    /// the host-staged baseline (tagged `HostStaged`) even when the device CAN peer
+    /// and `prefer_p2p_combine` is true, since the device-resident path would call the
+    /// very `cudaDeviceEnablePeerAccess` this veto forbids (cleanup C-1).
     bool enable_peer_access = true;
 
     /// Prefer the device-resident P2P combine over the host-staged combine WHEN
@@ -281,9 +285,13 @@ struct DeviceConfig {
     /// BASELINE and the only path on a budget box with peer access disabled
     /// (e.g. stock-driver GeForce). The probe result and the which-path tag are
     /// DISCOVERED state recorded in `Resources`/result metadata, NOT here (see
-    /// the override-knob banner above). The sharding + combine ALGORITHM that
-    /// reads this knob lands in the M4.5 multi-GPU workflow; this is the
-    /// capability-tier SCAFFOLD that makes the knob expressible.
+    /// the override-knob banner above). The M4.5 multi-GPU combine reads this knob:
+    /// its §4 gate (`f2_blocks_multigpu.cpp`) ANDs BOTH override-intent levers —
+    /// `prefer_p2p_combine` (WHICH-PATH) AND `enable_peer_access` (MAY-WE) — with the
+    /// discovered `can_access_peer` (and `G >= 2`, structural), so a user who FORBIDS
+    /// peer access (`enable_peer_access=false`) takes the host-staged baseline even
+    /// when the device CAN peer and P2P is preferred — the device-resident path's
+    /// `cudaDeviceEnablePeerAccess` is never reached against the veto (cleanup C-1).
     bool prefer_p2p_combine = true;
 
     /// Bit-stability INTENT for the statistic path (default ON). When true the

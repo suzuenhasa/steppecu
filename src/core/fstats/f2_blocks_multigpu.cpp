@@ -24,9 +24,13 @@
 // budget box and is bit-identical to the opt-in device-resident cudaMemcpyPeer
 // fast-path (device/p2p_combine.{hpp,cu}, a separate workflow). When the P2P unit
 // lands, the §4 gate (resources.config.prefer_p2p_combine &&
-// resources.gpus[0].caps.can_access_peer && G >= 2) selects the device-resident
-// combine here; until then every G >= 2 run takes the host-staged baseline, which
-// is bit-identical to single-GPU regardless (the gate is parity-NEUTRAL, §12).
+// resources.config.enable_peer_access && resources.gpus[0].caps.can_access_peer &&
+// G >= 2) selects the device-resident combine here; until then every G >= 2 run
+// takes the host-staged baseline, which is bit-identical to single-GPU regardless
+// (the gate is parity-NEUTRAL, §12). The two-knob AND (the MAY-WE enable_peer_access
+// + the WHICH-PATH prefer_p2p_combine) honors both documented config levers so the
+// P2P path's cudaDeviceEnablePeerAccess is reached only with the user's permission
+// (cleanup CT2 / config C-1).
 #include "core/fstats/f2_blocks_multigpu.hpp"
 
 #include <cstddef>
@@ -213,7 +217,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
 
     // ---- Fixed-order combine, capability-gated (THE §4 fork) -----------------
     // The §4 gate selects the OPT-IN device-resident cudaMemcpyPeer combine when
-    //   prefer_p2p_combine && gpus[0].caps.can_access_peer && G >= 2
+    //   prefer_p2p_combine && enable_peer_access && gpus[0].caps.can_access_peer && G >= 2
     // (true on rtxbox: PRO 6000 stock-driver P2P, canAccessPeer==1 both ways), else
     // it DEGRADES to the host-staged fixed-order combine baseline. Both tiers sum the
     // SAME fixed g=0..G-1 order onto a zero-initialized full tensor and are therefore
@@ -223,11 +227,27 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // recorded OUT-OF-BAND on Resources (NEVER on the numeric F2BlockTensor; cleanup
     // §(2).2), and a genuine degrade (P2P requested but peer access unavailable) emits
     // the architecture-mandated tagged WARN via the non-throwing path.
+    //
+    // THE TWO-KNOB GATE (cleanup CT2 / config C-1/K-2; config.hpp OVERRIDE-KNOB
+    // banner). The two override-intent knobs are DISTINCT and BOTH must permit P2P:
+    //   * enable_peer_access — the MAY-WE knob: "whether the backend is permitted to
+    //     call cudaDeviceEnablePeerAccess at all" (config.hpp). The device-resident
+    //     combine combine_f2_partials_p2p DOES call cudaDeviceEnablePeerAccess
+    //     (cuda/p2p_combine.cu), so taking that path with enable_peer_access==false
+    //     would directly VIOLATE the veto the user set. The gate must AND it in so a
+    //     user who set enable_peer_access=false (forbid the enable) is honored and the
+    //     enable is reached only WITH permission.
+    //   * prefer_p2p_combine — the WHICH-PATH knob: once peer access IS permitted and
+    //     available, prefer the device-resident combine over the host-staged baseline.
+    // can_access_peer is the DISCOVERED probe (set once at build_resources). The gate
+    // is parity-NEUTRAL either way (both transports are bit-identical, §12), so AND-ing
+    // in enable_peer_access only changes WHICH transport runs, never a reported number.
     const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
     const std::span<const steppe::device::DeviceShard> shards_span(shards.data(), shards.size());
 
     const bool use_p2p =
-        resources.config.prefer_p2p_combine && resources.gpus[0].caps.can_access_peer;
+        resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
+        resources.gpus[0].caps.can_access_peer;
     if (use_p2p) {
         // device_ids[g] == the physical ordinal that computed partial g (gpus[g] in
         // the fixed g=0..G-1 == DeviceConfig::devices order; gpus[0] is the root).
@@ -246,12 +266,16 @@ F2BlockTensor compute_f2_blocks_multigpu(
     }
 
     // ---- Host-staged baseline (the portable parity baseline) -----------------
-    // Taken when P2P is not preferred, or when peer access is unavailable. Emit the
-    // EXACT architecture-mandated tagged degrade ONLY on a genuine degrade — the user
-    // PREFERRED P2P but the device cannot peer-access (architecture.md §11.4; config
-    // .hpp prefer_p2p_combine doc). A user who set prefer_p2p_combine=false took the
-    // baseline by choice — no WARN. Both outcomes are bit-identical to single-GPU.
-    if (resources.config.prefer_p2p_combine && !resources.gpus[0].caps.can_access_peer) {
+    // Taken when P2P is not preferred, peer access is FORBIDDEN by the user
+    // (enable_peer_access=false), or peer access is UNAVAILABLE on the device. Emit
+    // the EXACT architecture-mandated tagged degrade ONLY on a genuine degrade — the
+    // user both PREFERRED P2P and PERMITTED peer access, but the device cannot
+    // peer-access (architecture.md §11.4; config.hpp prefer_p2p_combine doc). A user
+    // who set prefer_p2p_combine=false OR enable_peer_access=false took the baseline by
+    // a DELIBERATE choice (a baseline preference or a forbidden enable, not a thwarted
+    // capability) — no WARN. Both outcomes are bit-identical to single-GPU.
+    if (resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
+        !resources.gpus[0].caps.can_access_peer) {
         STEPPE_LOG_WARN(
             "P2P combine unavailable (no peer access) -> host-staged fixed-order combine");
     }
