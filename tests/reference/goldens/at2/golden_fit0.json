@@ -1,0 +1,82 @@
+{
+  "schema": ["steppe.golden.at2.qpadm/1"],
+  "purpose": ["M(fit-1) acceptance oracle: first qpAdm GLS fit (CpuBackend, FP64, one model) must match these to bit/tolerance parity per architecture.md S12 PARITY LAW + S13."],
+  "reproduction": {
+    "canonical_invocation": ["qpadm(f2_dir, left=left, right=right, target=target, boot=FALSE, getcov=TRUE, return_f4=TRUE, fudge=1e-4, cpp=TRUE)  with set.seed(42)"],
+    "note": ["Values reproduce BIT-EXACT (all 15 digits) when qpadm is given the f2 DIRECTORY PATH directly. Calling read_f2(dir) then qpadm(f2_blocks,...) with non-default read args yields a ~1e-5 difference (different internal f2-read arg set); the directory-path form is canonical."],
+    "f2_dir_on_box": ["/workspace/data/aadr/f2_fit0_FINAL"],
+    "f2_cache_id": ["sha256:076b802156973971ca1ca2b3db3cfbe180651833e45f09a33c455cd3db0eff87"]
+  },
+  "metadata": {
+    "R": ["R version 4.3.3 (2024-02-29)"],
+    "admixtools": ["2.0.10"],
+    "target": ["England_BellBeaker"],
+    "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
+    "right": ["Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"],
+    "blgsize": [0.05],
+    "maxmiss": [0],
+    "fudge": [0.0001],
+    "boot": [false],
+    "seed": [42],
+    "allsnps": [true],
+    "dataset": ["v66.p1_HO.aadr.patch.PUB"],
+    "geno_sha256": ["7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3"],
+    "snp_sha256": ["c0d565ee9e6a6edf30c2063430ee4f828e5db45f26d4747fd76f19eee650a5de"],
+    "ind_sha256": ["51f99bee3667b5c3a97b663cc12fd3e25486cf64049782657d99db347b65509e"]
+  },
+  "model_well_determined": {
+    "feasible": true,
+    "both_weights_in_unit_interval": true,
+    "both_abs_z_gt_1p9": true,
+    "model_p": 0.326820092470997,
+    "model_not_rejected": true,
+    "f4_var_rcond": 0.00618636488534423,
+    "rank_Q": 5,
+    "n_snps_polymorphic": 500848,
+    "n_blocks": 708,
+    "f4dim": [1, 5, 708]
+  },
+  "weights": {
+    "target": ["England_BellBeaker", "England_BellBeaker"],
+    "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
+    "weight": [0.558906248861195, 0.441093751138805],
+    "se": [0.225911861836373, 0.225911861836373],
+    "z": [2.47400133980574, 1.95250372226266]
+  },
+  "rankdrop": {
+    "f4rank": [1, 0],
+    "dof": [4, 10],
+    "chisq": [4.63516296859645, 31.9697628796068],
+    "p": [0.326820092470997, 0.000405109973855609],
+    "dofdiff": [6, "NA"],
+    "chisqdiff": [27.3345999110104, "NA"],
+    "p_nested": [0.000125328972063141, "NA"]
+  },
+  "popdrop": {
+    "pat": ["00", "01", "10"],
+    "wt": [0, 1, 1],
+    "dof": [4, 5, 5],
+    "chisq": [4.63516296859645, 13.1352334823443, 17.1406935861748],
+    "p": [0.326820092470997, 0.0221439104360255, 0.00424055405322031],
+    "f4rank": [1, 0, 0],
+    "feasible": [true, true, true]
+  },
+  "X_f4_estimate_vector": {
+    "description": ["qpadm internal f4 matrix flattened: row left[-1]=Turkey_N over the 5 non-ref rights (rightref=Mbuti). OQ-1/OQ-3 seam golden."],
+    "leftref": ["Turkey_N"],
+    "rightref": ["Mbuti"],
+    "rightpair": ["Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"],
+    "f4_est": [0.000204208644854152, 0.000158461166756911, -2.44579443823133e-05, -2.42885897838109e-05, -3.27534454121373e-05]
+  },
+  "Q_jackknife_covariance": {
+    "description": ["5x5 jackknife covariance, UNfudged (qpadm fudges diag by += fudge*tr(Q) before inverting)."],
+    "matrix": [
+      [4.83261400481559e-09, 2.33658629797894e-09, 2.14254842654568e-09, 1.9301917318397e-09, 2.44496689120141e-09],
+      [2.33658629797894e-09, 4.38937359295631e-09, 2.08199573756359e-09, 1.79087827569103e-09, 2.03417976444829e-09],
+      [2.14254842654568e-09, 2.08199573756359e-09, 2.43374449452477e-09, 2.01288892096343e-09, 2.23742010650564e-09],
+      [1.9301917318397e-09, 1.79087827569103e-09, 2.01288892096343e-09, 3.18630101668274e-09, 2.12894642579008e-09],
+      [2.44496689120141e-09, 2.03417976444829e-09, 2.23742010650564e-09, 2.12894642579008e-09, 4.5704478312779e-09]
+    ],
+    "fudged_diag": [4.83455525290962e-09, 4.39131484105034e-09, 2.43568574261879e-09, 3.18824226477677e-09, 4.57238907937193e-09]
+  }
+}
