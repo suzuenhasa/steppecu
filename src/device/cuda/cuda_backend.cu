@@ -671,18 +671,27 @@ public:
         return rb;  // f2/vpair DeviceBuffers MOVE out to the caller (no free here)
     }
 
-    /// M5 STREAMED block-stream loop (the §5 mechanism). REUSES run_f2_blocks_resident's
-    /// prologue (block_ranges, size-buckets, the ONE fused feeder over all M,
-    /// engage_f2_precision once) and the per-block gather/GEMM/assemble VERBATIM — the
-    /// per-block bits are BIT-IDENTICAL to the device-resident path (§12). The ONLY
-    /// difference: instead of allocating the full [P²·n_block] resident tensors, it
-    /// allocates a SMALL DEVICE RING of kStreamStagingSlots per-chunk [P²·max_nb] f2 +
-    /// vpair buffers, computes each chunk into the next ring buffer (in the SAME fixed
-    /// bucket→chunk order ⇒ same batchCount per group ⇒ same bits, even native Fp64),
-    /// and spills each of that chunk's blocks through `sink` (which triple-buffers the
-    /// D2H→tier-write). The assemble writes chunk-local slabs 0..nb-1 (a LOCAL id array),
-    /// so the destination OFFSET differs from the resident path but the VALUE does not —
-    /// the spill places each slab under its GLOBAL block id. No new GEMM; no recompute.
+    /// M5 STREAMED block-stream loop (the §5 mechanism), with SNP-TILE INPUT STREAMING
+    /// (m5-input-streaming). REUSES run_f2_blocks_resident's block_ranges + size-buckets +
+    /// engage_f2_precision setup and the per-block gather/GEMM/assemble VERBATIM — the
+    /// per-block bits are BIT-IDENTICAL to the device-resident path (§12). TWO differences
+    /// from the resident path: (1) instead of the all-M feeder (the 7·P·M wall that OOM'd
+    /// full-autosome at P≳768 on a 32 GB card), each chunk decodes ONLY its own SNP-column
+    /// tile [s_lo,s_hi) — uploading Q/V/N[:, s_lo:s_hi] from the HOST [P×M] MatView, running
+    /// the SAME launch_f2_feeder over `tile` columns into per-tile feeder buffers, then
+    /// gathering via REBASED offsets (block_offsets[gid]-s_lo) into LOCAL ids; the GPU
+    /// footprint is O(P·max_tile + P²·max_nb), INDEPENDENT of M (the full [P×M] stays in
+    /// host RAM, owned by the caller). The tile is the SAME host columns the all-M gather
+    /// read, fed per-column elementwise ⇒ bit-identical (§5.1-5.2). (2) instead of the full
+    /// [P²·n_block] resident tensors, it allocates a SMALL DEVICE RING of kStreamDeviceChunks
+    /// per-chunk [P²·max_nb] f2 + vpair buffers, computes each chunk into the next ring buffer
+    /// (in the SAME fixed bucket→chunk order ⇒ same batchCount per group ⇒ same bits, even
+    /// native Fp64; the tile-width split valve is a NO-OP at the parity sizes, so the split
+    /// is identical there — §5.4), and spills each of that chunk's blocks through `sink`
+    /// (which triple-buffers the D2H→tier-write). The assemble writes chunk-local slabs
+    /// 0..nb-1 (a LOCAL id array), so the destination OFFSET differs from the resident path
+    /// but the VALUE does not — the spill places each slab under its GLOBAL block id. No new
+    /// GEMM; no recompute; only WHEN each block's columns upload moves (§5.5).
     void stream_f2_blocks_impl(const core::MatView& Q, const core::MatView& V,
                                const core::MatView& N, const int* block_id, int n_block,
                                const Precision& precision, BlockSink& sink) {
@@ -730,64 +739,171 @@ public:
         // The sink allocates the tier destination + its persistent pinned staging ONCE.
         sink.begin(P, n_block, block_sizes);
 
-        // ---- VRAM budget + feeder (IDENTICAL prologue) ---------------------------
+        // ---- VRAM budget (RETAINED) ----------------------------------------------
         std::size_t free_b = 0, total_b = 0;
         STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
 
+        // SNP-TILE INPUT STREAMING (m5-input-streaming). The all-M feeder prologue is
+        // GONE: we NO LONGER allocate dQ/dV/dS over all M (the 7·P·M wall) nor upload
+        // the whole [P×M] Q/V/N. Instead each chunk decodes ONLY its own SNP-column
+        // tile [s_lo, s_hi) into per-tile raw+feeder buffers (allocated ONCE below at
+        // the max tile width over all chunks, reused across chunks — never a per-chunk
+        // cudaMalloc/cudaFree, mirroring the L4b slab pre-sizing). The full [P×M] Q/V/N
+        // stay in HOST RAM (the caller's MatView); we slice sub-columns H2D per chunk.
+        // PARITY (§12): block gid's columns are the SAME host columns whether read from
+        // an all-M feeder (gather src = block_offsets[gid]+c) or a per-tile feeder
+        // (gather src = (block_offsets[gid]-s_lo)+c built from host columns [s_lo,s_hi));
+        // the feeder is block-agnostic / per-column, so feeding a column in isolation is
+        // bit-identical to feeding it inside the all-M sweep. Only WHEN columns upload
+        // moves — never the values.
         const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
-        const std::size_t two_pm = 2u * pm;
-        DeviceBuffer<double> dQ(pm), dV(pm), dS(two_pm);     // feeder outputs (persist)
-        DeviceBuffer<long>   dOffsets(static_cast<std::size_t>(n_block));
         DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
-                                          static_cast<std::size_t>(n_block) * sizeof(long),
-                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), block_sizes.data(),
                                           static_cast<std::size_t>(n_block) * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        {
-            DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
-            const std::size_t raw_bytes = pm * sizeof(double);
-            pinned_in_.ensure(Q.data, raw_bytes);
-            pinned_in_.ensure(V.data, raw_bytes);
-            pinned_in_.ensure(N.data, raw_bytes);
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, raw_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, raw_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, raw_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
-                             dQ.data(), dV.data(), dS.data(), P, M, stream_.get());
-            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-        }
+        // AMORTIZED-pin the FULL host [P×M] Q/V/N ONCE (P4/L2): the per-chunk tile
+        // slices are sub-ranges of these already-pinned regions, so a single base pin
+        // covers every slice (do NOT pin per-tile sub-ranges). cudaMemcpyAsync from a
+        // pinned source runs as a true async DMA; from pageable it host-blocks.
+        const std::size_t raw_bytes = pm * sizeof(double);
+        pinned_in_.ensure(Q.data, raw_bytes);
+        pinned_in_.ensure(V.data, raw_bytes);
+        pinned_in_.ensure(N.data, raw_bytes);
         engage_f2_precision(blas_.get(), precision);
 
-        // ---- Per-chunk slab sizing (IDENTICAL budget; the gather/GEMM scratch) ----
+        // ---- STREAMED VRAM BUDGET (NOT the resident chunk budget) ----------------
+        // The resident max_blocks_per_chunk reserves resident_tensor_bytes (the FULL
+        // [P²·n_block] result, co-resident on the resident tier). The STREAMED path
+        // holds NO resident result — it spills block-by-block through a SMALL device
+        // RING. Using the resident budget here is doubly wrong: at low-mid P it reserves
+        // a 12-48 GB phantom result while the actual co-resident footprint is the
+        // gather/GEMM slabs PLUS the ring (which the resident per_block_chunk_bytes does
+        // NOT count), so max_nb grows to fill a budget that omits the ring and the path
+        // OOMs (the measured P=1000/1500 HostRam/Disk OOM); at high P it saturates to a
+        // 1-block chunk. So budget against the REAL streamed per-block footprint:
+        //   gather slabs dQg+dVg+dSg : 4·P·s_pad      (per block)
+        //   GEMM out dGg+dVpairg+dRg : 4·P²           (per block)
+        //   device ring (×2 buffers, f2+vpair each P²): 4·P²  (per block, scaled by nb)
+        //   ⇒ per-block streamed = (4·P·s_pad + 8·P²)·8 bytes
+        // plus a FIXED tile-feeder reservation (7·P·max_tile_cols·8). The envelope is
+        // kMaxVramUtilizationFraction of net free VRAM (free − the cuBLAS workspace),
+        // split so the tile feeder takes a bounded slice and the slabs+ring take the
+        // rest — guaranteeing feeder + slabs + ring ≤ fraction·free. Independent of M.
+        const std::size_t net_free_b =
+            (free_b > kCublasWorkspaceBytes) ? (free_b - kCublasWorkspaceBytes) : 0u;
+        const std::size_t envelope_b = static_cast<std::size_t>(
+            kMaxVramUtilizationFraction * static_cast<double>(net_free_b));
+        // The tile feeder is a SMALL contributor (one chunk's column union); reserve a
+        // quarter of the envelope for it (bounding max_tile_cols) and leave the rest for
+        // the slabs+ring. At P=512/M=584k both are vast vs the need, so the chunking is
+        // unconstrained and the split is a NO-OP (parity §5.4).
+        const std::size_t tile_budget_b = envelope_b / 4u;
+        const std::size_t slab_budget_b = envelope_b - tile_budget_b;
+        const std::size_t per_col_feeder_b =
+            7u * static_cast<std::size_t>(P) * sizeof(double);  // 7·P doubles per tile col
+        const long max_tile_cols = static_cast<long>(std::max<std::size_t>(
+            per_col_feeder_b > 0u ? (tile_budget_b / per_col_feeder_b) : 1u, 1u));
+
+        // Streamed per-chunk block cap for one bucket of padded width `s_pad`: the
+        // largest nb whose (4·P·s_pad + 8·P²)·8·nb fits slab_budget_b, clamped to
+        // [1, min(nb_total, kMaxGridZ)] (a single block always attempted; the grid-z
+        // batch limit mirrors max_blocks_per_chunk's cap).
+        auto streamed_max_blocks = [&](int s_pad, int nb_total) -> int {
+            if (nb_total <= 0) return 0;
+            const std::size_t p = static_cast<std::size_t>(P);
+            const std::size_t sp = static_cast<std::size_t>(s_pad < 0 ? 0 : s_pad);
+            const std::size_t per_block_b =
+                (4u * p * sp + 8u * p * p) * sizeof(double);
+            const std::size_t fit = (per_block_b > 0u) ? (slab_budget_b / per_block_b) : 0u;
+            const std::size_t capped = std::min({fit, static_cast<std::size_t>(nb_total),
+                                                 static_cast<std::size_t>(core::kMaxGridZ)});
+            return static_cast<int>(std::max<std::size_t>(capped, 1u));
+        };
+
+        // Compute, for ONE chunk starting at `start` of bucket `bk` with a per-chunk
+        // block cap `max_blocks`, the actual block count `nb` (≤ max_blocks, ≥1) whose
+        // column union [s_lo, s_hi) fits within `max_tile_cols`, plus that extent. This
+        // is the SINGLE source of the bucket→chunk split — both the pre-sizing pre-pass
+        // and the streaming loop call it, so the device buffer sizing and the runtime
+        // chunking can never drift. Always admits at least the first block (a single
+        // block must be attempted even if its own width exceeds the cap — it then OOMs
+        // cleanly rather than silently producing nothing, matching max_blocks_per_chunk).
+        auto chunk_extent = [&](const Bucket& bk, int start, int max_blocks,
+                                long& s_lo, long& s_hi) -> int {
+            const int nb_total = static_cast<int>(bk.blocks.size());
+            const int cap = std::min(max_blocks, nb_total - start);
+            int nb = 0;
+            s_lo = 0;
+            s_hi = 0;
+            for (int kk = 0; kk < cap; ++kk) {
+                const int gid = bk.blocks[static_cast<std::size_t>(start + kk)];
+                const long b_lo = block_offsets[static_cast<std::size_t>(gid)];
+                const long b_hi = b_lo + block_sizes[static_cast<std::size_t>(gid)];
+                const long new_lo = (nb == 0) ? b_lo : std::min(s_lo, b_lo);
+                const long new_hi = (nb == 0) ? b_hi : std::max(s_hi, b_hi);
+                if (nb > 0 && (new_hi - new_lo) > max_tile_cols) break;  // tile valve
+                s_lo = new_lo;
+                s_hi = new_hi;
+                ++nb;
+            }
+            return nb;  // ≥1 (the first block always admitted)
+        };
+
+        // ---- Per-chunk slab + tile sizing (the gather/GEMM scratch + tile feeder) --
         std::size_t max_nb = 0;
         std::size_t max_psp_nb = 0;
+        long        max_tile = 0;
         std::vector<int> bucket_max_blocks(buckets.size(), 0);
         for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
             const int s_pad = buckets[bi].s_pad;
             const int nb_total = static_cast<int>(buckets[bi].blocks.size());
-            const int mb = max_blocks_per_chunk(free_b, P, n_block, s_pad, nb_total);
+            const int mb = streamed_max_blocks(s_pad, nb_total);
             bucket_max_blocks[bi] = mb;
-            const std::size_t nb = static_cast<std::size_t>(mb < 0 ? 0 : mb);
-            max_nb = std::max(max_nb, nb);
-            max_psp_nb = std::max(
-                max_psp_nb,
-                static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) * nb);
+            // Walk this bucket's chunks EXACTLY as the streaming loop will (same
+            // chunk_extent split), accumulating the max nb / P·s_pad·nb / tile width.
+            for (int start = 0; start < nb_total; ) {
+                long s_lo = 0, s_hi = 0;
+                const int nb = chunk_extent(buckets[bi], start, mb, s_lo, s_hi);
+                const std::size_t nbz = static_cast<std::size_t>(nb < 0 ? 0 : nb);
+                max_nb = std::max(max_nb, nbz);
+                max_psp_nb = std::max(
+                    max_psp_nb,
+                    static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) * nbz);
+                max_tile = std::max(max_tile, s_hi - s_lo);
+                start += (nb > 0 ? nb : 1);
+            }
         }
-        DeviceBuffer<int>    dIds(max_nb);        // GLOBAL block ids of the chunk (gather)
         DeviceBuffer<double> dQg(max_psp_nb), dVg(max_psp_nb), dSg(2u * max_psp_nb);
         const std::size_t max_pp_nb = slab * max_nb;
         DeviceBuffer<double> dGg(max_pp_nb), dVpairg(max_pp_nb), dRg(2u * max_pp_nb);
 
-        // LOCAL id array [0,1,...,max_nb-1], uploaded ONCE: the assemble uses this to
-        // write chunk-local slabs 0..nb-1 of the small per-chunk f2/vpair buffer (instead
-        // of the resident path's global P²·id offset). The gather still uses dIds (global)
-        // so it reads the correct SNP columns — so the COMPUTED bits are identical; only
-        // the assemble's destination OFFSET is chunk-local (a write location, not a value).
+        // ---- Per-tile raw + feeder buffers, sized at the MAX tile width over all
+        //      chunks, allocated ONCE and REUSED (mirror the slab pre-sizing — never a
+        //      per-chunk cudaMalloc/cudaFree, the L4b churn the P3 commit eliminated).
+        //      GPU footprint is now O(P·max_tile), INDEPENDENT of M. -----------------
+        const std::size_t max_tile_z = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
+        const std::size_t p_tile = static_cast<std::size_t>(P) * max_tile_z;
+        DeviceBuffer<double> dQ_raw(p_tile), dV_raw(p_tile), dN_raw(p_tile);  // raw tile H2D
+        DeviceBuffer<double> dQt(p_tile), dVt(p_tile), dSt(2u * p_tile);      // tile feeder out
+        // Rebased per-tile offsets: dOffsetsTile[localid] = block_offsets[gid] - s_lo,
+        // dSizesTile[localid] = block_sizes[gid], and dIdsTile = [0..nb) (LOCAL into the
+        // chunk's block list). The gather then reads the [P×tile] tile feeder at
+        // dOffsetsTile[id] + c — exactly block gid's columns, SAME feeder bits as the
+        // all-M path (which read block_offsets[gid]+c from the all-M feeder).
+        DeviceBuffer<long> dOffsetsTile(max_nb);
+        DeviceBuffer<int>  dSizesTile(max_nb);
+        std::vector<long>  h_offsets_tile(max_nb);
+        std::vector<int>   h_sizes_tile(max_nb);
+
+        // LOCAL id array [0,1,...,max_nb-1], uploaded ONCE: BOTH the gather and the
+        // assemble use it. The gather indexes the rebased per-tile dOffsetsTile/
+        // dSizesTile by this LOCAL id (its first nb entries are this chunk's blocks in
+        // bucket-list order, so dOffsetsTile[localid] = block_offsets[gid]-s_lo selects
+        // exactly block gid's columns in the [P×tile] tile feeder — same SNPs, same
+        // bits as the all-M path). The assemble writes chunk-local slabs 0..nb-1 of the
+        // small per-chunk f2/vpair buffer (instead of the resident path's global P²·id
+        // offset). So the COMPUTED bits are identical; only the destination OFFSET is
+        // chunk-local (a write location, not a value) and the spill restores the GLOBAL id.
         std::vector<int> local_ids(max_nb);
         for (std::size_t k = 0; k < max_nb; ++k) local_ids[k] = static_cast<int>(k);
         DeviceBuffer<int> dIdsLocal(max_nb);
@@ -831,8 +947,12 @@ public:
             const int nb_total = static_cast<int>(bk.blocks.size());
             const int max_blocks = bucket_max_blocks[bi];
 
-            for (int start = 0; start < nb_total; start += max_blocks) {
-                const int nb = std::min(max_blocks, nb_total - start);
+            for (int start = 0; start < nb_total; ) {
+                // The tile-width split valve fixes BOTH nb and the column extent
+                // [s_lo,s_hi) of THIS chunk (same split the pre-pass sized for).
+                long s_lo = 0, s_hi = 0;
+                const int nb = chunk_extent(bk, start, max_blocks, s_lo, s_hi);
+                const long tile = s_hi - s_lo;
                 Ring& r = ring[chunk_idx % kStreamDeviceChunks];
                 // Reuse-after-drain: wait until the prior chunk that used this device
                 // buffer has had its D2Hs issued+drained (its event), so chunk c's
@@ -840,12 +960,50 @@ public:
                 if (r.used)
                     STEPPE_CUDA_CHECK(cudaEventSynchronize(r.reuse));
 
-                // GLOBAL ids of this chunk's blocks -> dIds (gather reads correct columns).
-                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
+                // ---- PER-CHUNK SNP-TILE DECODE (the new mechanism) -----------------
+                // Upload ONLY this chunk's column union Q/V/N[:, s_lo:s_hi] from the
+                // host MatView. Column-major [P×M] makes the slice a SINGLE contiguous
+                // run of P·tile doubles starting at i + P·s_lo (views.hpp), so it is ONE
+                // cudaMemcpyAsync per matrix (the source is a sub-range of the FULL host
+                // region already pinned above — no per-tile pin).
+                const std::size_t tile_elems =
+                    static_cast<std::size_t>(P) * static_cast<std::size_t>(tile);
+                const std::size_t tile_bytes = tile_elems * sizeof(double);
+                const std::size_t src_off = static_cast<std::size_t>(P) *
+                                            static_cast<std::size_t>(s_lo);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                // SAME feeder wrapper, M arg = tile (a long); per-column elementwise so
+                // feeding [s_lo,s_hi) in isolation is bit-identical to feeding it inside
+                // the all-M sweep (§5.2 — no cross-column dependency).
+                launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
+                                 dQt.data(), dVt.data(), dSt.data(), P, tile, stream_.get());
+
+                // Rebase this chunk's offsets/sizes into LOCAL ids [0..nb): the gather
+                // reads the [P×tile] tile feeder at dOffsetsTile[id] + c = block gid's
+                // columns within the tile — exactly the columns the all-M gather read at
+                // block_offsets[gid]+c, so the gathered slab is bit-identical.
+                for (int kk = 0; kk < nb; ++kk) {
+                    const int gid = bk.blocks[static_cast<std::size_t>(start + kk)];
+                    h_offsets_tile[static_cast<std::size_t>(kk)] =
+                        block_offsets[static_cast<std::size_t>(gid)] - s_lo;
+                    h_sizes_tile[static_cast<std::size_t>(kk)] =
+                        block_sizes[static_cast<std::size_t>(gid)];
+                }
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsetsTile.data(), h_offsets_tile.data(),
+                                                  static_cast<std::size_t>(nb) * sizeof(long),
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizesTile.data(), h_sizes_tile.data(),
                                                   static_cast<std::size_t>(nb) * sizeof(int),
                                                   cudaMemcpyHostToDevice, stream_.get()));
-                launch_gather_group(dQ.data(), dV.data(), dS.data(),
-                                    dIds.data(), dOffsets.data(), dSizes.data(),
+                // dIdsLocal is [0..max_nb); its first nb entries [0..nb) are the LOCAL
+                // ids the gather indexes into dOffsetsTile/dSizesTile.
+                launch_gather_group(dQt.data(), dVt.data(), dSt.data(),
+                                    dIdsLocal.data(), dOffsetsTile.data(), dSizesTile.data(),
                                     P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_.get());
                 run_f2_gemms_group(blas_.get(), precision, P, s_pad, nb,
                                    dQg.data(), dVg.data(), dSg.data(),
@@ -872,6 +1030,7 @@ public:
                 STEPPE_CUDA_CHECK(cudaEventRecord(r.reuse, stream_.get()));
                 r.used = true;
                 ++chunk_idx;
+                start += (nb > 0 ? nb : 1);  // advance by the split-determined nb
             }
         }
 

@@ -46,10 +46,50 @@ enum class OutputTier {
 /// :544-560) so they fit under this envelope. Mirrors estimate_peak_vram_bytes in
 /// test_f2_multigpu_parity.cu:223-230, MINUS the resident_tensor_bytes term (the
 /// caller adds the result separately). std::size_t throughout (no 32-bit wrap).
+///
+/// SCOPE (m5-input-streaming): the `7·P·M` term is the RESIDENT-tier feeder envelope
+/// ONLY. The STREAMED tiers (HostRam/Disk) decode per-block-tile inside the chunk
+/// loop (stream_f2_blocks_impl) and hold O(P·max_tile), NOT 7·P·M — see
+/// streamed_working_set_bytes below. This helper is consulted ONLY for the Resident
+/// decision in select_output_tier (which still runs the unchanged all-M feeder), so
+/// it must keep the 7·P·M term exactly.
 [[nodiscard]] inline std::size_t resident_working_set_bytes(int P, long M) noexcept {
     if (P <= 0 || M <= 0) return 0;
     const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     return 7u * pm * sizeof(double) + kCublasWorkspaceBytes;
+}
+
+/// Peak transient VRAM of the STREAMED (HostRam/Disk) single-GPU path
+/// (stream_f2_blocks_impl), which decodes ONE block-tile at a time instead of the
+/// all-M feeder. Its GPU footprint is INDEPENDENT of M to first order — bounded by
+/// the widest single chunk's tile, NOT 7·P·M:
+///   per-tile raw inputs   3·P·max_tile   (dQ_raw/dV_raw/dN_raw)
+///   per-tile feeder out    4·P·max_tile   (dQt + dVt + dSt = P + P + 2P)
+///   gather/GEMM slabs     (4·P·max_s_pad + 4·P²)·max_nb   (per_block_chunk_bytes ×nb)
+///   device ring (×2)       2·P²·max_nb    (kStreamDeviceChunks f2/vpair ring buffers)
+/// + the cuBLAS determinism workspace. This is O(P·max_tile + P²·max_nb), with NO
+/// P·M term — which is exactly why the streamed tiers no longer hit the feeder wall
+/// that capped full-autosome runs at P≲768 on a 32 GB card. NOT used by
+/// select_output_tier (the streamed tiers are chosen by RESULT size, the feeder
+/// cost being gone); exposed for the bench's high-P feasibility narrative and any
+/// future select that needs to assert the streamed path fits. std::size_t throughout.
+///
+/// @param P          number of populations.
+/// @param M          UNUSED (kept for call-site symmetry with resident_working_set_bytes).
+/// @param max_tile   widest single chunk's column-union tile width (SNP columns).
+/// @param max_nb     most blocks in any one chunk (the strided-batch batchCount).
+/// @param max_s_pad  widest bucket's padded SNP-block width.
+[[nodiscard]] inline std::size_t streamed_working_set_bytes(
+        int P, long /*M*/, int max_tile, int max_nb, int max_s_pad) noexcept {
+    if (P <= 0) return 0;
+    const std::size_t p = static_cast<std::size_t>(P);
+    const std::size_t t = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
+    const std::size_t nb = static_cast<std::size_t>(max_nb < 0 ? 0 : max_nb);
+    const std::size_t sp = static_cast<std::size_t>(max_s_pad < 0 ? 0 : max_s_pad);
+    const std::size_t feeder = (3u * p * t + 4u * p * t);                 // raw + tile feeder
+    const std::size_t slabs = (4u * p * sp + 4u * p * p) * nb;            // gather/GEMM scratch
+    const std::size_t ring = 2u * p * p * nb;                            // §5 device ring (×2)
+    return (feeder + slabs + ring) * sizeof(double) + kCublasWorkspaceBytes;
 }
 
 /// Free host RAM in bytes, read at RUNTIME (NEVER hardcoded — vast instances vary).
