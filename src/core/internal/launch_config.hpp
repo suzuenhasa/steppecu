@@ -112,7 +112,12 @@ inline constexpr unsigned kMaxGridZ = 65535u;
 /// routes its `gridDim.y` (the P axis) through `grid_for(P, kDecodeBlockY)` so the
 /// y-cap assert applies there too.
 [[nodiscard]] STEPPE_HD constexpr int grid_for(int n, int block = kCdivBlock,
-                                               unsigned max_grid = kMaxGridY) noexcept {
+                                               [[maybe_unused]] unsigned max_grid = kMaxGridY) noexcept {
+    // `max_grid` is consumed ONLY by the STEPPE_ASSERT below, which compiles out
+    // under NDEBUG (host_device.hpp). `[[maybe_unused]]` (C++17, [dcl.attr.unused])
+    // makes the genuinely-conditionally-used parameter honest under -Werror in BOTH
+    // build types — Release drops the assert, leaving the bound unread, but it is
+    // load-bearing in debug where the fail-fast over-limit check fires.
     const int extent = cdiv(n, block);
     STEPPE_ASSERT(extent >= 0 && static_cast<unsigned>(extent) <= max_grid,
                   "grid extent exceeds the hardware grid-dimension limit "

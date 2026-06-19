@@ -23,6 +23,10 @@
 //      when honorable they MUST DIFFER (the FIXED-slice Ozaki path engaged).
 //   4. On the downgrade lane, the one-shot capability TAG is emitted to stderr
 //      (observable refusal, not silent) — captured by redirecting stderr to a pipe.
+//      The tag now routes through the ONE warn sink STEPPE_LOG_WARN (M4.5/U5,
+//      core/internal/log.hpp), which is NDEBUG-silent by contract, so the stderr
+//      assertion is gated to DEBUG builds; under NDEBUG the bit-identical downgrade
+//      (item 3) is the observability and the tag is not asserted.
 //
 // Build (REMOTE sm_120 / CUDA 13 box; NOT locally). Built by CMake/CTest as the
 // `emu_honorability` test (tests/CMakeLists.txt) linking steppe::device. The test
@@ -196,8 +200,24 @@ int main() {
     // ---- (4) downgrade is OBSERVABLE (logged tag), not silent ----------------
     // Only assert the tag on the downgrade lane (it is emitted at most once per
     // process; on the honorable lane no tag is expected).
+    //
+    // BUILD-MODE GATE (M4.5/U5): the downgrade tag now routes through the ONE warn
+    // sink STEPPE_LOG_WARN (core/internal/log.hpp), which — like `assert` — is
+    // NDEBUG-silent by contract (a release build emits nothing at this level; the
+    // earlier interim path used an unconditional std::fprintf). So the tag is
+    // OBSERVABLE-in-stderr only in a DEBUG build; under NDEBUG the refusal is still
+    // not "silent" in the dangerous sense (the predicate STILL downgrades to native
+    // — proven bit-identical in check (3) above — it just does not print), and the
+    // one-shot atomic still fires. We therefore assert the stderr tag only when the
+    // sink is armed (!NDEBUG); under NDEBUG the contract is the bit-identical
+    // downgrade, already asserted by (3).
     bool tag_ok = true;
     if (!honorable) {
+#if defined(NDEBUG)
+        std::printf("  capability tag on downgrade: not asserted under NDEBUG "
+                    "(STEPPE_LOG_WARN is release-silent; the bit-identical downgrade "
+                    "in check (3) is the NDEBUG observability)  -> PASS\n");
+#else
         const bool saw_tag = emu_stderr.find("emu_tuning_unavailable") != std::string::npos;
         tag_ok = saw_tag;
         std::printf("  capability tag on downgrade: %s  -> %s\n",
@@ -207,6 +227,7 @@ int main() {
             std::fprintf(stderr, "  [FAIL] EmulatedFp64 downgraded to native but NO capability tag "
                                  "was logged — the refusal is silent (X-6/B2). stderr was: <<<%s>>>\n",
                                  emu_stderr.c_str());
+#endif
     } else {
         std::printf("  capability tag on downgrade: n/a (honorable)  -> PASS\n");
     }

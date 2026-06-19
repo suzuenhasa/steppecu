@@ -324,7 +324,13 @@ namespace {
 
 // Run `fn` in a forked child; return true iff the child died via SIGABRT (what a
 // fired STEPPE_ASSERT does). Mirrors tests/unit/test_f2_from_blocks.cpp's harness.
-[[nodiscard]] bool child_aborts(void (*fn)()) {
+//
+// `[[maybe_unused]]` (C++17, [dcl.attr.unused]): the death-case loop in main() that
+// calls this is `#ifndef NDEBUG`, so under NDEBUG the helper is defined but never
+// called by contract (the asserts compile out) — the attribute keeps the TU clean
+// under nvcc `--Werror all-warnings` in BOTH builds without #ifdef'ing the helper
+// away from its <sys/wait.h>/<unistd.h> home.
+[[maybe_unused]] [[nodiscard]] bool child_aborts(void (*fn)()) {
     const pid_t pid = fork();
     if (pid < 0) {
         std::fprintf(stderr, "fork() failed\n");

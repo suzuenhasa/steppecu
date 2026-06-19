@@ -20,7 +20,10 @@
 #include "device/backend.hpp"
 #include "io/snp_reader.hpp"
 
-namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(); }
+// M4.5/U5: make_cuda_backend now takes an int device_id (default 0); the zero-arg
+// call below still binds to device 0. (This throwaway spike forward-declares the
+// factory itself rather than including device/backend_factory.hpp.)
+namespace steppe::device { std::unique_ptr<steppe::ComputeBackend> make_cuda_backend(int device_id = 0); }
 
 static void read_f64(const std::string& p, std::vector<double>& d, size_t n){
   FILE*f=fopen(p.c_str(),"rb"); if(!f){fprintf(stderr,"open %s\n",p.c_str());exit(1);}

@@ -226,9 +226,75 @@ struct DeviceConfig {
     /// (architecture.md §7, §11.2).
     bool use_mem_pool = true;
 
+    // -----------------------------------------------------------------------
+    // MULTI-GPU OVERRIDE-KNOB BANNER (architecture.md §11.4; cleanup overview
+    // (2).3, finding include-config 11.1/9.1).
+    //
+    // There are TWO distinct knob types in the capability-tier design and they
+    // live in TWO distinct places — do not conflate them:
+    //
+    //   * OVERRIDE INTENT  → here, in `DeviceConfig`. The user-facing levers
+    //     that say what the run MAY or PREFERS to do. This set is APPEND-ONLY as
+    //     capability levers land: `devices` (the fixed combine order, §11.4),
+    //     `enable_peer_access` (M4), `prefer_p2p_combine` (M4.5), and a future
+    //     `enable_gds_ingest` (M5/M7). Every lever is parity-NEUTRAL — it moves
+    //     bytes or changes observability only, never a reported number (§12), so
+    //     the host-staged fixed-order combine and the device-resident P2P
+    //     combine are bit-identical on both capability tiers (§11.4).
+    //
+    //   * DISCOVERED CAPABILITY + the WHICH-PATH tag → NEVER here. The runtime
+    //     probe result (canAccessPeer, free/total VRAM, emulated-FP64-honorable
+    //     state) and the recorded "which path did this run actually take, and
+    //     why did it degrade" tag are RUNTIME STATE, not intent: they live in
+    //     `Resources` / the result metadata, never on `DeviceConfig` and never
+    //     on the pure-numeric `F2BlockTensor` (cleanup overview (2).2). A
+    //     non-throwing tagged-degrade path (e.g. canAccessPeer == "no") records
+    //     the fallback there; it is NOT an error (§11.4).
+    // -----------------------------------------------------------------------
+
     /// Enable peer access opportunistically (cudaDeviceEnablePeerAccess when
-    /// canAccessPeer) for single-node multi-GPU (architecture.md §11.4).
+    /// canAccessPeer) for single-node multi-GPU (architecture.md §11.4). This is
+    /// the MAY-WE knob: whether the backend is permitted to call
+    /// cudaDeviceEnablePeerAccess at all. DISTINCT from `prefer_p2p_combine`
+    /// (which path to take WHEN peer access is available) — see below. The M4.5
+    /// combine gate (the four-term §4 gate defined ONCE in `f2_blocks_multigpu.cpp`,
+    /// "THE §4 COMBINE GATE", §8 single-source) ANDs this term in: `false` here forces
+    /// the host-staged baseline (tagged `HostStaged`) even when the device CAN peer
+    /// and `prefer_p2p_combine` is true, since the device-resident path would call the
+    /// very `cudaDeviceEnablePeerAccess` this veto forbids (cleanup C-1).
     bool enable_peer_access = true;
+
+    /// Prefer the device-resident P2P combine over the host-staged combine WHEN
+    /// peer access is available (architecture.md §11.4; cleanup overview (2).3,
+    /// finding include-config 11.1). This is the WHICH-PATH knob and is DISTINCT
+    /// from `enable_peer_access`:
+    ///   * `enable_peer_access` = MAY we call cudaDeviceEnablePeerAccess at all;
+    ///   * `prefer_p2p_combine` = once peer access IS available, prefer the
+    ///     device-resident `cudaMemcpyPeer` combine (GPU 0 pulls each peer's
+    ///     partial via a byte-exact DMA and sums in the fixed `g = 0..G-1`
+    ///     `devices` order on-device) over gathering the G partials to the host
+    ///     and summing them there.
+    /// BOTH combine paths sum in the SAME fixed device order and are therefore
+    /// BIT-IDENTICAL to each other and to the single-GPU reference — the
+    /// transport only moves bytes; software fixes the order; NEVER NCCL
+    /// AllReduce (architecture.md §11.4, §12). So this knob is parity-NEUTRAL: it
+    /// is a data-movement/cleanliness lever, never a reported number.
+    /// Default `true` (capable-first): prefer the device-resident combine when
+    /// `enable_peer_access` is set AND the runtime `cudaDeviceCanAccessPeer`
+    /// probe succeeds; otherwise the backend DEGRADES — non-throwing and tagged
+    /// — to the host-staged fixed-order combine, which is the portable parity
+    /// BASELINE and the only path on a budget box with peer access disabled
+    /// (e.g. stock-driver GeForce). The probe result and the which-path tag are
+    /// DISCOVERED state recorded in `Resources`/result metadata, NOT here (see
+    /// the override-knob banner above). The M4.5 multi-GPU combine reads this knob in
+    /// its four-term §4 gate — defined ONCE in `f2_blocks_multigpu.cpp` ("THE §4
+    /// COMBINE GATE", §8 single-source), which ANDs BOTH override-intent levers
+    /// (`prefer_p2p_combine` WHICH-PATH AND `enable_peer_access` MAY-WE) with the
+    /// discovered `can_access_peer` and the structural `G >= 2`. So a user who FORBIDS
+    /// peer access (`enable_peer_access=false`) takes the host-staged baseline even
+    /// when the device CAN peer and P2P is preferred — the device-resident path's
+    /// `cudaDeviceEnablePeerAccess` is never reached against the veto (cleanup C-1).
+    bool prefer_p2p_combine = true;
 
     /// Bit-stability INTENT for the statistic path (default ON). When true the
     /// run is held to the §12 reproducibility contract and `build()` enforces the

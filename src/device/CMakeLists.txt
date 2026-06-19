@@ -24,8 +24,20 @@ add_library(steppe_device STATIC
     cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
-    cpu/cpu_backend.cpp)          # REFERENCE backend: scalar host oracle
+    cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
+    cuda/p2p_combine.cu           # M4.5: combine_f2_partials_resident — device-resident cudaMemcpyPeer disjoint placement combine
+    cpu/cpu_backend.cpp           # REFERENCE backend: scalar host oracle
+    resources.cpp                 # M4.5: build_resources — one backend+probe PER device (CUDA-free body)
+    shard_plan.cpp)               # M4.5: plan_block_shards — block-aligned SNP shard plan (CUDA-free body)
 add_library(steppe::device ALIAS steppe_device)
+
+# resources.cpp + shard_plan.cpp are PLAIN .cpp (not CUDA): build_resources reaches
+# the GPU only through the CUDA-free factory (make_cuda_backend) + the CUDA-free
+# capabilities() probe, and plan_block_shards is host-pure block→device arithmetic
+# over core::BlockRange — neither includes a CUDA header (design §1/§2/§7). They link
+# into steppe_device (so make_cuda_backend resolves, and the multi-GPU orchestrator
+# in steppe_core reaches plan_block_shards through the device target), but are
+# themselves device-toolkit-free.
 
 # backend.hpp (the CUDA-free DI seam) is reached as "device/backend.hpp"; the f2
 # estimator + views come via steppe::core_internal as "core/internal/...". Both

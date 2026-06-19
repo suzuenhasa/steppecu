@@ -287,6 +287,59 @@ target_link_libraries(test_device_buffer
 set_target_properties(test_device_buffer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME device_buffer_unit COMMAND test_device_buffer)
 
+# --- M4.5 CAP-1/CAP-2 non-throwing tagged-degrade check gate (device-cuda-check)
+# CUDA TU, DATA-FREE and NO GPU work (sibling of test_device_buffer.cu): drives the
+# device-private check.cuh (a .cuh — PRIVATE to steppe_device, architecture.md §4 —
+# so this gate is a CUDA TU) on chosen cudaError_t values, never touching a device.
+# The verify gate (cleanup device-cuda-check CAP-1/CAP-2; architecture.md §10, §11.4,
+# §12; TODO M4.5): STEPPE_CUDA_WARN on the EXPECTED capability-degrade statuses
+# (cudaErrorPeerAccessAlreadyEnabled / cudaErrorPeerAccessNotEnabled) does NOT throw,
+# logs one line, and YIELDS the status the multi-GPU probe branches on — while
+# STEPPE_CUDA_CHECK on the SAME status DOES throw a CudaError carrying it (the two are
+# distinct paths; routing a graceful degrade through the throwing checker would fault
+# the budget tier). Also pins the success quiet-pass-through and the source_location
+# capture (the A-4 nvcc-fragility regression guard). The runtime's
+# cudaGetErrorName/String are host-side string lookups needing no device context, so
+# this runs on EVERY lane with no GPU and no data. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::device (check.cuh) +
+# steppe::core_internal (the STEPPE_LOG_WARN sink). No io / no data / no GPU.
+add_executable(test_cuda_check reference/test_cuda_check.cu)
+target_link_libraries(test_cuda_check
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_cuda_check PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME cuda_check_unit COMMAND test_cuda_check)
+
+# --- M4.5 U4/L10 CublasHandle MathModeScope + device-ordinal scaffold gate -----
+# CUDA TU, DATA-FREE (sibling of test_device_buffer.cu): exercises the device-
+# private handles.hpp RAII cuBLAS-handle wrapper directly. handles.hpp includes
+# <cublas_v2.h> — PRIVATE to steppe_device (architecture.md §4) — so this gate is a
+# CUDA TU. Unlike test_cuda_check (no GPU), this NEEDS a live device: cublasCreate
+# / cublasGetMathMode require a cuBLAS context. The U4/L10 verdict gate (cleanup
+# device-cuda-handles 2.3/11.x, L10; overview §(2).1; architecture.md §7, §9,
+# §11.4, §12; TODO M4.5):
+#   (a) MathModeScope (L10 / f2_block_kernel N-5) captures the live cuBLAS math
+#       mode on construction and RESTORES it at scope exit — proven across nesting
+#       (inner restores to outer, so the ctor captures the live mode, not a default)
+#       and a moved-from scope (which restores NOTHING, so the mode is restored
+#       exactly once). This is the M4.5 Fp64-parity-recompute-coexisting-with-
+#       EmulatedFp64 scaffold: the §12 oracle pass can engage PEDANTIC for its scope
+#       and leave the shared handle exactly as it found it. Parity-NEUTRAL (it only
+#       restores state already set imperatively, §12).
+#   (b) CublasHandle records the device ordinal current at construction
+#       (cudaGetDevice — query only, NEVER cudaSetDevice inside the wrapper; cuBLAS
+#       §2.1.2 couples the context to the creation device) and, in DEBUG, the
+#       context-mutating methods record-and-ASSERT the current device still matches
+#       (the §11.4 multi-GPU precondition; a no-op-true on the single-GPU box).
+# Native Fp64 / no numeric claim (it asserts handle STATE, not a precision value),
+# so no emulation tuning and no real AADR are required. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::device (handles.hpp +
+# check.cuh) + steppe::core_internal (the STEPPE_LOG_WARN sink). No io / no data.
+add_executable(test_handles reference/test_handles.cu)
+target_link_libraries(test_handles
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_handles PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME handles_unit COMMAND test_handles)
+
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
 # correct on the host path (STEPPE_HD == empty under g++). architecture.md §13.
@@ -370,6 +423,375 @@ if(STEPPE_HAVE_GTEST)
   target_compile_definitions(test_backend_factory PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
 add_test(NAME backend_factory_unit COMMAND test_backend_factory)
+
+# --- Host-only unit test of the M4.5 BackendCapabilities POD (U2) -------------
+# Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend.hpp and
+# pins the SHAPE + value-initialized "unknown" defaults of the BackendCapabilities
+# POD the M4.5 capability-tier scaffold adds (architecture.md §9 Resources, §11.4
+# SPMG capability-tiered combine, §12 parity; cleanup 00-overview §(2).1). The U2
+# verdict gate: BackendCapabilities is an aggregate / trivially-copyable /
+# standard-layout POD whose every field defaults to the documented zero/false
+# ("unknown" tier), AND ComputeBackend::capabilities() has a usable base default
+# returning that unknown (so CpuBackend need not override it and backend.hpp
+# compiles standalone). The REAL probe values are asserted in U5, not here. The
+# checks are compile-time static_asserts plus run-time guards. Like
+# test_backend_factory, this links ONLY steppe::core_internal (which exposes the
+# src/ include root resolving "device/backend.hpp") + steppe::api — NOT
+# steppe::device / its PRIVATE CUDA toolkit; a CUDA leak in the capability struct
+# would fail this host compile, which is itself the §4-layering proof.
+# architecture.md §4, §9, §11.4, §12, §13.
+add_executable(test_backend_capabilities unit/test_backend_capabilities.cpp)
+target_link_libraries(test_backend_capabilities
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_backend_capabilities PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_backend_capabilities PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME backend_capabilities_unit COMMAND test_backend_capabilities)
+
+# --- M4.5 U5 CUDA capabilities() probe + device_id threading gate -------------
+# CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the PRODUCTION
+# CUDA path — make_cuda_backend(device_id) + CudaBackend::capabilities() — on a live
+# device. The U2 host-only gate (tests/unit/test_backend_capabilities.cpp) pins the
+# BackendCapabilities POD SHAPE + the value-initialized "unknown" base default; THIS
+# gate pins the REAL probe VALUES the CUDA override reports, plus the device_id
+# binding (F19/F20). The U5 verdict gate (cleanup device-cuda-cuda_backend F19/F20 +
+# X-6/B2; architecture.md §9, §11.4, §12; 00-overview §(2).1):
+#   TIER-INVARIANT (every lane): compute_major >= 12 (sm_120), total_vram_bytes > 0
+#     (the captured `total` the M0/M4 path discarded), free <= total, device_count
+#     matches cudaGetDeviceCount, emulated_fp64_honorable == the LIBRARY's X-6/B2
+#     emulation_honorable predicate (the probe + GEMM path can never disagree), and a
+#     backend constructs on device 0 reporting itself.
+#   rtxbox VERDICT (2× RTX PRO 6000): device_count == 2, a backend constructs on
+#     device 1 too, and can_access_peer == true (the REAL stock-driver P2P this box
+#     has — MEASURED 55.6 GB/s; architecture.md §11.4 capability-tier law). The
+#     strict peer assertion is KEYED to the tier (device name contains "PRO"): on the
+#     budget GeForce box can_access_peer == false is the EXPECTED tagged degrade to
+#     the host-staged combine baseline (a PASS, not a fault), so the ONE sm_120 build
+#     serves BOTH boxes (the §0 / ⚡ box-role split). Every field is parity-NEUTRAL
+#     (§12) — the gate asserts the PROBE, never a reported number.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device (the factory + capabilities()) + steppe::core_internal (the
+# STEPPE_LOG_WARN / STEPPE_CUDA_WARN sink) + the device-private f2_block_kernel.cuh
+# for emulation_honorable. No io / no data. architecture.md §9, §11.4, §12, §13.
+add_executable(test_backend_capabilities_probe reference/test_backend_capabilities_probe.cu)
+target_link_libraries(test_backend_capabilities_probe
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_backend_capabilities_probe PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# emulated_fp64_honorable reflects steppe_device's own STEPPE_HAVE_EMU_TUNING; the
+# end-to-end check trusts the LIBRARY's compiled emulation_honorable() regardless of
+# this target's define. Match the library's define anyway (both flow from the one
+# cmake option; the box build turns it on) so this TU's #if-guarded include agrees.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_backend_capabilities_probe PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME backend_capabilities_probe COMMAND test_backend_capabilities_probe)
+
+# --- M4.5 UNIT I1 build_resources / Resources / PerGpuResources gate ----------
+# CUDA TU, DATA-FREE (sibling of test_backend_capabilities_probe.cu): drives the
+# M4.5 Resources HOME + builder — steppe::device::build_resources — on live
+# devices. The U5 gate above pins one CudaBackend's capabilities() probe; THIS
+# gate pins that build_resources BINDS one backend PER device in
+# DeviceConfig::devices order (the per-device-instance contract, backend.hpp;
+# the fixed g=0..G-1 combine order, architecture.md §11.4/§12) and stores each
+# device's ONE probe in PerGpuResources::caps (out-of-band, cleanup §(2).1/§(2).2).
+# The I1 verdict gate (architecture.md §9 Resources, §11.4 SPMG, §12 parity):
+#   TIER-INVARIANT (every lane): devices={0} -> exactly 1 entry bound to device 0
+#     with compute_major >= 12 and total_vram > 0; devices={} (auto) -> all visible
+#     ordinals 0..count-1 in order (the §9 DeviceConfig::devices auto-enumerate
+#     contract).
+#   rtxbox VERDICT (2x RTX PRO 6000, count >= 2): devices={0,1} -> exactly 2 entries
+#     bound to devices 0 and 1 IN ORDER, each compute_major >= 12, and — on the PRO
+#     tier (device name contains "PRO") — each can_access_peer == true (the REAL
+#     stock-driver P2P; architecture.md §11.4 capability-tier law). On a budget
+#     GeForce box can_access_peer == false is the EXPECTED tagged degrade to the
+#     host-staged combine baseline (a PASS, not a fault), so the strict peer
+#     assertion is KEYED to the tier and the 2-device build still succeeds — the
+#     ONE sm_120 build serves BOTH boxes (the §0 / ⚡ box-role split). NO real f2
+#     compute; every checked field is parity-NEUTRAL (§12) — the gate asserts the
+#     device BINDING + the PROBE, never a reported number.
+# Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
+# steppe::device (build_resources + the factory + capabilities()) + steppe::core_internal
+# (the src/ include root resolving "device/resources.hpp") + steppe::api (config.hpp).
+# No io / no data. architecture.md §9, §11.4, §12, §13.
+add_executable(test_resources_build reference/test_resources_build.cu)
+target_link_libraries(test_resources_build
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_resources_build PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# resources.cpp's build_resources reaches the GPU only through the CUDA-free factory
+# + capabilities(); no STEPPE_HAVE_EMU_TUNING-gated symbol is touched here, so no
+# emulation-tuning define is needed for this TU.
+add_test(NAME resources_build COMMAND test_resources_build)
+
+# --- M4.5 MULTI-GPU PARITY GATE (the §12 PARITY LAW; THE verify gate) ----------
+# CUDA TU (mirrors test_f2_blocks_equivalence.cu's data loading): loads real
+# derived_acc (P=50, fast) AND derived_full (P=768, scale) Q/V/N + the .snp prefix
+# via the io leaf, runs the SHARED assign_blocks, and asserts the MULTI-GPU combined
+# f2_blocks AND Vpair are BIT-IDENTICAL (exact std::memcmp / ==, NOT a tolerance) to
+# the single-GPU reference (core::compute_f2_blocks over the full inputs), across G:
+#   (1) G==1 (devices={0}) multi-GPU == single-GPU reference  (the bit-identity floor)
+#   (2) G==2 (devices={0,1}, prefer_p2p_combine=false) host-staged == single-GPU
+#       reference  (THE core parity claim, architecture.md §11.4 SPMG host-side
+#       fixed-order combine, §12 — bit-identical across G AND to single-GPU; NEVER an
+#       NCCL AllReduce).
+#   (3) G==2 (devices={0,1}, prefer_p2p_combine=true) P2P device-resident
+#       (cudaMemcpyPeer) combine == single-GPU reference  (the OPT-IN fast-path moves
+#       the same bytes / sums the same fixed order ⇒ identical; runs on the PRO tier).
+#   (4) G==2 P2P == G==2 host-staged  (the two-tier NEUTRALITY: both combine tiers
+#       bit-identical to each other — the explicit workflow ask).
+# Bit-identity holds because the sharding is BLOCK-ALIGNED (each block computed
+# entirely on one device from its own contiguous SNP columns ⇒ same slab bits as
+# single-GPU) and BOTH combine tiers sum in fixed g=0..G-1 order onto a zero tensor
+# (design §0/§3/§4). Strict bit-identity is asserted for EmulatedFp64{40} (the f2
+# production default; (4) is strict for both precisions); native Fp64 at G>=2 is the
+# documented batched-GEMM shape-sensitivity cell (oracle-tolerance, §12). On a
+# single-GPU box the G==2 lane is skipped (logged); an absent dataset directory is
+# skipped so the fast gate runs without derived_full. The out-of-band which-path tag
+# (Resources::last_combine_path) is asserted: prefer_p2p_combine=false ⇒ HostStaged on
+# every tier; on the PRO tier (rtxbox) can_access_peer==true AND the P2P candidate's
+# tag == P2pDeviceResident (confirms (3) actually exercised cudaMemcpyPeer, not a
+# silent fallback). Self-checking main() (not a GoogleTest TU); CTest gates on the
+# exit code. Links steppe::io (read_snp) + steppe::core (assign_blocks +
+# compute_f2_blocks + the multi-GPU entry point + the host-staged combine) +
+# steppe::device (build_resources + the per-device backends + plan_block_shards + the
+# device-resident P2P combine). architecture.md §11.4, §12, §13; design §6.
+add_executable(test_f2_multigpu_parity reference/test_f2_multigpu_parity.cu)
+target_link_libraries(test_f2_multigpu_parity
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+# Separable compilation so the executable device-links steppe_device's RDC kernels
+# directly (the same path the M4 / U5 reference tests use). steppe_core carries no
+# device link object of its own (CUDA_RESOLVE_DEVICE_SYMBOLS OFF, src/core/CMakeLists.txt),
+# so there is exactly one device-link of steppe_device — here.
+set_target_properties(test_f2_multigpu_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# The parity assertion is BIT-IDENTITY (single-GPU vs sharded, SAME precision), which
+# holds on BOTH lanes; match steppe_device's STEPPE_HAVE_EMU_TUNING when the option is
+# on (the box build) so the EmulatedFp64 arm exercises the FIXED-slice Ozaki path that
+# the per-device compute_f2_blocks engages (it must produce identical bits sharded vs
+# not), and so this TU's #if-guarded includes agree with the library.
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(test_f2_multigpu_parity PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
+
+# --- M4.5 SPMG single-GPU vs 2-GPU wall-clock BENCH (cleanup B1 fan-out) -------------
+# Manual bench (NOT a ctest gate): times core::compute_f2_blocks_multigpu G==1 vs G==2
+# end-to-end on real AADR; reports the speedup and catches the single-GPU OOM (large-P
+# only fits when sharded on a 32 GB card). Mirrors the parity target's links + emu def.
+add_executable(bench_f2_multigpu reference/bench_f2_multigpu.cu)
+target_link_libraries(bench_f2_multigpu
+    PRIVATE steppe::io steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(bench_f2_multigpu PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+if(STEPPE_HAVE_EMU_TUNING)
+  target_compile_definitions(bench_f2_multigpu PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+
+# --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
+# HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
+# core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
+# hand-built Resources (no real GPU compute, no io, no real peer access). It asserts
+# the FULL combine-gate truth table for the FOUR-term §4 gate — the workflow's REQUIRED
+# objective gate is that enable_peer_access=false forces last_combine_path==HostStaged
+# EVEN IF can_access_peer were true (the row the OLD two-term gate got wrong, which
+# would have selected P2P and called the forbidden cudaDeviceEnablePeerAccess). It also
+# pins: prefer && enable && can_access && G>=2 is the ONLY combo that selects P2P;
+# prefer=false or no-peer degrade to HostStaged; the G==1 fast path never runs the gate
+# (tag stays None); and (B4/X6) the `&& G >= 2` term is spelled in the predicate and
+# bites at G==1 — the production code now MATCHES the four-term predicate documented
+# across the seam (it was documented 4-term while shipping 3-term). Parity-NEUTRAL: it
+# asserts WHICH transport the gate picks, never a reported number, so the
+# f2_multigpu_parity bit-identity is untouched (the G>=2 term changes no reached path).
+#
+# It is a .cu (not a host .cpp) because compute_f2_blocks_multigpu references the
+# device-layer symbols plan_block_shards (host) + combine_f2_partials_p2p (CUDA, RDC),
+# so the executable must LINK + device-link steppe::device to RESOLVE them
+# (steppe::core links steppe::device PRIVATE; the P2P symbol is resolved, never called
+# — every driven row resolves to the host-staged baseline). Same .cu +
+# CUDA_SEPARABLE_COMPILATION pattern as test_resources_build.cu. Links steppe::core
+# (the entry point + host-staged combine) + steppe::device (resolve the referenced
+# device symbols) + steppe::core_internal (the src/ include root) + steppe::api
+# (config.hpp). No io / no data / no STEPPE_HAVE_EMU_TUNING (no emulation symbol
+# touched). architecture.md §11.4, §12, §13; cleanup B3 / CT2.
+add_executable(test_f2_multigpu_gate reference/test_f2_multigpu_gate.cu)
+target_link_libraries(test_f2_multigpu_gate
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_f2_multigpu_gate PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME f2_multigpu_gate COMMAND test_f2_multigpu_gate)
+
+# --- Host-only unit test of the SHARED f2-combine validator (cleanup B5 / X7) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the new single-home guard
+# core::validate_f2_partials (src/core/fstats/f2_partials_validate.hpp) — the ONE
+# validator BOTH f2 combine tiers (host-staged core::combine_f2_partials_host AND
+# device-resident device::combine_f2_partials_p2p) call, so the two tiers reject
+# malformed inputs IDENTICALLY (their parity-neutrality, architecture.md §11.4/§12).
+# The guard was DUPLICATED byte-for-byte across the two TUs (kept "in lock-step" by a
+# comment); B5 single-homes it AND closes the shared short-partial OOB gap (no
+# validator checked part.f2/vpair/block_sizes.size() == P*P*n_block, so a partial with
+# the right scalar n_block/P but an under-sized vector read out of bounds). The B5
+# verdict gate: every VALID case passes (single/two-shard tiling, empty/trailing-empty
+# degenerates, the n_block_full==0 corner) and EVERY malformed case FAILS FAST (throws
+# std::runtime_error) — count mismatch, negative P/n_block_full, n_block != shard span,
+# P disagreement, the SHORT-PARTIAL storage gap (f2/vpair/block_sizes under-sized), and
+# shards that do not tile [0, n_block_full). validate_f2_partials is header-only INLINE
+# and CUDA-free, reached as "core/fstats/f2_partials_validate.hpp" via
+# steppe::core_internal's src/ include root (the same root that resolves
+# "device/shard_plan.hpp"); steppe::api carries the public steppe/fstats.hpp. NO CUDA /
+# no out-of-line symbol, so this links ONLY steppe::core_internal + steppe::api — a
+# CUDA leak in the shared guard would fail this host compile (the §4-layering proof).
+# architecture.md §2 fail-fast, §4, §8, §13; cleanup B5 / X7 / C1.
+add_executable(test_f2_partials_validate unit/test_f2_partials_validate.cpp)
+target_link_libraries(test_f2_partials_validate
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_f2_partials_validate PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_f2_partials_validate PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate)
+
+# --- Host-only unit test of the HOST-STAGED f2 combine (cleanup B7 / f2_combine T1)
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the PORTABLE PARITY
+# BASELINE core::combine_f2_partials_host (src/core/fstats/f2_combine.cpp) — the
+# host-staged fixed-order combine that is the ONLY combine path on the budget box
+# (no peer access) and the bit-identity reference the device-resident P2P sibling
+# must match (architecture.md §11.4, §12). The unit was covered ONLY transitively
+# through the GPU-required parity test (test_f2_multigpu_parity.cu); this realizes
+# the header's own "unit-testable host-only" promise on the cheap host path.
+#
+# THE FIX UNDER TEST (B7 / f2_combine N2+P2): the combine PLACES each device's
+# compact partial at its block offset via a contiguous std::copy_n (memcpy-grade),
+# replacing the prior scalar `+=`-onto-+0.0 triple loop. The placement is STRICTLY
+# more faithful to single-GPU: a copy reproduces a −0.0 partial element byte-for-
+# byte, where the `+=` flipped it to +0.0 ((+0.0)+(−0.0)==+0.0). The verdict gate:
+# (1) two disjoint shards place over the full cover BIT-EXACT (f2/vpair/block_sizes);
+# (2) the −0.0 CASE — a −0.0 partial element lands as −0.0 (this case FAILS the old
+# `+=` body and PASSES the std::copy_n body, the N2 hardening proof); (3) the G==1
+# single-full-shard floor; (4) the degenerates (all-empty -> empty tensor, trailing
+# empty shard skipped); (5) fail-fast through the shared validate_f2_partials guard.
+# Bit-level placement + control flow + a bit-pattern fidelity claim, NOT a precision
+# statistic (ROADMAP §0).
+#
+# combine_f2_partials_host is out-of-line in steppe_core (f2_combine.cpp); steppe_core
+# links steppe::device PRIVATE with CUDA_RESOLVE_DEVICE_SYMBOLS OFF, and this TU names
+# only the CUDA-free F2BlockTensor + DeviceShard, so no GPU/CUDA symbol is pulled —
+# the CUDA-free host link is itself the §4-layering proof. Reached as
+# "core/fstats/f2_combine.hpp" / "device/shard_plan.hpp" via steppe::core_internal's
+# src/ include root; steppe::api carries the public steppe/fstats.hpp. Dual harness
+# (gtest when present, else self-checking main()); CTest gates on the exit code.
+# architecture.md §11.4, §12, §13; cleanup B7 / f2_combine N2/P2/T1.
+add_executable(test_f2_combine unit/test_f2_combine.cpp)
+target_link_libraries(test_f2_combine
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_f2_combine PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_f2_combine PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME f2_combine_unit COMMAND test_f2_combine)
+
+# --- Host-only unit test of the SPMG block-aligned shard PLANNER (cleanup TST-1) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the host-pure deterministic
+# planner steppe::device::plan_block_shards (src/device/shard_plan.{hpp,cpp}) — the
+# block→device mapping that is the STRUCTURAL parity floor (whole-block-on-one-device)
+# under BOTH combine tiers (architecture.md §11.4, §12). The unit was covered ONLY
+# transitively through the GPU parity test (test_f2_multigpu_parity.cu), which on
+# near-uniform AADR blocks can never hit the skew/edge cases; this test realizes the
+# header's own "exercisable host-only" promise.
+#
+# THE FIX UNDER TEST (B6 / X1 / shard_plan D-1): plan_block_shards dropped its redundant
+# `block_sizes` parameter and now derives each block's SNP count from `ranges[b].size()`
+# (a `long`; the single source of both balance + each shard's [s0,s1)). The plan MUST
+# stay BYTE-IDENTICAL to the old (block_sizes, ranges, G) signature — each case asserts
+# plan == an independent greedy reference + the documented exact layout, so a divergence
+# (which would change the SPMG combine layout and break the locked f2_multigpu_parity
+# bit-identity) fails fast here on the cheap host path, before the slow GPU run.
+#
+# plan_block_shards is host-pure CUDA-FREE (it names only core::BlockRange + std types,
+# its TU shard_plan.cpp is a plain .cpp in steppe_device that references no CUDA symbol),
+# so this links the out-of-line symbol from steppe::device + the CUDA-free seam via
+# steppe::core_internal (the src/ include root that resolves "device/shard_plan.hpp" +
+# "core/domain/block_partition_rule.hpp"); steppe::api carries config.hpp. Only
+# shard_plan.cpp.o is pulled (no kernel object), so no GPU/CUDA code links — a CUDA leak
+# in the planner would fail this host link (the §4 layering proof). Self-checking main()
+# (no gtest); CTest gates on the exit code. architecture.md §8, §11.4, §12, §13.
+add_executable(test_shard_plan unit/test_shard_plan.cpp)
+target_link_libraries(test_shard_plan
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME shard_plan_unit COMMAND test_shard_plan)
+
+# --- Host-only unit test of the SPMG ORCHESTRATOR CORE (cleanup D1/T1, B9) -----
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the HOST-PURE, P2P-FREE
+# core of the multi-GPU precompute orchestrator — core::plan_multigpu_shards (the
+# block-aligned shard plan) + core::compute_multigpu_partials (the per-device
+# concurrent std::jthread fan-out) — factored out of the public entry point
+# compute_f2_blocks_multigpu into src/core/fstats/f2_blocks_multigpu_core.{hpp,cpp}
+# (the audit's D1 extraction that unlocks the T1 host test). The orchestrator's host
+# logic — the zero-copy column sub-view, the dense zero-based local block_id
+# transform, the empty-/n_block<G-shard handling, the exception_ptr rethrow — was
+# exercised ONLY end-to-end on a GPU (test_f2_multigpu_parity.cu) or through the §4
+# gate .cu (test_f2_multigpu_gate.cu, which must device-link steppe::device for the
+# RDC P2P symbol). This realizes the §13 "GPU-free-testable seam" promise on the cheap
+# host path. The B9/T1 verdict gate:
+#   (1) SUB-VIEW + LOCAL-ID — each device g is handed EXACTLY its shard's columns
+#       (Q.data + P*s0, M == s1-s0) and a DENSE ZERO-BASED local block_id
+#       (block_id[s0+k] - b0), recorded + asserted by a fake backend;
+#   (2) FAN-OUT + COMBINE — the G partials, keyed on the GLOBAL block id, recombine via
+#       the host-staged fixed-order combine into the full tensor BIT-FOR-BIT vs an
+#       independent reference (driven over G=1/2/4 incl. an uneven 8-block/4-device
+#       case — the concurrent fan-out writing 4 distinct partials[g] slots, also
+#       TSan-checkable for race-freedom);
+#   (3) G==1 IDENTITY — the single full shard with local==global ids;
+#   (4) EMPTY / n_block<G — trailing empty shards place nothing, prefix still exact;
+#   (5) EXCEPTION PROPAGATION — a faulting worker surfaces as a normal throw (the
+#       exception_ptr rethrow), never std::terminate from an escaped thread exception.
+# Parity-NEUTRAL: it asserts the host-pure transform + placement, never a number — the
+# locked f2_multigpu_parity bit-identity is untouched (the extraction is a pure refactor).
+#
+# WHY THIS LINKS NO CUDA / NEEDS NO device-link. The extracted core references ONLY the
+# CUDA-free ComputeBackend seam, plan_block_shards (a plain .cpp symbol in steppe_device,
+# the same one test_shard_plan resolves), block_ranges (header-inline), and the
+# host-staged combine_f2_partials_host (steppe_core) — NEVER combine_f2_partials_p2p
+# (the device-RDC symbol the public entry point references). So this TU links
+# steppe::core (the core TU + the host-staged combine) + steppe::device (resolve the
+# plain plan_block_shards.o — NO kernel object pulled, NO CUDA_SEPARABLE_COMPILATION) +
+# steppe::core_internal (the src/ include root) + steppe::api (config.hpp). A CUDA leak
+# in the extracted core would fail this host link (the §4 layering proof). Self-checking
+# main() (no gtest); CTest gates on the exit code. architecture.md §2, §4, §7, §11.4,
+# §12, §13; cleanup D1/T1, B9.
+add_executable(test_f2_blocks_multigpu unit/test_f2_blocks_multigpu.cpp)
+target_link_libraries(test_f2_blocks_multigpu
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME f2_blocks_multigpu_unit COMMAND test_f2_blocks_multigpu)
+
+# --- Host-only unit test of the §9 device-ordinal validator (cleanup B8/C1/T1) -
+# Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the §9 build()-validation
+# predicate steppe::device::validate_device_order(span<const int>, int) the B8
+# cleanup factored out of build_resources — reject DUPLICATE or OUT-OF-RANGE device
+# ordinals fail-fast (architecture.md §9 "Validation at build() rejects ... any
+# device id in DeviceConfig::devices that is absent or duplicated", §2). Before B8
+# the duplicate case ({0,0}) was NOT validated at all (it silently ran two combine
+# lanes on ONE GPU), and the validation was entangled with a real device probe so
+# its only coverage was a GPU `.cu` — the §13 "exercisable GPU-free" duty unmet. The
+# B8/C1/T1 verdict gate: every g=0..G-1 order build_resources produces PASSES; every
+# duplicate ({0,0}, {0,1,0}) and every out-of-range (>=visible, negative, device on a
+# zero-visible box) THROWS std::runtime_error; out-of-range is checked BEFORE the
+# `seen` duplicate index (no OOB). Parity-NEUTRAL: it asserts INPUT rejection, never a
+# reached path or a number, so the locked f2_multigpu_parity bit-identity is untouched.
+#
+# validate_device_order is out-of-line in steppe_device (resources.cpp) and is itself
+# CUDA-FREE host arithmetic over (order, visible) — it makes NO CUDA call and touches
+# no device. This TU links steppe::device to RESOLVE the out-of-line symbol (like
+# test_shard_plan does for plan_block_shards) but calls only validate_device_order, so
+# it needs NO GPU at run time. resources.hpp is reached as "device/resources.hpp" via
+# the src/ root on steppe::device's PUBLIC include dir; steppe::api carries config.hpp.
+# Dual harness (gtest when present, else self-checking main()); CTest gates on the exit
+# code. architecture.md §2 fail-fast, §9, §11.4, §12, §13; cleanup device-resources
+# C1/T1, B8.
+add_executable(test_validate_device_order unit/test_validate_device_order.cpp)
+target_link_libraries(test_validate_device_order
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_validate_device_order PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_validate_device_order PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME validate_device_order_unit COMMAND test_validate_device_order)
 
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure

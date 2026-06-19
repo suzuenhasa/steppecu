@@ -39,14 +39,43 @@ target_compile_features(steppe_core_internal INTERFACE cxx_std_20)
 # by both io and the device kernels (architecture.md §8 DRY invariant). The
 # per-SNP `block_of` primitive + the cM→Morgan conversion stay header-inline; only
 # the stateful pass compiles here.
+#
+# M4.5 SPMG precompute (architecture.md §11.4, §12): the multi-GPU entry point
+# (fstats/f2_blocks_multigpu.cpp) shards whole blocks across the G devices of a
+# Resources bundle, drives each per-device backend through the CUDA-free
+# ComputeBackend seam, and combines the partials in the FIXED g=0..G-1 order — either
+# the host-staged fixed-order combine (fstats/f2_combine.cpp, the portable parity
+# baseline) or, behind the §4 capability gate (defined ONCE at the `use_p2p`
+# computation in fstats/f2_blocks_multigpu.cpp — "THE §4 COMBINE GATE", §8
+# single-source), the device-resident cudaMemcpyPeer combine
+# (combine_f2_partials_p2p). Both combine tiers are CUDA-free-DECLARED: f2_combine
+# .cpp is itself CUDA-free host-pure in steppe::core, and the P2P combine is reached
+# through the CUDA-free decl device/p2p_combine.hpp (its CUDA definition,
+# cuda/p2p_combine.cu, lives in steppe_device — the same CUDA-free-decl pattern as
+# make_cuda_backend). So this entry-point TU names only F2BlockTensor / Resources /
+# DeviceShard + the CUDA-free combine decls and stays CUDA-free. Both
+# plan_block_shards and combine_f2_partials_p2p resolve through the PRIVATE
+# steppe::device link below.
+#
+# The HOST-PURE, P2P-FREE core of that orchestrator — the block-aligned shard PLAN
+# (plan_multigpu_shards) + the per-device concurrent FAN-OUT (compute_multigpu_partials)
+# — is factored into fstats/f2_blocks_multigpu_core.cpp (cleanup D1/T1, B9): it
+# references ONLY the CUDA-free ComputeBackend seam + plan_block_shards + block_ranges,
+# NEVER the device-RDC combine_f2_partials_p2p, so a GPU-FREE host test
+# (tests/unit/test_f2_blocks_multigpu.cpp) drives it against a fake backend with no
+# device-link. The entry-point TU composes that core with the §4 combine fork.
 add_library(steppe_core STATIC
     fstats/f2_from_blocks.cpp
+    fstats/f2_combine.cpp
+    fstats/f2_blocks_multigpu.cpp
+    fstats/f2_blocks_multigpu_core.cpp
     domain/block_partition_rule.cpp)
 add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core
     PUBLIC  steppe::api steppe::core_internal
-    PRIVATE steppe::device steppe::warnings)   # GPU only via ComputeBackend
+    PRIVATE steppe::device steppe::warnings     # GPU only via ComputeBackend
+            Threads::Threads)                   # SPMG per-device fan-out (f2_blocks_multigpu)
 
 # steppe_core has NO CUDA sources of its own (pure host orchestration); it links
 # steppe_device PRIVATE only to reach the GPU through ComputeBackend. Do NOT let it
