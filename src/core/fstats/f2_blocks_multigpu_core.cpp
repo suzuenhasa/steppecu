@@ -77,10 +77,15 @@ std::vector<F2BlockTensor> compute_multigpu_partials(
     // is self-contained and blocking — it guard_device()s its OWN device, owns its OWN
     // stream/handle/buffers, and ends on its own cudaStreamSynchronize — so the host
     // loop that issued them one-at-a-time (each blocking on its trailing sync before
-    // the next was even issued) serialized work the hardware can overlap: each device
-    // has its own default stream and commands on distinct devices' default streams run
-    // concurrently (CUDA Programming Guide §3.4, "Programming Systems with Multiple
-    // GPUs"). Wall-clock was Σ_g time(g); fanned out it is max_g time(g).
+    // the next was even issued) serialized work the hardware can overlap. Each device's
+    // backend owns its OWN non-blocking statistic stream (cuda_backend.cu, P2/F1: a
+    // `cudaStreamNonBlocking` stream that does NOT implicitly serialize against the
+    // process-wide legacy default stream — CUDA Runtime API `cudaStreamCreateWithFlags`),
+    // and commands on distinct devices' streams run concurrently (CUDA Programming Guide
+    // §3.4, "Programming Systems with Multiple GPUs"). The fan-out's H2D inputs are
+    // additionally pinned through the per-backend registry (P4/L2) so the two devices'
+    // uploads run as concurrent DMAs rather than contending pageable copies. Wall-clock
+    // was Σ_g time(g); fanned out it trends toward max_g time(g).
     //
     // No shared mutable state: each worker writes ONLY its own pre-sized partials[g]
     // slot (distinct elements of a vector sized to G before any thread starts — no

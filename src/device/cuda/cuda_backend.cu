@@ -58,6 +58,7 @@
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
+#include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
 #include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction
@@ -180,11 +181,23 @@ public:
         DeviceBuffer<double> dG(pp), dVpair(pp), dR(two_pp), dF2(pp);
 
         // ---- Upload the Q/V/N contract (column-major [P × M]) ----------------
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, pm * sizeof(double),
+        // AMORTIZED-pin the H2D source pages (P4/L2) so these are genuine async DMAs
+        // that overlap the peer device's copies/compute under the §11.4 fan-out.
+        // `cudaMemcpyAsync` is host-async ONLY from page-locked memory (CUDA Runtime
+        // API); from pageable host memory it falls back to a synchronous staging copy.
+        // The cache registers each (ptr,bytes) ONCE and reuses it across calls — the
+        // register cost is paid once, not per call (the bench/M5 reuse the same Q/V/N).
+        // A failed pin degrades to pageable with a debug warning. PARITY-NEUTRAL (same
+        // bytes; architecture.md §11.4, §12).
+        const std::size_t raw_bytes = pm * sizeof(double);
+        pinned_in_.ensure(Q.data, raw_bytes);
+        pinned_in_.ensure(V.data, raw_bytes);
+        pinned_in_.ensure(N.data, raw_bytes);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, raw_bytes,
                                           cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, pm * sizeof(double),
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, raw_bytes,
                                           cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, pm * sizeof(double),
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, raw_bytes,
                                           cudaMemcpyHostToDevice, stream_.get()));
 
         // ---- Fused feeder -> 3 GEMMs -> fused numerator/divide ---------------
@@ -199,7 +212,12 @@ public:
         launch_assemble_f2(dG.data(), dVpair.data(), dR.data(), dF2.data(), P, stream_.get());
 
         // ---- Copy results back across the CUDA-free seam --------------------
-        // `out` (with out.P set) was constructed before the degenerate guard.
+        // `out` (with out.P set) was constructed before the degenerate guard. The D2H
+        // result vectors are FRESHLY allocated each call (a new base pointer every
+        // time), so a per-call cudaHostRegister would pay the page-locking tax with
+        // ZERO amortization — a strict loss (MEASURED, perf-discovery P4). The result
+        // copies therefore stay PAGEABLE; only the stable, reused H2D inputs above are
+        // worth pinning.
         out.f2.resize(pp);
         out.vpair.resize(pp);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2.data(), pp * sizeof(double),
@@ -319,11 +337,33 @@ public:
         {
             // Raw inputs — feeder-only; freed at the end of this scope.
             DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, pm * sizeof(double),
+            // ---- AMORTIZED-pin the Q/V/N H2D SOURCE pages (P4/L2; perf-discovery).
+            // These are the dominant copies (3·P·M doubles — ~5.4 GB at P=768/M=584k
+            // single-GPU, ~half that per device under the fan-out). `cudaMemcpyAsync`
+            // is host-async ONLY from page-locked memory; from the caller's PAGEABLE
+            // Q/V/N it falls back to a synchronous host-blocking staging copy (CUDA
+            // Runtime API, `cudaMemcpyAsync`: "For transfers from pageable host memory
+            // ... the function is synchronous"), so under the §11.4 fan-out the two
+            // devices' H2Ds contend on the driver's internal staging instead of
+            // running as concurrent DMAs (the measured ~44 % pageable copy stall,
+            // perf-discovery §2; MEASURED ~109 ms/iter pageable vs ~51 ms/iter pinned
+            // per device, two-device concurrent, on rtxbox). The cache registers each
+            // (ptr,bytes) ONCE and reuses it across calls — registering a multi-GB
+            // range is itself a ~50–360 ms page-walk, so per-call registration would
+            // be a net loss; amortizing it across the repeated calls (the bench/M5
+            // reuse the same host Q/V/N) is what makes the two concurrent pinned DMAs
+            // a net win. A failed pin (RLIMIT_MEMLOCK) degrades to pageable with a
+            // debug warning — never a crash. PARITY-NEUTRAL: pinned vs pageable moves
+            // the identical bytes (architecture.md §11.4, §12).
+            const std::size_t raw_bytes = pm * sizeof(double);
+            pinned_in_.ensure(Q.data, raw_bytes);
+            pinned_in_.ensure(V.data, raw_bytes);
+            pinned_in_.ensure(N.data, raw_bytes);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, raw_bytes,
                                               cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, pm * sizeof(double),
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, raw_bytes,
                                               cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, pm * sizeof(double),
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, raw_bytes,
                                               cudaMemcpyHostToDevice, stream_.get()));
             // ONE fused feeder over ALL SNPs (block-agnostic; native FP64).
             launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
@@ -435,6 +475,11 @@ public:
         }
 
         // ---- Copy the resident tensors back across the CUDA-free seam ---------
+        // The D2H result vectors (out.f2/out.vpair) are FRESHLY allocated each call,
+        // so caching their registration never hits and a per-call cudaHostRegister
+        // would pay the page-locking tax with zero amortization (a strict loss,
+        // MEASURED — perf-discovery P4). They stay PAGEABLE; only the stable, reused
+        // H2D inputs above are pinned.
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2_all.data(),
                                           total * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -670,6 +715,20 @@ private:
     Stream stream_{};
     CublasHandle blas_{};
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
+
+    // AMORTIZED H2D pinned-input registry (P4/L2; perf-discovery.md). Holds the
+    // persistent `cudaHostRegister`s of the Q/V/N H2D source pages so the page-locking
+    // cost is paid ONCE per (ptr,bytes) and reused across the many compute_f2_blocks
+    // calls a run issues — the precondition for the two devices' H2Ds to run as
+    // CONCURRENT pinned DMAs (MEASURED ~2× per-device copy speedup vs contending
+    // pageable). Declared LAST so it is destroyed FIRST (reverse-order destruction):
+    // it only `cudaHostUnregister`s host pages — no dependency on stream_/blas_, and
+    // unregistering the caller's pages before the device-context members tear down is
+    // clean. The registrations reference caller-owned host memory (the contract's
+    // Q/V/N); the cache must not outlive that memory, which it cannot — the backend is
+    // owned by `Resources`, scoped within the caller's compute call tree. PARITY-
+    // NEUTRAL (pinning moves no arithmetic bits; §12).
+    PinnedRegistryCache pinned_in_{};
 };
 
 /// Factory for the GPU backend (declared in device/backend_factory.hpp, X-9/B8;
