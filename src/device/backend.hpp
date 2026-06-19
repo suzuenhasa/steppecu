@@ -27,11 +27,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
 #include "steppe/config.hpp"        // steppe::Precision
+#include "steppe/error.hpp"         // steppe::Status (qpAdm domain-outcome POD fields)
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
+#include "steppe/qpadm.hpp"         // steppe::QpAdmOptions (CUDA-free; the fit seam config)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
@@ -70,6 +73,67 @@ struct F2Result {
 
     /// Number of populations P (the leading dimension of both matrices).
     int P = 0;
+};
+
+// ---------------------------------------------------------------------------
+// qpAdm fit-engine PODs (design docs/design/fit-engine.md §2; the M(fit-1)
+// FROZEN CONTRACT §2). Plain CUDA-free PODs that cross the ComputeBackend seam by
+// value, adjacent to F2Result. Flattening convention is fixed here ONCE so the
+// jackknife/ALS/cross-checks cannot disagree on the vectorization order.
+//
+// VECTORIZATION ORDER (binding — it is AT2's `c(t(xmat))` order, design §4 S4/S6;
+// verified against the golden by the R prototype): the m = nl*nr entries of the
+// per-block f4 matrix are flattened ROW-MAJOR over (i,j): k = j + nr*i, with i in
+// 0..nl-1 over left[-target] and j in 0..nr-1 over right[-R0]. AT2 builds Q with
+// this same row-major order (jack_pairarr_stats: aperm(c(2,1,3)) then row-fill),
+// and opt_A/opt_B index qinv with c(t(xmat)) = the same order. Using i + nl*j
+// would silently transpose Q vs the X vector and break parity.
+// ---------------------------------------------------------------------------
+
+/// S3 output: the per-block f4 matrix X, flattened m=nl*nr per block, plus the
+/// jackknife point estimate x_total (the AT2 $est vector).
+struct F4Blocks {
+    /// [m * n_block]: x_blocks[k + m*b] = vec(f4)[k] for block b, with the
+    /// row-major k = j + nr*i convention above.
+    std::vector<double> x_blocks;
+
+    /// [m]: AT2 weighted-jackknife point estimate of f4 (the $est vector), same
+    /// k = j + nr*i flatten.
+    std::vector<double> x_total;
+
+    /// [m * n_block]: the per-entry leave-one-out (est_to_loo) replicate values
+    /// loo[k + m*b], carried so S7 re-fits per LOO block without recomputing S4.
+    std::vector<double> x_loo;
+
+    int nl = 0;       ///< = left.size()       (rows of the f4 matrix)
+    int nr = 0;       ///< = right.size() - 1  (cols of the f4 matrix)
+    int n_block = 0;
+};
+
+/// S4 output: the covariance Q and the inverse of the FUDGED Q.
+struct JackknifeCov {
+    /// [m*m] (symmetric, layout-agnostic), UNFUDGED (the golden Q convention).
+    std::vector<double> Q;
+
+    /// [m*m] inverse of the FUDGED Q (diag += fudge*tr(Q)).
+    std::vector<double> Qinv;
+
+    int m = 0;
+
+    /// NonSpdCovariance if the fudged Q is not invertible (value, not throw).
+    Status status = Status::Ok;
+};
+
+/// S6 output: the GLS weight fit.
+struct GlsWeights {
+    std::vector<double> w;  ///< [nl] normalized admixture weights (Σw = 1).
+    std::vector<double> A;  ///< [nl*r] col-major refined left factor (rows=left, cols=rank).
+    std::vector<double> B;  ///< [r*nr] col-major refined right factor.
+    double chisq = 0.0;     ///< vec(E)' Qinv vec(E), E = X - A*B.
+    int r = 0;
+
+    /// RankDeficient if svd(X)/the constrained solve degenerates (value, not throw).
+    Status status = Status::Ok;
 };
 
 /// A CUDA-FREE, NON-OWNING view of one packed genotype tile + its population
@@ -388,6 +452,96 @@ public:
     ///         (N, V integer-valued ⇒ zero diff; Q via integer-accumulate AC/AN +
     ///         single FP64 divide ⇒ exact is the goal/gate).
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
+
+    // -----------------------------------------------------------------------
+    // qpAdm fit-engine virtuals (design §1.7 + the M(fit-1) FROZEN CONTRACT §2).
+    // BATCHED-CAPABLE by signature (a leading n_block / model axis) so the CUDA
+    // backend (M(fit-4)) never needs a per-model/per-block host-loop retrofit.
+    // NON-PURE: the base throws (the established backend.hpp pattern); CpuBackend
+    // overrides all four with the native-FP64 reference. Each takes a `Precision`
+    // that governs ONLY matmul sub-steps; the SVD/Cholesky/weight solves are
+    // pinned native FP64 internally regardless (§12 backend invariant). In
+    // M(fit-1) the CpuBackend ignores `Precision` and is unconditionally FP64.
+    // -----------------------------------------------------------------------
+
+    /// S3 — assemble the per-block f4 matrix X from device-resident f2 (zero D2H on
+    /// the CUDA path). BATCHED over n_block (the whole [m × n_block] tensor in one
+    /// call) and resident-capable. left_idx[0] is the TARGET (L_0, prepended);
+    /// right_idx[0] is R_0. AT2 identity (per block b), for i in 0..nl-1 (left
+    /// source i), j in 0..nr-1 (right j):
+    ///   X[i,j,b] = 0.5*( f2(left_idx[i+1], right_idx[0], b)
+    ///                  + f2(left_idx[0],   right_idx[j+1], b)
+    ///                  - f2(left_idx[0],   right_idx[0],   b)
+    ///                  - f2(left_idx[i+1], right_idx[j+1], b) )
+    /// nl = left_idx.size()-1, nr = right_idx.size()-1, m = nl*nr; flatten
+    /// k = j + nr*i (row-major; the F4Blocks vectorization). Native FP64 (OQ-5).
+    [[nodiscard]] virtual F4Blocks assemble_f4(const steppe::device::DeviceF2Blocks& f2,
+                                               std::span<const int> left_idx,
+                                               std::span<const int> right_idx,
+                                               const Precision& precision) {
+        (void)f2; (void)left_idx; (void)right_idx; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f4: not implemented by this backend");
+    }
+
+    /// S3 host-oracle overload — the SAME AT2 f4 combine reading a host
+    /// F2BlockTensor directly (the M(fit-1) parity/oracle door; design §6 table:
+    /// the CpuBackend reads host memory). Identical math to the DeviceF2Blocks
+    /// overload; only the f2 storage differs (host vs VRAM). The GPU backend
+    /// overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides this.
+    [[nodiscard]] virtual F4Blocks assemble_f4(const F2BlockTensor& f2,
+                                               std::span<const int> left_idx,
+                                               std::span<const int> right_idx,
+                                               const Precision& precision) {
+        (void)f2; (void)left_idx; (void)right_idx; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f4(host): not implemented by this backend");
+    }
+
+    /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
+    /// the per-block jackknife WEIGHTS. OQ-3 RESOLVED: the weight is block_sizes[b]
+    /// (AT2 block_lengths, the per-block SNP count) — NOT Vpair. Pipeline (AT2
+    /// jack_pairarr_stats / est_to_loo, design §4 S4): the est_to_loo conversion to
+    /// LOO replicates (carried on F4Blocks.x_loo), the AT2 jackknife `est` total,
+    /// the xtau pseudo-values, Q = xtau·xtauᵀ/n_block (UNFUDGED), then Qinv =
+    /// inverse(Q with diag += fudge·tr(Q)). BATCHED over the m axis. Native FP64.
+    [[nodiscard]] virtual JackknifeCov jackknife_cov(const F4Blocks& x,
+                                                     std::span<const int> block_sizes,
+                                                     double fudge,
+                                                     const Precision& precision) {
+        (void)x; (void)block_sizes; (void)fudge; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::jackknife_cov: not implemented by this backend");
+    }
+
+    /// S5 — rank test: chisq = vec(E)'·Qinv·vec(E), E = X_total - A·B, dof =
+    /// (nl-r)·(nr-r). Returns the SVD seed factors A (nl×r), B (r×nr) and the
+    /// statistic for rank r. In M(fit-1) this is the SEED for S6's ALS at the
+    /// single fitted rank; the qpWave rank sweep (multiple r) is M(fit-2).
+    /// Deterministic; native FP64 (oracle-grade).
+    [[nodiscard]] virtual GlsWeights rank_test(const F4Blocks& x,
+                                               const JackknifeCov& cov,
+                                               int r,
+                                               const Precision& precision) {
+        (void)x; (void)cov; (void)r; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::rank_test: not implemented by this backend");
+    }
+
+    /// S6 — GLS weights via AT2 ALS (OQ-1, the load-bearing primitive). Seed A,B
+    /// from svd(X_total) at rank r; refine by opt_A/opt_B for opts.als_iterations
+    /// (default 20) with the fudge ridge; then the CONSTRAINED weight solve on the
+    /// (r+1)×(r+1) SPD system; normalize Σw=1. Returns w, refined A,B, and chisq.
+    /// AT2 `qpadm.R` reproduced verbatim (design §4). Native FP64 throughout.
+    [[nodiscard]] virtual GlsWeights gls_weights(const F4Blocks& x,
+                                                 const JackknifeCov& cov,
+                                                 int r,
+                                                 const QpAdmOptions& opts,
+                                                 const Precision& precision) {
+        (void)x; (void)cov; (void)r; (void)opts; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::gls_weights: not implemented by this backend");
+    }
 
     /// Probe the capability tier of THE device this backend instance is bound to
     /// (the per-device-instance contract above): compute capability, total/free

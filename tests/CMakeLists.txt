@@ -404,6 +404,28 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME config_unit COMMAND test_config)
 
+# --- M(fit-1) qpAdm parity test (the Phase-2 first-fit acceptance gate) --------
+# CUDA-FREE host C++ driven through the CpuBackend reference (native FP64): reads
+# the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the SAME
+# f2 ADMIXTOOLS 2 read internally — runs the single-model qpAdm fit
+# (steppe::run_qpadm, S3->S4->S6->S7) and asserts weights/chisq/dof/p + the S3/S4
+# X/Q slice cross-check vs the af6a8c2 golden (design docs/design/fit-engine.md;
+# the M(fit-1) FROZEN CONTRACT). Self-checking main() (exits non-zero on failure;
+# CTest gates on the exit code), so it does NOT link gtest_main.
+#
+# The TU itself is host-only C++ (no CUDA kernels) — it is the §4 layering proof
+# that the fit reference compiles + runs with no GPU. It is named .cu only so the
+# executable device-links steppe_device's RDC kernels (CUDA_SEPARABLE_COMPILATION),
+# the same path every other reference test that links steppe::device uses; the GPU
+# is never touched at run time (CpuBackend only). Links steppe::core (run_qpadm) +
+# steppe::device (make_cpu_backend + the four fit virtuals on CpuBackend).
+add_executable(test_qpadm_parity reference/test_qpadm_parity.cu)
+target_link_libraries(test_qpadm_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpadm_parity
+         COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- Host-only unit test of the backend-factory single source (X-9/B8) --------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend_factory.hpp
 # and static_asserts that BOTH factories — make_cpu_backend AND make_cuda_backend —

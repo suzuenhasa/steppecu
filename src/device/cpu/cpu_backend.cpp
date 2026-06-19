@@ -45,6 +45,7 @@
 // `import steppe` work without a GPU and is the correctness anchor the GPU is
 // diffed against (architecture.md §8, §13).
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -54,10 +55,14 @@
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/decode_af.hpp"     // genotype_code, accumulate_genotype, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
+#include "core/internal/small_linalg.hpp"  // core::solve/inverse/jacobi_svd (the qpAdm reference solvers)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
-#include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult
+#include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult, F4Blocks/...
 #include "device/backend_factory.hpp"      // steppe::device::make_cpu_backend (the single-source decl, X-9/B8)
+#include "device/device_f2_blocks.hpp"     // steppe::device::DeviceF2Blocks (the S3 device-resident input)
 #include "steppe/config.hpp"               // steppe::Precision
+#include "steppe/error.hpp"                // steppe::Status
+#include "steppe/qpadm.hpp"                // steppe::QpAdmOptions
 
 // CpuBackend + make_cpu_backend live in steppe::device alongside the GPU backend:
 // both implement the ONE CUDA-free ComputeBackend interface and both compile into
@@ -346,6 +351,511 @@ public:
             }
         }
         return out;
+    }
+
+    // =====================================================================
+    // qpAdm fit-engine reference (S3/S4/S5/S6) — native FP64, AT2-exact.
+    // The math reproduces ADMIXTOOLS 2 R/qpadm.R + R/resampling.R verbatim
+    // (design docs/design/fit-engine.md §4; the FROZEN CONTRACT §4) and was
+    // validated bit-for-bit against the af6a8c2 golden via the R prototype. The
+    // vectorization order is the AT2 `c(t(xmat))` ROW-MAJOR order k = j + nr*i
+    // (design §2 F4Blocks doc) — Q is built in this same order so opt_A/opt_B's
+    // c(t(xmat)) indexing of qinv lines up.
+    // =====================================================================
+
+    /// S3 — host-oracle f4 assembly (design §4 S3). The AT2 four-slab combine
+    /// per block: X[i,j,b] = (f2(Li,R0)+f2(L0,Rj)-f2(L0,R0)-f2(Li,Rj))/2, where
+    /// left_idx = [target] ++ sources, right_idx[0] = R0. Flatten k = j + nr*i.
+    /// Native FP64 (ignores `precision`, OQ-5). Also computes the AT2 jackknife
+    /// point estimate x_total + the est_to_loo replicate array x_loo (carried for
+    /// S4/S7) so the totals→LOO conversion happens once.
+    [[nodiscard]] F4Blocks assemble_f4(const F2BlockTensor& f2,
+                                       std::span<const int> left_idx,
+                                       std::span<const int> right_idx,
+                                       const Precision& precision) override {
+        (void)precision;  // native FP64 reference
+
+        const int nl = static_cast<int>(left_idx.size()) - 1;  // sources (target prepended)
+        const int nr = static_cast<int>(right_idx.size()) - 1;  // rights minus R0
+        const int nb = f2.n_block;
+        const int P = f2.P;
+        const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+
+        F4Blocks out;
+        out.nl = nl;
+        out.nr = nr;
+        out.n_block = nb;
+        const std::size_t m = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb), 0.0);
+        if (nl <= 0 || nr <= 0 || nb <= 0) return out;
+
+        const int L0 = left_idx[0];
+        const int R0 = right_idx[0];
+        // f2 accessor: f2[i + P*j + P*P*b].
+        const auto f2at = [&](int i, int j, int b) -> double {
+            return f2.f2[static_cast<std::size_t>(i) +
+                         static_cast<std::size_t>(P) * static_cast<std::size_t>(j) +
+                         slab * static_cast<std::size_t>(b)];
+        };
+        for (int i = 0; i < nl; ++i) {
+            const int Li = left_idx[static_cast<std::size_t>(i) + 1];
+            for (int j = 0; j < nr; ++j) {
+                const int Rj = right_idx[static_cast<std::size_t>(j) + 1];
+                const std::size_t k = static_cast<std::size_t>(j) +
+                                      static_cast<std::size_t>(nr) * static_cast<std::size_t>(i);
+                for (int b = 0; b < nb; ++b) {
+                    const double x = 0.5 * (f2at(Li, R0, b) + f2at(L0, Rj, b) -
+                                            f2at(L0, R0, b) - f2at(Li, Rj, b));
+                    out.x_blocks[k + m * static_cast<std::size_t>(b)] = x;
+                }
+            }
+        }
+
+        // est_to_loo + the AT2 jackknife point estimate, computed once here so S4
+        // (Q) and S7 (LOO re-fits) share the SAME loo array. block_sizes are read
+        // from the host tensor (OQ-3: AT2 block_lengths, NOT Vpair).
+        compute_loo_and_total(out, f2.block_sizes);
+        return out;
+    }
+
+    /// S4 — weighted block-jackknife covariance (design §4 S4; AT2
+    /// jack_pairarr_stats). Consumes the per-entry LOO replicates carried on
+    /// F4Blocks (x_loo) and the AT2 point estimate (x_total). Builds the xtau
+    /// pseudo-values, Q = xtau·xtauᵀ/n_block (UNFUDGED, golden convention), then
+    /// Qinv = inverse(Q with diag += fudge·tr(Q)). Native FP64.
+    [[nodiscard]] JackknifeCov jackknife_cov(const F4Blocks& x,
+                                             std::span<const int> block_sizes,
+                                             double fudge,
+                                             const Precision& precision) override {
+        (void)precision;  // native FP64
+
+        const int m = x.nl * x.nr;
+        const int nb = x.n_block;
+        JackknifeCov out;
+        out.m = m;
+        if (m <= 0 || nb <= 0) { out.status = Status::Ok; return out; }
+
+        // n = Σ block_sizes; h_b = n / bl_b. AT2 xtau (design §4 S4):
+        //   xtau[k,b] = ( est[k]*h_b - loo[k,b]*(h_b-1) - tot_line[k] ) / sqrt(h_b-1)
+        // where est[k] = x_total[k] (the AT2 jackknife $est), and tot_line[k] is the
+        // weighted.mean(loo, 1 - bl/n) line (computed in compute_loo_and_total).
+        long double n_ld = 0.0L;
+        for (int b = 0; b < nb; ++b) n_ld += static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+        const double n = static_cast<double>(n_ld);
+
+        const std::size_t M = static_cast<std::size_t>(m);
+        std::vector<double> xtau(M * static_cast<std::size_t>(nb), 0.0);
+        for (int b = 0; b < nb; ++b) {
+            const double bl = static_cast<double>(block_sizes[static_cast<std::size_t>(b)]);
+            const double h = n / bl;
+            const double sh = std::sqrt(h - 1.0);
+            for (int k = 0; k < m; ++k) {
+                const double loo = x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
+                const double est = x.x_total[static_cast<std::size_t>(k)];
+                const double totline = tot_line_[static_cast<std::size_t>(k)];
+                xtau[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)] =
+                    (est * h - loo * (h - 1.0) - totline) / sh;
+            }
+        }
+        // Q = xtau · xtauᵀ / numblocks  (m×m, symmetric, column-major).
+        out.Q.assign(M * M, 0.0);
+        for (int kk = 0; kk < m; ++kk) {
+            for (int ll = kk; ll < m; ++ll) {
+                long double acc = 0.0L;
+                for (int b = 0; b < nb; ++b) {
+                    acc += static_cast<long double>(
+                               xtau[static_cast<std::size_t>(kk) + M * static_cast<std::size_t>(b)]) *
+                           static_cast<long double>(
+                               xtau[static_cast<std::size_t>(ll) + M * static_cast<std::size_t>(b)]);
+                }
+                const double v = static_cast<double>(acc / static_cast<long double>(nb));
+                out.Q[static_cast<std::size_t>(kk) + M * static_cast<std::size_t>(ll)] = v;
+                out.Q[static_cast<std::size_t>(ll) + M * static_cast<std::size_t>(kk)] = v;
+            }
+        }
+        // Fudge (OQ-4): Qf = Q; diag(Qf) += fudge * tr(Q); Qinv = inverse(Qf).
+        double tr = 0.0;
+        for (int k = 0; k < m; ++k) tr += out.Q[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(k)];
+        std::vector<double> Qf = out.Q;
+        for (int k = 0; k < m; ++k)
+            Qf[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(k)] += fudge * tr;
+        const core::LinAlgStatus st = core::inverse(Qf, m, out.Qinv);
+        out.status = st.ok ? Status::Ok : Status::NonSpdCovariance;
+        return out;
+    }
+
+    /// S5 — rank test / SVD seed (design §4 S5). Seeds A,B from svd(x_total) at
+    /// rank r and returns chisq = vec(E)'·Qinv·vec(E) for E = X - A·B with the
+    /// seed factors. In M(fit-1) this is the ALS seed; the rank sweep is M(fit-2).
+    [[nodiscard]] GlsWeights rank_test(const F4Blocks& x,
+                                       const JackknifeCov& cov,
+                                       int r,
+                                       const Precision& precision) override {
+        (void)precision;
+        GlsWeights gw;
+        gw.r = r;
+        const int nl = x.nl, nr = x.nr;
+        // xmat as nl×nr column-major from x_total (k = j + nr*i row-major source).
+        std::vector<double> xmat = xmat_from_total(x);
+        seed_AB(xmat, nl, nr, r, gw.A, gw.B);
+        gw.chisq = chisq_of(xmat, gw.A, gw.B, nl, nr, r, cov.Qinv);
+        gw.status = Status::Ok;
+        return gw;
+    }
+
+    /// S6 — GLS weights via AT2 ALS (design §4 S6; AT2 qpadm_weights). svd seed →
+    /// opt_A/opt_B for opts.als_iterations with the fudge ridge → the constrained
+    /// weight solve (the literal "single Cholesky" — here an LU solve matching R's
+    /// solve()) → normalize Σw=1. Native FP64.
+    [[nodiscard]] GlsWeights gls_weights(const F4Blocks& x,
+                                         const JackknifeCov& cov,
+                                         int r,
+                                         const QpAdmOptions& opts,
+                                         const Precision& precision) override {
+        (void)precision;
+        const int nl = x.nl, nr = x.nr;
+        std::vector<double> xmat = xmat_from_total(x);
+        return als_weights(xmat, nl, nr, r, cov.Qinv, opts);
+    }
+
+    // ---- AT2 ALS shared with S7 (a public-on-the-class entry for the LOO re-fit;
+    //      design §3 nested_models reuses gls_weights per LOO block). The S7
+    //      driver in core/qpadm calls gls_weights with a one-block F4Blocks, so no
+    //      extra virtual is needed.
+
+private:
+    // tot_line_ caches the AT2 weighted.mean(loo, 1 - bl/n) line vector (length m)
+    // computed in assemble_f4's compute_loo_and_total and consumed by jackknife_cov
+    // (the xtau centering term). One model is fit at a time on this backend
+    // instance (single-model M(fit-1)); the cache is rebuilt per assemble_f4 call.
+    std::vector<double> tot_line_{};
+
+    /// est_to_loo (AT2 R/resampling.R) + the AT2 jackknife point estimate
+    /// (jack_pairarr_stats `est`) + the centering line `tot` — all in one pass so
+    /// S4/S7 reuse the SAME loo array. With no missing blocks (M(fit-1), OQ-12):
+    ///   tot_ij    = weighted.mean(X[i,j,:], bl)
+    ///   loo[k,b]  = (tot_ij - X[k,b]*rel_b) / (1 - rel_b),  rel_b = bl_b / Σbl
+    ///   tot_line  = weighted.mean(loo, 1 - bl/n)
+    ///   est[k]    = mean(tot_line - loo[k,:])*nb + weighted.mean(loo[k,:], bl)
+    void compute_loo_and_total(F4Blocks& x, const std::vector<int>& block_sizes) {
+        const int nl = x.nl, nr = x.nr, nb = x.n_block;
+        const int m = nl * nr;
+        const std::size_t M = static_cast<std::size_t>(m);
+        x.x_loo.assign(M * static_cast<std::size_t>(nb), 0.0);
+        x.x_total.assign(M, 0.0);
+        tot_line_.assign(M, 0.0);
+        if (m <= 0 || nb <= 0) return;
+
+        long double n_ld = 0.0L;
+        for (int b = 0; b < nb; ++b) n_ld += static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+        const double n = static_cast<double>(n_ld);
+
+        for (int k = 0; k < m; ++k) {
+            // tot_ij = weighted.mean(X[k,:], bl) = Σ X*bl / Σ bl
+            long double num = 0.0L;
+            for (int b = 0; b < nb; ++b) {
+                num += static_cast<long double>(x.x_blocks[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
+                       static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+            }
+            const double tot_ij = static_cast<double>(num / n_ld);
+            // loo[k,b] = (tot_ij - X*rel_b)/(1-rel_b)
+            for (int b = 0; b < nb; ++b) {
+                const double bl = static_cast<double>(block_sizes[static_cast<std::size_t>(b)]);
+                const double rel = bl / n;
+                const double xv = x.x_blocks[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
+                x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)] =
+                    (tot_ij - xv * rel) / (1.0 - rel);
+            }
+            // tot_line[k] = weighted.mean(loo[k,:], 1 - bl/n)
+            long double wln = 0.0L, wld = 0.0L;
+            for (int b = 0; b < nb; ++b) {
+                const double w = 1.0 - static_cast<double>(block_sizes[static_cast<std::size_t>(b)]) / n;
+                wln += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
+                       static_cast<long double>(w);
+                wld += static_cast<long double>(w);
+            }
+            tot_line_[static_cast<std::size_t>(k)] = static_cast<double>(wln / wld);
+            // est[k] = mean(tot_line - loo)*nb + weighted.mean(loo, bl)
+            long double diffsum = 0.0L;
+            for (int b = 0; b < nb; ++b) {
+                diffsum += static_cast<long double>(tot_line_[static_cast<std::size_t>(k)]) -
+                           static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]);
+            }
+            const double term1 = static_cast<double>(diffsum / static_cast<long double>(nb)) *
+                                 static_cast<double>(nb);
+            long double wbn = 0.0L;
+            for (int b = 0; b < nb; ++b) {
+                wbn += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
+                       static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+            }
+            const double term2 = static_cast<double>(wbn / n_ld);
+            x.x_total[static_cast<std::size_t>(k)] = term1 + term2;
+        }
+    }
+
+    /// Build the nl×nr COLUMN-MAJOR xmat from the row-major x_total vector
+    /// (k = j + nr*i ⇒ xmat(i,j) at i + nl*j).
+    [[nodiscard]] static std::vector<double> xmat_from_total(const F4Blocks& x) {
+        const int nl = x.nl, nr = x.nr;
+        std::vector<double> xmat(static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr), 0.0);
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j)
+                xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] =
+                    x.x_total[static_cast<std::size_t>(j) + static_cast<std::size_t>(nr) * static_cast<std::size_t>(i)];
+        return xmat;
+    }
+
+    /// Build an nl×nr COLUMN-MAJOR xmat from a single LOO block's row-major slice
+    /// (the S7 per-block re-fit input; loo[k] for k = j + nr*i at block b).
+    [[nodiscard]] static std::vector<double> xmat_from_loo_block(const F4Blocks& x, int b) {
+        const int nl = x.nl, nr = x.nr;
+        const std::size_t M = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        std::vector<double> xmat(M, 0.0);
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j) {
+                const std::size_t k = static_cast<std::size_t>(j) +
+                                      static_cast<std::size_t>(nr) * static_cast<std::size_t>(i);
+                xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] =
+                    x.x_loo[k + M * static_cast<std::size_t>(b)];
+            }
+        return xmat;
+    }
+
+    /// SVD seed: B = t(V[:,0:r]) (r×nr), A = xmat · t(B) (nl×r). xmat is nl×nr
+    /// column-major; A,B returned column-major. (AT2 qpadm_weights seed.)
+    static void seed_AB(const std::vector<double>& xmat, int nl, int nr, int r,
+                        std::vector<double>& A, std::vector<double>& B) {
+        const core::SvdResult sv = core::jacobi_svd(xmat, nl, nr);
+        // B (r×nr): B[p,j] = V[j,p]  (V is nr×k column-major).
+        B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
+        for (int p = 0; p < r; ++p)
+            for (int j = 0; j < nr; ++j)
+                B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)] =
+                    sv.V[static_cast<std::size_t>(j) + static_cast<std::size_t>(nr) * static_cast<std::size_t>(p)];
+        // A (nl×r) = xmat (nl×nr) · t(B) (nr×r).
+        A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
+        for (int i = 0; i < nl; ++i)
+            for (int p = 0; p < r; ++p) {
+                double acc = 0.0;
+                for (int j = 0; j < nr; ++j)
+                    acc += xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] *
+                           B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)];
+                A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)] = acc;
+            }
+    }
+
+    /// AT2 opt_A: A (nl×r) minimizing c(E)'·qinv·c(E), E = xmat - A·B, given B
+    /// (r×nr). Builds B2 = I_{nl} ⊗ B ((nl·r)×m), coeffs = B2·qinv·t(B2)
+    /// ((nl·r)×(nl·r)), rhs = c(t(xmat))·qinv·t(B2), ridge on the diagonal, solve,
+    /// reshape rowwise into A. All matrices column-major; m = nl·nr; the qinv index
+    /// and c(t(xmat)) use the row-major k = j + nr*i order.
+    static std::vector<double> opt_A(const std::vector<double>& B,
+                                     const std::vector<double>& xmat, int nl, int nr, int r,
+                                     const std::vector<double>& qinv, double fudge) {
+        const int m = nl * nr;
+        const int t = nl * r;  // dim of A (vectorized)
+        // B2 is (nl·r) × m. AT2: B2 = diag(nl) %x% B, with R's c(t(xmat)) row-major
+        // (k = j + nr*i) convention. The (a, k) entry: a = i*r + p (block i of B),
+        // k = i'*nr + j ; B2[a,k] = (i==i') ? B[p,j] : 0.
+        // We compute coeffs = B2·qinv·t(B2) and rhs = xvecᵀ·qinv·t(B2) directly.
+        // First W = qinv·t(B2): m × t.  (t(B2) is m × t.)
+        const auto B2 = [&](int a, int k) -> double {
+            const int i = a / r, p = a % r;
+            const int ii = k / nr, j = k % nr;
+            return (i == ii) ? B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)]
+                             : 0.0;
+        };
+        // xvec[k] = c(t(xmat))[k] = xmat(i,j) for k = i*nr + j.
+        std::vector<double> xvec(static_cast<std::size_t>(m));
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j)
+                xvec[static_cast<std::size_t>(i * nr + j)] =
+                    xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)];
+        // W = qinv (m×m) · t(B2) (m×t)  → m×t
+        std::vector<double> W(static_cast<std::size_t>(m) * static_cast<std::size_t>(t), 0.0);
+        for (int kr = 0; kr < m; ++kr)
+            for (int a = 0; a < t; ++a) {
+                double acc = 0.0;
+                for (int kc = 0; kc < m; ++kc)
+                    acc += qinv[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(kc)] *
+                           B2(a, kc);
+                W[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)] = acc;
+            }
+        // coeffs = B2 (t×m) · W (m×t)  → t×t ; rhs[a] = Σ_k xvec[k]·W[k,a]
+        std::vector<double> coeffs(static_cast<std::size_t>(t) * static_cast<std::size_t>(t), 0.0);
+        std::vector<double> rhs(static_cast<std::size_t>(t), 0.0);
+        for (int a = 0; a < t; ++a) {
+            for (int c = 0; c < t; ++c) {
+                double acc = 0.0;
+                for (int k = 0; k < m; ++k) acc += B2(a, k) * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)];
+                coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(c)] = acc;
+            }
+            double rr = 0.0;
+            for (int k = 0; k < m; ++k) rr += xvec[static_cast<std::size_t>(k)] * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)];
+            rhs[static_cast<std::size_t>(a)] = rr;
+        }
+        double tr = 0.0;
+        for (int a = 0; a < t; ++a) tr += coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)];
+        for (int a = 0; a < t; ++a) coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)] += fudge * tr;
+        std::vector<double> A2;
+        const core::LinAlgStatus st = core::solve(coeffs, t, rhs, A2);
+        // A = matrix(A2, nl, byrow=TRUE): A2[a], a = i*r + p ⇒ A(i,p). Column-major out.
+        std::vector<double> A(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
+        if (st.ok)
+            for (int i = 0; i < nl; ++i)
+                for (int p = 0; p < r; ++p)
+                    A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)] =
+                        A2[static_cast<std::size_t>(i * r + p)];
+        return A;
+    }
+
+    /// AT2 opt_B: B (r×nr) minimizing c(E)'·qinv·c(E), E = xmat - A·B, given A
+    /// (nl×r). Builds A2 = A ⊗ I_{nr} (m×(r·nr)), coeffs = t(A2)·qinv·A2, rhs =
+    /// c(t(xmat))·qinv·A2, ridge, solve, reshape into B (byrow over nr columns).
+    static std::vector<double> opt_B(const std::vector<double>& A,
+                                     const std::vector<double>& xmat, int nl, int nr, int r,
+                                     const std::vector<double>& qinv, double fudge) {
+        const int m = nl * nr;
+        const int t = r * nr;  // dim of B (vectorized)
+        // A2 is m × (r·nr). AT2: A2 = A %x% diag(nr). Row k = i*nr + j (row-major),
+        // col c = p*nr + jc. A2[k,c] = (j==jc) ? A[i,p] : 0.
+        const auto A2 = [&](int k, int c) -> double {
+            const int i = k / nr, j = k % nr;
+            const int p = c / nr, jc = c % nr;
+            return (j == jc) ? A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)]
+                             : 0.0;
+        };
+        std::vector<double> xvec(static_cast<std::size_t>(m));
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j)
+                xvec[static_cast<std::size_t>(i * nr + j)] =
+                    xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)];
+        // W = qinv (m×m) · A2 (m×t) → m×t
+        std::vector<double> W(static_cast<std::size_t>(m) * static_cast<std::size_t>(t), 0.0);
+        for (int kr = 0; kr < m; ++kr)
+            for (int c = 0; c < t; ++c) {
+                double acc = 0.0;
+                for (int kc = 0; kc < m; ++kc)
+                    acc += qinv[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(kc)] *
+                           A2(kc, c);
+                W[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)] = acc;
+            }
+        // coeffs = t(A2) (t×m) · W (m×t) → t×t ; rhs[c] = Σ_k xvec[k]·W[k,c]
+        std::vector<double> coeffs(static_cast<std::size_t>(t) * static_cast<std::size_t>(t), 0.0);
+        std::vector<double> rhs(static_cast<std::size_t>(t), 0.0);
+        for (int a = 0; a < t; ++a) {
+            for (int c = 0; c < t; ++c) {
+                double acc = 0.0;
+                for (int k = 0; k < m; ++k) acc += A2(k, a) * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)];
+                coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(c)] = acc;
+            }
+            double rr = 0.0;
+            for (int k = 0; k < m; ++k) rr += xvec[static_cast<std::size_t>(k)] * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)];
+            rhs[static_cast<std::size_t>(a)] = rr;
+        }
+        double tr = 0.0;
+        for (int a = 0; a < t; ++a) tr += coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)];
+        for (int a = 0; a < t; ++a) coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)] += fudge * tr;
+        std::vector<double> B2;
+        const core::LinAlgStatus st = core::solve(coeffs, t, rhs, B2);
+        // B = matrix(B2, ncol=nr, byrow=TRUE): B2[c], c = p*nr + j ⇒ B(p,j). Col-major out.
+        std::vector<double> B(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
+        if (st.ok)
+            for (int p = 0; p < r; ++p)
+                for (int j = 0; j < nr; ++j)
+                    B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)] =
+                        B2[static_cast<std::size_t>(p * nr + j)];
+        return B;
+    }
+
+    /// AT2 qpadm_weights full body (svd seed → ALS → constrained weight solve →
+    /// normalize). Returns the normalized weights, the refined A,B, and chisq.
+    [[nodiscard]] static GlsWeights als_weights(const std::vector<double>& xmat, int nl, int nr,
+                                                int r, const std::vector<double>& qinv,
+                                                const QpAdmOptions& opts) {
+        GlsWeights gw;
+        gw.r = r;
+        if (r == 0) {  // AT2: rnk==0 ⇒ weights = 1 (single-source trivial)
+            gw.w.assign(static_cast<std::size_t>(nl), 1.0);
+            gw.A.assign(static_cast<std::size_t>(nl) * 0, 0.0);
+            gw.B.assign(0, 0.0);
+            gw.chisq = chisq_of(xmat, gw.A, gw.B, nl, nr, r, qinv);
+            gw.status = Status::Ok;
+            return gw;
+        }
+        std::vector<double> A, B;
+        seed_AB(xmat, nl, nr, r, A, B);
+        for (int it = 0; it < opts.als_iterations; ++it) {
+            A = opt_A(B, xmat, nl, nr, r, qinv, opts.fudge);
+            B = opt_B(A, xmat, nl, nr, r, qinv, opts.fudge);
+        }
+        gw.A = A;
+        gw.B = B;
+        // Constrained weight solve (AT2): x = t(cbind(A,1)) → (r+1)×nl ;
+        // y = c(rep(0,r),1) ; rhs = crossprod(x) = x·t(x)? No: crossprod(x)=t(x)·x.
+        // In R: x is (r+1)×nl ; crossprod(x) = t(x)·x = nl×nl ; lhs = crossprod(x,y)
+        // = t(x)·y = nl-vector ; w = solve(rhs, lhs) (length nl). Build directly.
+        const int rp = r + 1;
+        // x = t(cbind(A, 1)) is (r+1)×nl ⇒ x(p,i) = xm(i,p) where xm = cbind(A,1)
+        // (nl×(r+1)): xm(i,p)=A(i,p) for p<r, xm(i,r)=1. AT2 then solves
+        //   rhs = crossprod(x) = t(x)·x = nl×nl : rhs(i,i') = Σ_p xm(i,p)·xm(i',p)
+        //   lhs = crossprod(x,y) = t(x)·y, y = c(rep(0,r),1) ⇒ lhs(i) = xm(i,r) = 1
+        //   w = solve(rhs, lhs) ; weights = w/Σw.
+        const auto xm = [&](int i, int p) -> double {
+            return (p < r) ? A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)]
+                           : 1.0;
+        };
+        std::vector<double> RHS(static_cast<std::size_t>(nl) * static_cast<std::size_t>(nl), 0.0);
+        std::vector<double> LHS(static_cast<std::size_t>(nl), 0.0);
+        for (int i = 0; i < nl; ++i) {
+            for (int ip = 0; ip < nl; ++ip) {
+                double acc = 0.0;
+                for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
+                RHS[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(ip)] = acc;
+            }
+            LHS[static_cast<std::size_t>(i)] = xm(i, r);  // = 1
+        }
+        std::vector<double> w;
+        const core::LinAlgStatus st = core::solve(RHS, nl, LHS, w);
+        if (!st.ok) { gw.status = Status::RankDeficient; return gw; }
+        double sum = 0.0;
+        for (double v : w) sum += v;
+        gw.w.assign(static_cast<std::size_t>(nl), 0.0);
+        for (int i = 0; i < nl; ++i) gw.w[static_cast<std::size_t>(i)] = w[static_cast<std::size_t>(i)] / sum;
+        gw.chisq = chisq_of(xmat, A, B, nl, nr, r, qinv);
+        gw.status = Status::Ok;
+        return gw;
+    }
+
+    /// chisq = vec(E)'·qinv·vec(E), E = xmat - A·B, vectorized ROW-MAJOR
+    /// (k = j + nr*i = the AT2 c(t(res)) order; res = t(xmat - A·B) ⇒ c(res) is the
+    /// row-major flatten of (xmat - A·B)). A is nl×r, B is r×nr (column-major).
+    [[nodiscard]] static double chisq_of(const std::vector<double>& xmat,
+                                         const std::vector<double>& A,
+                                         const std::vector<double>& B,
+                                         int nl, int nr, int r,
+                                         const std::vector<double>& qinv) {
+        const int m = nl * nr;
+        std::vector<double> e(static_cast<std::size_t>(m), 0.0);
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j) {
+                double ab = 0.0;
+                for (int p = 0; p < r; ++p)
+                    ab += A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)] *
+                          B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)];
+                const double resid =
+                    xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] - ab;
+                e[static_cast<std::size_t>(i * nr + j)] = resid;  // row-major k = j + nr*i
+            }
+        long double acc = 0.0L;
+        for (int a = 0; a < m; ++a) {
+            long double row = 0.0L;
+            for (int b = 0; b < m; ++b)
+                row += static_cast<long double>(qinv[static_cast<std::size_t>(a) + static_cast<std::size_t>(m) * static_cast<std::size_t>(b)]) *
+                       static_cast<long double>(e[static_cast<std::size_t>(b)]);
+            acc += static_cast<long double>(e[static_cast<std::size_t>(a)]) * row;
+        }
+        return static_cast<double>(acc);
     }
 };
 

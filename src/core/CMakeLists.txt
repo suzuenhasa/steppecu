@@ -69,7 +69,13 @@ add_library(steppe_core STATIC
     fstats/f2_combine.cpp
     fstats/f2_blocks_multigpu.cpp
     fstats/f2_blocks_multigpu_core.cpp
-    domain/block_partition_rule.cpp)
+    domain/block_partition_rule.cpp
+    # Phase 2 qpAdm fit engine (S3-S8). Host-pure, CUDA-FREE: every device op
+    # routes through the ComputeBackend seam (CpuBackend reference in M(fit-1);
+    # CudaBackend in M(fit-4)). f4_matrix/jackknife/gls_solve are header-only thin
+    # drivers; the orchestrator + S7 SE + pchisq compile here.
+    qpadm/qpadm_fit.cpp
+    qpadm/nested_models.cpp)
 add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core
