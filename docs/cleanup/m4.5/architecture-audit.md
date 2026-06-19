@@ -1,5 +1,28 @@
 # M4.5 multi-GPU architecture — adversarial verdict
 
+> **RESOLVED / OUTCOME (post-M5).** This audit's central thesis was VINDICATED: **the binding
+> constraint was the deliverable's memory shape, and the real lever was getting the result OFF the
+> CPU + streaming — not multi-GPU.** Two things landed, both predicted here. **(1) Device-resident
+> output (commit `1f80c0c`)** — the precompute returns a VRAM-resident handle (`DeviceF2Blocks`),
+> host `F2BlockTensor` is opt-in; this dissolved the serial pageable D2H tail (Flaw 3 / Flaw 4) for
+> the in-VRAM case. **Measured P=512 ~673 ms resident vs ~2879 ms bulk-to-host = ~4.3×** — i.e. ~80%
+> of the old wall was the host copy, exactly the meta-cause this doc named. **(2) M5 out-of-core
+> (commits `176a07d` adaptive tiered output + `c65179f` SNP-tile input streaming)** — this is §3
+> items 2-4 ("SNP-axis tiling", "block-axis result streaming") shipped. The device footprint is now
+> O(P·tile + P²), independent of M, and the result goes to the fastest tier it FITS
+> (VRAM -> host RAM -> disk). **The OOM ceilings this sweep mapped are GONE: full-autosome P=2500
+> now COMPLETES on a single 32 GB RTX 5090 in ~51.5 s** (76 GB result streamed, GPU peak ~26 GB),
+> parity bit-identical — i.e. §4's "M5 should have come first" call was correct, and a streamed
+> single-GPU path now covers (and exceeds) the window multi-GPU was built for. **The honest
+> multi-GPU story (correcting §1/§4):** multi-GPU on the *precompute* is a modest throughput layer
+> (and was measured *slower* than single-GPU until the data-bounce was fixed; nsys overlap was
+> ~22-74% with a serial D2H/host tail). Its proper home is the **FIT / ROTATION phase** (Phase 2,
+> S3-S8, unbuilt): thousands of INDEPENDENT qpAdm models, no combine — embarrassingly parallel.
+> Sharded-output-D2H on the precompute (§3 item 4) is now an OPTIONAL throughput lever, not a
+> blocker. The analysis below is preserved as the design rationale that drove `1f80c0c` /
+> `176a07d` / `c65179f`. (NOTE: `scaling-sweep.md` is PRE-M5 and now SUPERSEDED — it says P=2500
+> OOMs on every path; M5 makes that FALSE.)
+
 Lead-architect cross-examination of four lens audits (data-layout-memory, parallelism-scaling,
 algorithm-formulation, system-fit) against the measured scaling sweep
 (`docs/cleanup/m4.5/scaling-sweep.md`, rtxbox 2× RTX PRO 6000, 95.6 GB/GPU, 169 GB host, Release,
@@ -235,10 +258,13 @@ D2H* across GPUs (Flaw 3 fix) gives a genuine near-2× on the now-streamed artif
    win: P=2500 root 113.6 → 56.7 GB (fits), every memory term halves. The one change that puts the
    real dataset on these cards.
 3. **SNP-axis tiling on block boundaries** (Flaw 2, parity-safe if tiled on block edges). Removes the
-   78.8 GB feeder-phase peak; unblocks single-GPU past P=1024 independent of result size.
+   78.8 GB feeder-phase peak; unblocks single-GPU past P=1024 independent of result size. **DONE —
+   M5 SNP-tile input streaming, commit `c65179f`** (footprint O(P·tile + P²), independent of M).
 4. **Block-axis result streaming to pinned host / GDS** (Flaw 4 = M5). Dissolves the OOM wall;
-   parity-neutral. This is the strategic centerpiece — schedule it as the next milestone, ahead of
-   any further multi-GPU perf work.
+   parity-neutral. This was called the strategic centerpiece, ahead of any further multi-GPU perf
+   work. **DONE — M5 adaptive tiered output, commit `176a07d`** (result goes to the fastest tier it
+   FITS: VRAM-resident -> host RAM -> disk). Combined with item 3, P=2500 full-autosome completes on
+   a single 32 GB 5090 in ~51.5 s, parity bit-identical — the OOM wall this audit mapped is gone.
 5. **Fix the feeder-output budget reservation** (Flaw 5, parity-neutral). Cheap correctness fix for
    the latent 23 GB over-commit.
 

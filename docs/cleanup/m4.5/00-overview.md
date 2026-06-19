@@ -1,5 +1,23 @@
 # M4.5 Multi-GPU — WHOLE-MILESTONE HOLISTIC REVIEW
 
+> **STATUS UPDATE (post-M5).** This review was written at the close of M4.5 with multi-GPU
+> framed as "the headline speedup." That framing has since been **corrected by the measured
+> record**: on the *precompute*, multi-GPU is a **modest throughput layer**, NOT the headline.
+> The real wins came AFTER M4.5, from getting the result **off the CPU** and **streaming** it:
+> **(1) device-resident output** (`1f80c0c`) — the precompute returns a VRAM-resident handle
+> (`DeviceF2Blocks`), host `F2BlockTensor` is an opt-in `.to_host()`; **measured P=512 ~673 ms
+> resident vs ~2879 ms bulk-to-host = ~4.3×** (the precompute was HOST-RESULT-BOUND — ~80% of
+> the old wall was the host copy). **(2) M5 out-of-core streaming** — **adaptive tiered output**
+> (`176a07d`, result goes to the fastest tier it FITS: VRAM -> host RAM -> disk) + **SNP-tile
+> input streaming** (`c65179f`, GPU footprint O(P·tile + P²), independent of M). **M5 is DONE:**
+> full-autosome (M=584131, n_block=757) **P=2500 COMPLETES on a single 32 GB RTX 5090 in
+> ~51.5 s** (76 GB result streamed, GPU peak ~26 GB), parity `memcmp` bit-identical. The
+> per-combine 1.10×/1.22× figures below are real M4.5-internal measurements and stand; the
+> *interpretation* changes — multi-GPU's proper home is the **Phase-2 FIT/ROTATION** (thousands
+> of independent qpAdm models, no combine — embarrassingly parallel), not the precompute. The
+> real next work is **Phase-2, the qpAdm FIT ENGINE** (S3-S8, still unbuilt). See
+> `architecture-audit.md`, `parallelism-check.md`, `why-d2h.md`, `why-multigpu-slow.md`.
+
 Scope: the entire single-node multi-GPU (SPMG) addition on branch `m4.5-multigpu` —
 the shard plan, per-device compute fan-out, the two combine tiers (host-staged baseline
 + P2P device-resident fast-path), the DI bundle, the capability probe, the config knob,
@@ -46,11 +64,17 @@ cleanest realization of arch §4 in the codebase, and the out-of-band `CombinePa
 discipline (§12 / cleanup §(2).2) is held without exception. The two highest-rated units
 (`backend.hpp`, `config.hpp`, both 9.5) earn it.
 
-**The headline speedup is now realized.** As of the device-resident combine fix (`867a4bf`), the
-2-GPU path is **faster** than single-GPU on the rtxbox (2× RTX PRO 6000 Blackwell sm_120, Release,
-EmuFp64{40}, median of 10): P=768 G1=2342ms vs G2=2125ms = **1.10×**; P=400 = **1.22×**. This
-*replaces* the prior "multi-GPU is slower (0.70× / 0.75–0.97×)" finding — that was the pre-fix
-state and is now FALSE. The nsys root-cause diagnosis (`165f655`,
+**The within-M4.5 combine slowdown was fixed (but multi-GPU is a modest layer, not the headline).**
+As of the device-resident combine fix (`867a4bf`), the 2-GPU path is **faster** than single-GPU on
+the rtxbox (2× RTX PRO 6000 Blackwell sm_120, Release, EmuFp64{40}, median of 10): P=768
+G1=2342ms vs G2=2125ms = **1.10×**; P=400 = **1.22×**. This *replaces* the prior "multi-GPU is
+slower (0.70× / 0.75–0.97×)" finding — that was the pre-fix state and is now FALSE. **Post-M5
+correction (per `architecture-audit.md` / `why-d2h.md` / `parallelism-check.md`):** this ~1.1× is a
+MODEST throughput layer, NOT the headline — the precompute was HOST-RESULT-BOUND, and the real
+speedups came after M4.5 from **device-resident output** (`1f80c0c`, P=512 ~4.3×) and **M5
+streaming** (`176a07d`/`c65179f`), i.e. getting OFF the CPU, not multi-GPU per se (nsys measured only
+~22–74% overlap on the precompute combine). Multi-GPU's proper home is the Phase-2 FIT/ROTATION
+(thousands of independent models, no combine). The nsys root-cause diagnosis (`165f655`,
 `docs/cleanup/m4.5/why-multigpu-slow.md`) pinned the slowdown on a redundant SECOND full ~7.14 GB
 Device→Host copy (the DATA-BOUNCE wart): `compute_f2_blocks` D2H-copied each partial to host and
 freed its device buffers, forcing the P2P combine to re-upload (H2D) + place-add + a 2nd D2H. The
@@ -73,8 +97,11 @@ visible:
    3-term (`… && G >= 2`) in FIVE files while the shipped gate is 2-term. These are contract lies
    on the seam the whole tier keys off.
 
-**Remaining OPTIONAL levers (NOT blockers):** pin the final pageable result D2H (the next
-available speedup, could push past 1.10×); the bench byte-traffic columns are observability-only
+**Remaining OPTIONAL levers (NOT blockers):** the "pin the final pageable result D2H" lever is now
+largely moot — **device-resident output (`1f80c0c`) removed the eager whole-tensor D2H** for the
+in-VRAM case (the result stays a `DeviceF2Blocks` handle; host copy is an opt-in `.to_host()`),
+which is where the ~4.3× came from; the only remaining D2H is the streamed block-tile spill of the
+beyond-VRAM case (`176a07d`). The bench byte-traffic columns are observability-only
 (currently print `0.00`). The L4 pool-allocator and the host-zeroing premise of the old
 `perf-discovery.md` P1 plan are NOT the speedup lever (the nsys trace measured **74% GPU overlap**,
 not the ~18% the pre-fix hypothesis assumed; the accumulator memset is ~5ms, P1 was reverted) —
@@ -85,7 +112,10 @@ combine) is now addressed; mark it REASSESS, not a pending speedup.
 **Concrete gap to 9.5+:** land the remaining BEFORE-M5 backlog below. The decisive items are now
 single-homing `validate_partials`, wiring/fixing the `enable_peer_access`+`G>=2` gate, and the
 GPU-free host tests for the planner/combine/orchestrator. With those, no unit sits below 9 and the
-cross-file story is coherent — a 9.5+ milestone. The perf rabbit-hole is CLOSED.
+cross-file story is coherent — a 9.5+ milestone. The perf rabbit-hole is CLOSED — and the subsequent
+record proved the right lever was never multi-GPU: it was device-resident output (`1f80c0c`) + M5
+streaming (`176a07d`/`c65179f`), now both DONE (full-autosome P=2500 on a single 32 GB 5090 in
+~51.5 s).
 
 ---
 
@@ -163,9 +193,11 @@ the NULL stream. The device-resident combine (`867a4bf`) removes both: the parti
 (no freed-buffer race), the per-peer `cudaDeviceSynchronize` is gone, and there is now **one fence
 before the final D2H** instead of a per-partial drain. The combine still has a true serial
 dependency ONLY on the accumulator add ORDER (§12) — preserved because each peer partial lands in
-its own disjoint block slice. **REMAINING OPTIONAL (not a blocker):** pinning the final pageable
-result D2H is the next available speedup (could push past 1.10×). (p2p_combine P3/P6/P9/N4;
-f2_blocks_multigpu P7.)
+its own disjoint block slice. **REMAINING OPTIONAL (not a blocker), now largely moot post-M5:** the
+eager whole-tensor final D2H this once pointed at is **gone** — device-resident output (`1f80c0c`)
+returns the result as a VRAM-resident `DeviceF2Blocks` handle (host copy opt-in), and the
+beyond-VRAM case streams block-tiles (`176a07d`); only the host-staged baseline / spill path keeps a
+D2H worth pinning. (p2p_combine P3/P6/P9/N4; f2_blocks_multigpu P7.)
 
 **Where data bounces H↔D (the inventory, post-867a4bf):**
 - P2P peer partials: **RESOLVED** — partials stay device-resident, `cudaMemcpyPeer` is a genuine
@@ -260,11 +292,13 @@ p2p_combine C4) — falls out of X7.
 
 ## (2) THE OPTIMIZE-WITHIN-PARITY STORY (top performance wins)
 
-Ordered by impact. Every item re-gated by the locked `memcmp`. **The headline win has landed:**
-the device-resident combine (`867a4bf`) makes the 2-GPU path faster than single-GPU (P=768 =
-1.10×, P=400 = 1.22×, rtxbox/Release/EmuFp64{40}/median of 10), by deleting the redundant 2nd
-~7.14 GB D2H + the H2D re-upload + the place-add (X3/X4). W2/W3/W4/W5 below are SUBSUMED by that
-fix; the remaining rows are optional cleanups, not blockers.
+Ordered by impact. Every item re-gated by the locked `memcmp`. **The within-M4.5 combine win has
+landed:** the device-resident combine (`867a4bf`) makes the 2-GPU path faster than single-GPU
+(P=768 = 1.10×, P=400 = 1.22×, rtxbox/Release/EmuFp64{40}/median of 10), by deleting the redundant
+2nd ~7.14 GB D2H + the H2D re-upload + the place-add (X3/X4). W2/W3/W4/W5 below are SUBSUMED by that
+fix; the remaining rows are optional cleanups, not blockers. **(Post-M5 perspective: this ~1.1× is a
+modest throughput layer; the real precompute speedups came from device-resident output `1f80c0c`
+(~4.3×) + M5 streaming `176a07d`/`c65179f` — getting OFF the CPU — not multi-GPU.)**
 
 | # | Win | Files | Parity | Effort |
 |---|-----|-------|--------|--------|
@@ -276,7 +310,7 @@ fix; the remaining rows are optional cleanups, not blockers.
 | **W6** | **Hoist `cudaDeviceEnablePeerAccess` to once-per-(root,peer)** (ideally into `build_resources`, gated on `enable_peer_access`) and delete the `cudaGetLastError` sticky-scrub | `p2p_combine.cu`, `resources.cpp` | **yes** (transport setup, parity-neutral) | S–M |
 | **W7** | **Collapse the host combine's scalar `+=` triple loop into `std::copy_n`** of the contiguous owned runs (`memcpy`-grade; ALSO removes the latent −0.0 bit-flip — see note) | `f2_combine.cpp` | **yes** — `std::copy` is *strictly more* faithful to single-GPU than `+=` on −0.0 | S |
 | **W8** | **Drop the throwaway device-0 backend in `resolve_device_order`** (64 MiB alloc/free + cuBLAS create/destroy + a discarded full probe) for a CUDA-free `visible_device_count()` query | `resources.cpp`, `backend_factory.hpp`, `cuda_backend.cu` | **yes** | S |
-| **W9** | **Pin the final pageable result D2H** (the next available speedup, could push past 1.10×); **`resize` not `assign(0.0)`** for the host result of the device combine | `p2p_combine.cu` | **yes** | S / S |
+| **W9** | **Pin any remaining host-staged/spill D2H** (the eager whole-tensor D2H is gone post-M5 — device-resident output `1f80c0c` + tiered spill `176a07d`; this lever now only touches the host-staged baseline path); **`resize` not `assign(0.0)`** for the host result of the device combine | `p2p_combine.cu` | **yes** | S / S |
 | — | Casting cleanup: settle one width per concept (`long` for kernel-feeding counts/indices, `size_t` for byte/alloc sizes); drop dead `?:` clamps; centralize the `DeviceShard` narrowing casts in one `make_shard`; use `core::cdiv` for the planner's ceiling-div | all combine + planner units | **yes** | S | 
 
 **REJECTED-FOR-PARITY (do not let these slip in under "optimize the combine"):**
@@ -301,7 +335,7 @@ no −0.0 observed), and the doc's "`x + 0.0 == x` for all finite x" is wrong on
 
 ## (3) PRIORITIZED MASTER BACKLOG (deduped across all units)
 
-### BEFORE-M5 (pay before building streaming on top)
+### BEFORE-M5 → now M4.5 RESIDUAL DEBT (M5 streaming `176a07d`/`c65179f` has since landed on top; B3–B9 are still-open debt, not blockers)
 
 | # | Item | File(s) | Fix | Sev | Parity |
 |---|------|---------|-----|-----|--------|
@@ -315,9 +349,13 @@ no −0.0 observed), and the doc's "`x + 0.0 == x` for all finite x" is wrong on
 | **B8** | Drop the throwaway device-0 backend + add §9 ordinal validation | `resources.cpp`, `backend_factory.hpp`, `cuda_backend.cu` | CUDA-free `visible_device_count()`; reject duplicate/out-of-range ordinals (one count query serves both); removes the leaked `cudaSetDevice(0)` | MED (HIGH perf) | yes |
 | **B9** | GPU-free host unit tests for the host-pure logic | `tests/unit/test_shard_plan.cpp`, `test_f2_combine.cpp`, `test_f2_blocks_multigpu.cpp` | Planner tiling/skew/edges; combine placement + fixed-order + every validate throw + the −0.0 case; orchestrator gate predicate + sub-view/local-id + empty/`n_block<G` (needs a fake `ComputeBackend` + D1 extraction) | MED | yes (tests) |
 
-Rationale for the BEFORE-M5 cut: B1+B2 (the speedup the milestone promised) are **DONE** @867a4bf —
-multi-GPU is now faster than single-GPU AND the surface M5 streaming builds on is in place, with
-parity freshly proven and locked by the `memcmp` gate. The remaining items are debt, not speedup:
+Rationale for the (now-historical) BEFORE-M5 cut: B1+B2 are **DONE** @867a4bf — the within-M4.5
+combine slowdown is fixed (2-GPU ~1.1×) AND the surface M5 streaming builds on was in place, with
+parity freshly proven and locked by the `memcmp` gate. **M5 has since landed on top** (device-resident
+output `1f80c0c` + adaptive tiered output `176a07d` + SNP-tile input streaming `c65179f`; full-autosome
+P=2500 on a single 32 GB 5090 in ~51.5 s) — so the framing here is no longer "pay before streaming" but
+"residual M4.5 debt to retire when the multi-GPU paths are next touched (most relevant on the Phase-2
+FIT/ROTATION, multi-GPU's proper home)." The remaining items are debt, not speedup:
 B3–B4 are contract lies that calcify under any refactor. B5–B6 are DRY/contract debt that a
 streaming refactor would otherwise duplicate further. B7 is a small perf win that also hardens a
 latent parity hazard. B8 is a cold-start cleanup + a §9 fail-fast gap. B9 is the fast inner-loop
@@ -327,8 +365,8 @@ gate that makes B5–B7 safe to land without the slow GPU parity run each time.
 
 | # | Item | File(s) | Sev | Parity |
 |---|------|---------|-----|--------|
-| L1 | ✅ DONE @867a4bf — Device-resident `compute_f2_blocks` partial (real P2P pull, no bounce). This was the M5 form of W2; it was pulled forward and is the fix that made multi-GPU faster. | `cuda_backend.cu` + seam | DONE | yes |
-| L2 | Pin the final pageable result D2H (the next available speedup past 1.10×) + pinned staging for any remaining H2D (needs a `PinnedBuffer` wrapper, not yet implemented) | `p2p_combine.cu`, `device_buffer.cuh` | LOW (optional) | yes |
+| L1 | ✅ DONE @867a4bf (combine partial) + generalized post-M5 — Device-resident `compute_f2_blocks` partial (real P2P pull, no bounce) was pulled forward into the combine; the broader **device-resident OUTPUT** then shipped as `1f80c0c` (`DeviceF2Blocks` handle, host copy opt-in `.to_host()`, P=512 ~4.3×) — the precompute is no longer host-result-bound. | `cuda_backend.cu` + seam | DONE | yes |
+| L2 | ✅ MOSTLY DONE post-M5 — the eager whole-tensor result D2H is gone (device-resident output `1f80c0c`); the beyond-VRAM case streams block-tiles to the fastest tier (`176a07d`). Residual optional: a `PinnedBuffer` wrapper to pin any remaining host-staged/spill H2D/D2H. | `p2p_combine.cu`, `device_buffer.cuh`, new `pinned_buffer.cuh` | LOW (optional) | yes |
 | L3 | Balanced contiguous shard partition (idle-GPU on skewed inputs) + bucketed cost model | `shard_plan.cpp` | MED-HIGH (narrow-input) | yes-if-careful |
 | L4 | `MathModeScope` is built but UNWIRED — the §12 oracle math-mode leak is still open in `engage_f2_precision`; wire it (return a scope) | `handles.hpp`, `f2_block_kernel.cu` | MED | yes |
 | L5 | `MathModeScope` lacks the device-ordinal guard the same delta added to `CublasHandle` (delta-internal asymmetry) | `handles.hpp` | MED | yes |
@@ -348,7 +386,7 @@ gate that makes B5–B7 safe to land without the slow GPU parity run each time.
 
 | Area | Score | Note |
 |------|-------|------|
-| **End-to-end data flow / overlap** | **9.0** | The data-bounce wart is GONE (X3/X4 RESOLVED @867a4bf): the device-resident combine deletes the redundant 2nd ~7.14 GB D2H + the H2D re-upload, and multi-GPU is now FASTER than single-GPU (1.10× P=768, 1.22× P=400, nsys-measured 74% overlap). Held off 10 only by the optional per-device host-thread fan-out (X2) and pinning the final result D2H — both further-overlap levers, not blockers. |
+| **End-to-end data flow / overlap** | **9.0** | The data-bounce wart is GONE (X3/X4 RESOLVED @867a4bf): the device-resident combine deletes the redundant 2nd ~7.14 GB D2H + the H2D re-upload, and multi-GPU is now FASTER than single-GPU (1.10× P=768, 1.22× P=400, nsys-measured 74% overlap). Held off 10 only by the optional per-device host-thread fan-out (X2). Post-M5, the "pin the final result D2H" lever is largely moot — device-resident output (`1f80c0c`) removed the eager whole-tensor D2H and M5 streaming (`176a07d`/`c65179f`) covers the beyond-VRAM case. |
 | **Layering / CUDA-free seam** | **9.5** | Exemplary and verified end-to-end; the cleanest §4 realization in the codebase. Only the two contract-coherence gaps (X5 dead knob, X6 gate doc) keep it off 10. |
 | **DRY / single-home** | **8.0** | `validate_partials` duplicated (X7), the gate predicate 5–6 homes (X6/X8), the CUDA-free paragraph 4–6 homes, dead ternaries copy-pasted. All §8 misses, none a bug. |
 | **Capability-tier coherence** | **8.5** | The probe-once / out-of-band tag / non-throwing degrade discipline is textbook; held by the dead `enable_peer_access` (X5), the `None` G==1 lie (X10), the release-silent WARN (X12), the any-peer/G>2 gap (X11). |
@@ -362,16 +400,21 @@ gate that makes B5–B7 safe to land without the slow GPU parity run each time.
 ## CONCLUSION
 
 M4.5 is **correct, parity-locked, beautifully-layered, AND faster than single-GPU** — the milestone
-is COMPLETE. The device-resident combine (`867a4bf`) deleted the data-bounce wart that the nsys
-diagnosis (`165f655`, `why-multigpu-slow.md`) pinned as the root cause of the old slowdown, and the
-2-GPU path now beats single-GPU (P=768 1.10×, P=400 1.22×, rtxbox/Release/EmuFp64{40}). Branch
-`m4.5-multigpu` (46 commits ahead) is being merged to main. None of the gaps threatens the proven
-bit-identity. The remaining BEFORE-M5 work is debt, not speedup: wiring the `enable_peer_access`
-gate (B3), making the gate match its 3-term doc (B4), single-homing `validate_partials` (B5),
-dropping the redundant `block_sizes` (B6), the host-combine `std::copy` (B7), the cold-start probe
-fix + §9 validation (B8), and GPU-free host tests (B9). Optional further levers: per-device
-host-thread fan-out (B1) and pinning the final result D2H. The B2 P2P-transport fix-pass is
-REASSESS / largely subsumed by the resident combine. Landing the debt items moves every unit to ≥9
-— a 9.5+ milestone and a sound foundation for M5 streaming. The real next work is the qpAdm FIT
-ENGINE (Phase 2), then M5 out-of-core streaming, AT2 goldens (M7 gate), M6 merge; the perf
+is COMPLETE and on `main`. The device-resident combine (`867a4bf`) deleted the data-bounce wart that
+the nsys diagnosis (`165f655`, `why-multigpu-slow.md`) pinned as the root cause of the old slowdown,
+and the 2-GPU path now beats single-GPU (P=768 1.10×, P=400 1.22×, rtxbox/Release/EmuFp64{40}).
+**Post-M5 verdict (the honest perf story):** that ~1.1× is a *modest throughput layer*, not the
+headline — the precompute was HOST-RESULT-BOUND, and the real speedups came after M4.5 from
+**device-resident output** (`1f80c0c`, P=512 ~4.3×) and **M5 out-of-core streaming**
+(`176a07d` adaptive tiered output + `c65179f` SNP-tile input streaming), i.e. getting OFF the CPU.
+**M5 is now DONE:** full-autosome (M=584131, n_block=757) P=2500 completes on a single 32 GB RTX 5090
+in ~51.5 s (76 GB result streamed, GPU peak ~26 GB), parity bit-identical. None of the M4.5 gaps
+threatens the proven bit-identity. The remaining M4.5 work is debt, not speedup: wiring the
+`enable_peer_access` gate (B3), making the gate match its 3-term doc (B4), single-homing
+`validate_partials` (B5), dropping the redundant `block_sizes` (B6), the host-combine `std::copy`
+(B7), the cold-start probe fix + §9 validation (B8), and GPU-free host tests (B9). Optional further
+levers: per-device host-thread fan-out (B1). The B2 P2P-transport fix-pass is REASSESS / largely
+subsumed by the resident combine. **The real next work is the qpAdm FIT ENGINE (Phase 2, S3-S8,
+still unbuilt)** — multi-GPU's proper home (thousands of independent qpAdm models, no combine —
+embarrassingly parallel); then AT2 goldens (the validation gate), M6 merge. The perf
 rabbit-hole is CLOSED.

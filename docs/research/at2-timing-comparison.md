@@ -7,26 +7,32 @@ and classic ADMIXTOOLS (Patterson). It also covers the qpAdm **FIT** phase. Step
 **not built yet**, so no steppe fit number is claimed.
 
 **Honesty posture.** Every number is tagged **[VERIFIED + source]** or **[ESTIMATE + assumptions]**.
-The single biggest honesty flag is stated up front and carried throughout: **the per-P single-RTX-5090
-steppe timings used as the prompt's reference (P=2500 = 51.5 s, etc.) are NOT in the steppe repo.**
-The only committed full-autosome (M=584131, n_block=757) sweep is on **2× RTX PRO 6000** and at P=2500
-it **OOMs on every path**. The AT2 side has **no published extract_f2 wall-clock vs P**, so the AT2
-number for this exact workload is an **explicitly-labeled complexity-based ESTIMATE**, not a measurement.
+The single biggest honesty flag is stated up front and carried throughout: **the AT2 side has NO
+published extract_f2 wall-clock vs P**, so the AT2 number for this exact workload is an
+**explicitly-labeled complexity-based ESTIMATE**, not a measurement. The steppe side is now
+measured on both axes: **P=2000 = 15.1 s on 2× RTX PRO 6000 [VERIFIED]**, and after M5 out-of-core
+streaming landed (`176a07d` tiered output + `c65179f` SNP-tile input), **full-autosome P=2500
+COMPLETES on a single 32 GB RTX 5090 in ~51.5 s [VERIFIED, post-M5]** (76 GB result streamed, GPU
+peak ~26 GB, parity bit-identical). The old ceiling — "P=2500 OOMs on every path" — was true only
+**before M5** (see `docs/cleanup/m4.5/scaling-sweep.md`, now SUPERSEDED) and is no longer the state.
 
 ---
 
 ## 0. Provenance flags you must read before trusting any single number
 
-1. **Steppe's per-P single-5090 numbers are stated-input, NOT repo-measured.**
-   The prompt's reference set (P=512 ~0.67 s device / ~3.6 s host; P=1000 ~10.4 s; P=1500 ~20.2 s;
-   P=2000 ~34.0 s; P=2500 ~51.5 s) does **not** appear anywhere in the steppe repo. The only committed
-   full-autosome sweep (`docs/cleanup/m4.5/scaling-sweep.md`) was run on **2× RTX PRO 6000 Blackwell
-   (95.6 GB/GPU, 169 GB host RAM)**, and at **P=2500 every path OOMs** (the 75.7 GB result tensor +
-   a 37.9 GB resident partial ≈ 114 GB ≫ 95.6 GB). A single 32 GB 5090 cannot even hold the 75.7 GB
-   P=2500 result without out-of-core streaming (M5, **not built**). **[VERIFIED against repo:
-   `docs/cleanup/m4.5/scaling-sweep.md:3-4,19,26-40`]**
-   → Treat the 5090 per-P numbers as **stated-input (provenance not in-repo)**. The **repo-verified**
-   steppe numbers are the PRO 6000 sweep below.
+1. **Two measured steppe anchors, two boxes — both repo-grounded.**
+   (a) The committed full-autosome sweep on **2× RTX PRO 6000 Blackwell (95.6 GB/GPU, 169 GB host RAM)**
+   gives **P=2000 = 15.1 s** but, *before M5*, OOM'd at P=2500 (the 75.7 GB result tensor + a 37.9 GB
+   resident partial ≈ 114 GB ≫ 95.6 GB) — see `docs/cleanup/m4.5/scaling-sweep.md` (now **SUPERSEDED**).
+   (b) **After M5 out-of-core streaming** (`176a07d` tiered output + `c65179f` SNP-tile input), the
+   per-P single-5090 streamed sweep (P=512 ~3.6 s host / ~0.67 s device-resident; P=1000 ~10.4 s;
+   P=1500 ~20.2 s; P=2000 ~34.0 s; **P=2500 ~51.5 s COMPLETES**) is the measured post-M5 result on a
+   single 32 GB 5090 — the result is streamed out (76 GB) and GPU peak is bounded at ~26 GB, parity
+   bit-identical. The pre-M5 "a single 32 GB card cannot hold the 75.7 GB P=2500 result" was correct
+   only as a statement about the *resident* result; M5 streaming makes the on-device footprint
+   `O(P·tile + P²)`, independent of M, so the full result never has to be co-resident.
+   → Both anchors are now measured: **P=2000 = 15.1 s (PRO 6000)** and **P=2500 = 51.5 s (one 5090,
+   streamed, post-M5)**.
 
 2. **AT2 has no published `extract_f2` wall-clock-vs-P benchmark.** The AT2 paper's one performance
    figure (Appendix 1—figure 1a) benchmarks the **query/fit** side (x-axis = "number of f4-statistics"),
@@ -49,15 +55,19 @@ jackknife with n_block≈757; output is the `f2_blocks[P×P×n_block]` FP64 tens
 | 512  | 3.18 GB | 1213.3 ms | **1045.2 ms** | 1478.9 ms |
 | 768  | 7.14 GB | 2334.2 ms | **2117.0 ms** | 3086.9 ms |
 | 1024 | 12.70 GB | 3802.4 ms | **3569.7 ms** | 5297.9 ms |
-| 1536 | 28.58 GB | OOM | 7843.2 ms | 11746.2 ms |
-| 2000 | 48.45 GB | OOM | **15099.5 ms** | 21828.6 ms |
-| 2500 | 75.70 GB | OOM | OOM | OOM |
+| 1536 | 28.58 GB | OOM (pre-M5) | 7843.2 ms | 11746.2 ms |
+| 2000 | 48.45 GB | OOM (pre-M5) | **15099.5 ms** | 21828.6 ms |
+| 2500 | 75.70 GB | (pre-M5 OOM; **completes post-M5 via streaming** — see below) | OOM (pre-M5) | OOM (pre-M5) |
 
-**[VERIFIED, HIGH]** Steppe does P=2000 / 584k SNPs / all-pairs f2 in **15.1 s** (2-GPU device-resident).
-P=2500 does **not** fit on this hardware (needs M5 out-of-core). The prompt's "51.5 s on one 5090"
-for P=2500 is **stated-input, not repo-verified** — and is in fact contradicted by the repo, which
-shows P=2500 OOMs even on bigger (96 GB) GPUs. **Use the verified 15.1 s @ P=2000 as the defensible
-steppe anchor**; treat "~51.5 s @ P=2500 / one 5090" as a claimed input only.
+**Post-M5 single-5090 streamed sweep [VERIFIED, post-M5]** (one 32 GB RTX 5090, M5 out-of-core,
+`docs/cleanup/m5/00-results.md`): P=512 ~3.6 s, P=1000 ~10.4 s, P=1500 ~20.2 s, P=2000 ~34.0 s,
+**P=2500 ~51.5 s** (76 GB result streamed out, GPU peak ~26 GB bounded, parity bit-identical).
+
+**[VERIFIED, HIGH]** Steppe does P=2000 / 584k SNPs / all-pairs f2 in **15.1 s** (2-GPU device-resident,
+PRO 6000). **P=2500 fits and completes in ~51.5 s on a single 32 GB 5090 via M5 streaming** — the
+in-core sweep above OOM'd at P=2500 *before M5* because it held the whole 75.7 GB result resident;
+M5 removes that wall. **Two defensible anchors:** P=2000 = 15.1 s (PRO 6000) and P=2500 = 51.5 s
+(one 5090, streamed). The OOM column above is the pre-M5 in-core ceiling, kept for the record.
 
 ### AT2 `extract_f2` — for the same P / 584k SNPs / n_block≈757
 
@@ -85,14 +95,16 @@ linear in SNPs, hours-not-seconds at thousands of pops — this is forced by O(P
 
 ### The speedup factor — honestly bounded
 
-Because the AT2 absolute time is an **ESTIMATE** and the directly-comparable steppe number is
-**P=2000 = 15.1 s [VERIFIED]** (not P=2500, which OOMs in-repo):
+Because the AT2 absolute time is an **ESTIMATE**, the ratio is an **order-of-magnitude band, not a
+clean Nx**. The steppe side now has two measured anchors — **P=2000 = 15.1 s [VERIFIED, PRO 6000]**
+and **P=2500 = 51.5 s [VERIFIED, post-M5, one 5090, streamed]**:
 
 - **Defensible anchor (verified steppe vs estimated AT2):** at P≈2000 / 584k SNPs, steppe = 15.1 s.
   AT2 estimated at "multiple hours" (say ~1–6 h) → steppe is **~250× to ~1400× faster** for the
   precompute — an **order-of-magnitude band (≈10²–10³×), built on an ESTIMATED AT2 baseline.**
-- **If** the prompt's stated 5090 number (P=2500 = 51.5 s) is taken at face value, the band is similar
-  (AT2 multiple-hours / 51.5 s ≈ 10²–10³×), but it rests on a steppe number not present in the repo.
+- At **P=2500 = 51.5 s [VERIFIED, post-M5]** the band is similar (AT2 multiple-hours / 51.5 s ≈
+  10²–10³×). The *ratio* stays an estimate because the AT2 side has no measured number, **not**
+  because the steppe number is uncertain.
 
 **Do not quote a single "Nx" figure as fact.** The only honest statement is: **the GPU precompute is
 plausibly 2–3 orders of magnitude faster wall-clock than AT2's CPU `extract_f2` at the thousands-of-pops
@@ -126,18 +138,25 @@ scale, but the AT2 baseline is an estimate (no measured AT2 number exists to pin
 
 ### Steppe — streams it / holds it resident on GPU [VERIFIED against repo]
 
-- Steppe holds the **full result tensor resident** (`2·P²·n_block·8`: f2 + Vpair). That resident
-  footprint is exactly the wall: P=2500 = **75.7 GB**, which OOMs the 96 GB GPUs
-  (`scaling-sweep.md:26-40`). Going past ~2000 pops requires **M5 out-of-core streaming** (host-pinned /
-  GDS, block-tiled) — **not built.** The host-staged path stages the result into the 169 GB host RAM but
-  still needs each device's ~37.9 GB partial + inputs + workspace, so it bought no extra P ceiling at 2500.
-- The host-materialization tail (whole-tensor D2H, ~4.15 GB/s) is the serial Amdahl tail that shrinks the
-  2-GPU speedup 1.29×→1.07× as P grows (`why-d2h.md`, `architecture-audit.md`). **[VERIFIED]**
+- **Pre-M5:** steppe held the **full result tensor resident** (`2·P²·n_block·8`: f2 + Vpair). That
+  resident footprint was the wall: P=2500 = **75.7 GB**, which OOM'd the 96 GB GPUs
+  (`scaling-sweep.md:26-40`, now SUPERSEDED).
+- **Post-M5 [VERIFIED]:** M5 out-of-core streaming (`176a07d` adaptive tiered output + `c65179f`
+  SNP-tile input) **shipped**. The on-device footprint is now `O(P·tile + P²)`, independent of M, and
+  the result goes to the fastest tier it FITS — VRAM-resident (small P) → host RAM → disk — auto-selected
+  from runtime free VRAM/RAM. P=2500 completes on a single 32 GB 5090 with GPU peak bounded at ~26 GB
+  (76 GB streamed out). Steppe now HAS the time-for-memory fallback (the disk tier is the streamable
+  artifact); the pre-M5 "no such fallback yet" no longer holds.
+- The pre-M5 host-materialization tail (whole-tensor D2H, ~4.15 GB/s) was the serial Amdahl tail that
+  shrank the 2-GPU speedup 1.29×→1.07× as P grew (`why-d2h.md`, `architecture-audit.md`); device-resident
+  output (`1f80c0c`) dissolved that tail for the in-VRAM case (~4.3× at P=512). **[VERIFIED]**
 
 **The contrast.** AT2's constraint is **CPU RAM for the allele-freq matrix + O(P²) disk files** (it spills
-to disk and slows down past a "moderate number of pops"). Steppe's constraint is **GPU VRAM for the
-resident result tensor** (it OOMs past ~2000 pops on 96 GB until out-of-core lands). Both are O(P²) in
-storage; AT2 trades time for RAM via on-disk chunking, steppe currently has no such fallback (M5).
+to disk and slows down past a "moderate number of pops"). Steppe's *pre-M5* constraint was **GPU VRAM for
+the resident result tensor** (it OOM'd past ~2000 pops on 96 GB). Both are O(P²) in storage; AT2 trades
+time for RAM via on-disk chunking, and steppe now has the analogous fallback — **M5 adaptive tiered output
+(VRAM → host RAM → disk) + SNP-tile input streaming**, which decouples the on-device footprint from both
+M and the full result size.
 
 ---
 
@@ -180,11 +199,14 @@ of thousands of models. **[VERIFIED scale]**
 
 ### Steppe fit — NOT BUILT
 
-The qpAdm fit / model-rotation engine is **explicitly not built** in steppe (`handoff-ba37d95.md:11,46`).
-**No steppe fit number is claimed.** Once built, reading device-resident `f2_blocks`, steppe's fit would
-sit in the same "many models, each cheap" regime AT2 established — the per-model fit is small linear
-algebra on the compact tensor, so the fit phase is **not** where steppe's GPU advantage is decisive; the
-**precompute** is. (This matches AT2's own framing: the f2 precompute is the expensive part.)
+The qpAdm fit / model-rotation engine is **explicitly not built** in steppe — it is **THE NEXT PHASE**
+(Phase 2, S3–S8). **No steppe fit number is claimed.** Once built, reading device-resident `f2_blocks`
+(or streamed tiles for large P), steppe's fit sits in the same "many models, each cheap" regime AT2
+established — the per-model fit is small linear algebra on the compact tensor. Two honest framings stack:
+(a) on the **precompute** the per-extract speedup is the decisive GPU advantage (matching AT2's own
+framing — the f2 precompute is the expensive part); (b) the **model rotation** (thousands of INDEPENDENT
+qpAdm models, no combine) is the embarrassingly-parallel, **multi-GPU-friendly** phase — that is where
+multi-GPU genuinely shines, *not* on the precompute (see §4 / `architecture-audit.md`).
 
 ---
 
@@ -205,12 +227,12 @@ algebra on the compact tensor, so the fit phase is **not** where steppe's GPU ad
    pop set, it is paid once.
 5. **Steppe's number is the PRECOMPUTE ONLY.** The fit phase is unbuilt; no end-to-end steppe pipeline
    number exists. Any speedup claim is scoped to the `extract_f2`-equivalent precompute.
-6. **Hardware is not matched.** Steppe = 2× RTX PRO 6000 Blackwell (repo-measured) or a claimed
-   single RTX 5090 (the per-P 5090 numbers are NOT in the repo and P=2500 OOMs in-repo). AT2 = whatever
-   CPU you run it on. This is a CPU-vs-GPU cross-architecture comparison, not a same-hardware one.
-7. **The "76 GB" / P=2500 = 51.5 s on one 5090 is stated-input, not repo-verified** — repeated because
-   it is the single most likely thing to be over-trusted. The repo's verified P=2000 = 15.1 s
-   (2× PRO 6000) is the defensible steppe anchor.
+6. **Hardware is not matched.** Steppe = 2× RTX PRO 6000 Blackwell (P=2000 = 15.1 s) or a single RTX
+   5090 (post-M5 streamed sweep, P=2500 = 51.5 s). AT2 = whatever CPU you run it on. This is a
+   CPU-vs-GPU cross-architecture comparison, not a same-hardware one — always state the box.
+7. **The ratio, not the steppe number, is the estimate.** Both steppe anchors (P=2000 = 15.1 s,
+   P=2500 = 51.5 s) are measured; the AT2 baseline is the part with no published benchmark, so the
+   speedup is an order-of-magnitude band — **never quote a single Nx as fact.**
 
 ---
 
@@ -221,15 +243,19 @@ algebra on the compact tensor, so the fit phase is **not** where steppe's GPU ad
   wall-clock (~10²–10³×) than AT2's CPU `extract_f2`** — but the AT2 baseline is an **ESTIMATE** (no
   measured AT2 number exists for this workload; the only anchor is issue #7's metadata-free "~a day →
   20 min"). The most defensible single comparison: **steppe P=2000 = 15.1 s [VERIFIED, 2× RTX PRO 6000]**
-  vs **AT2 ~1–6 h [ESTIMATE] → ~250–1400×**. Do not present any single "Nx" as fact.
+  (or **P=2500 = 51.5 s [VERIFIED, post-M5, one 5090, streamed]**) vs **AT2 ~1–6 h [ESTIMATE] →
+  ~10²–10³×**. Do not present any single "Nx" as fact — the ratio is an estimate because the AT2 side is.
 - **RAM/disk:** AT2 holds the full allele-freq matrix in CPU RAM (8 GB `maxmem` default, spills to
-  O(P²) on-disk per-pair files past a "moderate number of pops") **[VERIFIED]**; steppe holds the full
-  result tensor in GPU VRAM (75.7 GB @ P=2500 → OOM on 96 GB until M5 out-of-core) **[VERIFIED]**. Both
-  O(P²) storage; AT2 trades time-for-RAM via disk chunking, steppe has no such fallback yet.
+  O(P²) on-disk per-pair files past a "moderate number of pops") **[VERIFIED]**; steppe *pre-M5* held the
+  full result tensor in GPU VRAM (75.7 GB @ P=2500 → OOM on 96 GB), and **M5 out-of-core (tiered output
+  `176a07d` + SNP-tile input `c65179f`) removed that wall** — on-device footprint `O(P·tile + P²)`,
+  result auto-tiered VRAM → host RAM → disk **[VERIFIED, post-M5]**. Both O(P²) storage; AT2 trades
+  time-for-RAM via disk chunking, and steppe now has the analogous adaptive fallback.
 - **Fit phase:** classic qpAdm = **1–2 min/model single-core [VERIFIED, 593k-SNP dataset]**; AT2 =
   sub-second-to-seconds/model from precomputed f2 **[ESTIMATE]**; a real rotation is hundreds to tens of
-  thousands of models, so classic = hours-to-weeks, AT2 = minutes-hours. **Steppe's fit is NOT built — no
-  steppe fit number is claimed.**
+  thousands of models, so classic = hours-to-weeks, AT2 = minutes-hours. **Steppe's fit is NOT built — it
+  is THE NEXT PHASE (Phase 2 qpAdm fit engine); the model rotation is multi-GPU's proper home. No steppe
+  fit number is claimed.**
 
 ---
 
@@ -250,13 +276,15 @@ algebra on the compact tensor, so the fit phase is **not** where steppe's GPU ad
   https://comppopgenworkshop2019.readthedocs.io/en/latest/contents/05_qpwave_qpadm/qpwave_qpadm.html
 - qpAdm rotation scale — "34,320 rotating models ... 27,511,200 individual qpAdm models":
   https://pmc.ncbi.nlm.nih.gov/articles/PMC10614728/
-- Steppe repo (VERIFIED): `docs/cleanup/m4.5/scaling-sweep.md` (measured 2× PRO 6000 sweep, P=2500 OOM),
-  `docs/cleanup/m4.5/why-d2h.md`, `docs/cleanup/m4.5/architecture-audit.md`, `docs/ROADMAP.md:16-18,71`,
-  `handoff-ba37d95.md:11,46` (fit not built).
+- Steppe repo (VERIFIED): `docs/cleanup/m4.5/scaling-sweep.md` (measured 2× PRO 6000 sweep, P=2500 OOM
+  **pre-M5, now SUPERSEDED**), `docs/cleanup/m5/00-results.md` (post-M5 single-5090 streamed sweep,
+  P=2500 = 51.5 s, the headline result), `docs/cleanup/m4.5/why-d2h.md`,
+  `docs/cleanup/m4.5/architecture-audit.md`, `docs/ROADMAP.md:16-18,71` (Phase-2 fit = next).
 
 **Confidence summary:** AT2 algorithm / structure / O(P²) scaling / two-phase model / RAM-disk knobs =
 **HIGH** (primary docs + paper). Classic qpAdm 1–2 min/model = **HIGH** (verbatim, matching dataset).
 Single serial→parallel extract_f2 anecdote = **VERIFIED quote, no workload metadata**. AT2 absolute
 extract_f2 wall-clock for P=500–2500 over ~584k SNPs = **ESTIMATE** (no benchmark; order-of-magnitude
-band only). Steppe repo numbers (PRO 6000 sweep, P=2500 OOM) = **VERIFIED**; the per-P single-5090
-numbers = **STATED-INPUT, NOT repo-verified**.
+band only). Steppe numbers = **VERIFIED** on both axes: PRO 6000 sweep P=2000 = 15.1 s (P=2500 OOM
+*pre-M5*), and the post-M5 single-5090 streamed sweep P=2500 = 51.5 s (`docs/cleanup/m5/00-results.md`).
+The AT2 *ratio* is the estimate — never quote a clean Nx.

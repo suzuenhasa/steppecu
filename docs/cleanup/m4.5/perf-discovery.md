@@ -1,6 +1,21 @@
 # M4.5 Multi-GPU PERF DISCOVERY — the parity-safe speedup plan
 
-> **STATUS: SUPERSEDED on its central premise (P1) — see `why-multigpu-slow.md`.** This doc's #1
+> **RESOLVED / OUTCOME (post-M5) — this whole plan is HISTORICAL.** This doc hunts for the multi-GPU
+> precompute speedup; the honest finding is that **multi-GPU per se was never the precompute
+> speedup.** The data-bounce was fixed (`867a4bf`, the local 1.10× below), but the REAL wins came from
+> getting the result OFF the CPU: **device-resident OUTPUT (commit `1f80c0c`)** — the result stays in
+> VRAM, host `F2BlockTensor` is opt-in — measured **P=512 ~673 ms resident vs ~2879 ms bulk-to-host =
+> ~4.3×** (the precompute was HOST-RESULT-BOUND; ~80% of the old wall was the host copy). Then **M5
+> out-of-core** (`176a07d` adaptive tiered output + `c65179f` SNP-tile input streaming) bounded the
+> GPU footprint to O(P·tile + P²) and let P=2500 full-autosome complete on a single 32 GB 5090 in
+> ~51.5 s, parity bit-identical. Multi-GPU on the precompute is a modest throughput layer at best; its
+> real home is the embarrassingly-parallel FIT / ROTATION phase (Phase 2, unbuilt). The "speedup plan"
+> below is kept for the build-type / overlap / pinned-staging findings, but treat the multi-GPU
+> framing as historical.
+>
+> ---
+>
+> **PRIOR STATUS: SUPERSEDED on its central premise (P1) — see `why-multigpu-slow.md`.** This doc's #1
 > claim — that the dominant cost is **~1440 ms/run of redundant combine host-zeroing** (`assign(0.0)`),
 > and that **P1 (`resize` not `assign`) is THE speedup lever** — was **REFUTED on-box** by a later nsys
 > trace. The accumulator zeroing measures **5 ms** (a `cudaMemset`), not 1440 ms; the host
@@ -261,9 +276,13 @@ real P2P). Item order (as originally proposed — see the HISTORICAL note above 
   re-run `bench_f2_multigpu` G2 vs G1 + the locked `memcmp` parity test.
 - **P2 — real per-worker `Stream`** (S, the overlap precondition) — **landed `9fdc946`**.
 - **P3 — L4 buffer reuse / pool** (S–M) — **landed `a41d67a`** (optional cleanup, not the lever).
-- **P4 — pinned staging** (M, needs the new `PinnedBuffer`) — *remaining optional lever:* pin the final
-  pageable result D2H to push past 1.10×.
-- **P6 — device-resident combine — the ACTUAL cure, landed `867a4bf` (G2 1.10× @ P=768).**
+- **P4 — pinned staging** (M, needs the new `PinnedBuffer`) — *was the remaining optional lever* (pin
+  the final pageable result D2H to push past 1.10×). **SUPERSEDED post-M5:** device-resident OUTPUT
+  (`1f80c0c`) removes that final D2H entirely for the in-VRAM case (~4.3× @ P=512), and M5 streaming
+  (`176a07d`/`c65179f`) handles the beyond-VRAM spill in overlapped block-tiles; an M5 pinned
+  double-buffer is the spill mechanism, not a multi-GPU lever.
+- **P6 — device-resident combine — the local cure that flipped G2 to 1.10× @ P=768 (`867a4bf`);
+  later superseded by device-resident OUTPUT (`1f80c0c`) + M5 streaming as the architectural fix.**
 
 **Recommended measurement:** the post-fix bench (rtxbox, Release, EmuFp64{40}, median of 10) recorded
 P=768 G2 = 2125 ms vs G1 = 2342 ms = 1.10×, P=400 = 1.22×, via `tests/reference/bench_f2_multigpu.cu`

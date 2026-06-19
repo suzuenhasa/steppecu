@@ -1,3 +1,16 @@
+> **SUPERSEDED — historical (pre-M5).** This sweep concluded that **P≥2000 needs multi-GPU and
+> P=2500 OOMs on every path** (75.7 GB resident result vs 95.6 GB/GPU). That conclusion was correct
+> *before M5*, and is now **FALSE**. M5 SNP-tile **input streaming** (commit `c65179f`) + **adaptive
+> tiered output** (commit `176a07d`) decouple the GPU footprint from the result size: full-autosome
+> (M=584131, n_block=757) **P=2500 now COMPLETES on a single 32 GB RTX 5090 in ~51.5 s**, with the
+> 76 GB result streamed out and GPU peak bounded at ~26 GB (parity `memcmp` bit-identical). The
+> "wall is the resident full result" / "M5 becomes mandatory at ≥2000 pops" framing below is the
+> *map of why M5 was built* — M5 then removed the wall. The honest perf story also shifted: on the
+> precompute, multi-GPU is a modest throughput layer, not the headline; the real wins came from
+> getting the result **off the CPU** (device-resident output `1f80c0c`) and **streaming** it
+> (`176a07d` + `c65179f`). See **`docs/cleanup/m5/00-results.md`** for the current results. Kept
+> verbatim below as the historical record — **do not act on its conclusions.**
+
 # M4.5 multi-GPU — at-scale scaling sweep (where 2 GPUs top out)
 
 Box: rtxbox (2× RTX PRO 6000 Blackwell sm_120, **95.6 GB/GPU**, **169 GB host RAM**), CUDA 13, Release,
@@ -23,8 +36,14 @@ Run via `agentscripts/m4.5-scaling-sweep.js`. The result tensor is `f2 + Vpair`,
 
 ## Headline — can we do 2500 pops on 2 GPUs?
 
-**No.** At P=2500 the result tensor alone is **75.7 GB**, and *every* path OOMs on a 95.6 GB GPU.
-**The ceiling on these two GPUs is P≈2000** (both multi-GPU paths reach it; single-GPU does not).
+> **SUPERSEDED:** the "No" below was true only for the *fully-resident* pre-M5 paths. With M5
+> streaming (`c65179f` + `176a07d`) P=2500 completes on a single **32 GB** card (~51.5 s) — see the
+> banner at the top and `docs/cleanup/m5/00-results.md`.
+
+**No** (pre-M5, resident result). At P=2500 the result tensor alone is **75.7 GB**, and *every*
+fully-resident path OOMs on a 95.6 GB GPU. **The ceiling on these two GPUs is P≈2000** (both
+multi-GPU paths reach it; single-GPU does not). M5 lifts this ceiling by never holding the full
+`P²·n_block` result on-device.
 
 ## Where each path hits its wall (with the memory budget)
 
@@ -46,14 +65,23 @@ Run via `agentscripts/m4.5-scaling-sweep.js`. The result tensor is `f2 + Vpair`,
    grows with P²** and is a serial tail after the (overlapped) compute — so the relative win erodes as the
    result dominates. It stays >1× at every P that fits, and **beats host-staged at every single P**.
 2. **From P≈1536 up, multi-GPU is *enabling*, not just faster:** single-GPU OOMs, multi-GPU runs (to 2000).
-   This is the real value at scale — jobs one GPU physically cannot hold.
+   *(SUPERSEDED nuance:* this was the pre-M5 value — a second GPU bought P headroom one resident GPU could not
+   hold. M5 streaming made that moot: a *single* 32 GB card now reaches P=2500 by never holding the full result.
+   On the precompute, multi-GPU is therefore a **modest throughput layer**, not the at-scale enabler — and it was
+   measured *slower* than single-GPU until the data-bounce was fixed (nsys ~22–74% overlap, a serial D2H/host
+   tail; see `why-multigpu-slow.md`). Multi-GPU's proper home is the **fit/rotation phase** — thousands of
+   independent qpAdm models, no combine — not the precompute.)*
 3. **Host-staged is the portable fallback, not a lever:** slower than device-resident everywhere (0.99×→0.72×
    vs G1), and here it bought no extra P headroom. Its purpose remains correctness on no-P2P (consumer) boxes.
 4. **The wall is the resident full result** (`2·P²·n_block·8`), not compute or the combine. To go past ~2000
-   pops you must stop holding the entire `f2_blocks` tensor resident — i.e. **M5 out-of-core**: stream/shard the
-   result to host-pinned or disk (GDS) and process block-tiles, so neither the device nor a single buffer holds
-   all `P²·n_block`. This sweep is the precise map of where M5 becomes mandatory (≥~2000 pops at full-autosome
-   n_block=757). Fewer blocks (e.g. a single chromosome) or smaller P stay comfortably on-GPU.
+   pops you must stop holding the entire `f2_blocks` tensor resident — i.e. **M5 out-of-core**, **which has
+   since been built** (input streaming `c65179f` + adaptive tiered output `176a07d`). M5 streams the SNP-tiles in
+   (per-block decode; GPU footprint `O(P·tile + P²)`, *independent of M* — no `7·P·M` feeder wall) and routes the
+   result to the fastest tier it FITS (VRAM-resident → host RAM → disk, auto-selected from runtime free
+   VRAM/RAM), so neither the device nor a single buffer holds all `P²·n_block`. With M5, full-autosome
+   (n_block=757) P=2500 runs on a single **32 GB** card (~51.5 s; GPU peak ~26 GB). This sweep is the precise
+   map of *why* M5 was needed (≥~2000 pops at full-autosome would otherwise OOM). Fewer blocks (e.g. a single
+   chromosome) or smaller P stay comfortably on-GPU and keep the device-resident fast path (`1f80c0c`).
 
 ## Caveats
 

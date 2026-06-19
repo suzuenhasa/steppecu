@@ -1,5 +1,21 @@
 # Why is there a D2H of `f2_blocks` at all?
 
+> **RESOLVED / OUTCOME (post-M5).** This doc's recommendation SHIPPED. The precompute now
+> returns a **device-resident handle** (`DeviceF2Blocks`; the result stays in VRAM) and the host
+> `F2BlockTensor` is an **opt-in `.to_host()`** — exactly the §5 recommendation below (commit
+> `1f80c0c`). **Measured:** P=512 device-resident ~673 ms vs ~2879 ms bulk-to-host = **~4.3×** —
+> confirming the key lesson that the precompute was HOST-RESULT-BOUND (~80% of the old wall was
+> copying the multi-GB result to CPU; getting it OFF the CPU was the real win). The §2(c) /
+> §3 / §4 scale-beyond-VRAM case is also DONE via **M5 out-of-core streaming**: ADAPTIVE TIERED
+> output (commit `176a07d`) sends the result to the fastest tier it FITS (VRAM-resident -> host
+> RAM -> disk, auto-selected from runtime free VRAM/RAM), and **SNP-tile input streaming** (commit
+> `c65179f`) bounds the device footprint to O(P·tile + P²), independent of M. Full-autosome
+> (M=584131, n_block=757) P=2500 now **COMPLETES on a single 32 GB RTX 5090 in ~51.5 s** (76 GB
+> result streamed, GPU peak ~26 GB), parity bit-identical. So the unconditional eager whole-tensor
+> D2H this doc argues against no longer exists: the in-VRAM case has no D2H, and the
+> beyond-VRAM case spills in block-tiles per the design. The analysis below is preserved as the
+> design rationale that drove `1f80c0c` + `176a07d` + `c65179f`.
+
 Lead-architect answer, from the design + code. Read-only audit; all claims cited to
 `file:line` or doc section. The three review lenses (deliverable-contract,
 consumer-dataflow, eliminate-or-fuse) converged on the same verdict; this doc
@@ -114,10 +130,13 @@ terminal**, never "every precompute":
   (`ROADMAP.md:80`), unbuilt.
 - **(c) Scale beyond VRAM.** The spec itself concedes the full-resident model breaks
   at the top end: at `P=4266 / B=757` the `f2 + Vpair` pair "**reaches ≈220 GB and is
-  itself VRAM-budgeted per §11.2**" (`architecture.md:717`); the scaling sweep confirms
-  every path OOMs past P≈2000 on 96 GB cards (`scaling-sweep.md:52-56`). Here the bytes
-  *must* spill — but to **pinned host or GDS in block-tiles, overlapped** (M5), not a
-  single serial whole-tensor copy.
+  itself VRAM-budgeted per §11.2**" (`architecture.md:717`). The pre-M5 scaling sweep
+  reported every full-resident path OOMing past P≈2000 on 96 GB cards
+  (`scaling-sweep.md:52-56`, now SUPERSEDED — that doc is pre-M5). **M5 fixed exactly this:**
+  block-tile spill to host RAM or disk, overlapped (`176a07d`), plus SNP-tile input streaming
+  (`c65179f`), so P=2500 full-autosome now completes on a single 32 GB 5090. Here the bytes
+  *do* spill — to **pinned host or disk in block-tiles, overlapped** (M5), not a single serial
+  whole-tensor copy.
 
 The honest meta-point (audit **Flaw 4**, `architecture-audit.md:112-122`): the
 deliverable is "materialized whole … then copied whole," but the consumer (the
@@ -192,20 +211,24 @@ block-axis overlapped — not the current `~4.15 GB/s` pageable serial tail.
 
 Yes, but as a *design constraint on Phase 2*, not a reordering:
 
-1. **Make the precompute→fit handoff device-resident.** Promote the device-resident
-   result handle (`DevicePartial`, already built) to the **primary** output of
-   `compute_f2_blocks[_multigpu]`; the host `F2BlockTensor` becomes an **opt-in
-   `.to_host()` / `.write_cache()` materialization**, not the unconditional return.
-   This is what `architecture.md:673,235,717` already prescribe; the current code
-   diverges from the spec, it does not implement it.
+1. **Make the precompute→fit handoff device-resident. [DONE — commit `1f80c0c`.]** The
+   device-resident result handle (now `DeviceF2Blocks`) IS the **primary** output of the
+   precompute; the host `F2BlockTensor` is an **opt-in `.to_host()`** materialization, not the
+   unconditional return — exactly as recommended here. This is what `architecture.md:673,235,717`
+   prescribe; the code now implements it. **Measured: P=512 device-resident ~673 ms vs ~2879 ms
+   bulk-to-host = ~4.3×.**
 2. **Design the Phase-2 fit engine to read `f2_blocks` from VRAM, block-by-block /
    pair-subset** (Flaw 4; `scaling-sweep.md:52-56`), so it never needs the whole
    `2·P²·B` co-resident and never round-trips through host. Building this is the act
    that removes the measured wall for the common case.
 3. **Treat host/disk as the persistence path, not the default:** the M7 cache spill
    (opt-in, block-tiled, pinned/GDS) and the Phase-3 public egress are the only places
-   a host copy belongs. M5 out-of-core handles the P-beyond-VRAM spill with the same
-   block-tiled, overlapped discipline.
+   a host copy belongs. **M5 out-of-core (DONE) handles the P-beyond-VRAM spill** with the
+   block-tiled, overlapped discipline this doc prescribes: adaptive tiered output (`176a07d`)
+   spills to host RAM or disk only when the result does not fit VRAM, and SNP-tile input
+   streaming (`c65179f`) keeps the device footprint at O(P·tile + P²). P=2500 full-autosome now
+   completes on one 32 GB 5090 in ~51.5 s (parity bit-identical), so the beyond-VRAM case no
+   longer OOMs.
 
 ### Where the design is explicit vs silent
 

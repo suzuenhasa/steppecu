@@ -1,5 +1,19 @@
 # M4.5 multi-GPU: is it TRUE parallel, or built wrong?
 
+> **RESOLVED / OUTCOME (post-M5).** The diagnosis here held — the precompute wall was HOST-bound,
+> not GPU-bound — and the fix was NOT "make multi-GPU truly parallel" but **get the result off the
+> CPU**. §2/§5 found the ~570 ms serial tail was per-call D2H host pin/unpin of the ~3 GB result
+> slice, and §3 framed the deeper problem ("multi-GPU-vs-D2H is the wrong axis; the wall is host
+> work, not GPU time"). Both were answered by **device-resident output (commit `1f80c0c`)**: the
+> precompute returns a VRAM-resident handle, the host copy becomes opt-in, and the per-call pin tail
+> is simply not executed in the in-VRAM case. **Measured P=512 ~673 ms resident vs ~2879 ms
+> bulk-to-host = ~4.3×.** Scale beyond VRAM is handled by **M5 streaming** (`176a07d` tiered output +
+> `c65179f` SNP-tile input streaming): footprint O(P·tile + P²), P=2500 full-autosome completes on
+> one 32 GB 5090 in ~51.5 s, parity bit-identical. **The honest takeaway:** multi-GPU per se was NOT
+> the precompute speedup — getting off the CPU was. Multi-GPU's real home is the embarrassingly
+> parallel FIT / ROTATION phase (Phase 2, unbuilt), not the precompute. The analysis below is
+> preserved as the record of how the host-bound nature was proven.
+
 Box: box5090 (2x RTX 5090 sm_120, 32 GB ea, CONSUMER no-P2P, CUDA 13.0.88), live.
 Method: code read (read-only) reconciled against an nsys CUDA/NVTX/OSRT timeline at P=512
 (`bench_f2_multigpu /workspace/data/aadr 512`), SQLite export of CUPTI KERNEL+MEMCPY+RUNTIME.
