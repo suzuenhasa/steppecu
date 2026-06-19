@@ -58,6 +58,7 @@
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
+#include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
 #include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction
 #include "steppe/fstats.hpp"                // F2BlockTensor
@@ -104,7 +105,7 @@ public:
         // M0 and M4 paths. Order matters: bind the workspace FIRST so the
         // `set_stream` re-apply has it.
         blas_.set_workspace(workspace_.data(), workspace_.bytes());
-        blas_.set_stream(stream_);
+        blas_.set_stream(stream_.get());
     }
 
     [[nodiscard]] F2Result compute_f2(const core::MatView& Q,
@@ -180,33 +181,33 @@ public:
 
         // ---- Upload the Q/V/N contract (column-major [P × M]) ----------------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
 
         // ---- Fused feeder -> 3 GEMMs -> fused numerator/divide ---------------
         launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
-                         dQ.data(), dV.data(), dS.data(), P, M, stream_);
+                         dQ.data(), dV.data(), dS.data(), P, M, stream_.get());
         // The handle's stream + emulated-FP64 workspace are bound ONCE in the ctor
         // (architecture.md §12; cleanup X-1/B1); run_f2_gemms never re-binds the
         // stream, so the determinism workspace survives every GEMM.
         run_f2_gemms(blas_.get(), precision, P, M,
                      dQ.data(), dV.data(), dS.data(),
                      dG.data(), dVpair.data(), dR.data());
-        launch_assemble_f2(dG.data(), dVpair.data(), dR.data(), dF2.data(), P, stream_);
+        launch_assemble_f2(dG.data(), dVpair.data(), dR.data(), dF2.data(), P, stream_.get());
 
         // ---- Copy results back across the CUDA-free seam --------------------
         // `out` (with out.P set) was constructed before the degenerate guard.
         out.f2.resize(pp);
         out.vpair.resize(pp);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2.data(), pp * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair.data(),
                                           pp * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
     }
 
@@ -310,27 +311,27 @@ public:
 
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
                                           static_cast<std::size_t>(n_block) * sizeof(long),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), out.block_sizes.data(),
                                           static_cast<std::size_t>(n_block) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
 
         {
             // Raw inputs — feeder-only; freed at the end of this scope.
             DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, pm * sizeof(double),
-                                              cudaMemcpyHostToDevice, stream_));
+                                              cudaMemcpyHostToDevice, stream_.get()));
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, pm * sizeof(double),
-                                              cudaMemcpyHostToDevice, stream_));
+                                              cudaMemcpyHostToDevice, stream_.get()));
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, pm * sizeof(double),
-                                              cudaMemcpyHostToDevice, stream_));
+                                              cudaMemcpyHostToDevice, stream_.get()));
             // ONE fused feeder over ALL SNPs (block-agnostic; native FP64).
             launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
-                             dQ.data(), dV.data(), dS.data(), P, M, stream_);
+                             dQ.data(), dV.data(), dS.data(), P, M, stream_.get());
             // Sync so the feeder finishes before dQ_raw/dV_raw/dN_raw free (the
             // gather then reads dQ/dV/dS, and the freed raw VRAM is reused by the
             // bucket slabs).
-            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         }
 
         // Engage the precision policy ONCE (the SHARED engagement; the grouped GEMM
@@ -358,7 +359,7 @@ public:
                 DeviceBuffer<int> dIds(static_cast<std::size_t>(nb));
                 STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
                                                   static_cast<std::size_t>(nb) * sizeof(int),
-                                                  cudaMemcpyHostToDevice, stream_));
+                                                  cudaMemcpyHostToDevice, stream_.get()));
 
                 const std::size_t psp_nb =
                     static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) *
@@ -369,7 +370,7 @@ public:
 
                 launch_gather_group(dQ.data(), dV.data(), dS.data(),
                                     dIds.data(), dOffsets.data(), dSizes.data(),
-                                    P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_);
+                                    P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_.get());
                 // The handle's stream + emulated-FP64 workspace are bound ONCE in
                 // the ctor (architecture.md §12; cleanup X-1/B1). The M4 grouped
                 // path previously reset the stream — and thus the workspace — per
@@ -380,21 +381,21 @@ public:
                                    dGg.data(), dVpairg.data(), dRg.data());
                 launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
                                              dIds.data(), P, nb,
-                                             dF2_all.data(), dVpair_all.data(), stream_);
+                                             dF2_all.data(), dVpair_all.data(), stream_.get());
                 // Sync before this chunk's slabs (dQg…dRg) free at scope exit, so
                 // the next chunk reuses the VRAM (one chunk resident at a time).
-                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
             }
         }
 
         // ---- Copy the resident tensors back across the CUDA-free seam ---------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2_all.data(),
                                           total * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair_all.data(),
                                           total * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
     }
 
@@ -427,23 +428,23 @@ public:
         // ---- Upload the packed tile + the population partition ---------------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
                                           packed_bytes * sizeof(std::uint8_t),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
                                           n_off * sizeof(std::size_t),
-                                          cudaMemcpyHostToDevice, stream_));
+                                          cudaMemcpyHostToDevice, stream_.get()));
 
         // ---- Decode (S0 unpack + S1 segmented reduction → Q/V/N) -------------
         launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
-                         P, M, tile.ploidy, dQ.data(), dV.data(), dN.data(), stream_);
+                         P, M, tile.ploidy, dQ.data(), dV.data(), dN.data(), stream_.get());
 
         // ---- Copy results back across the CUDA-free seam ---------------------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.q.data(), dQ.data(), pm * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.v.data(), dV.data(), pm * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.n.data(), dN.data(), pm * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_));
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_));
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
     }
 
@@ -581,29 +582,46 @@ private:
     // ordering concern.
     int device_id_ = 0;
 
-    // Single statistic stream for bit-stability (architecture.md §12). The
-    // default stream suffices at M0 (one f2 call at a time); a dedicated RAII
-    // Stream lands with the streaming pipeline (architecture.md §11.1). The
-    // handle is bound to this stream + the workspace ONCE in the ctor and is
-    // never re-`cublasSetStream`'d (cleanup X-1/B1), so the emulated-FP64
-    // determinism workspace persists for every GEMM (cuBLAS §2.4.7).
+    // The ONE statistic stream PER DEVICE for bit-stability (architecture.md §12
+    // single-stream-per-device determinism rule). An OWNING, non-blocking RAII
+    // `Stream` (stream.hpp; `cudaStreamNonBlocking`), created in the ctor AFTER
+    // `device_id_`'s initializer made this device current — so the stream is
+    // associated with `device_id_` (CUDA Runtime API: a stream binds to the device
+    // current at create time). Every launch, `cudaMemcpyAsync`, and the trailing
+    // `cudaStreamSynchronize` route through `stream_.get()`. The handle is bound to
+    // this stream + the workspace ONCE in the ctor and is never re-`cublasSetStream`'d
+    // (cleanup X-1/B1), so the emulated-FP64 determinism workspace persists for every
+    // GEMM (cuBLAS §2.4.7).
     //
-    // NOTE (M4.5 SPMG, perf-discovery.md F1): this is the NULL *legacy default*
-    // stream, and the build is NOT compiled `--default-stream per-thread`, so it
-    // does NOT give each per-device worker an independent, concurrently-issuing
-    // stream — under the multi-GPU fan-out the two workers' launches implicitly
-    // serialize against the single legacy default stream (CUDA C Programming Guide
-    // §3.2.8.5.2 "Default Stream"). Replacing this with an owning per-device RAII
-    // `Stream` is fix P2; it is NOT done here (P0 is the build-clean baseline). Do
-    // NOT read this comment as a claim that the default stream overlaps across
-    // devices — it does not in this compile mode.
+    // WHY NON-BLOCKING (M4.5 SPMG, perf-discovery.md P2/F1). The prior member was
+    // the NULL *legacy default* stream and the build is NOT compiled
+    // `--default-stream per-thread`, so under the §11.4 multi-GPU fan-out the two
+    // per-device worker threads' launches implicitly serialized against the single
+    // process-wide legacy default stream (CUDA C Programming Guide §3.2.8.5.2
+    // "Default Stream") — the measured 18% kernel overlap. A `cudaStreamNonBlocking`
+    // stream does NOT implicitly synchronize with the legacy default stream (CUDA
+    // Runtime API, `cudaStreamCreateWithFlags`), so each device's backend now issues
+    // on its own independent lane and the two devices' GEMMs can overlap. This is a
+    // pure scheduling change: stream choice moves no arithmetic bits, so §12 parity
+    // is unaffected. §12 mandates ONE stream PER DEVICE on the statistic path — this
+    // single per-device non-blocking stream satisfies it (we do NOT add a second
+    // statistic stream).
     //
     // Declaration order is load-bearing at teardown (reverse-order destruction):
-    // `blas_` holds a NON-owning pointer into `workspace_`, so `workspace_` must
-    // be declared AFTER `blas_` to be freed first — `cublasDestroy` only
-    // synchronizes (it does not read the workspace), so freeing the workspace
-    // VRAM before the handle is destroyed is safe (architecture.md §7).
-    cudaStream_t stream_ = nullptr;
+    //   1. `workspace_` declared AFTER `blas_` so it is freed FIRST — `blas_` holds a
+    //      NON-owning pointer into it; `cublasDestroy` only synchronizes (it does not
+    //      read the workspace), so freeing the workspace VRAM before the handle is
+    //      destroyed is safe (architecture.md §7).
+    //   2. `stream_` declared BEFORE `blas_` so it is destroyed AFTER it — the handle's
+    //      cuBLAS context is bound to this stream, so the stream must outlive
+    //      `cublasDestroy` (which synchronizes the bound stream); destroying the stream
+    //      only after the handle is gone avoids tearing down a stream the handle still
+    //      references (architecture.md §7 RAII teardown ordering).
+    // Construction order (declaration order) is also load-bearing: `device_id_` is
+    // declared FIRST, and its initializer makes the device current, so both `stream_`
+    // (created on the current device) and `blas_`'s cuBLAS context (cuBLAS §2.1.2)
+    // bind to `device_id_`.
+    Stream stream_{};
     CublasHandle blas_{};
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
 };

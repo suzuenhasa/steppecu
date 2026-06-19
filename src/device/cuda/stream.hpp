@@ -34,12 +34,30 @@
 namespace steppe::device {
 
 /// Owning, move-only CUDA stream. A default-constructed Stream creates a fresh
-/// non-blocking-capable stream; a moved-from Stream owns nothing and is safe to
-/// destroy. Hand `get()` to kernel launches / cuBLAS / memcpyAsync.
+/// NON-BLOCKING stream (`cudaStreamNonBlocking`) on the current device; a
+/// moved-from Stream owns nothing and is safe to destroy. Hand `get()` to kernel
+/// launches / cuBLAS / memcpyAsync.
+///
+/// NON-BLOCKING is the default and the idiom (architecture.md §7 "one Stream per
+/// independent lane"). A stream created with `cudaStreamNonBlocking` does NOT
+/// implicitly synchronize with the NULL legacy default stream (CUDA Runtime API,
+/// `cudaStreamCreateWithFlags`; CUDA C Programming Guide §3.2.8.5.2 "Default
+/// Stream"). This is the property the §11.4 SPMG fan-out needs: with each
+/// per-device backend owning its own non-blocking stream, the per-device worker
+/// threads' launches no longer implicitly serialize against the shared legacy
+/// default stream, so the two devices' GEMMs can actually overlap. The stream is
+/// created on whatever device is current at construction (CUDA Runtime API: a
+/// stream is associated with the device current at create time), so the owner
+/// must `cudaSetDevice` its device first.
 class Stream {
 public:
-    /// Create a new stream. Throws CudaError via STEPPE_CUDA_CHECK on failure.
-    Stream() { STEPPE_CUDA_CHECK(cudaStreamCreate(&s_)); }
+    /// Create a new NON-BLOCKING stream on the current device (the §7 idiom for
+    /// an independent lane). `flags` defaults to `cudaStreamNonBlocking`; pass
+    /// `cudaStreamDefault` for a legacy-default-synchronizing stream. Throws
+    /// CudaError via STEPPE_CUDA_CHECK on failure.
+    explicit Stream(unsigned int flags = cudaStreamNonBlocking) {
+        STEPPE_CUDA_CHECK(cudaStreamCreateWithFlags(&s_, flags));
+    }
 
     Stream(Stream&& o) noexcept : s_(std::exchange(o.s_, nullptr)) {}
 
