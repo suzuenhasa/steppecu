@@ -29,11 +29,13 @@
 #include "core/fstats/f2_blocks_multigpu.hpp"
 
 #include <cstddef>
+#include <cstdlib>   // std::getenv (STEPPE_FORCE_TIER / STEPPE_F2_CACHE_PATH)
 #include <span>
 #include <stdexcept>
 #include <vector>
 
 #include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident|_into] (host-pure, P2P-free)
+#include "core/domain/block_partition_rule.hpp"   // steppe::core::block_ranges, BlockRange (the block_sizes single-source inverse)
 #include "core/internal/views.hpp"               // steppe::core::MatView
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
@@ -42,6 +44,9 @@
 #include "device/device_f2_blocks.hpp"           // steppe::device::DeviceF2Blocks (CUDA-free device-resident result handle)
 #include "device/resources.hpp"                  // steppe::device::Resources, CombinePath
 #include "device/shard_plan.hpp"                 // steppe::device::DeviceShard
+#include "device/tier_select.hpp"                // steppe::device::resolve_output_tier, free_host_ram_bytes, OutputTier
+#include "device/f2_blocks_out.hpp"              // steppe::device::F2BlocksOut (the adaptive tiered result)
+#include "device/stream_f2_blocks.hpp"           // steppe::device::StreamTarget (the CUDA-free streamed-tier request)
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 
@@ -297,6 +302,126 @@ steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
     steppe::F2BlockTensor host =
         compute_f2_blocks_multigpu(resources, Q, V, N, partition, precision);
     return steppe::device::upload_f2_blocks_to_device(host, resources.gpus[0].device_id);
+}
+
+// =============================================================================
+// compute_f2_blocks_multigpu_tiered — the M5 ADAPTIVE TIERED entry (single-GPU first).
+// The result lives in the FASTEST tier it FITS in, selected by resolve_output_tier from
+// the RUNTIME free-VRAM probe (resources.gpus[0].caps.free_vram_bytes) + the RUNTIME
+// free-host-RAM probe (free_host_ram_bytes via sysinfo) — never hardcoded — or the
+// force-tier override. PARITY-NEUTRAL (§12): the tier moves no bits.
+//
+// TIER 0 (Resident) IS THE EXISTING PATH UNCHANGED: on OutputTier::Resident the
+// orchestrator calls compute_f2_blocks_device EXACTLY as the device entry does (no sink,
+// no staging, no triple-buffer) — P=512 keeps its 3.9x and never touches streaming.
+// HostRam + Disk drive the streamed seam (compute_f2_blocks_streamed) ONLY when the
+// result does not fit VRAM (opt-in-by-need).
+// =============================================================================
+steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision) {
+    const int  P = Q.P;
+    const long M = Q.M;
+    const int  n_block = partition.n_block;
+
+    // ---- Shared contract (debug fail-fast; identical to the other entries) -----
+    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
+                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on P");
+    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
+                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on M");
+    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
+                  "compute_f2_blocks_multigpu_tiered: negative P or M (uninitialized MatView)");
+    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+                  "compute_f2_blocks_multigpu_tiered: block_id length != M");
+
+    const std::size_t G = resources.device_count();
+    if (G < 1) {
+        throw std::runtime_error(
+            "steppe::core::compute_f2_blocks_multigpu_tiered: Resources has 0 devices — "
+            "the SPMG precompute requires at least one (architecture.md §9)");
+    }
+
+    // ---- TIER SELECT (runtime probes; never hardcoded) -----------------------
+    // Free VRAM is the per-device probe captured ONCE at build_resources
+    // (backend.hpp:166-167); free host RAM is sysinfo(2) read NOW. The override
+    // precedence (config.force_tier wins, then STEPPE_FORCE_TIER, then automatic) is
+    // resolved by the frozen helper.
+    const std::size_t free_vram = resources.gpus[0].caps.free_vram_bytes;
+    const std::size_t free_host = steppe::device::free_host_ram_bytes();
+    const steppe::device::OutputTier tier = steppe::device::resolve_output_tier(
+        resources.config.force_tier, std::getenv("STEPPE_FORCE_TIER"),
+        P, M, n_block, free_vram, free_host);
+
+    steppe::device::F2BlocksOut out;
+    out.P = P;
+    out.n_block = (n_block < 0 ? 0 : n_block);
+
+    // Block_sizes are needed on the result for every tier (the S4 jackknife metadata).
+    // The streamed sinks fill them from the per-device compute's block_ranges; for
+    // Resident the DeviceF2Blocks carries them. To keep the result self-describing in
+    // ALL tiers we derive them once from the partition's block_id (the single-source
+    // inverse), matching what the per-device compute records.
+    {
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(partition.block_id.data(),
+                                                    static_cast<std::size_t>(M < 0 ? 0 : M)),
+                               M, n_block);
+        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        for (int b = 0; b < n_block; ++b)
+            out.block_sizes[static_cast<std::size_t>(b)] =
+                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+    }
+
+    switch (tier) {
+        case steppe::device::OutputTier::Resident: {
+            // TIER 0 UNCHANGED — the 3.9x path, NO sink, NO streaming. EXACTLY the
+            // device entry's G==1 call (f2_blocks_multigpu.cpp verbatim).
+            out.tier = steppe::device::OutputTier::Resident;
+            out.resident = resources.gpus[0].backend->compute_f2_blocks_device(
+                Q, V, N, partition.block_id.data(), n_block, precision);
+            // The handle carries its own block_sizes/P/n_block; mirror onto out for the
+            // tier-agnostic surface.
+            out.P = out.resident.P;
+            out.n_block = out.resident.n_block < 0 ? 0 : out.resident.n_block;
+            if (!out.resident.block_sizes.empty()) out.block_sizes = out.resident.block_sizes;
+            break;
+        }
+        case steppe::device::OutputTier::HostRam: {
+            out.tier = steppe::device::OutputTier::HostRam;
+            steppe::device::StreamTarget target;
+            target.tier = steppe::device::OutputTier::HostRam;
+            target.host_dst = &out.host;
+            resources.gpus[0].backend->compute_f2_blocks_streamed(
+                Q, V, N, partition.block_id.data(), n_block, precision, target);
+            if (out.host.n_block >= 0) out.n_block = out.host.n_block;
+            out.P = out.host.P;
+            if (!out.host.block_sizes.empty()) out.block_sizes = out.host.block_sizes;
+            break;
+        }
+        case steppe::device::OutputTier::Disk: {
+            out.tier = steppe::device::OutputTier::Disk;
+            // Disk path precedence: config.disk_cache_path, else STEPPE_F2_CACHE_PATH
+            // env, else the frozen default "./steppe_f2_blocks.cache" in the cwd.
+            std::string path = resources.config.disk_cache_path;
+            if (path.empty()) {
+                const char* env = std::getenv("STEPPE_F2_CACHE_PATH");
+                path = (env && env[0]) ? std::string(env) : std::string("./steppe_f2_blocks.cache");
+            }
+            steppe::device::StreamTarget target;
+            target.tier = steppe::device::OutputTier::Disk;
+            target.disk_path = path;
+            target.disk_dst = &out.disk;
+            resources.gpus[0].backend->compute_f2_blocks_streamed(
+                Q, V, N, partition.block_id.data(), n_block, precision, target);
+            out.P = out.disk.P;
+            out.n_block = out.disk.n_block < 0 ? 0 : out.disk.n_block;
+            if (!out.disk.block_sizes.empty()) out.block_sizes = out.disk.block_sizes;
+            break;
+        }
+    }
+    return out;
 }
 
 }  // namespace steppe::core

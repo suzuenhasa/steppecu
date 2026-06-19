@@ -35,6 +35,7 @@
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
+#include "device/stream_f2_blocks.hpp"  // steppe::device::StreamTarget (CUDA-free M5 streamed-tier request)
 
 namespace steppe {
 
@@ -346,6 +347,29 @@ public:
         (void)dst_f2; (void)dst_vpair; (void)block_sizes_dst; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::compute_f2_blocks_into: not supported by this backend");
+    }
+
+    /// M5 STREAMED (out-of-core) per-block f2 — the HostRam + Disk tiers. Computes the
+    /// FULL per-block [P × P × n_block] f2/Vpair EXACTLY as compute_f2_blocks_device does
+    /// (same run_f2_blocks_resident prologue + per-block gather/GEMM/assemble; the
+    /// per-block bits are BIT-IDENTICAL; §12), but instead of leaving the whole result
+    /// resident it SPILLS each block's [P²] slab block-by-block through a triple-buffered
+    /// sink into the tier `target` selects (HostRam: into target.host_dst; Disk: to
+    /// target.disk_path, reopened read-only into target.disk_dst). The ONLY difference
+    /// from the resident path is WHEN/WHERE a slab lands, never its bits. TIER 0
+    /// (Resident) NEVER routes here — the orchestrator calls compute_f2_blocks_device.
+    ///
+    /// NON-PURE: the base throws (streaming is a CUDA-backend concept; the CPU backend /
+    /// any fake need NOT override it). Only the CUDA backend overrides it — exactly the
+    /// compute_f2_blocks_device pattern.
+    virtual void compute_f2_blocks_streamed(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision,
+        steppe::device::StreamTarget& target) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)precision; (void)target;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_streamed: not supported by this backend "
+            "(out-of-core block streaming requires a CUDA backend)");
     }
 
     /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5

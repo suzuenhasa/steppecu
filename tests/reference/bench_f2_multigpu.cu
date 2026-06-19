@@ -55,6 +55,8 @@
 #include "core/fstats/f2_blocks_multigpu.hpp"
 #include "device/resources.hpp"
 #include "device/device_f2_blocks.hpp"
+#include "device/f2_blocks_out.hpp"        // M5: F2BlocksOut, OutputTier (the adaptive tiered result)
+#include "device/tier_select.hpp"          // M5: select_output_tier, free_host_ram_bytes (auto-tier report)
 #include "io/snp_reader.hpp"
 
 using steppe::Precision;
@@ -70,6 +72,14 @@ namespace {
 // round-trip is gone. When false (default), the bench is host-returning (the baseline
 // that INCLUDES the materialization tail), unchanged from before.
 bool g_resident_mode = false;
+
+// M5 TIERED mode (the --tiered flag). When true, main() runs a SINGLE-GPU tier-focused
+// sweep instead of the G1/G2 sweep: for each P it reports (i) the AUTO-selected tier (the
+// production policy from the runtime free-VRAM/free-host-RAM probes — confirms P=512
+// stays Resident), (ii) the Resident-tier wall (device-resident, no streaming — the 3.9x
+// baseline), and (iii) a FORCED-Disk-tier wall (block-stream + triple-buffer spill) so
+// the disk wall ≈ the resident compute wall demonstrates the spill OVERLAPS compute.
+bool g_tiered_mode = false;
 
 bool read_f64(const std::string& path, std::vector<double>& out, std::size_t count) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -169,6 +179,77 @@ RunStats run_cell(const DeviceConfig& cfg, const MatView& Q, const MatView& V,
     }
 }
 
+// M5: run a forced-tier single-GPU cell (compute_f2_blocks_multigpu_tiered) and return
+// the median wall. The result handle frees by RAII at end of each iter (no host
+// materialization is timed — the wall is the tiered precompute itself, mirroring the
+// resident-mode bench). OOM-tolerant like run_cell.
+RunStats run_tier_cell(const MatView& Q, const MatView& V, const MatView& N,
+                       const BlockPartition& part, const Precision& prec, int iters,
+                       steppe::DeviceConfig::ForceTier ft, const std::string& disk_path,
+                       const char* label) {
+    RunStats st;
+    try {
+        DeviceConfig cfg;
+        cfg.devices = {0};
+        cfg.precision = prec;
+        cfg.force_tier = ft;
+        if (ft == steppe::DeviceConfig::ForceTier::Disk) cfg.disk_cache_path = disk_path;
+        steppe::device::Resources res = steppe::device::build_resources(cfg);
+        std::vector<double> samples;
+        samples.reserve(static_cast<std::size_t>(iters));
+        { auto warm = steppe::core::compute_f2_blocks_multigpu_tiered(res, Q, V, N, part, prec); (void)warm; }
+        for (int i = 0; i < iters; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto r = steppe::core::compute_f2_blocks_multigpu_tiered(res, Q, V, N, part, prec);
+            const auto t1 = std::chrono::steady_clock::now();
+            (void)r;
+            samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        std::sort(samples.begin(), samples.end());
+        const std::size_t n = samples.size();
+        st.ok = n > 0;
+        if (st.ok) st.median = samples[n / 2];
+        return st;
+    } catch (const std::exception& e) {
+        std::printf("    [%-13s] OOM/failed: %s\n", label, e.what());
+        cudaGetLastError();
+        return st;
+    }
+}
+
+// M5: time the EXISTING bulk host-returning single-GPU path (compute_f2_blocks_multigpu =
+// compute_f2_blocks_device().to_host()) — the apples-to-apples baseline for the streamed
+// HostRam tier (both land the full result in host RAM). OOM-tolerant like run_cell.
+RunStats run_tohost_cell(const MatView& Q, const MatView& V, const MatView& N,
+                         const BlockPartition& part, const Precision& prec, int iters) {
+    RunStats st;
+    try {
+        DeviceConfig cfg;
+        cfg.devices = {0};
+        cfg.precision = prec;
+        steppe::device::Resources res = steppe::device::build_resources(cfg);
+        std::vector<double> samples;
+        samples.reserve(static_cast<std::size_t>(iters));
+        { auto warm = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec); (void)warm; }
+        for (int i = 0; i < iters; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto r = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec);
+            const auto t1 = std::chrono::steady_clock::now();
+            (void)r;
+            samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        std::sort(samples.begin(), samples.end());
+        const std::size_t n = samples.size();
+        st.ok = n > 0;
+        if (st.ok) st.median = samples[n / 2];
+        return st;
+    } catch (const std::exception& e) {
+        std::printf("    [ToHost       ] OOM/failed: %s\n", e.what());
+        cudaGetLastError();
+        return st;
+    }
+}
+
 // GiB helper for the measured-byte print (out-of-band; bytes are arithmetic, not numeric).
 double to_gib(std::size_t bytes) {
     return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
@@ -196,9 +277,10 @@ void print_cell_detail(const char* label, const RunStats& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // argv[1] is the data root unless it is the --resident flag (handled below).
+    // argv[1] is the data root unless it is a flag (--resident / --tiered; handled below).
     const std::string root =
-        (argc > 1 && std::string(argv[1]) != "--resident") ? argv[1] : "/workspace/data/aadr";
+        (argc > 1 && std::string(argv[1]) != "--resident" && std::string(argv[1]) != "--tiered")
+            ? argv[1] : "/workspace/data/aadr";
 
     // Pick the derived subdir: prefer the at-scale derived_2500, else derived_full. The
     // repack handles any native P0 (it reads shape.txt), so a 2500-pop dir subsets DOWN to
@@ -216,12 +298,14 @@ int main(int argc, char** argv) {
     // --resident: the M4.5 DEVICE-RESIDENT timing mode (no host materialization). Scan
     // all argv for it (it may appear anywhere) and skip it when building the P-list.
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--resident") { g_resident_mode = true; break; }
+        if (std::string(argv[i]) == "--resident") { g_resident_mode = true; }
+        if (std::string(argv[i]) == "--tiered")   { g_tiered_mode = true; }
     }
 
     std::vector<int> Ps;
     for (int i = 2; i < argc; ++i) {
         if (std::string(argv[i]) == "--resident") continue;  // a flag, not a P
+        if (std::string(argv[i]) == "--tiered")   continue;  // a flag, not a P
         Ps.push_back(std::atoi(argv[i]));
     }
     if (Ps.empty()) Ps = {256, 512, 768, 1024, 1536, 2000, 2500};
@@ -267,6 +351,80 @@ int main(int argc, char** argv) {
     std::printf("  cells: G1=single-GPU | G2res=device-resident P2P combine | "
                 "G2host=host-staged combine\n");
     std::printf("  result_GB = 2 * P^2 * n_block * 8 / 1e9 (f2 + Vpair, FP64)\n\n");
+
+    // ---- M5 TIERED MODE (--tiered): single-GPU tier-focused sweep ------------------
+    // For each P: the AUTO-selected tier (production policy from the runtime probes —
+    // confirms P=512 stays Resident), the Resident-tier wall (no streaming, the 3.9x
+    // baseline), and a FORCED-Disk-tier wall (block-stream + triple-buffer spill). The
+    // disk wall ≈ the resident compute wall demonstrates the spill OVERLAPS compute.
+    if (g_tiered_mode) {
+        std::printf("  M5 TIERED MODE: single-GPU; auto-tier + the streamed tiers vs the right baselines.\n");
+        std::printf("  ResCompute = device-resident compute (no materialization; data stays on GPU).\n");
+        std::printf("  ToHost     = the EXISTING bulk compute_f2_blocks().to_host() (full result -> host RAM).\n");
+        std::printf("  HostRam    = the M5 streamed host tier (block-by-block spill + triple-buffer overlap).\n");
+        std::printf("  Disk       = the M5 streamed disk tier (+ the disk-write bandwidth, this fs ~0.85 GB/s).\n");
+        std::printf("  OVERLAP CLAIM: HostRam ~ ToHost (streaming adds NO penalty over bulk materialization,\n");
+        std::printf("  the spill hides behind compute+D2H); Disk = ToHost + the disk residual (partly hidden).\n");
+        std::printf("  %-5s %7s %9s | %-9s | %11s %10s %10s %10s | %8s\n",
+                    "P", "n_block", "result_GB", "auto-tier", "ResCompute", "ToHost",
+                    "HostRam", "Disk", "Host/ToH");
+        std::printf("  %s\n", "-------------------------------------------------------------"
+                              "-----------------------------------------------------");
+        std::fflush(stdout);
+        const std::string disk_path = "/tmp/steppe_bench_f2.cache";
+        for (int Pp : Ps) {
+            if (Pp <= 0 || Pp > P0) {
+                std::printf("  %-5d  (skipped: out of range 1..%d)\n", Pp, P0);
+                std::fflush(stdout);
+                continue;
+            }
+            const double result_gb =
+                2.0 * static_cast<double>(Pp) * static_cast<double>(Pp) *
+                static_cast<double>(n_block) * 8.0 / 1.0e9;
+            std::vector<double> Qd = repack(Qf, P0, Pp, M);
+            std::vector<double> Vd = repack(Vf, P0, Pp, M);
+            std::vector<double> Nd = repack(Nf, P0, Pp, M);
+            const MatView Q{Qd.data(), Pp, M};
+            const MatView V{Vd.data(), Pp, M};
+            const MatView N{Nd.data(), Pp, M};
+
+            // Auto tier from the production policy + the device-0 runtime probes.
+            std::size_t free_b = 0, total_b = 0;
+            cudaSetDevice(0);
+            cudaMemGetInfo(&free_b, &total_b);
+            const std::size_t free_host = steppe::device::free_host_ram_bytes();
+            const steppe::device::OutputTier at =
+                steppe::device::select_output_tier(Pp, M, n_block, free_b, free_host);
+            const char* atn = (at == steppe::device::OutputTier::Resident) ? "Resident"
+                            : (at == steppe::device::OutputTier::HostRam)  ? "HostRam" : "Disk";
+
+            const RunStats rRes = run_tier_cell(Q, V, N, part, prec, ITERS,
+                                                steppe::DeviceConfig::ForceTier::Resident,
+                                                disk_path, "ResCompute");
+            const RunStats rToH = run_tohost_cell(Q, V, N, part, prec, ITERS);
+            const RunStats rHost = run_tier_cell(Q, V, N, part, prec, ITERS,
+                                                 steppe::DeviceConfig::ForceTier::HostRam,
+                                                 disk_path, "HostRam");
+            const RunStats rDisk = run_tier_cell(Q, V, N, part, prec, ITERS,
+                                                 steppe::DeviceConfig::ForceTier::Disk,
+                                                 disk_path, "Disk");
+            auto ms = [](const RunStats& s, char* b, std::size_t n) {
+                if (s.ok) std::snprintf(b, n, "%9.1f", s.median);
+                else      std::snprintf(b, n, "%10s", "OOM");
+            };
+            char bRes[32], bToH[32], bHost[32], bDisk[32], rHostR[16];
+            ms(rRes, bRes, sizeof bRes);
+            ms(rToH, bToH, sizeof bToH);
+            ms(rHost, bHost, sizeof bHost);
+            ms(rDisk, bDisk, sizeof bDisk);
+            if (rToH.ok && rHost.ok) std::snprintf(rHostR, sizeof rHostR, "%.2fx", rHost.median / rToH.median);
+            else                     std::snprintf(rHostR, sizeof rHostR, "%s", "-");
+            std::printf("  %-5d %7d %9.2f | %-9s | %11s %10s %10s %10s | %8s\n",
+                        Pp, n_block, result_gb, atn, bRes, bToH, bHost, bDisk, rHostR);
+            std::fflush(stdout);
+        }
+        return 0;
+    }
 
     // ---- Table header --------------------------------------------------------
     std::printf("  %-5s %7s %9s | %13s %13s %13s | %10s %10s\n",

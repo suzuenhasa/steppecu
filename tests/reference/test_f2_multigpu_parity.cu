@@ -105,6 +105,8 @@
 #include "device/backend_factory.hpp"           // steppe::device::make_cuda_backend
 #include "device/resources.hpp"                 // steppe::device::Resources, build_resources
 #include "device/device_f2_blocks.hpp"          // steppe::device::DeviceF2Blocks (the device-resident primary + opt-in to_host)
+#include "device/f2_blocks_out.hpp"             // steppe::device::F2BlocksOut, OutputTier (M5 adaptive tiered result)
+#include "device/tier_select.hpp"               // steppe::device::select_output_tier, free_host_ram_bytes (M5 tier policy)
 #include "device/vram_budget.hpp"               // resident_tensor_bytes (the §11.2 footprint home — VRAM gate)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
@@ -665,6 +667,101 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
             check("!can_access_peer ⇒ resG2p.last_combine_path == HostStaged "
                   "(tagged degrade to the parity baseline)",
                   resG2p.last_combine_path == steppe::device::CombinePath::HostStaged);
+        }
+    }
+
+    // ===================================================================================
+    // (M5) ADAPTIVE TIERED OUTPUT — FORCE EACH TIER, READ BACK, MEMCMP vs the
+    // device-resident reference (architecture.md §12; the FROZEN per-tier read-back
+    // battery). The reference is the EmulatedFp64{40} single-GPU result materialized to
+    // host (emuRef above — the existing trusted path). For each tier in
+    // {Resident, HostRam, Disk} we build a DeviceConfig with force_tier set to that tier
+    // (the override exercises Disk/HostRam at the SMALL P=50 derived_acc where Auto would
+    // pick Resident), run compute_f2_blocks_multigpu_tiered, call out.to_host(), and
+    // assert bit_equal(emuRef, out.to_host()). Block-axis streaming is EXACT by
+    // construction — each block is computed identically/independently and the stream only
+    // changes WHEN/WHERE a slab lands, never its bits (§12). EmulatedFp64{40} is the f2
+    // production default and is batchCount-deterministic; at G==1 all three tiers share
+    // ONE per-block run_f2_blocks_resident code, so even native Fp64 would be bit-identical
+    // — we assert with the strict bit_equal predicate.
+    {
+        const Precision precEmuTier{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+        struct TierCase { steppe::DeviceConfig::ForceTier ft; steppe::device::OutputTier expect; const char* name; };
+        const TierCase tiers[3] = {
+            {steppe::DeviceConfig::ForceTier::Resident, steppe::device::OutputTier::Resident, "Resident"},
+            {steppe::DeviceConfig::ForceTier::HostRam,  steppe::device::OutputTier::HostRam,  "HostRam"},
+            {steppe::DeviceConfig::ForceTier::Disk,     steppe::device::OutputTier::Disk,     "Disk"},
+        };
+        for (const TierCase& tc : tiers) {
+            steppe::DeviceConfig cfgT;
+            cfgT.devices = {0};
+            cfgT.force_tier = tc.ft;
+            if (tc.ft == steppe::DeviceConfig::ForceTier::Disk)
+                cfgT.disk_cache_path = std::string("/tmp/steppe_f2_") + label + ".cache";
+            steppe::device::Resources resT = steppe::device::build_resources(cfgT);
+
+            steppe::device::F2BlocksOut outT = steppe::core::compute_f2_blocks_multigpu_tiered(
+                resT, Q, V, N, part, precEmuTier);
+
+            // The override was honored (out.tier == the forced tier).
+            {
+                char lab[160];
+                std::snprintf(lab, sizeof(lab),
+                              "[EmuFp64{40}] force_tier=%s ⇒ out.tier == %s (override honored)",
+                              tc.name, tc.name);
+                check(lab, outT.tier == tc.expect);
+            }
+
+            // to_host() read-back is BIT-IDENTICAL to the single-GPU EmuFp64 reference.
+            const F2BlockTensor backT = outT.to_host();
+            {
+                char lab[160];
+                std::snprintf(lab, sizeof(lab),
+                              "[EmuFp64{40}] tier=%s to_host() == single-GPU reference (bit-identical)",
+                              tc.name);
+                const bool ok = bit_equal(emuRef, backT);
+                check(lab, ok);
+                if (!ok) report_first_diff(tc.name, emuRef, backT);
+            }
+
+            // Disk-only: the FIT's per-block accessor read_block_to_host(b) is byte-exact
+            // for EVERY block (proves the pread offsets, f2_disk_format.hpp §4, are right).
+            if (tc.ft == steppe::DeviceConfig::ForceTier::Disk) {
+                const std::size_t slab =
+                    static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+                std::vector<double> f2_slab(slab), vp_slab(slab);
+                bool all_ok = (outT.n_block == emuRef.n_block);
+                for (int b = 0; b < outT.n_block && all_ok; ++b) {
+                    outT.read_block_to_host(b, f2_slab.data(), vp_slab.data());
+                    const std::size_t off = slab * static_cast<std::size_t>(b);
+                    if (std::memcmp(f2_slab.data(), emuRef.f2.data() + off, slab * sizeof(double)) != 0 ||
+                        std::memcmp(vp_slab.data(), emuRef.vpair.data() + off, slab * sizeof(double)) != 0) {
+                        all_ok = false;
+                        std::fprintf(stderr, "  [Disk] read_block_to_host(%d) differs from reference slab\n", b);
+                    }
+                }
+                check("[EmuFp64{40}] tier=Disk read_block_to_host(b) == reference slab for every b "
+                      "(the fit's per-block accessor is byte-exact; §4 pread offsets correct)",
+                      all_ok);
+            }
+        }
+
+        // AUTO at small P picks Resident (streaming NOT forced on small P — the dominant
+        // correctness/perf gate: opt-in-by-need). select_output_tier reads the SAME runtime
+        // probes the production orchestrator uses (free VRAM caps + sysinfo free host RAM).
+        {
+            steppe::DeviceConfig cfgA;
+            cfgA.devices = {0};
+            steppe::device::Resources resA = steppe::device::build_resources(cfgA);
+            const std::size_t free_vram = resA.gpus[0].caps.free_vram_bytes;
+            const std::size_t free_host = steppe::device::free_host_ram_bytes();
+            const steppe::device::OutputTier auto_tier =
+                steppe::device::select_output_tier(P, M, part.n_block, free_vram, free_host);
+            char lab[200];
+            std::snprintf(lab, sizeof(lab),
+                          "[EmuFp64{40}] Auto select_output_tier(P=%d) == Resident "
+                          "(streaming NOT forced on small P; opt-in-by-need)", P);
+            check(lab, auto_tier == steppe::device::OutputTier::Resident);
         }
     }
 

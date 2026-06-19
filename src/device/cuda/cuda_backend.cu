@@ -62,6 +62,9 @@
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
+#include "device/cuda/block_sink.cuh"       // M5: BlockSink, HostRamSink, DiskSink, kStreamStagingSlots
+#include "device/stream_f2_blocks.hpp"      // M5: StreamTarget (the CUDA-free streamed-tier request)
+#include "device/f2_blocks_out.hpp"         // M5: DiskF2Blocks (the Disk descriptor DiskSink populates)
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
 #include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
@@ -377,6 +380,38 @@ public:
         // rb's DeviceBuffers free here (same free point as compute_f2_blocks).
     }
 
+    /// M5 STREAMED (out-of-core) override — the HostRam + Disk tiers (backend.hpp
+    /// compute_f2_blocks_streamed). Builds the concrete sink the CUDA-free StreamTarget
+    /// selects (HostRamSink into target.host_dst, or DiskSink to target.disk_path),
+    /// then drives the block-stream loop (stream_f2_blocks_impl), which REUSES the
+    /// run_f2_blocks_resident prologue + per-block gather/GEMM/assemble VERBATIM and
+    /// spills each block's [P²] slab through the triple-buffered sink. The per-block
+    /// bits are BIT-IDENTICAL to the device-resident path (§12); the ONLY difference is
+    /// the result is spilled block-by-block instead of left whole. Resident NEVER routes
+    /// here (the orchestrator calls compute_f2_blocks_device directly).
+    void compute_f2_blocks_streamed(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision,
+        StreamTarget& target) override {
+        if (target.tier == OutputTier::HostRam) {
+            if (!target.host_dst)
+                throw std::runtime_error("compute_f2_blocks_streamed: HostRam tier needs a "
+                                         "host_dst destination");
+            HostRamSink sink(*target.host_dst);
+            stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink);
+        } else if (target.tier == OutputTier::Disk) {
+            if (!target.disk_dst)
+                throw std::runtime_error("compute_f2_blocks_streamed: Disk tier needs a "
+                                         "disk_dst descriptor");
+            DiskSink sink(target.disk_path);
+            stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink);
+            sink.take_descriptor(*target.disk_dst);
+        } else {
+            throw std::runtime_error("compute_f2_blocks_streamed: Resident tier must not "
+                                     "route through the stream seam (it bypasses it)");
+        }
+    }
+
     /// M4 — PER-BLOCK f2 via the SPIKE-CHOSEN size-grouped strided-batched design
     /// (architecture.md §5 S2, §11.1; ROADMAP M4). The factored GEMM body SHARED by
     /// compute_f2_blocks (host) and compute_f2_blocks_resident: it produces the two
@@ -634,6 +669,214 @@ public:
         // override leaves the buffers resident (the cure, doc §4 Item 1).
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return rb;  // f2/vpair DeviceBuffers MOVE out to the caller (no free here)
+    }
+
+    /// M5 STREAMED block-stream loop (the §5 mechanism). REUSES run_f2_blocks_resident's
+    /// prologue (block_ranges, size-buckets, the ONE fused feeder over all M,
+    /// engage_f2_precision once) and the per-block gather/GEMM/assemble VERBATIM — the
+    /// per-block bits are BIT-IDENTICAL to the device-resident path (§12). The ONLY
+    /// difference: instead of allocating the full [P²·n_block] resident tensors, it
+    /// allocates a SMALL DEVICE RING of kStreamStagingSlots per-chunk [P²·max_nb] f2 +
+    /// vpair buffers, computes each chunk into the next ring buffer (in the SAME fixed
+    /// bucket→chunk order ⇒ same batchCount per group ⇒ same bits, even native Fp64),
+    /// and spills each of that chunk's blocks through `sink` (which triple-buffers the
+    /// D2H→tier-write). The assemble writes chunk-local slabs 0..nb-1 (a LOCAL id array),
+    /// so the destination OFFSET differs from the resident path but the VALUE does not —
+    /// the spill places each slab under its GLOBAL block id. No new GEMM; no recompute.
+    void stream_f2_blocks_impl(const core::MatView& Q, const core::MatView& V,
+                               const core::MatView& N, const int* block_id, int n_block,
+                               const Precision& precision, BlockSink& sink) {
+        guard_device();
+        const int P = Q.P;
+        const long M = Q.M;
+        const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+
+        // ---- Block layout (IDENTICAL to run_f2_blocks_resident) ------------------
+        std::vector<int> block_sizes(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        if (P <= 0 || M <= 0 || n_block <= 0) {
+            sink.begin(P, n_block, block_sizes);  // degenerate empty result -> empty tier
+            sink.finish();
+            return;
+        }
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+        std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
+        for (int b = 0; b < n_block; ++b) {
+            block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
+            block_sizes[static_cast<std::size_t>(b)] =
+                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+        }
+
+        // ---- Size-bucketing (IDENTICAL to run_f2_blocks_resident) ----------------
+        auto ceil_bucket = [](int x) {
+            int p = 1;
+            while (p < x) p *= steppe::kBlockGroupPadBase;
+            return p;
+        };
+        struct Bucket { int s_pad = 0; std::vector<int> blocks; };
+        std::vector<Bucket> buckets;
+        for (int b = 0; b < n_block; ++b) {
+            const int sp = ceil_bucket(block_sizes[static_cast<std::size_t>(b)]);
+            int gi = -1;
+            for (std::size_t k = 0; k < buckets.size(); ++k)
+                if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
+            if (gi < 0) { gi = static_cast<int>(buckets.size()); buckets.push_back({sp, {}}); }
+            buckets[static_cast<std::size_t>(gi)].blocks.push_back(b);
+        }
+        std::sort(buckets.begin(), buckets.end(),
+                  [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
+
+        // The sink allocates the tier destination + its persistent pinned staging ONCE.
+        sink.begin(P, n_block, block_sizes);
+
+        // ---- VRAM budget + feeder (IDENTICAL prologue) ---------------------------
+        std::size_t free_b = 0, total_b = 0;
+        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t two_pm = 2u * pm;
+        DeviceBuffer<double> dQ(pm), dV(pm), dS(two_pm);     // feeder outputs (persist)
+        DeviceBuffer<long>   dOffsets(static_cast<std::size_t>(n_block));
+        DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(long),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), block_sizes.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        {
+            DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
+            const std::size_t raw_bytes = pm * sizeof(double);
+            pinned_in_.ensure(Q.data, raw_bytes);
+            pinned_in_.ensure(V.data, raw_bytes);
+            pinned_in_.ensure(N.data, raw_bytes);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data, raw_bytes,
+                                              cudaMemcpyHostToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data, raw_bytes,
+                                              cudaMemcpyHostToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data, raw_bytes,
+                                              cudaMemcpyHostToDevice, stream_.get()));
+            launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
+                             dQ.data(), dV.data(), dS.data(), P, M, stream_.get());
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        }
+        engage_f2_precision(blas_.get(), precision);
+
+        // ---- Per-chunk slab sizing (IDENTICAL budget; the gather/GEMM scratch) ----
+        std::size_t max_nb = 0;
+        std::size_t max_psp_nb = 0;
+        std::vector<int> bucket_max_blocks(buckets.size(), 0);
+        for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
+            const int s_pad = buckets[bi].s_pad;
+            const int nb_total = static_cast<int>(buckets[bi].blocks.size());
+            const int mb = max_blocks_per_chunk(free_b, P, n_block, s_pad, nb_total);
+            bucket_max_blocks[bi] = mb;
+            const std::size_t nb = static_cast<std::size_t>(mb < 0 ? 0 : mb);
+            max_nb = std::max(max_nb, nb);
+            max_psp_nb = std::max(
+                max_psp_nb,
+                static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) * nb);
+        }
+        DeviceBuffer<int>    dIds(max_nb);        // GLOBAL block ids of the chunk (gather)
+        DeviceBuffer<double> dQg(max_psp_nb), dVg(max_psp_nb), dSg(2u * max_psp_nb);
+        const std::size_t max_pp_nb = slab * max_nb;
+        DeviceBuffer<double> dGg(max_pp_nb), dVpairg(max_pp_nb), dRg(2u * max_pp_nb);
+
+        // LOCAL id array [0,1,...,max_nb-1], uploaded ONCE: the assemble uses this to
+        // write chunk-local slabs 0..nb-1 of the small per-chunk f2/vpair buffer (instead
+        // of the resident path's global P²·id offset). The gather still uses dIds (global)
+        // so it reads the correct SNP columns — so the COMPUTED bits are identical; only
+        // the assemble's destination OFFSET is chunk-local (a write location, not a value).
+        std::vector<int> local_ids(max_nb);
+        for (std::size_t k = 0; k < max_nb; ++k) local_ids[k] = static_cast<int>(k);
+        DeviceBuffer<int> dIdsLocal(max_nb);
+        if (max_nb > 0)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIdsLocal.data(), local_ids.data(),
+                                              max_nb * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+
+        // SMALL DEVICE RING of kStreamDeviceChunks (2) per-chunk [P²·max_nb] f2/vpair
+        // buffers (the §5 device ring). Chunk c computes into ring buffer c%2; an event per
+        // ring buffer is recorded after the chunk's per-block spill D2Hs are issued, so a
+        // ring buffer is reused only after its prior chunk's D2Hs drained — the
+        // device-side half of the overlap. The SINK's background writer (its pinned ring)
+        // is the host-side half: it does the slow host-copy/pwrite CONCURRENTLY with this
+        // loop's next-chunk compute. Two device buffers (not three) keep the device ring's
+        // VRAM small (the device buffer only needs to survive its own D2H, NOT the slow
+        // write — the pinned ring absorbs that latency), so a chunk-tile fits alongside the
+        // feeder envelope even at large M.
+        constexpr int kStreamDeviceChunks = 2;
+        struct Ring {
+            DeviceBuffer<double> f2;
+            DeviceBuffer<double> vpair;
+            cudaEvent_t reuse = nullptr;  // recorded after this buffer's chunk D2Hs issued
+            bool used = false;
+        };
+        Ring ring[kStreamDeviceChunks];
+        for (Ring& r : ring) {
+            r.f2 = DeviceBuffer<double>(max_pp_nb);
+            r.vpair = DeviceBuffer<double>(max_pp_nb);
+            STEPPE_CUDA_CHECK(cudaEventCreateWithFlags(&r.reuse, cudaEventDisableTiming));
+        }
+        struct RingGuard {
+            Ring* r; int n;
+            ~RingGuard() { for (int i = 0; i < n; ++i) if (r[i].reuse) (void)cudaEventDestroy(r[i].reuse); }
+        } ring_guard{ring, kStreamDeviceChunks};
+
+        int chunk_idx = 0;
+        for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
+            const Bucket& bk = buckets[bi];
+            const int s_pad = bk.s_pad;
+            const int nb_total = static_cast<int>(bk.blocks.size());
+            const int max_blocks = bucket_max_blocks[bi];
+
+            for (int start = 0; start < nb_total; start += max_blocks) {
+                const int nb = std::min(max_blocks, nb_total - start);
+                Ring& r = ring[chunk_idx % kStreamDeviceChunks];
+                // Reuse-after-drain: wait until the prior chunk that used this device
+                // buffer has had its D2Hs issued+drained (its event), so chunk c's
+                // assemble cannot overwrite slabs chunk c-slots is still D2H-ing.
+                if (r.used)
+                    STEPPE_CUDA_CHECK(cudaEventSynchronize(r.reuse));
+
+                // GLOBAL ids of this chunk's blocks -> dIds (gather reads correct columns).
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
+                                                  static_cast<std::size_t>(nb) * sizeof(int),
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                launch_gather_group(dQ.data(), dV.data(), dS.data(),
+                                    dIds.data(), dOffsets.data(), dSizes.data(),
+                                    P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_.get());
+                run_f2_gemms_group(blas_.get(), precision, P, s_pad, nb,
+                                   dQg.data(), dVg.data(), dSg.data(),
+                                   dGg.data(), dVpairg.data(), dRg.data());
+                // Assemble into the chunk-LOCAL slabs 0..nb-1 of this ring buffer (the
+                // dIdsLocal array). Same finalize_f2(num, vp) -> same VALUE bits as the
+                // resident path; only the destination OFFSET is chunk-local.
+                launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
+                                             dIdsLocal.data(), P, nb,
+                                             r.f2.data(), r.vpair.data(), stream_.get());
+
+                // Spill each of this chunk's nb blocks under its GLOBAL id. The sink
+                // issues the async D2H on stream_ (in issue order, after the assemble) and
+                // triple-buffers the D2H->tier-write. NO cudaStreamSynchronize here — the
+                // overlap is what hides the spill behind the next chunk's compute.
+                for (int kk = 0; kk < nb; ++kk) {
+                    const int gid = bk.blocks[static_cast<std::size_t>(start + kk)];
+                    const std::size_t off = slab * static_cast<std::size_t>(kk);
+                    sink.spill_block(gid, r.f2.data() + off, r.vpair.data() + off,
+                                     slab, stream_.get());
+                }
+                // Record the reuse event AFTER this chunk's spill D2Hs are enqueued, so a
+                // later chunk that reuses this device buffer waits for them.
+                STEPPE_CUDA_CHECK(cudaEventRecord(r.reuse, stream_.get()));
+                r.used = true;
+                ++chunk_idx;
+            }
+        }
+
+        // Drain the last in-flight slabs + finalize the tier (Disk: trailer+fsync+reopen).
+        sink.finish();
     }
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {

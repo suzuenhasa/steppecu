@@ -1,0 +1,95 @@
+// src/device/f2_blocks_out.hpp
+//
+// M5 F2BlocksOut — THE unified, adaptive precompute result (CUDA-FREE seam). The
+// result lives in EXACTLY ONE tier (Resident / HostRam / Disk); the fit + the parity
+// test consume it ONLY through the tier-agnostic read-back accessors (they never branch
+// on `tier` for the numeric read-back — the accessor does). CUDA-FREE like
+// device_f2_blocks.hpp: it holds the move-only DeviceF2Blocks by value (TIER 0,
+// UNCHANGED), an F2BlockTensor by value (TIER 1), and a CUDA-free DiskF2Blocks
+// descriptor (TIER 2). The accessors are defined in cuda/f2_blocks_out.cu (the Resident
+// arm needs CUDA for the D2H; HostRam/Disk are plain host/file I/O).
+//
+// PARITY (architecture.md §12): F2BlocksOut::to_host() is memcmp-bit-identical across
+// all tiers and to the device-resident DeviceF2Blocks::to_host() / the single-GPU
+// reference. The tier choice is OUT-OF-BAND (it lives here, never on the numeric
+// F2BlockTensor) — the same discipline as last_combine_path.
+#ifndef STEPPE_DEVICE_F2_BLOCKS_OUT_HPP
+#define STEPPE_DEVICE_F2_BLOCKS_OUT_HPP
+
+#include <cstddef>
+#include <cstdio>   // std::FILE for the disk descriptor read handle
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "steppe/fstats.hpp"               // F2BlockTensor (TIER 1, host materialization)
+#include "device/device_f2_blocks.hpp"     // DeviceF2Blocks (TIER 0, UNCHANGED)
+#include "device/tier_select.hpp"          // OutputTier
+
+namespace steppe::device {
+
+/// Binary on-disk f2_blocks cache descriptor (TIER 2). Holds the path + parsed header
+/// shape + an open read handle for slab read-back. The fit + parity test pread a block
+/// by offset (f2_disk_format.hpp byte layout). Move-only (it owns a FILE*); the read
+/// goes through F2BlocksOut::read_block_to_host / to_host, never raw here. The special
+/// members are defined out-of-line in cuda/f2_blocks_out.cu (where <cstdio> fclose is).
+struct DiskF2Blocks {
+    DiskF2Blocks();
+    ~DiskF2Blocks();
+    DiskF2Blocks(DiskF2Blocks&&) noexcept;
+    DiskF2Blocks& operator=(DiskF2Blocks&&) noexcept;
+    DiskF2Blocks(const DiskF2Blocks&) = delete;
+    DiskF2Blocks& operator=(const DiskF2Blocks&) = delete;
+
+    std::string path;
+    int P = 0;
+    int n_block = 0;
+    std::vector<int> block_sizes;          ///< length n_block (from header trailer).
+    std::FILE* read_handle = nullptr;      ///< open read-only handle (DiskSink::finish reopens).
+};
+
+/// THE unified precompute result — the result lives in EXACTLY ONE tier. Move-only
+/// (it owns either move-only DeviceF2Blocks, or vectors, or a FILE*). The fit and the
+/// parity test consume it ONLY through the tier-agnostic accessors below.
+class F2BlocksOut {
+public:
+    F2BlocksOut() = default;
+    ~F2BlocksOut() = default;
+    F2BlocksOut(F2BlocksOut&&) noexcept = default;
+    F2BlocksOut& operator=(F2BlocksOut&&) noexcept = default;
+    F2BlocksOut(const F2BlocksOut&) = delete;
+    F2BlocksOut& operator=(const F2BlocksOut&) = delete;
+
+    OutputTier tier = OutputTier::Resident;
+    int P = 0;
+    int n_block = 0;
+    std::vector<int> block_sizes;
+
+    // EXACTLY ONE of these is engaged, per `tier`:
+    DeviceF2Blocks resident;   ///< tier==Resident — the EXISTING handle, UNCHANGED.
+    F2BlockTensor  host;       ///< tier==HostRam — full materialized host tensor.
+    DiskF2Blocks   disk;       ///< tier==Disk    — on-disk cache descriptor.
+
+    // ---- Tier-agnostic READ-BACK ACCESSORS (the fit + parity test surface) ----
+
+    /// Materialize the WHOLE result to a host F2BlockTensor, BIT-IDENTICAL across all
+    /// tiers (architecture.md §12). Resident -> resident.to_host() (the existing ONLY
+    /// D2H). HostRam -> a copy of `host`. Disk -> read every block back via pread. THE
+    /// parity test calls this and memcmps vs the reference.
+    [[nodiscard]] F2BlockTensor to_host() const;
+
+    /// Read ONE block's [P²] f2 slab + [P²] vpair slab (column-major i+P·j) into the
+    /// caller's buffers (each length >= P²). Tier-agnostic: Resident -> D2H of the
+    /// block's slab; HostRam -> memcpy from host.f2/vpair at P²·b; Disk -> two preads
+    /// at the f2_disk_format.hpp byte offsets. This is the FIT's tile reader.
+    void read_block_to_host(int b, double* f2_slab_out, double* vpair_slab_out) const;
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return static_cast<std::size_t>(P) * static_cast<std::size_t>(P) *
+               static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+    }
+};
+
+}  // namespace steppe::device
+
+#endif  // STEPPE_DEVICE_F2_BLOCKS_OUT_HPP
