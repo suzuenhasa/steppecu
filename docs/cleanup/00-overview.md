@@ -1,5 +1,25 @@
 # 00 — Whole-codebase holistic review (steppe M0–M4, branch `m4-perblock-f2`)
 
+> **STATUS UPDATE (post-M5).** This document is the M0–M4 whole-codebase snapshot; its
+> before-M4.5 backlog (B1–B27) is now substantially landed on `main`, M4.5 single-node
+> multi-GPU shipped (block-aligned shard + host-staged/device-resident P2P combine,
+> parity bit-identical), and **Phase-1 precompute is substantially complete through M5**.
+> Two forward-looking claims below were corrected in place: (1) the X-13 "f2+vpair ≈ 220 GB
+> resident OOMs mid-stream at the §0 top end" deliverable-shape claim — **M5 out-of-core
+> streaming removed that wall** (SNP-tile **input streaming** `c65179f` bounds the device
+> footprint to O(P·tile + P²), independent of M; **adaptive tiered output** `176a07d` spills
+> the result to the fastest tier it FITS — VRAM-resident -> host RAM -> disk; and
+> **device-resident output** `1f80c0c` keeps the in-VRAM result off the CPU). Full-autosome
+> (M=584131, n_block=757) **P=2500 now COMPLETES on a single 32 GB RTX 5090 in ~51.5 s**
+> (76 GB result streamed, GPU peak ~26 GB), parity bit-identical. (2) The L3/L4/L8 "M5
+> streaming not yet built" rows are now DONE — see the LATER-table notes. Everything else is
+> preserved verbatim as the M0–M4 record. The honest perf lesson (correcting the older
+> multi-GPU-as-speedup framing): the precompute was HOST-RESULT-BOUND — ~80% of the old wall
+> was copying the multi-GB result to CPU; getting it OFF the CPU (`1f80c0c`) + streaming it
+> (`176a07d`/`c65179f`) was the real win, not multi-GPU. Multi-GPU on the precompute is a
+> modest throughput layer; it SHINES on the Phase-2 FIT/ROTATION (thousands of independent
+> models, no combine). See `docs/cleanup/m4.5/architecture-audit.md`, `why-d2h.md`.
+
 Reviewer: holistic synthesizer over **all 28 finalized per-unit reviews** in this directory
 (`device-cuda-f2_blocks_kernel` is now finalized, and `io-geno_reader` + `io-filter-snp_filter`
 were re-finalized this pass), re-grounded against `docs/architecture.md` (§2/§4/§7/§8/§9/§11/§12/§13),
@@ -211,13 +231,21 @@ the §11.2 budget table (architecture.md:687) lists only one `f2_blocks | P²·B
 says "`f2_blocks` is tiny (`P²·B` doubles)", and `fstats.hpp:19` cites only the single term — so the
 M4 resident-tensor footprint is **undercounted by exactly 2×** in the contract the consumer reads and
 the (future) `build()` VRAM check validates. At the spec's own top end (`P=4266, n_block=757`) each
-tensor is ≈110 GB, so f2+vpair ≈ **220 GB** resident — over even the 96 GB PRO 6000, and a `build()`
-that follows §11.2 verbatim under-reserves by `P²·B·8` and OOMs mid-stream, exactly the failure §11.2
-promises to reject up front. This is a three-file issue (`fstats.hpp` doc + the §11.2 architecture
-table + the `cuda_backend.cu` budget gate / the missing `build()` check) that no single-file review
-fully owns. Flagged by `include-fstats` (F21, NEW); interacts with X-5 (the budget gate) and X-13's
-own note that an M7 *on-disk* format may legitimately narrow `vpair` below FP64 (a serialization
-choice, not a resident-footprint one).
+tensor is ≈110 GB, so a *fully-resident* f2+vpair would be ≈ **220 GB** — over even the 96 GB PRO 6000,
+and a `build()` that follows §11.2 verbatim would under-reserve by `P²·B·8`. The **budget-accounting**
+half of this finding is real and was the right call (closed by B26: `vram_budget.hpp` now counts the
+2× term). **What is now stale is the "OOMs mid-stream / fully-resident" framing of the consequence:**
+post-M5, the M4 result is no longer required to be whole-tensor-resident — **adaptive tiered output**
+(`176a07d`) sends f2+vpair to the fastest tier it FITS (VRAM-resident -> host RAM -> disk) and
+**SNP-tile input streaming** (`c65179f`) bounds the *device* peak to O(P·tile + P²), independent of M
+and of the result size. Measured: full-autosome P=2500 (75.7 GB f2+vpair) completes on a single 32 GB
+RTX 5090 with GPU peak ~26 GB. So the 220 GB is the *result* footprint, which now streams; the
+device-resident budget gate still wants the 2× term right for the in-VRAM tier (small P) it auto-selects.
+This remains a three-file consistency issue (`fstats.hpp` doc + the §11.2 architecture table + the
+`vram_budget.hpp`/`cuda_backend.cu` gate) that no single-file review fully owns. Flagged by
+`include-fstats` (F21, NEW); interacts with X-5 (the budget gate) and X-13's own note that an M7
+*on-disk* format may legitimately narrow `vpair` below FP64 (a serialization choice, not a
+resident-footprint one).
 
 ### X-14 [MED, NEW] The AC/AN accumulation convention is hand-duplicated outside the one header whose entire purpose is single-sourcing it
 `decode_af.hpp` shares the unpack (`genotype_code`), the missing-test (`genotype_valid`), and the
@@ -369,12 +397,12 @@ MED = robustness/fail-fast/DRY/contract; LOW = polish/doc. "Files" lists the pri
 |---|-----|------|-------|
 | L1 | MED | **`error.hpp` ABI policy (§16/§17): C `steppe_status_t` vs C++ `enum class Status`.** Decide + record (Option A: make it the C enum with all 8 §10 values in §10 numeric order; Option B: keep as internal C++ mirror, document deferral). Add `ChisqUndefined`; fix the "three (two listed)" contradiction; **fix the `InvalidConfig` "over-budget VRAM" misattribution** (1.7 — §10/§11.2 route it to `DeviceOom`); pin underlying type + values (the current order already diverges from §10, foreclosing a `static_cast` round-trip) + type-level `[[nodiscard]]`. | `error.hpp` |
 | L2 | MED | **`DeviceBuffer::view()` restore + span/mdspan kernel signatures** (§7 "kernels accept only views"; today the bare-pointer `launch_*` wrappers make even a restored `view()` unconsumable); lands with `span_view.hpp`. | `device_buffer.cuh`, kernels |
-| L3 | MED | **`Stream` non-blocking ctor + priority** — the §11.1 copy/compute overlap *cannot be built* on the current blocking-only `Stream`; fix the "non-blocking-capable" docstring; split `Event` ordering-vs-timing (`elapsed_ms` fails only at runtime). M5. | `stream.hpp` |
-| L4 | MED | **Pool allocator (`allocator.cu`) + pinned staging (`pinned_buffer.cuh`)** — `cuda_backend.cu`'s per-chunk `cudaMalloc`/`cudaFree` is device-wide-synchronizing; `geno_reader`'s pageable per-individual `seekg` gather (8.1) + per-call reopen (7.2, the "owns an open stream" comment is false) is the named "clearest host liability." M5 ingest spine; the `io`-leaf-vs-CUDA tension (geno_reader 11.1) is the read-plan design note to write now. | new `allocator.cu`/`pinned_buffer.cuh`, `cuda_backend.cu`, `geno_reader.cpp` |
+| L3 | MED | **`Stream` non-blocking ctor + priority** — landed for M4.5 (owning non-blocking per-device `Stream`, the overlap precondition, commit `b4c2913`); the §11.1 copy/compute overlap it gates is now exercised by the M5 SNP-tile input-streaming feeder (`c65179f`). Residual: split `Event` ordering-vs-timing (`elapsed_ms` fails only at runtime). | `stream.hpp` |
+| L4 | MED | **Pool allocator + pinned staging** — the per-chunk `cudaMalloc`/`cudaFree` slab churn was removed (`a41d67a`, P3/L4b); M5 input streaming (`c65179f`) replaced the un-tiled feeder with per-block decode (footprint O(P·tile + P²)). Residual: `geno_reader`'s pageable per-individual `seekg` gather (8.1) + per-call reopen (7.2, the "owns an open stream" comment is false) — the named host liability — and a dedicated pinned-staging wrapper (`pinned_buffer.cuh`) are still optional throughput levers; the `io`-leaf-vs-CUDA tension (geno_reader 11.1) read-plan note still applies. | `cuda_backend.cu`, new `pinned_buffer.cuh`, `geno_reader.cpp` |
 | L5 | MED | **NVTX scopes** on the 3 backend methods (the §11.3 "Nsight first" gate needs named ranges; budget-5090 fallback is "nsys+NVTX only"). | new `nvtx.hpp`, `cuda_backend.cu` |
 | L6 | MED | **`FilterPlan` is dead code** — no `src/` populates it (verified). Wire the M2 factory + test, or mark as a forward stub; pin the per-tile-vs-dataset axis contract; narrow `in_tile` to a threshold sub-struct (drop the double-filter footgun); align `snp_keep` type with the snp_filter mask-type decision (B20/F14). M5/M6. | `filter_plan.hpp`, `snp_filter.cpp` |
 | L7 | MED | **`F2BlockTensor` schema_version + label/provenance + index accessors (fstats F8/F16/F17/F20).** Add `flat_index`/`block_offset`/`slab_elems`/`well_formed` so S3/M4.5/M7 stop re-deriving slab offsets (already 5+ hand-copies); add `schema_version` + decide in-struct-vs-out-of-band labels/capability-tag for the M7 cache. | `fstats.hpp` |
-| L8 | MED | **`mind_prepass`/`geno_reader` streaming reshape** — accept tiles, accumulate across tiles, `read_into(span)`, fd-based reads for `O_DIRECT`/`fadvise`, owning `std::ifstream` member. M5. | `mind_prepass.{hpp,cpp}`, `geno_reader.{hpp,cpp}` |
+| L8 | MED | **`mind_prepass`/`geno_reader` streaming reshape** — the M5 SNP-tile **input streaming** (`c65179f`) now decodes per-block so the GPU footprint is O(P·tile + P²) independent of M (the no-7·P·M-feeder-wall result). Residual polish: `read_into(span)`, fd-based reads for `O_DIRECT`/`fadvise`, owning `std::ifstream` member on the readers. | `mind_prepass.{hpp,cpp}`, `geno_reader.{hpp,cpp}` |
 | L9 | MED | **`f2_estimator` cancellation-regime test** — the load-bearing `f2_term`-vs-expanded equivalence is tested only on 3 benign SNPs at 1e-12, never in the `p_i≈p_j` cancellation regime its own comment claims to cover. Add a near-degenerate block. | `test_f2.cpp` |
 | L10 | LOW | **`MathModeScope` RAII** for the shared cuBLAS handle (M4.5 Fp64-parity-recompute coexisting with EmulatedFp64 on one handle; `f2_block_kernel` N-5). | `handles.hpp`, `f2_block_kernel.cu` |
 | L11 | LOW | **`constexpr` on the `decode_af`/`f2_estimator` numeric primitives** (enables `static_assert` tests; consistent with `cdiv`/`grid_for`/`code_in_byte`). NOTE: add as `STEPPE_HD constexpr`, never bare `constexpr` — the build sets no `--expt-relaxed-constexpr`, so bare `constexpr` is host-only under nvcc and would break the device call (`decode_af` R-3a). | `decode_af.hpp`, `f2_estimator.hpp` |
@@ -400,7 +428,7 @@ Per-area = the demanding-senior assessment folding the unit scores with the cros
 |---|---|---|---|
 | **Public API (`include/`)** | config 9.0, error 7.5, fstats 8.0 | **8.0** | `error.hpp` ABI policy undecided + `InvalidConfig` VRAM misattribution (L1); fstats diagonal-doc (X-2) + `vpair` budget 2× undercount (X-13/B26) + missing schema/accessors (L7); config missing `kMaxVramUtilizationFraction`/`deterministic`. |
 | **Core internal/domain/fstats** | views 8.5, f2_estimator 8.5, decode_af 9.0, block_partition 8.5, f2_from_blocks 8.0 | **8.5** | The codebase's strongest area; held by X-3 (block-ranges home), X-4 (phantom `launch_config`/`host_device`), X-14 (accumulation single-home), the unenforced-precondition pattern (B11/B13), and the cancellation-regime test gap (L9). |
-| **Device infra (RAII/check)** | check 8.5, device_buffer 8.5, stream 8.0, handles 8.5 | **8.0** | X-1 (handles must own (stream,workspace)); X-4 (phantom `log.hpp`, triplicated+drifted teardown macro + check.cuh's 4th NDEBUG gate); `Stream` can't express the M5 overlap it exists for (L3); OOM-path message alloc (L18); near-zero compile/test coverage of `Stream`/`device_buffer`. |
+| **Device infra (RAII/check)** | check 8.5, device_buffer 8.5, stream 8.0, handles 8.5 | **8.0** | X-1 (handles must own (stream,workspace)); X-4 (phantom `log.hpp`, triplicated+drifted teardown macro + check.cuh's 4th NDEBUG gate); the `Stream` non-blocking-overlap gap is now closed (L3, the M5 feeder uses it); OOM-path message alloc (L18); near-zero compile/test coverage of `Stream`/`device_buffer`. |
 | **Device backends/kernels** | cpu_backend 8.5, decode_af_kernel 8.5, f2_block_kernel 7.5, f2_blocks_kernel 8.0, cuda_backend 7.0 | **7.5** | The lowest area: X-1, X-2, X-5, X-6, X-7 all land here; `cuda_backend` carries the determinism void + two launch crashes + the 170-line monolith + no `device_id`/`Resources`; `f2_blocks_kernel` adds the per-chunk workspace reset + grid-z + empty-guard/gather-test gaps. |
 | **IO (readers + format + tile)** | eigenstrat 8.0, geno_reader 7.0, snp_reader 6.5, ind_reader 7.5, genotype_tile 8.5 | **7.5** | Parser robustness: the **silent overflow heap-write** (B17, geno_reader's dominant item), silent SNP-axis misalignment (B14), uncaught `stoi` (B15), exception-type contract (B18), unhomed chrom codes (X-8/B16), the `ind_reader` semantic bug (L19); zero host unit tests on parity-bearing parsers (L16). |
 | **IO filters** | filter_decision 9.0, snp_filter 8.0, mind_prepass 8.5, include_exclude 7.5, filter_plan 7.0 | **8.2** | `filter_decision` is near-reference (dragged only by the `is_monomorphic` re-fold + locale + non-finite contract); pulled by `filter_plan` (dead code, L6), the fail-silent prune.in (B19), the snp_filter fail-fast/host-test/fusion-seam cluster (B20), and the mind_prepass doc/`4u` gaps (B21). |

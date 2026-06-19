@@ -1,17 +1,33 @@
-# Why M4.5 multi-GPU was slower than single-GPU — the definitive answer (RESOLVED)
+# Why M4.5 multi-GPU was slower than single-GPU — the definitive answer (RESOLVED, then SUPERSEDED)
 
-> **STATUS: RESOLVED (@867a4bf).** The slowdown described below is the **PRE-FIX** state and is now
-> historical. The data-bounce wart this doc diagnoses (the redundant second full 7.14 GB D2H) was
-> eliminated by the **device-resident combine** (commit `867a4bf`; the nsys root-cause that drove it is
-> documented here and at commit `165f655`). After the fix, **multi-GPU is FASTER than single-GPU**:
+> **RESOLVED / OUTCOME (post-M5).** This whole saga is now **HISTORICAL**. The data-bounce wart this
+> doc diagnoses (the redundant second full 7.14 GB D2H) was first eliminated by the **device-resident
+> combine** (commit `867a4bf`), after which multi-GPU went from 0.70× to a modest **1.10× @ P=768 /
+> 1.22× @ P=400** on rtxbox — see the original banner below. But that 1.10× was then **SUPERSEDED by
+> the real architectural fix**, which had nothing to do with multi-GPU: **device-resident OUTPUT
+> (commit `1f80c0c`)** keeps the whole result in VRAM (host `F2BlockTensor` is opt-in `.to_host()`),
+> measured **P=512 ~673 ms resident vs ~2879 ms bulk-to-host = ~4.3×**. The key lesson is that the
+> precompute was **HOST-RESULT-BOUND** — ~80% of the old wall was copying the multi-GB result to CPU —
+> so getting it OFF the CPU was the real win, **not multi-GPU**. **M5 out-of-core** (`176a07d` adaptive
+> tiered output + `c65179f` SNP-tile input streaming) then bounded the GPU footprint to O(P·tile + P²)
+> and let P=2500 full-autosome complete on a single 32 GB 5090 in ~51.5 s (parity bit-identical).
+> **Honest multi-GPU story:** on the precompute, multi-GPU is at best a modest throughput layer (it was
+> measured *slower* than single-GPU until the data-bounce was fixed; nsys overlap ~22-74% with a serial
+> D2H/host tail). Its proper home is the embarrassingly-parallel **FIT / ROTATION phase** (Phase 2,
+> unbuilt — thousands of independent models, no combine), not the precompute. The diagnosis below is
+> kept as the record of how the data-bounce was found and fixed.
+>
+> ---
+>
+> **PRIOR STATUS (pre-M5): RESOLVED (@867a4bf).** The slowdown described below is the **PRE-FIX** state.
+> The data-bounce wart was eliminated by the **device-resident combine** (commit `867a4bf`; the nsys
+> root-cause that drove it is documented here and at commit `165f655`). After that fix, multi-GPU was
 > measured on rtxbox (2× RTX PRO 6000 Blackwell sm_120, Release, EmulatedFp64{40}, median of 10) at
 > **P=768 G1 = 2342 ms, G2 = 2125 ms = 1.10×**, and **P=400 = 1.22×**, with bit-identical (`memcmp`)
 > parity preserved on both the host-staged and the device-resident P2P combine paths, both datasets
-> (`derived_acc` P=50, `derived_full` P=768). The "Item 1 (THE cure)" design in §4 is the fix that
-> landed. The full diagnosis is kept below as the record of how this was found and fixed.
->
-> *Remaining optional lever (not a blocker):* pin the final pageable result D2H — the next available
-> speedup, could push past 1.10×.
+> (`derived_acc` P=50, `derived_full` P=768). The "Item 1 (THE cure)" design in §4 is the combine fix
+> that landed. (This 1.10× was the local win that the device-resident OUTPUT + M5 streaming then
+> superseded — see the post-M5 note above.)
 
 Branch: `m4.5-multigpu`. Box: rtxbox (2× RTX PRO 6000 Blackwell sm_120, CUDA 13, 96 GB, real P2P).
 Bench: `bench_f2_multigpu` @ P=768, M=584,131, n_block=757. Result is bit-identical between G1 and G2

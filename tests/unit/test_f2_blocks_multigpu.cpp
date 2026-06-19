@@ -187,6 +187,33 @@ public:
         return out;
     }
 
+    // The host-staged-DIRECT seam (M4.5 d2h-speed). Mirrors the real CUDA backend's
+    // PLACEMENT — compute the SAME keyed payload as compute_f2_blocks, then write
+    // (host memcpy, no CUDA, no pin — pinning is a parity-neutral perf lever) DIRECTLY
+    // into the caller's shared result at the disjoint block offset slab*b0 (f2/vpair)
+    // and b0 (block_sizes). The fake reuses compute_f2_blocks to build the per-device
+    // partial, then copies its slabs into the destination slice — so the recordings
+    // (calls/seen_q_data/seen_M/seen_n_block/local_id_ok) are populated identically.
+    void compute_f2_blocks_into(const MatView& Q, const MatView& V, const MatView& N,
+                                const int* block_id, int n_block, int b0,
+                                double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+                                const Precision& precision) override {
+        F2BlockTensor part = compute_f2_blocks(Q, V, N, block_id, n_block, precision);
+        const std::size_t slab =
+            static_cast<std::size_t>(Q.P) * static_cast<std::size_t>(Q.P);
+        const std::size_t slab_off = slab * static_cast<std::size_t>(b0);
+        if (!part.f2.empty()) {
+            std::memcpy(dst_f2 + slab_off, part.f2.data(),
+                        part.f2.size() * sizeof(double));
+            std::memcpy(dst_vpair + slab_off, part.vpair.data(),
+                        part.vpair.size() * sizeof(double));
+        }
+        for (int lb = 0; lb < part.n_block; ++lb) {
+            block_sizes_dst[static_cast<std::size_t>(b0) + static_cast<std::size_t>(lb)] =
+                part.block_sizes[static_cast<std::size_t>(lb)];
+        }
+    }
+
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView&) override { return {}; }
 };
 

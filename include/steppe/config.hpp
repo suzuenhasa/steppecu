@@ -110,6 +110,25 @@ inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
 /// free VRAM). Tunable policy number, NOT a mathematical constant.
 inline constexpr double kMaxVramUtilizationFraction = 0.80;
 
+/// M5 tier-select: the fraction of free VRAM the RESIDENT-tier result + its
+/// per-call working set may occupy before tier-select declines Resident and falls
+/// to HostRam. Strictly below kMaxVramUtilizationFraction (0.80) so the resident
+/// f2/Vpair result PLUS the run_f2_blocks_resident working set (feeder outputs +
+/// one chunk's slabs, already budgeted to 0.80 of the post-result residual) cannot
+/// co-exceed free VRAM. Tunable policy number, NOT a mathematical constant.
+inline constexpr double kResidentTierVramFraction = 0.70;
+
+/// M5 tier-select: the fraction of free HOST RAM the HOST-tier result may occupy
+/// before tier-select declines HostRam and falls to Disk. Below 1.0 so the host
+/// F2BlockTensor (2·P²·n_block·8 bytes) plus the small pinned staging + OS headroom
+/// stay within free RAM on a normal machine. Tunable policy number.
+inline constexpr double kHostTierRamFraction = 0.60;
+
+static_assert(kResidentTierVramFraction > 0.0 && kResidentTierVramFraction <= kMaxVramUtilizationFraction,
+              "kResidentTierVramFraction must be in (0, kMaxVramUtilizationFraction].");
+static_assert(kHostTierRamFraction > 0.0 && kHostTierRamFraction <= 1.0,
+              "kHostTierRamFraction must lie in (0, 1].");
+
 /// Default jackknife block size in centimorgans. ADMIXTOOLS 2's `blgsize`
 /// default is 0.05 Morgans = 5 cM (architecture.md §9; ROADMAP §4). The accessor
 /// surface speaks cM; the block math stores Morgans (1 cM = 0.01 Morgans). The
@@ -318,6 +337,23 @@ struct DeviceConfig {
     /// only for throughput-only lanes whose results are recomputed in
     /// EmulatedFp64/Fp64 before any reported number (§12).
     bool deterministic = true;
+
+    /// M5 force-tier OVERRIDE (default Auto = the select_output_tier policy). When set
+    /// to Resident/HostRam/Disk it PINS the output tier regardless of free VRAM/RAM, so
+    /// a test can exercise the Disk or HostRam stream at SMALL P (where Auto would pick
+    /// Resident). It is the higher-precedence twin of the STEPPE_FORCE_TIER env var
+    /// (config field wins). PARITY-NEUTRAL override intent (it moves bytes to a
+    /// different tier, never a reported number, §12) — so it lives here, never on the
+    /// numeric F2BlockTensor (override-knob banner above).
+    enum class ForceTier { Auto, Resident, HostRam, Disk };
+    ForceTier force_tier = ForceTier::Auto;
+
+    /// M5 Disk-tier on-disk f2_blocks cache path (TIER 2). Used only when the resolved
+    /// tier is Disk; empty ⇒ the STEPPE_F2_CACHE_PATH env var, else the frozen default
+    /// "./steppe_f2_blocks.cache" (cwd). The precompute-once/fit-many artifact (the
+    /// M7-style on-disk f2_blocks cache; what ADMIXTOOLS 2 also keeps). Parity-neutral
+    /// (it only chooses WHERE the bytes land, never a reported number, §12).
+    std::string disk_cache_path;
 };
 
 // ---------------------------------------------------------------------------

@@ -24,8 +24,56 @@
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 #include "device/resources.hpp"                   // steppe::device::Resources (CUDA-free)
+#include "device/device_f2_blocks.hpp"            // steppe::device::DeviceF2Blocks (CUDA-free device-resident result handle)
+#include "device/f2_blocks_out.hpp"               // steppe::device::F2BlocksOut (CUDA-free adaptive tiered result)
 
 namespace steppe::core {
+
+/// M5 ADAPTIVE TIERED precompute (single-GPU first). The [P×P×n_block] f2/Vpair
+/// result lives in the FASTEST tier it FITS in, selected AUTOMATICALLY from runtime
+/// free VRAM / free host RAM (tier_select.hpp), or pinned by config.force_tier /
+/// STEPPE_FORCE_TIER (tests):
+///   * Resident (TIER 0): result + working set fit free VRAM -> the EXISTING
+///     device-resident path UNCHANGED (compute_f2_blocks_device, NO sink, NO
+///     streaming — the 3.9x win preserved; streaming is OPT-IN-BY-NEED);
+///   * HostRam (TIER 1): does not fit VRAM but fits free host RAM -> stream blocks
+///     into a host F2BlockTensor via the triple-buffered sink;
+///   * Disk (TIER 2): fits neither -> stream blocks to a disk cache file via a small
+///     persistent pinned staging buffer (laptop-friendly tiny RAM).
+/// PARITY-NEUTRAL (architecture.md §12): F2BlocksOut::to_host() is memcmp-bit-identical
+/// across all tiers and to the single-GPU device-resident reference — the tier changes
+/// only WHERE/WHEN a slab lands, never its bits. Multi-GPU block-sharding of the stream
+/// is the follow-on; this is the single-GPU (G==1) arm (G>=2 delegates to the existing
+/// device entry for now).
+[[nodiscard]] steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision);
+
+/// M4.5 DEVICE-RESIDENT multi-GPU precompute (the PRIMARY entry; the cure). Computes
+/// the per-block f2 tensor across the G devices and returns it as a VRAM handle
+/// (DeviceF2Blocks) — NO forced D2H, NO host alloc/zero. The host
+/// compute_f2_blocks_multigpu below is now a thin wrapper = this + .to_host().
+///
+///   * G == 1: returns the ONE device's full result resident on gpus[0]
+///     (compute_f2_blocks_device) — the headline win: NO D2H AT ALL.
+///   * G >= 2 on a P2P box: per-device DevicePartials stay resident, assembled
+///     device-resident on the root (combine_f2_partials_resident_device — the
+///     no-final-D2H variant) into one DeviceF2Blocks.
+///   * G >= 2 on a NO-PEER box (the consumer 5090): full single-tensor assembly
+///     across 2 GPUs still requires P2P or a host bounce. The per-device partials
+///     stay RESIDENT (no premature D2H); this entry then materializes ONE host
+///     bounce ONLY because there is no P2P fabric to assemble a single device tensor
+///     across the two cards (documented limitation, architecture.md §11.4 no-peer
+///     tier), re-uploaded so the PRIMARY return is still a DeviceF2Blocks. The
+///     per-device compute is still resident; the host bounce is the assembly
+///     transport, not a forced output copy.
+[[nodiscard]] steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision);
 
 /// Compute the per-block f2 tensor `f2_blocks [P × P × n_block]` + the retained
 /// per-block `Vpair` across the G devices in `resources`, BIT-IDENTICAL to the

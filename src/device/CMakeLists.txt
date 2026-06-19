@@ -25,8 +25,12 @@ add_library(steppe_device STATIC
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
+    cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/p2p_combine.cu           # M4.5: combine_f2_partials_resident — device-resident cudaMemcpyPeer disjoint placement combine
+    cuda/block_sink.cu            # M5: HostRamSink + DiskSink — triple-buffered persistent-pinned block spill (TIER 1/2)
+    cuda/f2_blocks_out.cu         # M5: F2BlocksOut tier-agnostic read-back (to_host/read_block_to_host) + DiskF2Blocks members
     cpu/cpu_backend.cpp           # REFERENCE backend: scalar host oracle
+    host_ram.cpp                  # M5: free_host_ram_bytes (sysinfo) + resolve_output_tier (CUDA-free tier policy)
     resources.cpp                 # M4.5: build_resources — one backend+probe PER device (CUDA-free body)
     shard_plan.cpp)               # M4.5: plan_block_shards — block-aligned SNP shard plan (CUDA-free body)
 add_library(steppe::device ALIAS steppe_device)

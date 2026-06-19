@@ -34,6 +34,8 @@
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
+#include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
+#include "device/stream_f2_blocks.hpp"  // steppe::device::StreamTarget (CUDA-free M5 streamed-tier request)
 
 namespace steppe {
 
@@ -267,6 +269,27 @@ public:
                                                           int n_block,
                                                           const Precision& precision) = 0;
 
+    /// M4.5 DEVICE-RESIDENT primary: compute the FULL per-block f2 tensor
+    /// [P × P × n_block] + Vpair EXACTLY as compute_f2_blocks does (same GEMM body,
+    /// bit-identical bits; §12), but LEAVE the result RESIDENT in VRAM and return a
+    /// move-only DeviceF2Blocks handle — NO forced D2H, NO host alloc, NO host
+    /// zero-fill. THE PRIMARY OUTPUT (architecture.md §11.1 "f2_blocks stays on the
+    /// device"). compute_f2_blocks (host) is now a thin wrapper = this + .to_host().
+    /// The ONLY difference from compute_f2_blocks is the result stays on the device
+    /// instead of being copied to a host F2BlockTensor and freed.
+    ///
+    /// NON-PURE: the base throws (the device-resident output is a CUDA-backend
+    /// concept; nothing routes the CPU backend / a GPU-free fake through it). Only
+    /// the CUDA backend overrides it — CpuBackend / any fake need NOT.
+    [[nodiscard]] virtual steppe::device::DeviceF2Blocks compute_f2_blocks_device(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_device: not supported by this backend "
+            "(device-resident output requires a CUDA backend)");
+    }
+
     /// M4.5 device-resident variant of compute_f2_blocks: compute the per-block
     /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does, but LEAVE the
     /// f2/Vpair tensors RESIDENT on this backend's device (NO D2H, NO free) and
@@ -290,6 +313,63 @@ public:
             "ComputeBackend::compute_f2_blocks_resident: not supported by this backend "
             "(device-resident combine requires a peer-capable CUDA backend; the §4 gate "
             "must have routed a non-CUDA/non-peer backend to the host-staged path)");
+    }
+
+    /// M4.5 host-staged-direct variant of compute_f2_blocks: compute the per-block
+    /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does (same GEMM body,
+    /// bit-identical per-block bits; §12), but instead of allocating a fresh host
+    /// F2BlockTensor and D2H-copying into it, D2H the compact f2/vpair slabs DIRECTLY
+    /// into the caller-provided PINNED host destination at the disjoint block offset
+    /// slab_off = (size_t)P*P*b0. The destination is ONE shared result owned by the
+    /// orchestrator; this device owns the disjoint slice [slab_off, slab_off +
+    /// P*P*n_block) and writes ONLY it (block-aligned shards are disjoint, so two
+    /// devices' slices never overlap — concurrent D2H into one buffer is race-free).
+    ///
+    /// The backend page-locks [dst_f2+slab_off, ... +P*P*n_block) and the vpair slice
+    /// for the D2H window (RegisteredHostRegion, graceful pageable degrade) so the two
+    /// devices' D2Hs run as concurrent pinned DMAs. block_sizes for this device's blocks
+    /// are written into block_sizes_dst[b0 .. b0+n_block) (host int).
+    ///
+    /// @param dst_f2          base pointer of the shared result f2 buffer (length >=
+    ///                        P*P*n_block_full); the device writes [slab_off, +slab*nb).
+    /// @param dst_vpair       base pointer of the shared result vpair buffer (same shape).
+    /// @param block_sizes_dst base pointer of the shared result block_sizes (length >=
+    ///                        n_block_full); the device writes [b0, b0+n_block).
+    /// @param b0              the GLOBAL block placement offset for this partial (== shard.b0).
+    /// NON-PURE: default base throws (only the CUDA backend implements it; the CPU
+    /// backend / fakes need not override — but see §(4): the host test fake MUST).
+    virtual void compute_f2_blocks_into(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, int b0,
+        double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+        const Precision& precision) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)b0;
+        (void)dst_f2; (void)dst_vpair; (void)block_sizes_dst; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_into: not supported by this backend");
+    }
+
+    /// M5 STREAMED (out-of-core) per-block f2 — the HostRam + Disk tiers. Computes the
+    /// FULL per-block [P × P × n_block] f2/Vpair EXACTLY as compute_f2_blocks_device does
+    /// (same run_f2_blocks_resident prologue + per-block gather/GEMM/assemble; the
+    /// per-block bits are BIT-IDENTICAL; §12), but instead of leaving the whole result
+    /// resident it SPILLS each block's [P²] slab block-by-block through a triple-buffered
+    /// sink into the tier `target` selects (HostRam: into target.host_dst; Disk: to
+    /// target.disk_path, reopened read-only into target.disk_dst). The ONLY difference
+    /// from the resident path is WHEN/WHERE a slab lands, never its bits. TIER 0
+    /// (Resident) NEVER routes here — the orchestrator calls compute_f2_blocks_device.
+    ///
+    /// NON-PURE: the base throws (streaming is a CUDA-backend concept; the CPU backend /
+    /// any fake need NOT override it). Only the CUDA backend overrides it — exactly the
+    /// compute_f2_blocks_device pattern.
+    virtual void compute_f2_blocks_streamed(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision,
+        steppe::device::StreamTarget& target) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)precision; (void)target;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_streamed: not supported by this backend "
+            "(out-of-core block streaming requires a CUDA backend)");
     }
 
     /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5

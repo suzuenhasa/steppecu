@@ -238,4 +238,81 @@ std::vector<steppe::device::DevicePartial> compute_multigpu_partials_resident(
     return partials;
 }
 
+void compute_multigpu_partials_into(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    std::span<const steppe::device::DeviceShard> shards,
+    double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+    const Precision& precision) {
+    const int P = Q.P;
+    const std::size_t G = shards.size();
+
+    // The EXACT same concurrent fan-out as compute_multigpu_partials — same zero-copy
+    // sub-views, same dense local block_id, same exception-ptr rethrow, same empty-shard
+    // handling (design §0/§2; §6 lifetime) — differing ONLY in that each worker calls the
+    // host-staged-DIRECT seam method compute_f2_blocks_into(...), which D2Hs its compact
+    // f2/vpair (pinned) DIRECTLY into its DISJOINT slice [slab*b0, slab*(b0+nb)) of the
+    // SHARED result the caller pre-allocated — NO per-device F2BlockTensor, NO combine
+    // copy. NO shared mutable state across workers: worker g writes ONLY its disjoint
+    // slab range [slab*b0, slab*(b0+nb)) of dst_f2/dst_vpair and [b0, b0+nb) of
+    // block_sizes_dst; the block-aligned shards tile [0, n_block) disjointly
+    // (shard_plan.hpp; plan_block_shards), so for g != g' the ranges never overlap and
+    // the concurrent D2Hs into one host buffer are race-free. PARITY-NEUTRAL: each
+    // device's GEMM bits are fixed by the block-aligned shard, not the wall-clock slot;
+    // the join barrier is the happens-before before the orchestrator reads/returns the
+    // result.
+    std::vector<std::exception_ptr> worker_errors(G);  // value-init to nullptr
+    {
+        std::vector<std::jthread> workers;
+        workers.reserve(G);
+        for (std::size_t g = 0; g < G; ++g) {
+            workers.emplace_back([&, g]() {
+                try {
+                    const steppe::device::DeviceShard& sh = shards[g];
+                    const long s0 = sh.s0;
+                    const long s1 = sh.s1;
+                    const long M_local = s1 - s0;
+                    const int  n_block_local = sh.b1 - sh.b0;
+
+                    // Zero-copy column sub-views (data + P*s0). For an empty shard
+                    // M_local == 0 and the offset is harmless (the backend early-returns
+                    // before any deref / D2H).
+                    const std::size_t col_off =
+                        static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
+                    const MatView Qg{Q.data + col_off, P, M_local};
+                    const MatView Vg{V.data + col_off, P, M_local};
+                    const MatView Ng{N.data + col_off, P, M_local};
+
+                    // Dense, zero-based LOCAL block_id of length M_local.
+                    std::vector<int> block_id_local(
+                        static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
+                    for (long k = 0; k < M_local; ++k) {
+                        block_id_local[static_cast<std::size_t>(k)] =
+                            partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
+                    }
+
+                    // The host-staged-DIRECT seam method: D2Hs (pinned) straight into
+                    // this device's disjoint slice of the shared result at sh.b0.
+                    resources.gpus[g].backend->compute_f2_blocks_into(
+                        Qg, Vg, Ng, block_id_local.data(), n_block_local, sh.b0,
+                        dst_f2, dst_vpair, block_sizes_dst, precision);
+                } catch (...) {
+                    // NEVER let it escape the thread (std::terminate); surface it on join.
+                    worker_errors[g] = std::current_exception();
+                }
+            });
+        }
+    }  // <-- join barrier: all workers joined here (jthread dtors)
+
+    // Rethrow the FIRST worker failure (lowest g), deterministically. A worker that
+    // threw left its disjoint slice partially written, but this rethrow fires before the
+    // orchestrator returns its result, so no partial result escapes.
+    for (std::size_t g = 0; g < G; ++g) {
+        if (worker_errors[g]) {
+            std::rethrow_exception(worker_errors[g]);
+        }
+    }
+}
+
 }  // namespace steppe::core

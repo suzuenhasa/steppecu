@@ -29,19 +29,24 @@
 #include "core/fstats/f2_blocks_multigpu.hpp"
 
 #include <cstddef>
+#include <cstdlib>   // std::getenv (STEPPE_FORCE_TIER / STEPPE_F2_CACHE_PATH)
 #include <span>
 #include <stdexcept>
 #include <vector>
 
-#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident] (host-pure, P2P-free)
-#include "core/fstats/f2_combine.hpp"            // steppe::core::combine_f2_partials_host (the baseline)
+#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident|_into] (host-pure, P2P-free)
+#include "core/domain/block_partition_rule.hpp"   // steppe::core::block_ranges, BlockRange (the block_sizes single-source inverse)
 #include "core/internal/views.hpp"               // steppe::core::MatView
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
-#include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_resident (CUDA-free decl of the P2P fast-path)
+#include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_resident[_device] (CUDA-free decl of the P2P fast-path)
 #include "device/device_partial.hpp"             // steppe::device::DevicePartial (CUDA-free opaque resident handle)
+#include "device/device_f2_blocks.hpp"           // steppe::device::DeviceF2Blocks (CUDA-free device-resident result handle)
 #include "device/resources.hpp"                  // steppe::device::Resources, CombinePath
 #include "device/shard_plan.hpp"                 // steppe::device::DeviceShard
+#include "device/tier_select.hpp"                // steppe::device::resolve_output_tier, free_host_ram_bytes, OutputTier
+#include "device/f2_blocks_out.hpp"              // steppe::device::F2BlocksOut (the adaptive tiered result)
+#include "device/stream_f2_blocks.hpp"           // steppe::device::StreamTarget (the CUDA-free streamed-tier request)
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 
@@ -174,20 +179,37 @@ F2BlockTensor compute_f2_blocks_multigpu(
             core::compute_multigpu_partials_resident(resources, Q, V, N, partition,
                                                      shards_span, precision);
         resources.last_combine_path = steppe::device::CombinePath::P2pDeviceResident;
-        return steppe::device::combine_f2_partials_resident(
+        // Share the new no-final-D2H device-resident assembly, then materialize ONCE
+        // (.to_host()) for this host-returning entry. Bit-identical to the prior
+        // host-returning combine_f2_partials_resident (same bytes, same placement; §12).
+        return steppe::device::combine_f2_partials_resident_device(
             std::span<steppe::device::DevicePartial>(partials.data(), partials.size()),
-            shards_span, P, n_block, resources.gpus[0].device_id);
+            shards_span, P, n_block, resources.gpus[0].device_id).to_host();
     }
 
-    // ---- Host-staged baseline — KEEP EXACTLY AS-IS (byte-for-byte) ------------
+    // ---- Host-staged DIRECT path — pinned, sharded D2H into ONE shared result ----
     // Taken when P2P is not preferred, peer access is FORBIDDEN by the user
     // (enable_peer_access=false), or peer access is UNAVAILABLE on the device. The
-    // host-partial fan-out (compute_multigpu_partials, the UNMODIFIED per-device
-    // compute_f2_blocks) → combine_f2_partials_host, exactly as before — the parity
-    // test exercises this arm and it must stay bit-identical to single-GPU.
-    const std::vector<F2BlockTensor> partials = core::compute_multigpu_partials(
-        resources, Q, V, N, partition, shards_span, precision);
-    const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
+    // M4.5 d2h-speed cure (architecture-audit Flaw 3): pre-allocate the full-shape
+    // result and fan out so each device D2Hs its compact partial DIRECTLY (pinned) into
+    // its disjoint block-slice [slab*b0, slab*(b0+nb)) of this ONE result — NO per-device
+    // partials buffer, NO combine_f2_partials_host alloc + copy_n. The bytes/offsets are
+    // bit-identical to the deleted host-staged combine (§12): out.P/out.n_block/
+    // out.block_sizes init exactly as combine_f2_partials_host, total = slab*n_block,
+    // each device writes the SAME disjoint slab range. The parity test exercises this
+    // arm and it stays bit-identical to single-GPU.
+    F2BlockTensor out;
+    out.P = P;
+    out.n_block = n_block;
+    const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+    out.f2.resize(total);                          // pinned + written by the workers
+    out.vpair.resize(total);
+    out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+
+    core::compute_multigpu_partials_into(
+        resources, Q, V, N, partition, shards_span,
+        out.f2.data(), out.vpair.data(), out.block_sizes.data(), precision);
 
     // Emit the EXACT architecture-mandated tagged degrade ONLY on a genuine degrade —
     // the user both PREFERRED P2P and PERMITTED peer access, but the device cannot
@@ -200,7 +222,206 @@ F2BlockTensor compute_f2_blocks_multigpu(
             "P2P combine unavailable (no peer access) -> host-staged fixed-order combine");
     }
     resources.last_combine_path = steppe::device::CombinePath::HostStaged;
-    return steppe::core::combine_f2_partials_host(partials_span, shards_span, P, n_block);
+    return out;
+}
+
+// =============================================================================
+// compute_f2_blocks_multigpu_device — the M4.5 DEVICE-RESIDENT PRIMARY entry (the
+// cure). Same asserts + G fail-fast + §4 gate + shard plan as the host entry above;
+// the only difference is WHERE the result lives (VRAM handle) and WHEN it materializes
+// to host (only on opt-in .to_host()). PARITY-NEUTRAL (computed bits unchanged; §12).
+// =============================================================================
+steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision) {
+    const int  P = Q.P;
+    const long M = Q.M;
+    const int  n_block = partition.n_block;
+
+    // ---- Shared contract (debug fail-fast; identical to the host entry) -------
+    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
+                  "compute_f2_blocks_multigpu_device: Q/V/N disagree on P");
+    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
+                  "compute_f2_blocks_multigpu_device: Q/V/N disagree on M");
+    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
+                  "compute_f2_blocks_multigpu_device: negative P or M (uninitialized MatView)");
+    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+                  "compute_f2_blocks_multigpu_device: block_id length != M");
+
+    // ---- Fail-fast: at least one device (architecture.md §2) -----------------
+    const std::size_t G = resources.device_count();
+    if (G < 1) {
+        throw std::runtime_error(
+            "steppe::core::compute_f2_blocks_multigpu_device: Resources has 0 devices — "
+            "the SPMG precompute requires at least one (architecture.md §9)");
+    }
+
+    // ---- G == 1: the HEADLINE WIN — the result is already on the one GPU after the
+    //      GEMM; KEEP it resident and return the handle. NO D2H AT ALL. ------------
+    if (G == 1) {
+        return resources.gpus[0].backend->compute_f2_blocks_device(
+            Q, V, N, partition.block_id.data(), n_block, precision);
+    }
+
+    // ---- THE §4 COMBINE GATE — copied VERBATIM from the host entry above (the
+    //      single authoritative four-term predicate; architecture.md §8 single-source).
+    const bool use_p2p =
+        resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
+        resources.gpus[0].caps.can_access_peer && G >= 2;
+
+    // BLOCK-ALIGNED shard plan — shared by both arms (the parity floor; design §0/§2).
+    const std::vector<steppe::device::DeviceShard> shards =
+        core::plan_multigpu_shards(partition, M, n_block, G);
+    const std::span<const steppe::device::DeviceShard> shards_span(shards.data(), shards.size());
+
+    if (use_p2p) {
+        // P2P box: per-device partials stay RESIDENT, assembled DEVICE-RESIDENT into
+        // ONE root-resident DeviceF2Blocks — NO host bounce, NO final D2H.
+        std::vector<steppe::device::DevicePartial> partials =
+            core::compute_multigpu_partials_resident(resources, Q, V, N, partition,
+                                                     shards_span, precision);
+        resources.last_combine_path = steppe::device::CombinePath::P2pDeviceResident;
+        return steppe::device::combine_f2_partials_resident_device(
+            std::span<steppe::device::DevicePartial>(partials.data(), partials.size()),
+            shards_span, P, n_block, resources.gpus[0].device_id);
+    }
+
+    // ---- NO-PEER box (the consumer 5090): documented limitation. Full single-tensor
+    //      assembly across 2 GPUs without P2P needs a host bounce. The per-device
+    //      compute stays RESIDENT (no premature D2H per device — the host-staged DIRECT
+    //      path D2Hs each device's compact partial straight into its disjoint slice of
+    //      ONE host result); we then UPLOAD that to the root device so the PRIMARY
+    //      return is still a DeviceF2Blocks (the precompute->fit handoff is
+    //      device-resident even on the no-peer tier; the host bounce is the cross-card
+    //      assembly transport, NOT a forced output copy). [architecture.md §11.4: on
+    //      the no-P2P tier a single device-resident tensor across G cards is not
+    //      achievable without P2P or a host bounce.] last_combine_path is set to
+    //      HostStaged inside the host wrapper.
+    steppe::F2BlockTensor host =
+        compute_f2_blocks_multigpu(resources, Q, V, N, partition, precision);
+    return steppe::device::upload_f2_blocks_to_device(host, resources.gpus[0].device_id);
+}
+
+// =============================================================================
+// compute_f2_blocks_multigpu_tiered — the M5 ADAPTIVE TIERED entry (single-GPU first).
+// The result lives in the FASTEST tier it FITS in, selected by resolve_output_tier from
+// the RUNTIME free-VRAM probe (resources.gpus[0].caps.free_vram_bytes) + the RUNTIME
+// free-host-RAM probe (free_host_ram_bytes via sysinfo) — never hardcoded — or the
+// force-tier override. PARITY-NEUTRAL (§12): the tier moves no bits.
+//
+// TIER 0 (Resident) IS THE EXISTING PATH UNCHANGED: on OutputTier::Resident the
+// orchestrator calls compute_f2_blocks_device EXACTLY as the device entry does (no sink,
+// no staging, no triple-buffer) — P=512 keeps its 3.9x and never touches streaming.
+// HostRam + Disk drive the streamed seam (compute_f2_blocks_streamed) ONLY when the
+// result does not fit VRAM (opt-in-by-need).
+// =============================================================================
+steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision) {
+    const int  P = Q.P;
+    const long M = Q.M;
+    const int  n_block = partition.n_block;
+
+    // ---- Shared contract (debug fail-fast; identical to the other entries) -----
+    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
+                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on P");
+    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
+                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on M");
+    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
+                  "compute_f2_blocks_multigpu_tiered: negative P or M (uninitialized MatView)");
+    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+                  "compute_f2_blocks_multigpu_tiered: block_id length != M");
+
+    const std::size_t G = resources.device_count();
+    if (G < 1) {
+        throw std::runtime_error(
+            "steppe::core::compute_f2_blocks_multigpu_tiered: Resources has 0 devices — "
+            "the SPMG precompute requires at least one (architecture.md §9)");
+    }
+
+    // ---- TIER SELECT (runtime probes; never hardcoded) -----------------------
+    // Free VRAM is the per-device probe captured ONCE at build_resources
+    // (backend.hpp:166-167); free host RAM is sysinfo(2) read NOW. The override
+    // precedence (config.force_tier wins, then STEPPE_FORCE_TIER, then automatic) is
+    // resolved by the frozen helper.
+    const std::size_t free_vram = resources.gpus[0].caps.free_vram_bytes;
+    const std::size_t free_host = steppe::device::free_host_ram_bytes();
+    const steppe::device::OutputTier tier = steppe::device::resolve_output_tier(
+        resources.config.force_tier, std::getenv("STEPPE_FORCE_TIER"),
+        P, M, n_block, free_vram, free_host);
+
+    steppe::device::F2BlocksOut out;
+    out.P = P;
+    out.n_block = (n_block < 0 ? 0 : n_block);
+
+    // Block_sizes are needed on the result for every tier (the S4 jackknife metadata).
+    // The streamed sinks fill them from the per-device compute's block_ranges; for
+    // Resident the DeviceF2Blocks carries them. To keep the result self-describing in
+    // ALL tiers we derive them once from the partition's block_id (the single-source
+    // inverse), matching what the per-device compute records.
+    {
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(partition.block_id.data(),
+                                                    static_cast<std::size_t>(M < 0 ? 0 : M)),
+                               M, n_block);
+        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        for (int b = 0; b < n_block; ++b)
+            out.block_sizes[static_cast<std::size_t>(b)] =
+                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+    }
+
+    switch (tier) {
+        case steppe::device::OutputTier::Resident: {
+            // TIER 0 UNCHANGED — the 3.9x path, NO sink, NO streaming. EXACTLY the
+            // device entry's G==1 call (f2_blocks_multigpu.cpp verbatim).
+            out.tier = steppe::device::OutputTier::Resident;
+            out.resident = resources.gpus[0].backend->compute_f2_blocks_device(
+                Q, V, N, partition.block_id.data(), n_block, precision);
+            // The handle carries its own block_sizes/P/n_block; mirror onto out for the
+            // tier-agnostic surface.
+            out.P = out.resident.P;
+            out.n_block = out.resident.n_block < 0 ? 0 : out.resident.n_block;
+            if (!out.resident.block_sizes.empty()) out.block_sizes = out.resident.block_sizes;
+            break;
+        }
+        case steppe::device::OutputTier::HostRam: {
+            out.tier = steppe::device::OutputTier::HostRam;
+            steppe::device::StreamTarget target;
+            target.tier = steppe::device::OutputTier::HostRam;
+            target.host_dst = &out.host;
+            resources.gpus[0].backend->compute_f2_blocks_streamed(
+                Q, V, N, partition.block_id.data(), n_block, precision, target);
+            if (out.host.n_block >= 0) out.n_block = out.host.n_block;
+            out.P = out.host.P;
+            if (!out.host.block_sizes.empty()) out.block_sizes = out.host.block_sizes;
+            break;
+        }
+        case steppe::device::OutputTier::Disk: {
+            out.tier = steppe::device::OutputTier::Disk;
+            // Disk path precedence: config.disk_cache_path, else STEPPE_F2_CACHE_PATH
+            // env, else the frozen default "./steppe_f2_blocks.cache" in the cwd.
+            std::string path = resources.config.disk_cache_path;
+            if (path.empty()) {
+                const char* env = std::getenv("STEPPE_F2_CACHE_PATH");
+                path = (env && env[0]) ? std::string(env) : std::string("./steppe_f2_blocks.cache");
+            }
+            steppe::device::StreamTarget target;
+            target.tier = steppe::device::OutputTier::Disk;
+            target.disk_path = path;
+            target.disk_dst = &out.disk;
+            resources.gpus[0].backend->compute_f2_blocks_streamed(
+                Q, V, N, partition.block_id.data(), n_block, precision, target);
+            out.P = out.disk.P;
+            out.n_block = out.disk.n_block < 0 ? 0 : out.disk.n_block;
+            if (!out.disk.block_sizes.empty()) out.block_sizes = out.disk.block_sizes;
+            break;
+        }
+    }
+    return out;
 }
 
 }  // namespace steppe::core
