@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>    // std::memcpy — staging->result slice copy (P5/d2h-speed)
 #include <limits>     // std::numeric_limits<int>::max — the M0 k-narrowing guard (B22)
 #include <memory>
 #include <span>
@@ -60,7 +61,7 @@
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII)
-#include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2)
+#include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
 #include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction
@@ -315,15 +316,20 @@ public:
         return h;  // NO D2H, NO free — the cure (doc §4 Item 1)
     }
 
-    /// M4.5 host-staged-DIRECT override (the d2h-speed cure). Runs the SAME GEMM body
-    /// as compute_f2_blocks (so the per-block bits are bit-identical; §12), then D2Hs
-    /// the compact f2/vpair slabs DIRECTLY into the caller's shared PINNED result at the
-    /// disjoint block offset slab_off = P*P*b0, instead of into a fresh host
-    /// F2BlockTensor that the combine then re-copies. The destination slices are pinned
-    /// in place for the D2H window (RegisteredHostRegion, graceful pageable degrade) so
-    /// two devices' D2Hs run as concurrent pinned DMAs. block_sizes for this device's
-    /// blocks are placed at the shared result's [b0, b0+n_block) (host int copy, mirrors
-    /// f2_combine.cpp's std::copy_n at offset b0).
+    /// M4.5 host-staged override (the d2h-speed cure). Runs the SAME GEMM body as
+    /// compute_f2_blocks (so the per-block bits are bit-identical; §12), then D2Hs the
+    /// compact f2/vpair slabs into PERSISTENT per-backend pinned staging buffers
+    /// (stage_f2_/stage_vpair_, cudaHostAlloc'd ONCE and reused), and a host std::memcpy
+    /// copies the exact bytes into the caller's shared result at the disjoint block
+    /// offset slab_off = P*P*b0. The persistent staging replaces the prior per-call
+    /// RegisteredHostRegion pin of the ~3 GB result slice: cudaHostRegister/Unregister
+    /// took the device-wide driver lock and serialized the two workers' D2Hs (~570 ms
+    /// serial tail, MEASURED nsys box5090). Now the two devices D2H into their OWN
+    /// buffers as concurrent pinned DMAs, and the staging->result memcpy is CPU
+    /// bandwidth (no driver lock) running concurrently on the two worker threads.
+    /// block_sizes for this device's blocks are placed at the shared result's
+    /// [b0, b0+n_block) (host int copy, mirrors f2_combine.cpp's std::copy_n at offset
+    /// b0). PARITY-NEUTRAL: same doubles, same disjoint offset, exact memcpy (§12).
     void compute_f2_blocks_into(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, int b0,
@@ -341,21 +347,32 @@ public:
             const std::size_t slab_off =
                 static_cast<std::size_t>(rb.P) * static_cast<std::size_t>(rb.P) *
                 static_cast<std::size_t>(b0);
-            double* f2_slice    = dst_f2    + slab_off;
-            double* vpair_slice = dst_vpair + slab_off;
             const std::size_t bytes = total * sizeof(double);
-            // PIN the destination slices for the D2H window (graceful pageable degrade).
-            // The two devices register DISJOINT ranges of the shared buffer -> no overlap,
-            // no cudaErrorHostMemoryAlreadyRegistered across workers. The trailing
-            // cudaStreamSynchronize keeps the pin alive until the in-flight DMA drains
-            // (the RAII unregister fires at this scope's exit, AFTER the sync).
-            RegisteredHostRegion pin_f2(f2_slice, bytes);
-            RegisteredHostRegion pin_vp(vpair_slice, bytes);
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(f2_slice, rb.f2.data(), bytes,
+
+            // Grow the PERSISTENT pinned staging to this partial ONCE (reused thereafter).
+            // The partial size P*P*n_block_local is constant across a run's repeated
+            // calls, so this allocates on the first call and is a no-op after. Never
+            // shrink. Two separate buffers so the f2 and vpair D2Hs stage independently
+            // (one buffer would falsely serialize the two copies on the one stream).
+            if (stage_f2_.size()    < total) stage_f2_    = PinnedBuffer<double>(total);
+            if (stage_vpair_.size() < total) stage_vpair_ = PinnedBuffer<double>(total);
+
+            // D2H into the PERSISTENT pinned staging (genuine async DMA; NO per-call
+            // register/unregister, so NO device-wide driver lock). The two devices stage
+            // into their OWN per-backend buffers -> concurrent DMAs.
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(stage_f2_.data(), rb.f2.data(), bytes,
                                               cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(vpair_slice, rb.vpair.data(), bytes,
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(stage_vpair_.data(), rb.vpair.data(), bytes,
                                               cudaMemcpyDeviceToHost, stream_.get()));
             STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+            // Host copy into the caller's disjoint result slice. CPU bandwidth, NO driver
+            // lock, so the two worker threads' copies run concurrently. Disjoint
+            // block-aligned slices => race-free into the one shared result. Exact bytes
+            // => PARITY (architecture.md §12). The trailing sync above is the
+            // happens-before that guarantees the DMA fully drained into staging first.
+            std::memcpy(dst_f2    + slab_off, stage_f2_.data(),    bytes);
+            std::memcpy(dst_vpair + slab_off, stage_vpair_.data(), bytes);
         }
         // rb's DeviceBuffers free here (same free point as compute_f2_blocks).
     }
@@ -858,6 +875,21 @@ private:
     // owned by `Resources`, scoped within the caller's compute call tree. PARITY-
     // NEUTRAL (pinning moves no arithmetic bits; §12).
     PinnedRegistryCache pinned_in_{};
+
+    // PERSISTENT pinned D2H staging (P5/d2h-speed). Sized to the largest partial this
+    // backend has D2H'd, allocated ONCE via cudaHostAlloc and REUSED across every
+    // compute_f2_blocks_into call — so the page-locking cost is paid once, not per call.
+    // The prior path pinned the caller's ~3 GB result slice EVERY call
+    // (RegisteredHostRegion), and cudaHostRegister/Unregister take the device-wide driver
+    // lock, serializing the two worker threads' D2Hs (~570 ms serial tail, MEASURED nsys
+    // box5090). With persistent pinned staging the two devices' D2Hs run as concurrent
+    // pinned DMAs into per-backend buffers; the host memcpy to the disjoint result slice
+    // is CPU-bandwidth, takes NO driver lock, and runs concurrently on the two worker
+    // threads. Declared LAST (destroyed FIRST): cudaFreeHost has no dependency on
+    // stream_/blas_. PARITY-NEUTRAL: same doubles, same disjoint offset, exact memcpy
+    // (architecture.md §12).
+    PinnedBuffer<double> stage_f2_{};
+    PinnedBuffer<double> stage_vpair_{};
 };
 
 /// Factory for the GPU backend (declared in device/backend_factory.hpp, X-9/B8;
