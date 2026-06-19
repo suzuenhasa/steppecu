@@ -1,5 +1,19 @@
 # M4.5 Multi-GPU PERF DISCOVERY — the parity-safe speedup plan
 
+> **STATUS: SUPERSEDED on its central premise (P1) — see `why-multigpu-slow.md`.** This doc's #1
+> claim — that the dominant cost is **~1440 ms/run of redundant combine host-zeroing** (`assign(0.0)`),
+> and that **P1 (`resize` not `assign`) is THE speedup lever** — was **REFUTED on-box** by a later nsys
+> trace. The accumulator zeroing measures **5 ms** (a `cudaMemset`), not 1440 ms; the host
+> `assign(0.0)` first-touch is real but is merely **relocated into the D2H** (removing it just moves the
+> same page-fault into the copy), so P1 is **not a separate ~1440 ms bucket and not the cure.** P1 was
+> reverted / never the fix. The ACTUAL root cause was the **data-bounce wart**: a redundant SECOND full
+> 7.14 GB Device→Host copy. The ACTUAL fix is the **device-resident combine (commit `867a4bf`)**, after
+> which **multi-GPU is FASTER** (rtxbox, Release, EmuFp64{40}, median of 10: P=768 G2 = 2125 ms vs
+> G1 = 2342 ms = **1.10×**; P=400 = **1.22×**), with `memcmp` parity preserved. The "multi-GPU is
+> slower (0.70× / 0.72–0.85×)" tables below are the **PRE-FIX** state and are now FALSE. Read
+> `docs/cleanup/m4.5/why-multigpu-slow.md` (nsys root cause @165f655) for the corrected analysis; the
+> rest of this doc is kept for the build-type / overlap findings that remain valid.
+
 Branch `m4.5-multigpu`. Box `rtxbox` (2×RTX PRO 6000 Blackwell, sm_120, CUDA 13, 96 GB ea,
 REAL P2P `can_access_peer=true`). All numbers below are MEASURED on rtxbox unless tagged
 "expected". Every fix is tagged against the §12 `memcmp` bit-identity law and the
@@ -16,7 +30,12 @@ audit item named.
 
 ## (1) THE HEADLINE
 
-**Yes, multi-GPU is genuinely slower than single-GPU on rtxbox — and it is NOT a debug-build
+> **[PRE-FIX — now FALSE]** As of `867a4bf` multi-GPU is **FASTER** (P=768 = 1.10×, P=400 = 1.22×).
+> The "genuinely slower" finding below was the pre-fix state; it correctly ruled out the debug-build
+> artifact, but its attribution to host-zeroing (P1) was wrong — see the banner at the top of this doc
+> and `why-multigpu-slow.md`.
+
+**[PRE-FIX] Multi-GPU was genuinely slower than single-GPU on rtxbox — and it was NOT a debug-build
 artifact.** The leading prior hypothesis (the per-kernel `cudaDeviceSynchronize` in
 `check.cuh:201`, active because the bench built with no `CMAKE_BUILD_TYPE`) is **REFUTED**.
 
@@ -39,8 +58,9 @@ both equally and left the ratio unchanged. In the DEBUG nsys it dominated CUDA-A
 **42.1 % / 2.53 s / 186 calls**; in the Release nsys `cudaDeviceSynchronize` collapsed to
 **2.8 % / 0.22 s / 15 calls**, and those 15 are the *explicit* P2P combine fence
 (`p2p_combine.cu:283`), NOT the debug macro. So the 42 % was real but it inflated BOTH bars; the
-slowdown ratio is a different defect entirely. Multi-GPU is slower in Release (1.04× → 0.70×
-over P=200 → 768), the same monotone-with-P curve as DEFAULT.
+slowdown ratio is a different defect entirely. **[PRE-FIX]** Multi-GPU was slower in Release (1.04× → 0.70×
+over P=200 → 768), the same monotone-with-P curve as DEFAULT — this is the pre-`867a4bf` state and is
+now FALSE (post-fix: P=768 = 1.10×, P=400 = 1.22×).
 
 PARITY: bit-identity holds in BOTH build types (parity test PASS RC=0 in Release on
 `derived_acc` P=50 and `derived_full` P=768; P2P device-resident AND host-staged each
@@ -80,7 +100,14 @@ Per clean G2 timed iteration:
 - **GPU starvation:** over the whole G2 segment the GPUs are kernel-busy only ~210 ms each inside
   a ~2.6 s GPU-activity span. The wall is dominated by host-side stalls, not compute.
 
-### Why G2 is ~1000 ms slower than G1 — the dominant cause is NOT a CUDA primitive
+### Why G2 was ~1000 ms slower than G1 — [the host-zeroing attribution below is REFUTED]
+
+> **REFUTED — see banner + `why-multigpu-slow.md`.** The real dominant cost is the **redundant SECOND
+> full 7.14 GB D2H** (the data-bounce wart), not host-zeroing. The `cudaMemset` accumulator zero is
+> **5 ms**; the host `assign(0.0)` first-touch below is real CPU work but it is **relocated into the D2H
+> write** when removed, so it is not a separable ~1440 ms bucket. The microbench timed the page-faults
+> in isolation; under the real run that cost overlaps/relocates into the copy. The text below is kept as
+> the (incorrect) original hypothesis.
 
 A `[2·P²·n_block]` host result tensor is **3.57 GB**; zeroing both `out.f2.assign(total,0.0)` +
 `out.vpair.assign(total,0.0)` costs a **measured ~1440 ms of pure host CPU** (microbenched on
@@ -99,8 +126,16 @@ and the P2P DMA is ~36 ms.
 
 ### Ranked causes (by measured impact on the G1↔G2 gap)
 
-1. **Redundant combine host-zeroing — ~1440 ms/run (the #1 lever).** `assign(total,0.0)` on two
-   3.57 GB host vectors, paid TWICE on G2, serialized after the join. (audit **W9**, X4/§12 note.)
+> **CORRECTION — the real #1 cause is the data-bounce (second full D2H), fixed @867a4bf.** The ranking
+> below put combine host-zeroing first; that was refuted on-box (see banner). The true ranking is:
+> #1 the redundant SECOND full 7.14 GB D2H (the data-bounce wart) — eliminated by the device-resident
+> combine; host-zeroing is a 5 ms `cudaMemset` plus a page-fault that relocates into the D2H. Item 2's
+> overlap finding (18% kernel concurrency) was ALSO later re-measured at **74%** — see
+> `why-multigpu-slow.md`; the L4 allocator lock is at most a few percent, not the serializer.
+
+1. **[REFUTED as #1] Redundant combine host-zeroing — was claimed ~1440 ms/run.** Real cost is a 5 ms
+   `cudaMemset`; the host `assign(total,0.0)` page-fault relocates into the D2H, so it is not a separable
+   lever. Superseded by the data-bounce diagnosis. (audit **W9**, X4/§12 note.)
 2. **Fan-out cannot overlap (18 % kernel concurrency).** Compounds from three layers:
    - **F1 (root cause):** the per-device backend runs on the **NULL legacy default stream**
      (`cuda_backend.cu:596 stream_ = nullptr`) and the build is NOT `--default-stream
@@ -127,21 +162,29 @@ P2P rework) is NOT the speedup lever.**
 
 ## (3) PRIORITIZED, PARITY-SAFE FIX PLAN
 
+> **OUTCOME (post-fix):** The plan below was the pre-fix proposal. In reality **P1 was REFUTED** (not a
+> lever) and the cure was **P6 in disguise** — the **device-resident combine (commit `867a4bf`)**, which
+> made multi-GPU **1.10× faster @ P=768**. P0/P2/P3 landed as preconditions (`970fa42` / `9fdc946` /
+> `a41d67a`). Treat P1 below as historical; do not action it as a speedup. The L4 allocator lock was
+> later re-measured as at most a few percent (overlap is 74%, not 18% — see `why-multigpu-slow.md`), so
+> P3 is optional cleanup, not a blocker.
+
 Fix order is chosen so each lever's payoff is *visible*: P1 removes the serial tail the fan-out's
 `max` is added to; P2 gives the workers a stream that CAN overlap; P3 stops the alloc-lock
 serialization; P4 makes the blocking copies actually async. P1 alone closes most of the gap; P2+P3+P4
-together recover the ~2× fan-out.
+together recover the ~2× fan-out. **[The P1 premise was refuted; the real cure was P6 / the
+device-resident combine `867a4bf` — see the OUTCOME note above.]**
 
 | # | Fix | Where | Measured / expected impact on the G1↔G2 gap | Effort | Audit map | Parity |
 |---|---|---|---|---|---|---|
-| **P1** | **`resize(total)` not `assign(total,0.0)`** for the host result of the P2P combine AND the per-shard partial. Best form: resize once, let the full D2H overwrite. | `p2p_combine.cu:180-181`; `cuda_backend.cu:236-237` | **MEASURED ~1440 ms/run removed** — the single biggest number; by the microbench this alone closes most of the ~1000 ms G2 deficit at P=768. | **S** | **W9** | **PARITY-SAFE** (P2P tier + backend partial) |
+| **P1 — REFUTED** | **`resize(total)` not `assign(total,0.0)`** for the host result of the P2P combine AND the per-shard partial. | `p2p_combine.cu:180-181`; `cuda_backend.cu:236-237` | **REFUTED — not a lever.** The "~1440 ms/run" was wrong: the accumulator zero is a 5 ms `cudaMemset`; the `assign(0.0)` page-fault relocates into the D2H. The real cure was the device-resident combine (`867a4bf`, see P6). The swap is at most cosmetic. | **S** | **W9** | **PARITY-SAFE** (but no perf payoff) |
 | **P2** | **Give each worker a real per-device `Stream`** — replace `stream_ = nullptr` with an owning RAII `Stream stream_{}` (the wrapper in `stream.hpp` already exists, never instantiated), constructed after `device_id_` is set; pass `stream_.get()` everywhere. | `cuda_backend.cu:596` (+ all launch/copy/`set_stream` sites) | **Precondition** — alone moves the wall little, but without it P3/P4 cannot yield overlap. With P3+P4 it turns the ~488 ms fan-out window toward ~205–250 ms (max not sum). | **S** | new (precondition under **B1/W1**); subsumes part of L4 | **PARITY-SAFE** (stream is pure scheduling; cuBLAS workspace re-applied via `set_stream`) |
 | **P3** | **Stop the per-chunk alloc churn (L4):** pre-allocate the per-bucket slab buffers (`dIds/dQg/dVg/dSg/dGg/dVpairg/dRg`) ONCE at max bucket width and reuse across chunks (L4b, simpler, higher ROI on 96 GB), OR a per-device `cudaMallocAsync` pool with `cudaMemPoolAttrReleaseThreshold=MAX` (L4a). | `cuda_backend.cu:355-388`, `:306-309`, `:320`; `device_buffer.cuh:74,117` | **Expected ~150–240 ms/run** — lifts fan-out kernel overlap from 18 % toward 50–80 %. Bigger on the 32 GB budget tier (many chunks) than on 96 GB rtxbox (few chunks). | **S** (L4b) / **M** (L4a) | **L4** | **PARITY-SAFE** (allocation moves no bits; every buffer fully written before read; pool mem not zeroed but nothing relies on it) |
 | **P4** | **Pinned staging + async H2D/D2H (L2/W9):** add a `PinnedBuffer` RAII (`cudaHostAlloc`/`cudaFreeHost`; none exists in `src/` today) and stage Q/V/N and the partial/result transfers through pinned host memory. | `cuda_backend.cu` H2D/D2H sites; `p2p_combine.cu` staging; `device_buffer.cuh` (new sibling) | **Expected: unblocks the ~44 % pageable copy serialization.** Makes `cudaMemcpyAsync` truly async so device A's H2D overlaps device B's compute. Needs P2 first; little payoff alone. | **M** | **L2 / W9** | **PARITY-SAFE** (pinned vs pageable moves identical bytes) |
 | **P5** | **Build/perf config:** make the bench + perf builds Release (`-DCMAKE_BUILD_TYPE=Release`). | CMake invocation | **~0 on the gap** (symmetric) but ~2× absolute on BOTH G1 and G2 by removing the debug per-kernel sync. Already validated. | **S** | build-config (not numbered) | **PARITY-SAFE** (bit-identity proven in Release) |
-| **P6** | **Device-resident partial return + event-fence combine (L1 + W3):** retain `dF2_all/dVpair_all` device-resident so `cudaMemcpyPeer` is a genuine peer→root pull (kills the +6.65 GB re-upload, X3); replace `p2p_combine.cu:283` device-sync with an `Event` fence + K-deep staging ring, copies overlapped, place-adds kept serial in fixed g order. | `cuda_backend.cu` + seam; `p2p_combine.cu:283`, staging | **LOW at G=2** (one peer pull, 36 ms transport); removes the X3 quadratic-in-P host PCIe; grows with G. Do AFTER P1–P4. | **L** | **L1 / W3 / B2(W2)** | **yes-if-careful** (retained buffer byte-exact; copies overlap, NEVER reorder the place-adds — §12) |
+| **P6 — LANDED @867a4bf (THE actual cure)** | **Device-resident partial return + combine (L1 + W3):** the per-device compute leaves `dF2_all/dVpair_all` RESIDENT (returns an opaque move-only `DevicePartial`); the combine `cudaMemcpyPeer`s each peer slab straight into its disjoint slice, D2D-copies the root partial, then does ONE final D2H. Deletes the re-upload H2D, the accumulator `cudaMemset`, the place-add kernel, the staging buffers, and the per-peer `cudaDeviceSynchronize` (one fence before the final D2H). | `cuda_backend.cu` + seam; `p2p_combine.cu`, staging | **THE WIN.** Removes the data-bounce wart (the redundant SECOND full 7.14 GB D2H). **Measured: P=768 G2 = 2125 ms vs G1 = 2342 ms = 1.10×; P=400 = 1.22×** (rtxbox, Release, EmuFp64{40}, median of 10), bit-identical parity preserved. This — not P1 — was the cure. | **L** | **L1 / W3 / B2(W2)** | **SAFE — proven** (resident-to-resident DMA byte-exact; disjoint placement, fixed g order; memcmp parity passed) |
 
-**Parity argument for P1 (the #1 lever), in full:** the host `out.f2`/`out.vpair` are pure D2H
+**Parity argument for P1 (proposed as the #1 lever — later REFUTED; parity-safe but no perf payoff), in full:** the host `out.f2`/`out.vpair` are pure D2H
 landing buffers. The device accumulator is `cudaMemset(0)`'d and every element is written by the
 fixed-order place-adds, then copied back wholesale (`total > 0` branch overwrites all `total`
 elements unconditionally). `std::vector<double>::resize(n)` value-initializes to +0.0 anyway, so
@@ -182,8 +225,12 @@ idiomatic (W4 grid-stride kernel, W5 fused launch, W6 hoisted peer-enable, W3 ev
 The X3 double-bounce elimination IS a real ~6.65 GB host-PCIe win at P=768 — but its M5/device-
 resident form (P6/L1) is the part with the byte-count payoff, not the `cudaMemcpyPeer` rework
 itself. The W3 event-fence + ring matters for G>2 (more peer pulls to pipeline), which no current
-box can test. So: **B2 is a cleanliness + G>2-readiness item, NOT a 2-GPU speed item.** Land it
-AFTER P1–P4, and fold its X3/device-resident part into P6.
+box can test. So: **B2 is a cleanliness + G>2-readiness item, NOT a 2-GPU speed item.**
+
+> **UPDATE (post-`867a4bf`):** P6 (the device-resident combine) has LANDED and already delivered the
+> X3 / data-bounce win (the redundant second full D2H is gone; the per-peer device-sync collapsed to one
+> fence). B2's original motivation — the slow / bouncing combine — is therefore largely **subsumed**.
+> Mark B2 as **REASSESS / likely-subsumed**, NOT a pending speedup. (`agentscripts/m4.5-b2-p2p-fix-pass.js`.)
 
 ---
 
@@ -199,23 +246,28 @@ asserts/death-tests vanish under NDEBUG — demote those two warning kinds via c
 (`-Wno-error=unused-parameter -Wno-error=unused-function` + nvcc `-diag-suppress 177`); do NOT
 edit source. Their appearance is itself confirmation NDEBUG took effect.
 
+> **HISTORICAL — this fix-pass plan is now complete, with a different outcome than proposed.** The
+> `m4.5-perf-fix-pass.js` ran: P0/P2/P3 landed as preconditions (`970fa42` / `9fdc946` / `a41d67a`);
+> **P1 was REFUTED** (a sham/no-op fixer report, and not a lever anyway). The actual cure was **P6 — the
+> device-resident combine, `867a4bf`** — which flipped G2 from 0.70× to **1.10× (faster) @ P=768** and
+> **1.22× @ P=400**, bit-identical parity preserved. The original ROI-ordered plan below is kept for the
+> record; do not re-action P1.
+
 **Author a fix-pass workflow for the top levers (the proven pattern: STRICTLY SEQUENTIAL, 2
 agents per item — independent fixer + adversarial verdict; template `fix-pass-phase2.js`).**
 Suggested name `m4.5-perf-fix-pass.js`, run on rtxbox (P1/P6 touch the P2P path; only rtxbox has
-real P2P). Item order = the measured ROI order:
-- **P1 — W9 `resize` not `assign(0.0)`** (S, the #1 measured lever, ~1440 ms/run). Gate:
+real P2P). Item order (as originally proposed — see the HISTORICAL note above for what actually happened):
+- **P1 — W9 `resize` not `assign(0.0)`** — **[REFUTED, not a lever, do not action]**. Gate:
   re-run `bench_f2_multigpu` G2 vs G1 + the locked `memcmp` parity test.
-- **P2 — real per-worker `Stream`** (S, the overlap precondition).
-- **P3 — L4 buffer reuse / pool** (S–M).
-- **P4 — pinned staging** (M, needs the new `PinnedBuffer`).
-- Re-bench after P1, then after P2+P3+P4, against the table in §1. Expect P1 to flip G2 from 0.70×
-  toward ≥1×; P2+P3+P4 to push toward the ~2× fan-out (`max` not `sum`).
-- DEFER P6/B2 (`m4.5-b2-p2p-fix-pass.js` is already staged) until after P1–P4 land green —
-  cleanliness + G>2, not a 2-GPU speed item.
+- **P2 — real per-worker `Stream`** (S, the overlap precondition) — **landed `9fdc946`**.
+- **P3 — L4 buffer reuse / pool** (S–M) — **landed `a41d67a`** (optional cleanup, not the lever).
+- **P4 — pinned staging** (M, needs the new `PinnedBuffer`) — *remaining optional lever:* pin the final
+  pageable result D2H to push past 1.10×.
+- **P6 — device-resident combine — the ACTUAL cure, landed `867a4bf` (G2 1.10× @ P=768).**
 
-**Recommended measurement before the fix-pass:** none strictly needed — the Release nsys at
-rtxbox:/tmp/nsys768.nsys-rep already isolated the #1 cause and confirmed the 18 % overlap. Proceed
-straight to the P1 fix-pass; re-profile only if P1 does not move the bench as the microbench predicts.
+**Recommended measurement:** the post-fix bench (rtxbox, Release, EmuFp64{40}, median of 10) recorded
+P=768 G2 = 2125 ms vs G1 = 2342 ms = 1.10×, P=400 = 1.22×, via `tests/reference/bench_f2_multigpu.cu`
+(now ITERS=10, median + p10/p90, out-of-band timers).
 
 Every item above is re-gated by the locked §12 `memcmp` (`test_f2_multigpu_parity`) on both
 datasets; commit-green / revert per the fix-pass convention. None of P1–P6 perturbs a single
@@ -226,10 +278,11 @@ pinning, or transport.
 
 ## KEY FILES (all absolute)
 
-- `/home/suzunik/steppe/src/device/cuda/p2p_combine.cu:180-181` — the redundant full-tensor
-  `assign(total,0.0)` (the ~1440 ms #1 bottleneck; P1/W9); `:283` per-partial
-  `cudaDeviceSynchronize` (P6/W3); `:215-218,254-257` partial re-upload bounce (X3);
-  `:309-312` full D2H.
+- `/home/suzunik/steppe/src/device/cuda/p2p_combine.cu:180-181` — the full-tensor
+  `assign(total,0.0)` (was claimed the ~1440 ms #1 bottleneck under P1/W9; **REFUTED** — the zero is a
+  5 ms `cudaMemset`); `:283` per-partial `cudaDeviceSynchronize` (collapsed to one fence by P6/W3 @867a4bf);
+  `:215-218,254-257` partial re-upload bounce (X3 — **deleted** by the device-resident combine @867a4bf);
+  `:309-312` full D2H (now the SINGLE D2H, no second bounce).
 - `/home/suzunik/steppe/src/device/cuda/cuda_backend.cu:236-237` — per-shard `assign(0.0)`
   (P1/W9); `:596 stream_ = nullptr` (the NULL legacy default stream, P2/F1); `:80-83` the FALSE
   "per-device default streams overlap" comment; `:107` cuBLAS `set_stream`;

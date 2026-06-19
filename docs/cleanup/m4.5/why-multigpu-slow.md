@@ -1,8 +1,23 @@
-# Why M4.5 multi-GPU is slower than single-GPU — the definitive answer
+# Why M4.5 multi-GPU was slower than single-GPU — the definitive answer (RESOLVED)
+
+> **STATUS: RESOLVED (@867a4bf).** The slowdown described below is the **PRE-FIX** state and is now
+> historical. The data-bounce wart this doc diagnoses (the redundant second full 7.14 GB D2H) was
+> eliminated by the **device-resident combine** (commit `867a4bf`; the nsys root-cause that drove it is
+> documented here and at commit `165f655`). After the fix, **multi-GPU is FASTER than single-GPU**:
+> measured on rtxbox (2× RTX PRO 6000 Blackwell sm_120, Release, EmulatedFp64{40}, median of 10) at
+> **P=768 G1 = 2342 ms, G2 = 2125 ms = 1.10×**, and **P=400 = 1.22×**, with bit-identical (`memcmp`)
+> parity preserved on both the host-staged and the device-resident P2P combine paths, both datasets
+> (`derived_acc` P=50, `derived_full` P=768). The "Item 1 (THE cure)" design in §4 is the fix that
+> landed. The full diagnosis is kept below as the record of how this was found and fixed.
+>
+> *Remaining optional lever (not a blocker):* pin the final pageable result D2H — the next available
+> speedup, could push past 1.10×.
 
 Branch: `m4.5-multigpu`. Box: rtxbox (2× RTX PRO 6000 Blackwell sm_120, CUDA 13, 96 GB, real P2P).
 Bench: `bench_f2_multigpu` @ P=768, M=584,131, n_block=757. Result is bit-identical between G1 and G2
-(parity proven); G2 is **0.70×** — measured G1 = 2429.5 ms, G2 = 3446.5 ms (**+1017 ms**).
+(parity proven). **[PRE-FIX] G2 was 0.70×** — measured G1 = 2429.5 ms, G2 = 3446.5 ms (**+1017 ms**).
+This is the state the diagnosis below explains; it was cured by the device-resident combine (`867a4bf`),
+after which G2 is **1.10× FASTER** (P=768: G1 2342 ms, G2 2125 ms).
 
 Method of record: nsys (Nsight Systems 2025.3.2) GPU-timeline trace, per-op start/end/device/bytes pulled
 from the `.sqlite` (CUPTI_ACTIVITY_KIND_KERNEL / MEMCPY / MEMSET). GPU-union wall matches the bench's
@@ -143,6 +158,15 @@ combine at 72 ms PtP + ~14 ms placement + **one** 1720 ms final D2H. G2 then doe
 plus a cheap 72 ms peer hop, and the 74% compute overlap finally shows as a real win. Projected G2 wall:
 ~2023 ms compute-wall + ~72 ms PtP + ~1720 ms single D2H − (the partial-D2H that was inside compute-phase) →
 on the order of **~1.8–2.0 s**, i.e. **G2 beats G1 (~2.4 s)**, roughly 1.2–1.3× and scaling toward `max_g` as G grows.
+
+> **LANDED @867a4bf — projection CONFIRMED.** This is the fix that shipped: per-device compute leaves its
+> partial RESIDENT (no D2H / no free, returns an opaque move-only `DevicePartial` handle); the combine
+> allocates ONE root result, D2D-copies the root partial and `cudaMemcpyPeer`s each peer partial straight
+> into its DISJOINT block slice, then does ONE final D2H. Deleted: the re-upload H2D, the accumulator
+> `cudaMemset`, the place-add kernel, the staging buffers, and the per-peer `cudaDeviceSynchronize`
+> (now one fence before the final D2H). Measured result (rtxbox, Release, EmuFp64{40}, median of 10):
+> **P=768 G2 = 2125 ms vs G1 = 2342 ms = 1.10×; P=400 = 1.22×** — bit-identical parity held. The
+> ~1.8–2.0 s projection was correct.
 
 **§12 bit-identity:** SAFE and memcmp-identical. The bytes are unchanged — a resident-to-resident DMA moves
 the exact same doubles the host bounce moved (`p2p_combine.cu:31-41` argument holds verbatim). Disjoint

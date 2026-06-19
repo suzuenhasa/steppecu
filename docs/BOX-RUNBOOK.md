@@ -73,7 +73,7 @@ ssh <alias> 'cd /workspace/steppe && export PATH=/usr/local/cuda/bin:$PATH && ex
 ```
 Expect: clean build (warnings-as-errors) + all ctest green (36/36 on `m4.5-multigpu`). On `box5090` ctest ≈ 178 s (the CPU `filter_oracle` ≈ 88 s — slow box CPU, not a regression).
 
-**⚠ PERF / BENCHMARKING — ALWAYS use a RELEASE build, NOT the raw `cmake -GNinja` above.** The plain `cmake -GNinja` (no `CMAKE_BUILD_TYPE`) is a **debug build (no `NDEBUG`)**, so `STEPPE_CUDA_CHECK_KERNEL` fires a `cudaDeviceSynchronize` **after every kernel launch** (check.cuh, gated by `STEPPE_DEBUG_ONLY`) — which serializes streams and dominated (~42% of API time in an nsys) the "multi-GPU is slower" finding. For any timing/bench, build **Release**: `cmake --preset release` (or `--preset ci` for tests too; or `-DCMAKE_BUILD_TYPE=Release` in a separate dir) — `NDEBUG` drops the per-kernel sync, "no forced sync in the hot path" (check.cuh doc). Correctness/ctest is fine on the debug build; **PERF NUMBERS ARE ONLY MEANINGFUL ON RELEASE.**
+**⚠ PERF / BENCHMARKING — ALWAYS use a RELEASE build, NOT the raw `cmake -GNinja` above.** The plain `cmake -GNinja` (no `CMAKE_BUILD_TYPE`) is a **debug build (no `NDEBUG`)**, so `STEPPE_CUDA_CHECK_KERNEL` fires a `cudaDeviceSynchronize` **after every kernel launch** (check.cuh, gated by `STEPPE_DEBUG_ONLY`) — which serializes streams and made nsys traces unusable (~42% of API time). For any timing/bench, build **Release**: `cmake --preset release` (or `--preset ci` for tests too; or `-DCMAKE_BUILD_TYPE=Release` in a separate dir) — `NDEBUG` drops the per-kernel sync, "no forced sync in the hot path" (check.cuh doc). Correctness/ctest is fine on the debug build; **PERF NUMBERS ARE ONLY MEANINGFUL ON RELEASE.** (On Release, multi-GPU is now FASTER than single-GPU — measured 1.10x @ P=768, 1.22x @ P=400 on rtxbox; see 867a4bf / `docs/cleanup/m4.5/why-multigpu-slow.md`.)
 
 ## 7. ⚠ LONG-JOB DETACHED RUN (box5090's network drops long ssh connections)
 A >~3 min ssh (clean build + ctest, a big bench) can be silently cut. Run detached on the box + poll a logfile:
@@ -91,7 +91,7 @@ scp scripts/p2p_probe.cu <alias>:/tmp/ && ssh <alias> 'export PATH=/usr/local/cu
 Expect on a PRO 6000: `cudaDeviceCanAccessPeer 0->1=1 1->0=1`, `byte-exact = YES`, ~55 GB/s. On a consumer 5090: `canAccessPeer=0` (expected — host-staged only).
 
 ## 9. Spin-down
-Reclaim core dumps if the disk flooded: `ssh <alias> 'rm -f /var/lib/vastai_kaalia/data/core-* 2>/dev/null'`. rtxbox is $3.78/h — spin down when idle (its work: B2 P2P fix-pass, the real multi-GPU speedup measurement, AT2 goldens, GDS).
+Reclaim core dumps if the disk flooded: `ssh <alias> 'rm -f /var/lib/vastai_kaalia/data/core-* 2>/dev/null'`. rtxbox is $3.78/h — spin down when idle (its work: AT2 goldens, GDS, `ncu`/nsys re-profiling; the multi-GPU speedup is already measured + proven — 1.10x @ P=768).
 
 ---
 
@@ -100,6 +100,6 @@ Reclaim core dumps if the disk flooded: `ssh <alias> 'rm -f /var/lib/vastai_kaal
 |---|---|---|
 | tier | CAPABLE (96 GB, P2P OK stock driver) | BUDGET/consumer (32 GB, P2P disabled) |
 | `can_access_peer` | **true** → P2P device-combine | **false** → host-staged combine |
-| runs | B2 P2P · real speedup measure · AT2 goldens · GDS · `ncu` | the fix-passes · graceful-degrade target · daily dev |
+| runs | AT2 goldens · GDS · `ncu`/nsys re-profiling (speedup already proven 1.10x) | the fix-passes · graceful-degrade target · daily dev |
 | P_max single-GPU | ~P=768+ fits | P=768 OOMs (sharding required ≥~P=700) |
 | gotchas | ephemeral (update alias) · nvcc PATH · $$$ | flaky net (detached runs) · slow CPU · nvcc PATH |
