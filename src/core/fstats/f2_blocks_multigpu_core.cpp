@@ -22,6 +22,7 @@
 #include "core/domain/block_partition_rule.hpp"  // steppe::core::block_ranges, BlockRange
 #include "device/resources.hpp"                  // steppe::device::Resources
 #include "device/shard_plan.hpp"                 // steppe::device::plan_block_shards, DeviceShard
+#include "device/device_partial.hpp"             // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "steppe/config.hpp"                     // steppe::Precision
 #include "steppe/fstats.hpp"                     // steppe::F2BlockTensor
 
@@ -153,6 +154,81 @@ std::vector<F2BlockTensor> compute_multigpu_partials(
     // Rethrow the FIRST worker failure (lowest g) so a device/backend fault propagates
     // as a normal exception to the caller, deterministically (independent of which
     // worker raced to fail first).
+    for (std::size_t g = 0; g < G; ++g) {
+        if (worker_errors[g]) {
+            std::rethrow_exception(worker_errors[g]);
+        }
+    }
+
+    return partials;
+}
+
+std::vector<steppe::device::DevicePartial> compute_multigpu_partials_resident(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    std::span<const steppe::device::DeviceShard> shards,
+    const Precision& precision) {
+    const int P = Q.P;
+    const std::size_t G = shards.size();
+
+    // The EXACT same concurrent fan-out as compute_multigpu_partials — same zero-copy
+    // sub-views, same dense local block_id, same exception-ptr rethrow, same empty-shard
+    // handling (design §0/§2; §7 lifetime) — differing ONLY in that each worker calls the
+    // RESIDENT seam method (which leaves device g's f2/Vpair RESIDENT and returns a
+    // move-only DevicePartial) and move-assigns the handle into its pre-sized slot. The
+    // DeviceBuffer move inside the handle is a pointer swap (no CUDA call), safe from any
+    // thread; the handle (and its resident buffers) SURVIVES the join — partials outlives
+    // the workers — and frees only AFTER the combine consumed it (§7). PARITY-NEUTRAL:
+    // each device's GEMM bits are fixed by the block-aligned shard, not the wall-clock
+    // slot; the combine reads partials[g] in fixed g=0..G-1 order AFTER the join barrier.
+    std::vector<steppe::device::DevicePartial> partials(G);
+    std::vector<std::exception_ptr> worker_errors(G);  // value-init to nullptr
+    {
+        std::vector<std::jthread> workers;
+        workers.reserve(G);
+        for (std::size_t g = 0; g < G; ++g) {
+            workers.emplace_back([&, g]() {
+                try {
+                    const steppe::device::DeviceShard& sh = shards[g];
+                    const long s0 = sh.s0;
+                    const long s1 = sh.s1;
+                    const long M_local = s1 - s0;
+                    const int  n_block_local = sh.b1 - sh.b0;
+
+                    // Zero-copy column sub-views (data + P*s0). For an empty shard
+                    // M_local == 0 and the offset is harmless (the backend early-returns
+                    // an empty DevicePartial before any deref).
+                    const std::size_t col_off =
+                        static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
+                    const MatView Qg{Q.data + col_off, P, M_local};
+                    const MatView Vg{V.data + col_off, P, M_local};
+                    const MatView Ng{N.data + col_off, P, M_local};
+
+                    // Dense, zero-based LOCAL block_id of length M_local.
+                    std::vector<int> block_id_local(
+                        static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
+                    for (long k = 0; k < M_local; ++k) {
+                        block_id_local[static_cast<std::size_t>(k)] =
+                            partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
+                    }
+
+                    // The RESIDENT seam method — leaves the partial resident on device g
+                    // and carries sh.b0 (the global placement offset) on the handle. The
+                    // returned handle MOVES into the pre-sized slot (pointer swap, no CUDA).
+                    partials[g] = resources.gpus[g].backend->compute_f2_blocks_resident(
+                        Qg, Vg, Ng, block_id_local.data(), n_block_local, sh.b0, precision);
+                } catch (...) {
+                    // NEVER let it escape the thread (std::terminate); surface it on join.
+                    // partials[g] stays a default-constructed empty DevicePartial (frees
+                    // nothing); any successfully-allocated peers free via RAII on unwind.
+                    worker_errors[g] = std::current_exception();
+                }
+            });
+        }
+    }  // <-- join barrier: all workers joined here (jthread dtors)
+
+    // Rethrow the FIRST worker failure (lowest g), deterministically.
     for (std::size_t g = 0; g < G; ++g) {
         if (worker_errors[g]) {
             std::rethrow_exception(worker_errors[g]);

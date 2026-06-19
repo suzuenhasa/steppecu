@@ -33,8 +33,9 @@
 #include <stdexcept>
 #include <string>
 
-#include "steppe/fstats.hpp"      // steppe::F2BlockTensor (public, CUDA-free)
-#include "device/shard_plan.hpp"  // steppe::device::DeviceShard (CUDA-free plan)
+#include "steppe/fstats.hpp"          // steppe::F2BlockTensor (public, CUDA-free)
+#include "device/shard_plan.hpp"      // steppe::device::DeviceShard (CUDA-free plan)
+#include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 
 namespace steppe::core {
 
@@ -135,6 +136,93 @@ inline void validate_f2_partials(
                     std::to_string(part.block_sizes.size()) +
                     " (a short partial would read past its storage)");
             }
+        }
+        covered += span_blocks;
+    }
+    if (covered != static_cast<long>(n_block_full)) {
+        throw std::runtime_error(
+            prefix + "shards cover " + std::to_string(covered) +
+            " blocks but n_block_full = " + std::to_string(n_block_full) +
+            " (the shards must tile [0, n_block_full))");
+    }
+}
+
+/// The DEVICE-RESIDENT sibling of validate_f2_partials (cleanup B5 / Option A): the
+/// SAME fail-fast contract, validated over `DevicePartial` handles instead of host
+/// `F2BlockTensor` partials, so the device-resident combine
+/// (combine_f2_partials_resident) rejects malformed inputs IDENTICALLY to the
+/// host-staged tier — the two tiers stay parity-NEUTRAL siblings (architecture.md
+/// §11.4, §12). A separate overload (NOT an edit to the F2BlockTensor validator)
+/// keeps the host tier's reject behavior frozen and risk-free, while CUDA-free
+/// `DevicePartial` keeps this header CUDA-free (it compiles into a CUDA TU only).
+///
+/// The checks mirror validate_f2_partials, per g:
+///   1. `partials.size() == shards.size()` (== G).
+///   2. `P >= 0` and `n_block_full >= 0`.
+///   3. each handle g spans exactly its shard's block range
+///      (`partials[g].n_block_local == shards[g].b1 - shards[g].b0`).
+///   4. each handle's placement offset matches its shard (`partials[g].b0 == shards[g].b0`).
+///   5. every NON-EMPTY handle agrees on P (`partials[g].P == P`).
+///   6. every NON-EMPTY handle's host block_sizes is sized n_block_local (the count axis;
+///      the resident f2/vpair extent is P*P*n_block_local by construction in
+///      run_f2_blocks_resident — not re-checkable from this CUDA-free header).
+///   7. the shards together tile `[0, n_block_full)` contiguously (`Σ span == n_block_full`).
+///
+/// @param who           the calling combine's qualified name, prefixed onto every error.
+/// @param partials      G resident DevicePartial handles in g=0..G-1 order.
+/// @param shards        the block-aligned plan (plan_block_shards); the authoritative
+///                      tiling the handles are cross-checked against.
+/// @param P             the combined population count (leading dim of every slab).
+/// @param n_block_full  total block count of the combined tensor.
+/// @throws std::runtime_error on any precondition violation, with context.
+inline void validate_resident_partials(
+    const char* who,
+    std::span<const steppe::device::DevicePartial> partials,
+    std::span<const steppe::device::DeviceShard> shards,
+    int P, int n_block_full) {
+    const std::string prefix = std::string(who) + ": ";
+
+    if (partials.size() != shards.size()) {
+        throw std::runtime_error(
+            prefix + "partials count (" + std::to_string(partials.size()) +
+            ") != shards count (" + std::to_string(shards.size()) + ")");
+    }
+    if (P < 0 || n_block_full < 0) {
+        throw std::runtime_error(prefix + "negative P or n_block_full");
+    }
+
+    long covered = 0;  // running count of blocks the shards account for
+    for (std::size_t g = 0; g < partials.size(); ++g) {
+        const steppe::device::DevicePartial& part = partials[g];
+        const steppe::device::DeviceShard& sh = shards[g];
+        const int span_blocks = sh.b1 - sh.b0;  // shard's block count (>= 0)
+
+        if (part.n_block_local != span_blocks) {
+            throw std::runtime_error(
+                prefix + "partial[" + std::to_string(g) + "].n_block_local (" +
+                std::to_string(part.n_block_local) + ") != shard block span [" +
+                std::to_string(sh.b0) + ", " + std::to_string(sh.b1) + ") = " +
+                std::to_string(span_blocks));
+        }
+        if (part.b0 != sh.b0) {
+            throw std::runtime_error(
+                prefix + "partial[" + std::to_string(g) + "].b0 (" +
+                std::to_string(part.b0) + ") != shard.b0 (" +
+                std::to_string(sh.b0) + ")");
+        }
+        if (part.n_block_local > 0 && part.P != P) {
+            throw std::runtime_error(
+                prefix + "partial[" + std::to_string(g) + "].P (" +
+                std::to_string(part.P) + ") != combined P (" +
+                std::to_string(P) + ")");
+        }
+        if (part.n_block_local > 0 &&
+            part.block_sizes.size() != static_cast<std::size_t>(part.n_block_local)) {
+            throw std::runtime_error(
+                prefix + "partial[" + std::to_string(g) +
+                "] block_sizes size mismatch: expected " +
+                std::to_string(part.n_block_local) + " (n_block_local), got " +
+                std::to_string(part.block_sizes.size()));
         }
         covered += span_blocks;
     }

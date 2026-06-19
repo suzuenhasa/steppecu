@@ -68,6 +68,50 @@ enum class CombinePath {
     P2pDeviceResident
 };
 
+/// Out-of-band phase timing of the LAST multi-GPU run (M4.5 Item 4; OBSERVABILITY
+/// ONLY). It is a CUDA-free POD of plain wall-clock milliseconds + measured DMA byte
+/// totals, recorded the SAME out-of-band way as `last_combine_path`: NEVER on the
+/// numeric `F2BlockTensor`, NEVER on `DeviceConfig`, NEVER on the pure-numeric path —
+/// it lives here on `Resources` so a bench/test can attribute the per-run cost
+/// (compute fan-out vs combine, and the bus traffic) WITHOUT inspecting the tensor
+/// (mirrors the `last_combine_path` discipline; architecture.md §12, cleanup §(2).2).
+///
+/// Zeroed at the START of each `compute_f2_blocks_multigpu` G>=2 run (the G==1 fast
+/// path leaves it at default — it runs no combine). The orchestrator
+/// (`compute_f2_blocks_multigpu`, steppe::core, CUDA-FREE) fills the two host
+/// `std::chrono::steady_clock` wall brackets (`compute_wall_ms`, `combine_wall_ms`)
+/// and the three arithmetic byte totals (derivable host-side from P, M, n_block, G —
+/// see field docs); it does NOT thread CUDA event timers through the CUDA-free seam,
+/// so the finer device-internal fields (`combine_peer_ms`, `combine_d2h_ms`) stay 0
+/// unless a future combine returns them.
+struct MultiGpuTimings {
+    /// Fan-out wall: shard plan + the CONCURRENT per-device partial compute, host
+    /// steady_clock bracket (0 on the G==1 fast path / before any G>=2 run).
+    double compute_wall_ms = 0.0;
+    /// Combine call wall: the whole combine (peer/D2D placement + the single final
+    /// full-result D2H), host steady_clock bracket. 0 if no combine ran.
+    double combine_wall_ms = 0.0;
+    /// Cross-device DMA portion of the combine (root D2D + peer copies), ms.
+    /// Device-internal — left 0 unless the combine reports it (no CUDA timer is
+    /// threaded through the CUDA-free seam).
+    double combine_peer_ms = 0.0;
+    /// The single final full-result D2H portion of the combine, ms. Device-internal —
+    /// left 0 unless the combine reports it.
+    double combine_d2h_ms = 0.0;
+    /// Measured H2D bytes (inputs Q/V/N), per-run total summed over devices:
+    /// 3 * P * M * sizeof(double) (each device receives its column sub-view; the
+    /// columns partition M, so the summed H2D volume is the full 3*P*M doubles).
+    std::size_t h2d_bytes = 0;
+    /// Measured D2H bytes, per-run total: the SINGLE full-result copy
+    /// 2 * P * P * n_block * sizeof(double) (f2 + Vpair). Under the device-resident
+    /// combine there is exactly one full D2H (no per-device partial D2H).
+    std::size_t d2h_bytes = 0;
+    /// Measured cross-device DMA bytes: 2 * P * P * (n_block - n_block_on_root) *
+    /// sizeof(double) (the peer partials pulled to the root; the root's own slabs are
+    /// a same-device D2D, not counted as peer traffic).
+    std::size_t peer_bytes = 0;
+};
+
 /// One per device in DeviceConfig::devices, RAII-owned (architecture.md §9
 /// PerGpuResources). M4.5-precompute-focused: the per-device backend (which itself
 /// owns the device's single statistic stream + cuBLAS handle + emulated-FP64
@@ -118,6 +162,13 @@ struct Resources {
     /// (or after a G==1 fast-path run). Mutated by the entry point (which takes
     /// `Resources&`); read by callers/tests to confirm the chosen tier.
     CombinePath last_combine_path = CombinePath::None;
+
+    /// Out-of-band phase timing of the LAST multi-GPU run (M4.5 Item 4; observability
+    /// only — see `MultiGpuTimings` doc). Filled by the entry point's G>=2 path
+    /// (`compute_f2_blocks_multigpu`, which takes `Resources&`), read by the bench /
+    /// tests to attribute per-run cost. NEVER on the numeric `F2BlockTensor`. Stays at
+    /// default after a G==1 fast-path run (no combine to time).
+    MultiGpuTimings last_multigpu_timings{};
 
     /// Convenience: number of devices G (== gpus.size() == resolved devices count).
     [[nodiscard]] std::size_t device_count() const noexcept { return gpus.size(); }

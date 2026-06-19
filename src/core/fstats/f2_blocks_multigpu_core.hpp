@@ -42,6 +42,7 @@
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 #include "device/resources.hpp"                   // steppe::device::Resources (CUDA-free)
 #include "device/shard_plan.hpp"                  // steppe::device::DeviceShard (CUDA-free plan)
+#include "device/device_partial.hpp"             // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 
 namespace steppe::core {
 
@@ -102,6 +103,39 @@ namespace steppe::core {
 /// @throws  rethrows the first worker failure (runtime_error on a malformed
 ///          sub-partition, CudaError on a device fault).
 [[nodiscard]] std::vector<F2BlockTensor> compute_multigpu_partials(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    std::span<const steppe::device::DeviceShard> shards,
+    const Precision& precision);
+
+/// The DEVICE-RESIDENT sibling of compute_multigpu_partials (M4.5 cure, doc §4 Item 1):
+/// the EXACT same concurrent jthread fan-out — same zero-copy column sub-views, same
+/// dense zero-based LOCAL block_id, same exception-ptr rethrow, same empty-shard
+/// handling — but each worker calls the RESIDENT seam method
+/// `compute_f2_blocks_resident(..., sh.b0, precision)`, which LEAVES the device g's
+/// f2/Vpair partial RESIDENT on device g (NO D2H, NO free) and returns an opaque,
+/// move-only `DevicePartial` owning it. The handles are MOVED into the pre-sized
+/// `partials[g]` slot (a pointer swap, no CUDA call, safe from any thread) and SURVIVE
+/// the jthread join — the returned vector outlives the workers, and the resident
+/// buffers free only AFTER the device-resident combine consumed them (§7). The result
+/// feeds combine_f2_partials_resident (device/p2p_combine.hpp).
+///
+/// CUDA-FREE: `DevicePartial` is CUDA-free (opaque pimpl) and `compute_f2_blocks_resident`
+/// is a virtual on the CUDA-free ComputeBackend seam, so this function compiles into
+/// steppe_core without the device toolkit, exactly like its host sibling.
+///
+/// @param resources  the G-device bundle; gpus[g] drives device g (non-const).
+/// @param Q,V,N      the FULL per-SNP Q/V/N contract, column-major [P × M]; each device
+///                   receives a zero-copy column sub-view (Q.data + P*s0).
+/// @param partition  the SHARED partition (for the dense local block_id transform).
+/// @param shards     the block-aligned plan from plan_multigpu_shards (length G);
+///                   `shards[g].b0` is the global placement offset carried on the handle.
+/// @param precision  forwarded UNCHANGED to every compute_f2_blocks_resident (§12).
+/// @return  G resident DevicePartial handles in g=0..G-1 order (partials[g] for shards[g]).
+/// @throws  rethrows the first worker failure (runtime_error on a malformed sub-partition,
+///          CudaError on a device fault).
+[[nodiscard]] std::vector<steppe::device::DevicePartial> compute_multigpu_partials_resident(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
     const BlockPartition& partition,

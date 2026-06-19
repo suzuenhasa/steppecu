@@ -27,11 +27,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "steppe/config.hpp"        // steppe::Precision
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
+#include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 
 namespace steppe {
 
@@ -264,6 +266,31 @@ public:
                                                           const int* block_id,
                                                           int n_block,
                                                           const Precision& precision) = 0;
+
+    /// M4.5 device-resident variant of compute_f2_blocks: compute the per-block
+    /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does, but LEAVE the
+    /// f2/Vpair tensors RESIDENT on this backend's device (NO D2H, NO free) and
+    /// return an opaque, move-only DevicePartial owning them — the input to the
+    /// device-resident cudaMemcpyPeer combine (device/p2p_combine.hpp). Bit-identical
+    /// per-block bits to compute_f2_blocks over the same inputs (same GEMM body; §12):
+    /// the ONLY difference is the result stays on the device instead of being copied
+    /// to a host F2BlockTensor and freed.
+    ///
+    /// @param b0  the GLOBAL block placement offset for this partial (== shard.b0),
+    ///            carried on the returned handle so the combine knows the disjoint
+    ///            destination slice [b0, b0+n_block) without consulting the shard.
+    /// NON-PURE: the base throws (it is reached only behind the four-term §4 gate,
+    /// which requires caps.can_access_peer == true — only the CUDA backend reports
+    /// that). CpuBackend / any fake need NOT override it.
+    [[nodiscard]] virtual steppe::device::DevicePartial compute_f2_blocks_resident(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, int b0, const Precision& precision) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)b0; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_resident: not supported by this backend "
+            "(device-resident combine requires a peer-capable CUDA backend; the §4 gate "
+            "must have routed a non-CUDA/non-peer backend to the host-staged path)");
+    }
 
     /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5
     /// S0 Format decode + S1 Allele-freq reduction; ROADMAP M1). Unpacks the

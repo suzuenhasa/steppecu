@@ -52,6 +52,8 @@
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
+#include "device/device_partial.hpp"        // steppe::device::DevicePartial (the M4.5 resident handle)
+#include "device/cuda/device_partial_impl.cuh" // DevicePartial::Impl (the DeviceBuffer<double> owners)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
@@ -108,6 +110,21 @@ public:
         blas_.set_workspace(workspace_.data(), workspace_.bytes());
         blas_.set_stream(stream_.get());
     }
+
+    /// The factored GEMM body's output (run_f2_blocks_resident): the resident
+    /// [P × P × n_block] f2/Vpair tensors returned BY VALUE (move) with the host-side
+    /// block_sizes — NO D2H, NO copy-back. Both public overrides (compute_f2_blocks
+    /// host D2H, compute_f2_blocks_resident DevicePartial wrap) consume this. The
+    /// per-block bits are identical regardless of caller (§12). Declared BEFORE the
+    /// methods that name it as a return type (the member-function declaration's return
+    /// type is NOT in the complete-class context, so it must be visible here first).
+    struct ResidentBlocks {
+        DeviceBuffer<double> f2;     // [P*P*n_block] resident on device_id_ (or empty)
+        DeviceBuffer<double> vpair;  // [P*P*n_block] resident on device_id_ (or empty)
+        std::vector<int> block_sizes;
+        int P = 0;
+        int n_block = 0;
+    };
 
     [[nodiscard]] F2Result compute_f2(const core::MatView& Q,
                                       const core::MatView& V,
@@ -243,19 +260,87 @@ public:
                                                   const int* block_id,
                                                   int n_block,
                                                   const Precision& precision) override {
+        // The shared GEMM body produces the resident f2/Vpair DeviceBuffer pair (NO
+        // D2H, NO free). The HOST override then copies them D2H into a host
+        // F2BlockTensor (the EXACT prior copy-back, gated on total>0) and frees the
+        // buffers at this scope's `return`. Byte-unchanged from the prior single
+        // method (design §3): same GEMM body, same DeviceToHost cudaMemcpyAsync over
+        // total*sizeof(double), same trailing cudaStreamSynchronize.
+        ResidentBlocks rb = run_f2_blocks_resident(Q, V, N, block_id, n_block, precision);
+        F2BlockTensor out;
+        out.P = rb.P;
+        out.n_block = rb.n_block;
+        out.block_sizes = std::move(rb.block_sizes);
+        const std::size_t total = rb.f2.size();  // P*P*n_block (0 on degenerate)
+        // ---- Copy the resident tensors back across the CUDA-free seam ---------
+        // The D2H result vectors (out.f2/out.vpair) are FRESHLY allocated each call,
+        // so caching their registration never hits and a per-call cudaHostRegister
+        // would pay the page-locking tax with zero amortization (a strict loss,
+        // MEASURED — perf-discovery P4). They stay PAGEABLE; only the stable, reused
+        // H2D inputs are pinned.
+        out.f2.resize(total);
+        out.vpair.resize(total);
+        if (total > 0) {
+            guard_device();  // rb lives on device_id_
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), rb.f2.data(),
+                                              total * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), rb.vpair.data(),
+                                              total * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        }
+        return out;  // rb's DeviceBuffers free here (the EXACT prior free point)
+    }
+
+    /// M4.5 device-resident override (the cure, doc §4 Item 1). Runs the SAME GEMM
+    /// body, then MOVES the resident f2/Vpair DeviceBuffers into a DevicePartial —
+    /// NO D2H, NO free. The buffers ESCAPE this call into the returned handle (they
+    /// survive the jthread join and free only AFTER the combine consumed them, §7).
+    [[nodiscard]] DevicePartial compute_f2_blocks_resident(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, int b0, const Precision& precision) override {
+        ResidentBlocks rb = run_f2_blocks_resident(Q, V, N, block_id, n_block, precision);
+        DevicePartial h;
+        h.P = rb.P;
+        h.n_block_local = rb.n_block;
+        h.b0 = b0;
+        h.device_id = device_id_;
+        h.block_sizes = std::move(rb.block_sizes);
+        if (h.n_block_local > 0) {
+            h.impl = std::make_unique<DevicePartial::Impl>();
+            h.impl->f2 = std::move(rb.f2);        // buffers ESCAPE: ownership -> handle
+            h.impl->vpair = std::move(rb.vpair);  // survives the jthread join (§7)
+        }
+        return h;  // NO D2H, NO free — the cure (doc §4 Item 1)
+    }
+
+    /// M4 — PER-BLOCK f2 via the SPIKE-CHOSEN size-grouped strided-batched design
+    /// (architecture.md §5 S2, §11.1; ROADMAP M4). The factored GEMM body SHARED by
+    /// compute_f2_blocks (host) and compute_f2_blocks_resident: it produces the two
+    /// resident [P × P × n_block] f2/Vpair DeviceBuffers (returned BY MOVE in
+    /// ResidentBlocks) + the host-side block_sizes — WITHOUT any D2H and WITHOUT
+    /// freeing the buffers. Both public overrides differ ONLY in what they do with the
+    /// returned buffers (host D2H, or wrap in a DevicePartial); the per-block bits are
+    /// identical regardless of caller (§12 — same run_f2_gemms_group calls, same fixed
+    /// bucket order, same block_sizes, same per-chunk sync).
+    [[nodiscard]] ResidentBlocks run_f2_blocks_resident(const core::MatView& Q,
+                                                        const core::MatView& V,
+                                                        const core::MatView& N,
+                                                        const int* block_id,
+                                                        int n_block,
+                                                        const Precision& precision) {
         guard_device();
         const int P = Q.P;
         const long M = Q.M;
 
-        F2BlockTensor out;
-        out.P = P;
-        out.n_block = n_block;
+        ResidentBlocks rb;
+        rb.P = P;
+        rb.n_block = n_block;
         const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
         const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
-        out.f2.assign(total, 0.0);
-        out.vpair.assign(total, 0.0);
-        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
-        if (P <= 0 || M <= 0 || n_block <= 0) return out;
+        rb.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        if (P <= 0 || M <= 0 || n_block <= 0) return rb;
 
         // ---- Block layout from block_id (contiguous in file order) -----------
         // The SINGLE-SOURCE inverse of assign_blocks: block_ranges validates the
@@ -272,7 +357,7 @@ public:
         std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
         for (int b = 0; b < n_block; ++b) {
             block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
-            out.block_sizes[static_cast<std::size_t>(b)] =
+            rb.block_sizes[static_cast<std::size_t>(b)] =
                 static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
         }
 
@@ -288,7 +373,7 @@ public:
         struct Bucket { int s_pad = 0; std::vector<int> blocks; };
         std::vector<Bucket> buckets;
         for (int b = 0; b < n_block; ++b) {
-            const int sp = ceil_bucket(out.block_sizes[static_cast<std::size_t>(b)]);
+            const int sp = ceil_bucket(rb.block_sizes[static_cast<std::size_t>(b)]);
             int gi = -1;
             for (std::size_t k = 0; k < buckets.size(); ++k)
                 if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
@@ -323,14 +408,18 @@ public:
         const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
         const std::size_t two_pm = 2u * pm;
         DeviceBuffer<double> dQ(pm), dV(pm), dS(two_pm);     // feeder outputs (persist)
-        DeviceBuffer<double> dF2_all(total), dVpair_all(total);  // the resident tensors
+        // The resident tensors — owned by `rb` so they ESCAPE this helper (the host
+        // override D2H-copies + frees them; the resident override moves them into a
+        // DevicePartial). They are the EXACT prior dF2_all/dVpair_all (same `total`).
+        rb.f2 = DeviceBuffer<double>(total);
+        rb.vpair = DeviceBuffer<double>(total);
         DeviceBuffer<long>   dOffsets(static_cast<std::size_t>(n_block));
         DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
 
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
                                           static_cast<std::size_t>(n_block) * sizeof(long),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), out.block_sizes.data(),
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), rb.block_sizes.data(),
                                           static_cast<std::size_t>(n_block) * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
 
@@ -464,7 +553,7 @@ public:
                                    dGg.data(), dVpairg.data(), dRg.data());
                 launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
                                              dIds.data(), P, nb,
-                                             dF2_all.data(), dVpair_all.data(), stream_.get());
+                                             rb.f2.data(), rb.vpair.data(), stream_.get());
                 // Sync before the NEXT chunk overwrites the reused slabs (dQg…dRg),
                 // so each chunk's gather/GEMM/assemble fully completes before the
                 // next chunk's gather writes into the SAME buffers — the §12
@@ -474,20 +563,15 @@ public:
             }
         }
 
-        // ---- Copy the resident tensors back across the CUDA-free seam ---------
-        // The D2H result vectors (out.f2/out.vpair) are FRESHLY allocated each call,
-        // so caching their registration never hits and a per-call cudaHostRegister
-        // would pay the page-locking tax with zero amortization (a strict loss,
-        // MEASURED — perf-discovery P4). They stay PAGEABLE; only the stable, reused
-        // H2D inputs above are pinned.
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2_all.data(),
-                                          total * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair_all.data(),
-                                          total * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        // ---- Drain the stream so the resident tensors are fully written ------
+        // The bucket loop's per-chunk syncs already drained each chunk; this trailing
+        // sync ensures rb.f2/rb.vpair are COMPLETE before the caller reads them (the
+        // host override's D2H, or the resident override's peer/D2D reads in the
+        // combine). It plays the role the former final cudaStreamSynchronize before
+        // the D2H played. NO D2H here — the host override does that; the resident
+        // override leaves the buffers resident (the cure, doc §4 Item 1).
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-        return out;
+        return rb;  // f2/vpair DeviceBuffers MOVE out to the caller (no free here)
     }
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {

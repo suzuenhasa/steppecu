@@ -33,12 +33,13 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials (host-pure, P2P-free)
+#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident] (host-pure, P2P-free)
 #include "core/fstats/f2_combine.hpp"            // steppe::core::combine_f2_partials_host (the baseline)
 #include "core/internal/views.hpp"               // steppe::core::MatView
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
-#include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_p2p (CUDA-free decl of the P2P fast-path)
+#include "device/p2p_combine.hpp"                 // steppe::device::combine_f2_partials_resident (CUDA-free decl of the P2P fast-path)
+#include "device/device_partial.hpp"             // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "device/resources.hpp"                  // steppe::device::Resources, CombinePath
 #include "device/shard_plan.hpp"                 // steppe::device::DeviceShard
 #include "steppe/config.hpp"                      // steppe::Precision
@@ -89,29 +90,8 @@ F2BlockTensor compute_f2_blocks_multigpu(
             Q, V, N, partition.block_id.data(), n_block, precision);
     }
 
-    // ---- G >= 2: BLOCK-ALIGNED shard plan + per-device CONCURRENT fan-out ----
-    // Both steps are the HOST-PURE, P2P-FREE core of the orchestrator, factored into
-    // f2_blocks_multigpu_core.{hpp,cpp} (cleanup D1/T1, B9) so a GPU-FREE host test
-    // can drive them against a fake backend without device-linking the CUDA P2P
-    // symbol. This is a pure composition — the plan + the partials are byte-for-byte
-    // what the former inline body produced (§12 bit-identity untouched):
-    //   * plan_multigpu_shards: block_ranges (the single-source partition inverse) →
-    //     plan_block_shards (the single home of the block→device mapping, §8), the
-    //     block-aligned whole-block shard the parity floor rests on (design §0/§2).
-    //   * compute_multigpu_partials: one std::jthread per device, each computing its
-    //     compact partial over a zero-copy column sub-view + dense local block_id via
-    //     the UNMODIFIED ComputeBackend::compute_f2_blocks, joined before the combine;
-    //     PARITY-NEUTRAL (the GEMM bits are fixed by the shard, not the wall-clock
-    //     slot; the combine reads partials[g] in fixed g=0..G-1 order AFTER the join).
-    const std::vector<steppe::device::DeviceShard> shards =
-        core::plan_multigpu_shards(partition, M, n_block, G);
-
-    const std::vector<F2BlockTensor> partials = core::compute_multigpu_partials(
-        resources, Q, V, N, partition,
-        std::span<const steppe::device::DeviceShard>(shards.data(), shards.size()),
-        precision);
-
-    // ---- Fixed-order combine, capability-gated (THE §4 fork) -----------------
+    // ---- THE §4 COMBINE GATE — decided BEFORE the fan-out (it depends ONLY on
+    //      config + caps + G, all known up front; doc CRITICAL ORCHESTRATION POINT) --
     //
     // ============================ THE §4 COMBINE GATE =========================
     // SINGLE AUTHORITATIVE HOME of the device-resident-P2P gate predicate
@@ -130,21 +110,29 @@ F2BlockTensor compute_f2_blocks_multigpu(
     //
     // (all four true on rtxbox: PRO 6000 stock-driver P2P, canAccessPeer==1 both
     // ways), else it DEGRADES to the host-staged fixed-order combine baseline. Both
-    // tiers sum the SAME fixed g=0..G-1 order onto a zero-initialized full tensor and
-    // are therefore BIT-IDENTICAL to each other and to the single-GPU reference (the
-    // gate is parity-NEUTRAL — the transport only moves bytes; software fixes the
-    // order; architecture.md §11.4, §12). NEVER an NCCL AllReduce. The chosen path is
-    // recorded OUT-OF-BAND on Resources (NEVER on the numeric F2BlockTensor; cleanup
-    // §(2).2), and a genuine degrade (P2P requested + permitted but peer access
-    // unavailable) emits the architecture-mandated tagged WARN via the non-throwing
-    // path.
+    // tiers place the SAME bytes at the SAME disjoint offsets in the SAME fixed
+    // g=0..G-1 order, and are therefore BIT-IDENTICAL to each other and to the
+    // single-GPU reference (the gate is parity-NEUTRAL — the transport only moves
+    // bytes; software fixes the order; architecture.md §11.4, §12). NEVER an NCCL
+    // AllReduce. The chosen path is recorded OUT-OF-BAND on Resources (NEVER on the
+    // numeric F2BlockTensor; cleanup §(2).2), and a genuine degrade (P2P requested +
+    // permitted but peer access unavailable) emits the architecture-mandated tagged
+    // WARN via the non-throwing path.
+    //
+    // WHY THE GATE MOVED BEFORE THE FAN-OUT (M4.5 cure, doc §4 Item 1): the P2P arm now
+    // needs a DIFFERENT fan-out — the DEVICE-RESIDENT compute that leaves each partial
+    // on its device (compute_multigpu_partials_resident -> DevicePartial) feeding the
+    // device-resident combine — while the host-staged baseline keeps the EXACT existing
+    // host-partial fan-out (compute_multigpu_partials -> combine_f2_partials_host). The
+    // gate depends only on config + caps + G (all known up front), so it is decided
+    // here, BEFORE either fan-out, and forks into the matching resident-vs-host pair.
     //
     // THE FOUR TERMS:
     //   * prefer_p2p_combine — the WHICH-PATH knob: once peer access IS permitted and
     //     available, prefer the device-resident combine over the host-staged baseline.
     //   * enable_peer_access — the MAY-WE knob: "whether the backend is permitted to
     //     call cudaDeviceEnablePeerAccess at all" (config.hpp). The device-resident
-    //     combine combine_f2_partials_p2p DOES call cudaDeviceEnablePeerAccess
+    //     combine combine_f2_partials_resident DOES call cudaDeviceEnablePeerAccess
     //     (cuda/p2p_combine.cu), so taking that path with enable_peer_access==false
     //     would directly VIOLATE the veto the user set. The gate ANDs it in so a user
     //     who set enable_peer_access=false (forbid the enable) is honored and the
@@ -165,38 +153,47 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // The gate is parity-NEUTRAL either way (both transports are bit-identical, §12),
     // so the four-term AND only changes WHICH transport runs, never a reported number.
     // =========================================================================
-    const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
-    const std::span<const steppe::device::DeviceShard> shards_span(shards.data(), shards.size());
-
     const bool use_p2p =
         resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
         resources.gpus[0].caps.can_access_peer && G >= 2;
+
+    // BLOCK-ALIGNED shard plan — shared by both arms (the parity floor, design §0/§2):
+    // block_ranges (the single-source partition inverse) → plan_block_shards (the
+    // single home of the block→device mapping, §8). Computed once before the fork.
+    const std::vector<steppe::device::DeviceShard> shards =
+        core::plan_multigpu_shards(partition, M, n_block, G);
+    const std::span<const steppe::device::DeviceShard> shards_span(shards.data(), shards.size());
+
     if (use_p2p) {
-        // device_ids[g] == the physical ordinal that computed partial g (gpus[g] in
-        // the fixed g=0..G-1 == DeviceConfig::devices order; gpus[0] is the root).
-        // The CUDA-free P2P seam needs them to source each cudaMemcpyPeer (the root's
-        // own partial skips the peer hop). Built here, host-side; gpus[0].device_id
-        // is the combine root.
-        std::vector<int> device_ids(G, 0);
-        for (std::size_t g = 0; g < G; ++g) {
-            device_ids[g] = resources.gpus[g].device_id;
-        }
+        // ---- RESIDENT fan-out -> device-resident combine (the M4.5 cure) ------
+        // Each device computes its partial and LEAVES it RESIDENT (no D2H, no free);
+        // the combine pulls each peer's resident partial straight into one full device
+        // result via cudaMemcpyPeerAsync (root's own via D2D), then ONE final D2H. The
+        // handles free HERE, AFTER the combine consumed them (§7).
+        std::vector<steppe::device::DevicePartial> partials =
+            core::compute_multigpu_partials_resident(resources, Q, V, N, partition,
+                                                     shards_span, precision);
         resources.last_combine_path = steppe::device::CombinePath::P2pDeviceResident;
-        return steppe::device::combine_f2_partials_p2p(
-            partials_span, shards_span,
-            std::span<const int>(device_ids.data(), device_ids.size()),
-            P, n_block, resources.gpus[0].device_id);
+        return steppe::device::combine_f2_partials_resident(
+            std::span<steppe::device::DevicePartial>(partials.data(), partials.size()),
+            shards_span, P, n_block, resources.gpus[0].device_id);
     }
 
-    // ---- Host-staged baseline (the portable parity baseline) -----------------
+    // ---- Host-staged baseline — KEEP EXACTLY AS-IS (byte-for-byte) ------------
     // Taken when P2P is not preferred, peer access is FORBIDDEN by the user
-    // (enable_peer_access=false), or peer access is UNAVAILABLE on the device. Emit
-    // the EXACT architecture-mandated tagged degrade ONLY on a genuine degrade — the
-    // user both PREFERRED P2P and PERMITTED peer access, but the device cannot
+    // (enable_peer_access=false), or peer access is UNAVAILABLE on the device. The
+    // host-partial fan-out (compute_multigpu_partials, the UNMODIFIED per-device
+    // compute_f2_blocks) → combine_f2_partials_host, exactly as before — the parity
+    // test exercises this arm and it must stay bit-identical to single-GPU.
+    const std::vector<F2BlockTensor> partials = core::compute_multigpu_partials(
+        resources, Q, V, N, partition, shards_span, precision);
+    const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
+
+    // Emit the EXACT architecture-mandated tagged degrade ONLY on a genuine degrade —
+    // the user both PREFERRED P2P and PERMITTED peer access, but the device cannot
     // peer-access (architecture.md §11.4; config.hpp prefer_p2p_combine doc). A user
     // who set prefer_p2p_combine=false OR enable_peer_access=false took the baseline by
-    // a DELIBERATE choice (a baseline preference or a forbidden enable, not a thwarted
-    // capability) — no WARN. Both outcomes are bit-identical to single-GPU.
+    // a DELIBERATE choice — no WARN. Both outcomes are bit-identical to single-GPU.
     if (resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
         !resources.gpus[0].caps.can_access_peer && G >= 2) {
         STEPPE_LOG_WARN(
