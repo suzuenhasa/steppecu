@@ -292,6 +292,40 @@ public:
             "must have routed a non-CUDA/non-peer backend to the host-staged path)");
     }
 
+    /// M4.5 host-staged-direct variant of compute_f2_blocks: compute the per-block
+    /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does (same GEMM body,
+    /// bit-identical per-block bits; §12), but instead of allocating a fresh host
+    /// F2BlockTensor and D2H-copying into it, D2H the compact f2/vpair slabs DIRECTLY
+    /// into the caller-provided PINNED host destination at the disjoint block offset
+    /// slab_off = (size_t)P*P*b0. The destination is ONE shared result owned by the
+    /// orchestrator; this device owns the disjoint slice [slab_off, slab_off +
+    /// P*P*n_block) and writes ONLY it (block-aligned shards are disjoint, so two
+    /// devices' slices never overlap — concurrent D2H into one buffer is race-free).
+    ///
+    /// The backend page-locks [dst_f2+slab_off, ... +P*P*n_block) and the vpair slice
+    /// for the D2H window (RegisteredHostRegion, graceful pageable degrade) so the two
+    /// devices' D2Hs run as concurrent pinned DMAs. block_sizes for this device's blocks
+    /// are written into block_sizes_dst[b0 .. b0+n_block) (host int).
+    ///
+    /// @param dst_f2          base pointer of the shared result f2 buffer (length >=
+    ///                        P*P*n_block_full); the device writes [slab_off, +slab*nb).
+    /// @param dst_vpair       base pointer of the shared result vpair buffer (same shape).
+    /// @param block_sizes_dst base pointer of the shared result block_sizes (length >=
+    ///                        n_block_full); the device writes [b0, b0+n_block).
+    /// @param b0              the GLOBAL block placement offset for this partial (== shard.b0).
+    /// NON-PURE: default base throws (only the CUDA backend implements it; the CPU
+    /// backend / fakes need not override — but see §(4): the host test fake MUST).
+    virtual void compute_f2_blocks_into(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, int b0,
+        double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+        const Precision& precision) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)b0;
+        (void)dst_f2; (void)dst_vpair; (void)block_sizes_dst; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_into: not supported by this backend");
+    }
+
     /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5
     /// S0 Format decode + S1 Allele-freq reduction; ROADMAP M1). Unpacks the
     /// 2-bit codes (raw-value mapping: 0/1/2 ref-allele copies, 3 missing),

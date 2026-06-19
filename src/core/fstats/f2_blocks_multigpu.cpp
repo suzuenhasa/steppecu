@@ -33,8 +33,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident] (host-pure, P2P-free)
-#include "core/fstats/f2_combine.hpp"            // steppe::core::combine_f2_partials_host (the baseline)
+#include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident|_into] (host-pure, P2P-free)
 #include "core/internal/views.hpp"               // steppe::core::MatView
 #include "core/internal/host_device.hpp"         // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/internal/log.hpp"                 // STEPPE_LOG_WARN (the one warn sink; the tagged degrade)
@@ -179,15 +178,29 @@ F2BlockTensor compute_f2_blocks_multigpu(
             shards_span, P, n_block, resources.gpus[0].device_id);
     }
 
-    // ---- Host-staged baseline — KEEP EXACTLY AS-IS (byte-for-byte) ------------
+    // ---- Host-staged DIRECT path — pinned, sharded D2H into ONE shared result ----
     // Taken when P2P is not preferred, peer access is FORBIDDEN by the user
     // (enable_peer_access=false), or peer access is UNAVAILABLE on the device. The
-    // host-partial fan-out (compute_multigpu_partials, the UNMODIFIED per-device
-    // compute_f2_blocks) → combine_f2_partials_host, exactly as before — the parity
-    // test exercises this arm and it must stay bit-identical to single-GPU.
-    const std::vector<F2BlockTensor> partials = core::compute_multigpu_partials(
-        resources, Q, V, N, partition, shards_span, precision);
-    const std::span<const F2BlockTensor> partials_span(partials.data(), partials.size());
+    // M4.5 d2h-speed cure (architecture-audit Flaw 3): pre-allocate the full-shape
+    // result and fan out so each device D2Hs its compact partial DIRECTLY (pinned) into
+    // its disjoint block-slice [slab*b0, slab*(b0+nb)) of this ONE result — NO per-device
+    // partials buffer, NO combine_f2_partials_host alloc + copy_n. The bytes/offsets are
+    // bit-identical to the deleted host-staged combine (§12): out.P/out.n_block/
+    // out.block_sizes init exactly as combine_f2_partials_host, total = slab*n_block,
+    // each device writes the SAME disjoint slab range. The parity test exercises this
+    // arm and it stays bit-identical to single-GPU.
+    F2BlockTensor out;
+    out.P = P;
+    out.n_block = n_block;
+    const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+    out.f2.resize(total);                          // pinned + written by the workers
+    out.vpair.resize(total);
+    out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+
+    core::compute_multigpu_partials_into(
+        resources, Q, V, N, partition, shards_span,
+        out.f2.data(), out.vpair.data(), out.block_sizes.data(), precision);
 
     // Emit the EXACT architecture-mandated tagged degrade ONLY on a genuine degrade —
     // the user both PREFERRED P2P and PERMITTED peer access, but the device cannot
@@ -200,7 +213,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
             "P2P combine unavailable (no peer access) -> host-staged fixed-order combine");
     }
     resources.last_combine_path = steppe::device::CombinePath::HostStaged;
-    return steppe::core::combine_f2_partials_host(partials_span, shards_span, P, n_block);
+    return out;
 }
 
 }  // namespace steppe::core

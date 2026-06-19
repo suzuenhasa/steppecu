@@ -57,6 +57,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <utility>
@@ -118,6 +119,32 @@ public:
         out.f2.assign(n, kSentinel);
         out.vpair.assign(n, 1.0);
         return out;
+    }
+
+    // The host-staged-DIRECT seam (M4.5 d2h-speed): the orchestrator's host-staged
+    // branch now drives this instead of compute_f2_blocks + combine. Build the SAME
+    // partial and place it (host memcpy, no CUDA, no pin) into the caller's shared
+    // result at the disjoint block offset slab*b0 (f2/vpair) and b0 (block_sizes), so
+    // the end-to-end run resolves HostStaged exactly as before (the gate reads only
+    // last_combine_path).
+    void compute_f2_blocks_into(const MatView& Q, const MatView& V, const MatView& N,
+                                const int* block_id, int n_block, int b0,
+                                double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+                                const Precision& precision) override {
+        F2BlockTensor part = compute_f2_blocks(Q, V, N, block_id, n_block, precision);
+        const std::size_t slab =
+            static_cast<std::size_t>(Q.P) * static_cast<std::size_t>(Q.P);
+        const std::size_t slab_off = slab * static_cast<std::size_t>(b0);
+        if (!part.f2.empty()) {
+            std::memcpy(dst_f2 + slab_off, part.f2.data(),
+                        part.f2.size() * sizeof(double));
+            std::memcpy(dst_vpair + slab_off, part.vpair.data(),
+                        part.vpair.size() * sizeof(double));
+        }
+        for (int lb = 0; lb < part.n_block; ++lb) {
+            block_sizes_dst[static_cast<std::size_t>(b0) + static_cast<std::size_t>(lb)] =
+                part.block_sizes[static_cast<std::size_t>(lb)];
+        }
     }
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView&) override { return {}; }

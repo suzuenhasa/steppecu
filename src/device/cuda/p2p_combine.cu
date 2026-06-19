@@ -49,6 +49,7 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK (fault), STEPPE_CUDA_WARN (recoverable peer-enable)
 #include "device/cuda/device_buffer.cuh"    // steppe::device::DeviceBuffer<double> (the allowlisted RAII owner)
 #include "device/cuda/device_partial_impl.cuh"  // DevicePartial::Impl (resident DeviceBuffer<double> f2/vpair owners)
+#include "device/cuda/pinned_buffer.cuh"    // steppe::device::RegisteredHostRegion (pin the final D2H — M4.5 d2h-speed)
 #include "device/cuda/stream.hpp"           // steppe::device::Stream (owning non-blocking root stream)
 #include "steppe/fstats.hpp"                // steppe::F2BlockTensor
 #include "device/shard_plan.hpp"            // steppe::device::DeviceShard
@@ -173,12 +174,20 @@ F2BlockTensor combine_f2_partials_resident(
     }
 
     // ---- ONE sync, then the SINGLE final D2H of the full result (the only D2H) ----
+    // PIN the host destinations for the D2H window (M4.5 d2h-speed; RegisteredHostRegion,
+    // graceful pageable degrade). PARITY-NEUTRAL: pinned vs pageable moves identical
+    // bytes into the SAME disjoint placement (the D2H overwrites every element). The
+    // trailing cudaStreamSynchronize keeps the pin alive across the DMA (the RAII
+    // unregister fires at the if-scope exit, AFTER the sync).
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(root_stream));
     if (total > 0) {
+        const std::size_t bytes = total * sizeof(double);
+        RegisteredHostRegion pin_f2(out.f2.data(), bytes);   // pinned D2H (graceful degrade)
+        RegisteredHostRegion pin_vp(out.vpair.data(), bytes);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dResult_f2.data(),
-                                          total * sizeof(double), cudaMemcpyDeviceToHost, root_stream));
+                                          bytes, cudaMemcpyDeviceToHost, root_stream));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dResult_vp.data(),
-                                          total * sizeof(double), cudaMemcpyDeviceToHost, root_stream));
+                                          bytes, cudaMemcpyDeviceToHost, root_stream));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(root_stream));
     }
     return out;  // restore{} fires; the DevicePartial handles are freed by the caller AFTER this (§7)

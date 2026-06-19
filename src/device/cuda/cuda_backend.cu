@@ -315,6 +315,51 @@ public:
         return h;  // NO D2H, NO free — the cure (doc §4 Item 1)
     }
 
+    /// M4.5 host-staged-DIRECT override (the d2h-speed cure). Runs the SAME GEMM body
+    /// as compute_f2_blocks (so the per-block bits are bit-identical; §12), then D2Hs
+    /// the compact f2/vpair slabs DIRECTLY into the caller's shared PINNED result at the
+    /// disjoint block offset slab_off = P*P*b0, instead of into a fresh host
+    /// F2BlockTensor that the combine then re-copies. The destination slices are pinned
+    /// in place for the D2H window (RegisteredHostRegion, graceful pageable degrade) so
+    /// two devices' D2Hs run as concurrent pinned DMAs. block_sizes for this device's
+    /// blocks are placed at the shared result's [b0, b0+n_block) (host int copy, mirrors
+    /// f2_combine.cpp's std::copy_n at offset b0).
+    void compute_f2_blocks_into(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, int b0,
+        double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+        const Precision& precision) override {
+        ResidentBlocks rb = run_f2_blocks_resident(Q, V, N, block_id, n_block, precision);
+        // block_sizes for this device's blocks -> the shared host result at [b0, b0+nb).
+        // (host int copy; mirrors f2_combine.cpp std::copy_n at offset b0.)
+        for (int b = 0; b < rb.n_block; ++b)
+            block_sizes_dst[static_cast<std::size_t>(b0) + static_cast<std::size_t>(b)] =
+                rb.block_sizes[static_cast<std::size_t>(b)];
+        const std::size_t total = rb.f2.size();  // P*P*n_block (0 on degenerate/empty shard)
+        if (total > 0) {
+            guard_device();  // rb lives on device_id_
+            const std::size_t slab_off =
+                static_cast<std::size_t>(rb.P) * static_cast<std::size_t>(rb.P) *
+                static_cast<std::size_t>(b0);
+            double* f2_slice    = dst_f2    + slab_off;
+            double* vpair_slice = dst_vpair + slab_off;
+            const std::size_t bytes = total * sizeof(double);
+            // PIN the destination slices for the D2H window (graceful pageable degrade).
+            // The two devices register DISJOINT ranges of the shared buffer -> no overlap,
+            // no cudaErrorHostMemoryAlreadyRegistered across workers. The trailing
+            // cudaStreamSynchronize keeps the pin alive until the in-flight DMA drains
+            // (the RAII unregister fires at this scope's exit, AFTER the sync).
+            RegisteredHostRegion pin_f2(f2_slice, bytes);
+            RegisteredHostRegion pin_vp(vpair_slice, bytes);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(f2_slice, rb.f2.data(), bytes,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(vpair_slice, rb.vpair.data(), bytes,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        }
+        // rb's DeviceBuffers free here (same free point as compute_f2_blocks).
+    }
+
     /// M4 — PER-BLOCK f2 via the SPIKE-CHOSEN size-grouped strided-batched design
     /// (architecture.md §5 S2, §11.1; ROADMAP M4). The factored GEMM body SHARED by
     /// compute_f2_blocks (host) and compute_f2_blocks_resident: it produces the two

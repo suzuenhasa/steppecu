@@ -142,6 +142,29 @@ namespace steppe::core {
     std::span<const steppe::device::DeviceShard> shards,
     const Precision& precision);
 
+/// Host-staged-DIRECT fan-out (M4.5 d2h-speed cure): the EXACT same concurrent
+/// jthread fan-out as compute_multigpu_partials — same zero-copy sub-views, same
+/// dense local block_id, same exception-ptr rethrow, same empty-shard handling — but
+/// each worker calls compute_f2_blocks_into(..., sh.b0, dst_f2, dst_vpair,
+/// block_sizes_dst, precision), which D2Hs its compact f2/vpair DIRECTLY (pinned)
+/// into its DISJOINT slice [slab*b0, slab*(b0+nb)) of the SHARED result the caller
+/// pre-allocated. No per-device F2BlockTensor, no combine copy. The disjoint
+/// block-aligned shards guarantee the G workers write non-overlapping slices, so the
+/// concurrent writes into one buffer are race-free; PARITY-NEUTRAL (same bytes, same
+/// offsets, fixed g order independent of wall-clock).
+///
+/// @param dst_f2/dst_vpair  the SHARED result f2/vpair base pointers, pre-sized to
+///                          P*P*n_block_full by the caller (the orchestrator).
+/// @param block_sizes_dst   the SHARED block_sizes base, pre-sized to n_block_full.
+/// @throws rethrows the first worker failure (lowest g), deterministically.
+void compute_multigpu_partials_into(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    std::span<const steppe::device::DeviceShard> shards,
+    double* dst_f2, double* dst_vpair, int* block_sizes_dst,
+    const Precision& precision);
+
 }  // namespace steppe::core
 
 #endif  // STEPPE_CORE_FSTATS_F2_BLOCKS_MULTIGPU_CORE_HPP
