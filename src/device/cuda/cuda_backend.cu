@@ -339,6 +339,57 @@ public:
         // was bound in the ctor for emulated-FP64 determinism (architecture.md §12).
         engage_f2_precision(blas_.get(), precision);
 
+        // ---- Pre-size the per-chunk slabs ONCE, reuse across every chunk (L4b;
+        //      perf-discovery.md P3). --------------------------------------------
+        // The prior path allocated+freed dIds/dQg/dVg/dSg/dGg/dVpairg/dRg INSIDE the
+        // chunk loop — 645 `cudaMalloc` + 648 `cudaFree` on the P=768 run. Both
+        // `cudaMalloc` and `cudaFree` are DEVICE-WIDE-SYNCHRONIZING and take the
+        // global allocator/driver lock (CUDA C Programming Guide §3.2.2 "Device
+        // Memory"; CUDA Runtime API: cudaMalloc/cudaFree synchronize the device), so
+        // under the §11.4 SPMG fan-out the two per-device worker threads serialized
+        // against each other on that lock — a measured 7.1 % `cudaFree` + 2.6 %
+        // `cudaMalloc` CUDA-API time and the 18 % kernel overlap (perf-discovery P3).
+        //
+        // FIX: allocate each slab ONCE at the MAX single-chunk footprint over all
+        // buckets, OUTSIDE the loop, and REUSE it for every chunk. The kernel
+        // wrappers index strictly by the passed `P`/`s_pad`/`nb` (never by buffer
+        // size; f2_blocks_kernel.cuh), so a chunk uses only the leading
+        // `P·s_pad·nb` / `P²·nb` elements — over-sizing changes only WHEN the VRAM is
+        // committed, not a single bit (PARITY-SAFE: same buffers, same math, every
+        // used element fully written before read; the gather writes all `s_pad`
+        // columns incl. pad, the GEMM writes its outputs, before any read).
+        //
+        // §11.2 VRAM budget (architecture.md §11.2) is UPHELD: the peak resident set
+        // is unchanged — `max_blocks_per_chunk` already bounded EACH chunk's slabs to
+        // `kMaxVramUtilizationFraction` of the post-resident-set/post-workspace VRAM,
+        // and the loop already reached that peak transiently. Pre-allocating at the
+        // MAX over buckets (the largest single chunk, NOT the sum of all buckets)
+        // commits exactly that one-chunk peak once and holds it for the loop — never
+        // more than `resident + one max-chunk` is co-resident, the same ceiling the
+        // budget helper enforced per chunk. The two slab families scale differently
+        // (Qg/Vg/Sg with `P·s_pad·nb`, Gg/Vpairg/Rg with `P²·nb`), and the bucket
+        // maximizing each may differ, so each cap is tracked independently for a
+        // tight (sound, non-over-committed) bound.
+        std::size_t max_nb = 0;       // max blocks-per-chunk over all buckets (dIds, *_g)
+        std::size_t max_psp_nb = 0;   // max P·s_pad·nb over all buckets (Qg/Vg/Sg)
+        std::vector<int> bucket_max_blocks(buckets.size(), 0);
+        for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
+            const int s_pad = buckets[bi].s_pad;
+            const int nb_total = static_cast<int>(buckets[bi].blocks.size());
+            const int mb = max_blocks_per_chunk(free_b, P, n_block, s_pad, nb_total);
+            bucket_max_blocks[bi] = mb;
+            const std::size_t nb = static_cast<std::size_t>(mb < 0 ? 0 : mb);
+            max_nb = std::max(max_nb, nb);
+            max_psp_nb = std::max(
+                max_psp_nb,
+                static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) * nb);
+        }
+        // The reused slabs (RAII; freed once at function scope exit, NOT per chunk).
+        DeviceBuffer<int>    dIds(max_nb);
+        DeviceBuffer<double> dQg(max_psp_nb), dVg(max_psp_nb), dSg(2u * max_psp_nb);
+        const std::size_t max_pp_nb = slab * max_nb;
+        DeviceBuffer<double> dGg(max_pp_nb), dVpairg(max_pp_nb), dRg(2u * max_pp_nb);
+
         // ---- Per bucket (chunked): gather → strided-batched GEMMs → assemble ----
         // Each bucket is processed in CHUNKS of at most `max_blocks` blocks (the
         // host-pure, GPU-free budget helper: it reserves BOTH resident tensors +
@@ -347,26 +398,18 @@ public:
         // grouped strided-batched design while bounding the working set (the M5
         // out-of-core generalization is a superset of this; here it is the
         // single-GPU VRAM guard ROADMAP M4 requires).
-        for (const Bucket& bk : buckets) {
+        for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
+            const Bucket& bk = buckets[bi];
             const int s_pad = bk.s_pad;
             const int nb_total = static_cast<int>(bk.blocks.size());
-            const int max_blocks =
-                max_blocks_per_chunk(free_b, P, n_block, s_pad, nb_total);
+            const int max_blocks = bucket_max_blocks[bi];
 
             for (int start = 0; start < nb_total; start += max_blocks) {
                 const int nb = std::min(max_blocks, nb_total - start);
 
-                DeviceBuffer<int> dIds(static_cast<std::size_t>(nb));
                 STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
                                                   static_cast<std::size_t>(nb) * sizeof(int),
                                                   cudaMemcpyHostToDevice, stream_.get()));
-
-                const std::size_t psp_nb =
-                    static_cast<std::size_t>(P) * static_cast<std::size_t>(s_pad) *
-                    static_cast<std::size_t>(nb);
-                DeviceBuffer<double> dQg(psp_nb), dVg(psp_nb), dSg(2u * psp_nb);
-                const std::size_t pp_nb = slab * static_cast<std::size_t>(nb);
-                DeviceBuffer<double> dGg(pp_nb), dVpairg(pp_nb), dRg(2u * pp_nb);
 
                 launch_gather_group(dQ.data(), dV.data(), dS.data(),
                                     dIds.data(), dOffsets.data(), dSizes.data(),
@@ -382,8 +425,11 @@ public:
                 launch_assemble_blocks_group(dGg.data(), dVpairg.data(), dRg.data(),
                                              dIds.data(), P, nb,
                                              dF2_all.data(), dVpair_all.data(), stream_.get());
-                // Sync before this chunk's slabs (dQg…dRg) free at scope exit, so
-                // the next chunk reuses the VRAM (one chunk resident at a time).
+                // Sync before the NEXT chunk overwrites the reused slabs (dQg…dRg),
+                // so each chunk's gather/GEMM/assemble fully completes before the
+                // next chunk's gather writes into the SAME buffers — the §12
+                // single-stream-per-device serialization that keeps the reuse
+                // bit-identical to the prior fresh-per-chunk buffers.
                 STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
             }
         }
