@@ -54,6 +54,7 @@
 #include "core/domain/block_partition_rule.hpp"
 #include "core/fstats/f2_blocks_multigpu.hpp"
 #include "device/resources.hpp"
+#include "device/device_f2_blocks.hpp"
 #include "io/snp_reader.hpp"
 
 using steppe::Precision;
@@ -62,6 +63,13 @@ using steppe::core::MatView;
 using steppe::core::BlockPartition;
 
 namespace {
+
+// DEVICE-RESIDENT timing mode (the --resident flag, M4.5). When true, run_cell times
+// compute_f2_blocks_multigpu_device and does NOT call .to_host(), so the ~1840ms host
+// alloc/zero/D2H tail is EXCLUDED from the wall — directly demonstrating the CPU
+// round-trip is gone. When false (default), the bench is host-returning (the baseline
+// that INCLUDES the materialization tail), unchanged from before.
+bool g_resident_mode = false;
 
 bool read_f64(const std::string& path, std::vector<double>& out, std::size_t count) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -119,15 +127,31 @@ RunStats run_cell(const DeviceConfig& cfg, const MatView& Q, const MatView& V,
     RunStats st;
     try {
         steppe::device::Resources res = steppe::device::build_resources(cfg);
-        { auto warm = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec); (void)warm; }
         std::vector<double> samples;
         samples.reserve(static_cast<std::size_t>(iters));
-        for (int i = 0; i < iters; ++i) {
-            const auto t0 = std::chrono::steady_clock::now();
-            auto r = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec);
-            const auto t1 = std::chrono::steady_clock::now();
-            (void)r;
-            samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        if (g_resident_mode) {
+            // DEVICE-RESIDENT timing: the result STAYS in VRAM. NO .to_host(), so the
+            // ~1840ms host alloc/zero/D2H tail is EXCLUDED — this wall is the
+            // device-resident precompute only. The handle frees (cudaFree) at end of
+            // scope; that is VRAM teardown, not a host round-trip.
+            { auto warm = steppe::core::compute_f2_blocks_multigpu_device(res, Q, V, N, part, prec); (void)warm; }
+            for (int i = 0; i < iters; ++i) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto r = steppe::core::compute_f2_blocks_multigpu_device(res, Q, V, N, part, prec);
+                const auto t1 = std::chrono::steady_clock::now();
+                (void)r;
+                samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            }
+        } else {
+            // HOST-RETURNING timing (the baseline): includes the to_host materialization.
+            { auto warm = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec); (void)warm; }
+            for (int i = 0; i < iters; ++i) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto r = steppe::core::compute_f2_blocks_multigpu(res, Q, V, N, part, prec);
+                const auto t1 = std::chrono::steady_clock::now();
+                (void)r;
+                samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            }
         }
         std::sort(samples.begin(), samples.end());
         const std::size_t n = samples.size();
@@ -172,7 +196,9 @@ void print_cell_detail(const char* label, const RunStats& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::string root = (argc > 1) ? argv[1] : "/workspace/data/aadr";
+    // argv[1] is the data root unless it is the --resident flag (handled below).
+    const std::string root =
+        (argc > 1 && std::string(argv[1]) != "--resident") ? argv[1] : "/workspace/data/aadr";
 
     // Pick the derived subdir: prefer the at-scale derived_2500, else derived_full. The
     // repack handles any native P0 (it reads shape.txt), so a 2500-pop dir subsets DOWN to
@@ -187,8 +213,17 @@ int main(int argc, char** argv) {
     }
     const std::string snp = root + "/raw/v66.p1_HO.aadr.patch.PUB.snp";
 
+    // --resident: the M4.5 DEVICE-RESIDENT timing mode (no host materialization). Scan
+    // all argv for it (it may appear anywhere) and skip it when building the P-list.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--resident") { g_resident_mode = true; break; }
+    }
+
     std::vector<int> Ps;
-    for (int i = 2; i < argc; ++i) Ps.push_back(std::atoi(argv[i]));
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--resident") continue;  // a flag, not a P
+        Ps.push_back(std::atoi(argv[i]));
+    }
     if (Ps.empty()) Ps = {256, 512, 768, 1024, 1536, 2000, 2500};
     std::sort(Ps.begin(), Ps.end());  // ASCENDING sweep (OOM-tolerant: a failed large P does
                                       // not block the smaller ones, and ascending shows the
@@ -224,6 +259,9 @@ int main(int argc, char** argv) {
 
     std::printf("bench_f2_multigpu — SCALING SWEEP, %d GPUs, EmulatedFp64{%d}\n",
                 devcount, steppe::kDefaultMantissaBits);
+    std::printf("  mode: %s\n", g_resident_mode
+                ? "DEVICE-RESIDENT (no host materialization; the host round-trip is excluded)"
+                : "HOST-RETURNING (includes the to_host() materialization tail)");
     std::printf("  data=%s  native P0=%d  M=%ld  n_block=%d  median of %d runs (warm-up per cell)\n",
                 dir.c_str(), P0, M, n_block, ITERS);
     std::printf("  cells: G1=single-GPU | G2res=device-resident P2P combine | "

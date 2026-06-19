@@ -104,6 +104,7 @@
 #include "device/backend.hpp"                   // ComputeBackend, BackendCapabilities
 #include "device/backend_factory.hpp"           // steppe::device::make_cuda_backend
 #include "device/resources.hpp"                 // steppe::device::Resources, build_resources
+#include "device/device_f2_blocks.hpp"          // steppe::device::DeviceF2Blocks (the device-resident primary + opt-in to_host)
 #include "device/vram_budget.hpp"               // resident_tensor_bytes (the §11.2 footprint home — VRAM gate)
 #include "io/snp_reader.hpp"                    // io::read_snp (SHARED .snp parse)
 
@@ -474,8 +475,10 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         (is_emu_prec ? emuRef : natRef) = ref;  // F-COV-1: capture for the engaged-check
 
         // (1) G==1 multi-GPU == single-GPU reference (the bit-identity FLOOR).
+        // Drive the DEVICE-RESIDENT primary and materialize ONCE (.to_host()) for the
+        // memcmp — proves the resident result is bit-identical to single-GPU (§12).
         const F2BlockTensor candG1 =
-            steppe::core::compute_f2_blocks_multigpu(resG1, Q, V, N, part, prec);
+            steppe::core::compute_f2_blocks_multigpu_device(resG1, Q, V, N, part, prec).to_host();
         {
             const bool ok = bit_equal(ref, candG1);
             std::string lab = std::string("[") + precNames[p] +
@@ -494,13 +497,14 @@ bool run_dataset(const std::string& label, const std::string& dir, const std::st
         // EmulatedFp64{40} lane (precs[1]); p==0 is native Fp64 (precs[0]).
         if (have_two) {
             const F2BlockTensor candG2h =
-                steppe::core::compute_f2_blocks_multigpu(resG2h, Q, V, N, part, prec);
+                steppe::core::compute_f2_blocks_multigpu_device(resG2h, Q, V, N, part, prec).to_host();
             // The P2P candidate. On the PRO tier (can_access_peer) this runs the
-            // device-resident cudaMemcpyPeer combine; on a no-peer box it degrades
-            // (tagged) to host-staged — either way bit-identical. last_combine_path
-            // (checked below) records which transport actually ran.
+            // device-resident cudaMemcpyPeer combine (combine_f2_partials_resident_device,
+            // the no-final-D2H assembly); on a no-peer box it degrades (tagged) to
+            // host-staged + a re-upload — either way the .to_host() result is
+            // bit-identical. last_combine_path (checked below) records which transport ran.
             const F2BlockTensor candG2p =
-                steppe::core::compute_f2_blocks_multigpu(resG2p, Q, V, N, part, prec);
+                steppe::core::compute_f2_blocks_multigpu_device(resG2p, Q, V, N, part, prec).to_host();
 
             const bool is_emulated = (prec.kind == Precision::Kind::EmulatedFp64);
             if (is_emulated) {

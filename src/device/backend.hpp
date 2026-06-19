@@ -34,6 +34,7 @@
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
+#include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
 
 namespace steppe {
 
@@ -266,6 +267,27 @@ public:
                                                           const int* block_id,
                                                           int n_block,
                                                           const Precision& precision) = 0;
+
+    /// M4.5 DEVICE-RESIDENT primary: compute the FULL per-block f2 tensor
+    /// [P × P × n_block] + Vpair EXACTLY as compute_f2_blocks does (same GEMM body,
+    /// bit-identical bits; §12), but LEAVE the result RESIDENT in VRAM and return a
+    /// move-only DeviceF2Blocks handle — NO forced D2H, NO host alloc, NO host
+    /// zero-fill. THE PRIMARY OUTPUT (architecture.md §11.1 "f2_blocks stays on the
+    /// device"). compute_f2_blocks (host) is now a thin wrapper = this + .to_host().
+    /// The ONLY difference from compute_f2_blocks is the result stays on the device
+    /// instead of being copied to a host F2BlockTensor and freed.
+    ///
+    /// NON-PURE: the base throws (the device-resident output is a CUDA-backend
+    /// concept; nothing routes the CPU backend / a GPU-free fake through it). Only
+    /// the CUDA backend overrides it — CpuBackend / any fake need NOT.
+    [[nodiscard]] virtual steppe::device::DeviceF2Blocks compute_f2_blocks_device(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision) {
+        (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::compute_f2_blocks_device: not supported by this backend "
+            "(device-resident output requires a CUDA backend)");
+    }
 
     /// M4.5 device-resident variant of compute_f2_blocks: compute the per-block
     /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does, but LEAVE the

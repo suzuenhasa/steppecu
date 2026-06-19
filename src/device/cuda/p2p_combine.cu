@@ -49,6 +49,7 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK (fault), STEPPE_CUDA_WARN (recoverable peer-enable)
 #include "device/cuda/device_buffer.cuh"    // steppe::device::DeviceBuffer<double> (the allowlisted RAII owner)
 #include "device/cuda/device_partial_impl.cuh"  // DevicePartial::Impl (resident DeviceBuffer<double> f2/vpair owners)
+#include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (the device-resident FULL result buffers)
 #include "device/cuda/pinned_buffer.cuh"    // steppe::device::RegisteredHostRegion (pin the final D2H — M4.5 d2h-speed)
 #include "device/cuda/stream.hpp"           // steppe::device::Stream (owning non-blocking root stream)
 #include "steppe/fstats.hpp"                // steppe::F2BlockTensor
@@ -190,6 +191,110 @@ F2BlockTensor combine_f2_partials_resident(
                                           bytes, cudaMemcpyDeviceToHost, root_stream));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(root_stream));
     }
+    return out;  // restore{} fires; the DevicePartial handles are freed by the caller AFTER this (§7)
+}
+
+// DEVICE-RESIDENT assembly (M4.5 device-resident output). Structurally identical to
+// combine_f2_partials_resident above — same validate, same root bind, same fixed
+// g=0..G-1 disjoint placement (D2D for the root's own partial, cudaMemcpyPeerAsync for
+// each peer's), same single drain — but it builds the full result directly into a
+// DeviceF2Blocks::Impl on the root and OMITS the final D2H. The assembled tensor is
+// bit-identical to the host-returning combine's result (same bytes, same placement,
+// raw copy preserving −0.0; §12); the ONLY difference is it stays RESIDENT in VRAM.
+DeviceF2Blocks combine_f2_partials_resident_device(
+    std::span<DevicePartial> partials,
+    std::span<const steppe::device::DeviceShard> shards,
+    int P, int n_block_full, int root_device_id) {
+    // Same fail-fast precondition guard as the host-returning sibling (REUSED).
+    steppe::core::validate_resident_partials(
+        "steppe::device::combine_f2_partials_resident_device", partials, shards, P, n_block_full);
+
+    // Bind to the root for the whole routine (the result + every copy land here);
+    // RAII-restore the caller's device on exit (exception-safe), exactly as the
+    // host-returning sibling.
+    int prev_device = 0;
+    STEPPE_CUDA_CHECK(cudaGetDevice(&prev_device));
+    struct DeviceGuard {
+        int dev;
+        ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); }
+    } restore{prev_device};
+    STEPPE_CUDA_CHECK(cudaSetDevice(root_device_id));
+
+    // The combine's OWN non-blocking stream on the root (off the legacy default stream).
+    Stream root_stream_owner;
+    const cudaStream_t root_stream = root_stream_owner.get();
+
+    const std::size_t slab =
+        static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const std::size_t total = slab * static_cast<std::size_t>(n_block_full);
+
+    // ---- The DEVICE-RESIDENT full result (NO host F2BlockTensor, NO final D2H) ----
+    // ONE full-shape device RESULT on the root, allocated as the DeviceF2Blocks::Impl
+    // buffers (REPLACING the host-returning sibling's local dResult_f2/dResult_vp): the
+    // peer/D2D copies write DIRECTLY into out.impl->f2/out.impl->vpair. NO memset (the
+    // disjoint tiling covers every slab exactly once). block_sizes placed host-side in
+    // the fixed g order (int; identical to the host baseline).
+    DeviceF2Blocks out;
+    out.P = P;
+    out.n_block = n_block_full;
+    out.device_id = root_device_id;
+    out.block_sizes.assign(static_cast<std::size_t>(n_block_full), 0);
+    out.impl = std::make_unique<DeviceF2Blocks::Impl>();
+    out.impl->f2 = DeviceBuffer<double>(total);
+    out.impl->vpair = DeviceBuffer<double>(total);
+    double* result_f2 = out.impl->f2.data();
+    double* result_vp = out.impl->vpair.data();
+
+    // ---- FIXED-ORDER g = 0 .. G-1 placement into DISJOINT result slices ------
+    for (std::size_t g = 0; g < partials.size(); ++g) {
+        DevicePartial& part = partials[g];
+
+        // block_sizes: place this device's per-block SNP counts at offset b0 (host int,
+        // identical to the host baseline). Done even for an empty shard.
+        for (int lb = 0; lb < part.n_block_local; ++lb) {
+            out.block_sizes[static_cast<std::size_t>(part.b0 + lb)] =
+                part.block_sizes[static_cast<std::size_t>(lb)];
+        }
+        if (part.empty()) continue;  // empty shard: no resident buffers, nothing to copy
+
+        const std::size_t part_elems = slab * static_cast<std::size_t>(part.n_block_local);
+        const std::size_t part_bytes = part_elems * sizeof(double);
+        const std::size_t dst_off = slab * static_cast<std::size_t>(part.b0);  // disjoint slice base
+
+        double* dst_f2 = result_f2 + dst_off;
+        double* dst_vp = result_vp + dst_off;
+        const double* src_f2 = part.impl->f2.data();      // resident on part.device_id
+        const double* src_vp = part.impl->vpair.data();
+
+        if (part.device_id == root_device_id) {
+            // ROOT's own resident partial: D2D copy into its disjoint slice (no peer hop).
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst_f2, src_f2, part_bytes,
+                                              cudaMemcpyDeviceToDevice, root_stream));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst_vp, src_vp, part_bytes,
+                                              cudaMemcpyDeviceToDevice, root_stream));
+        } else {
+            // PEER's resident partial: enable peer access root<-device_id (directional,
+            // set from the issuing device = the root). AlreadyEnabled is expected on the
+            // 2nd+ combine (tagged, non-fatal); then clear the sticky last-error.
+            (void)STEPPE_CUDA_WARN(cudaDeviceEnablePeerAccess(part.device_id, 0));
+            (void)cudaGetLastError();
+            // Pull peer->root via the byte-exact cudaMemcpyPeerAsync DMA straight into the
+            // disjoint slice (NO H2D, NO stage).
+            STEPPE_CUDA_CHECK(cudaMemcpyPeerAsync(dst_f2, root_device_id,
+                                                  src_f2, part.device_id, part_bytes, root_stream));
+            STEPPE_CUDA_CHECK(cudaMemcpyPeerAsync(dst_vp, root_device_id,
+                                                  src_vp, part.device_id, part_bytes, root_stream));
+        }
+        // NO per-peer cudaDeviceSynchronize here: the resident peer buffers are NOT freed
+        // mid-loop (they live on the DevicePartial until the caller frees them AFTER this
+        // returns, §7). ONE sync below drains all the enqueued copies.
+    }
+
+    // ---- ONE sync, then RETURN the device-resident result (NO final D2H) ----------
+    // The result STAYS resident in out.impl on the root. The single drain guarantees
+    // every D2D/peer DMA has completed before the resident buffers are read downstream
+    // (or .to_host()'d) and before any source partial is freed.
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(root_stream));
     return out;  // restore{} fires; the DevicePartial handles are freed by the caller AFTER this (§7)
 }
 

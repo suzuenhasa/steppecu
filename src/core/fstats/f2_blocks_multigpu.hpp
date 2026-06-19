@@ -24,8 +24,33 @@
 #include "steppe/config.hpp"                      // steppe::Precision
 #include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
 #include "device/resources.hpp"                   // steppe::device::Resources (CUDA-free)
+#include "device/device_f2_blocks.hpp"            // steppe::device::DeviceF2Blocks (CUDA-free device-resident result handle)
 
 namespace steppe::core {
+
+/// M4.5 DEVICE-RESIDENT multi-GPU precompute (the PRIMARY entry; the cure). Computes
+/// the per-block f2 tensor across the G devices and returns it as a VRAM handle
+/// (DeviceF2Blocks) — NO forced D2H, NO host alloc/zero. The host
+/// compute_f2_blocks_multigpu below is now a thin wrapper = this + .to_host().
+///
+///   * G == 1: returns the ONE device's full result resident on gpus[0]
+///     (compute_f2_blocks_device) — the headline win: NO D2H AT ALL.
+///   * G >= 2 on a P2P box: per-device DevicePartials stay resident, assembled
+///     device-resident on the root (combine_f2_partials_resident_device — the
+///     no-final-D2H variant) into one DeviceF2Blocks.
+///   * G >= 2 on a NO-PEER box (the consumer 5090): full single-tensor assembly
+///     across 2 GPUs still requires P2P or a host bounce. The per-device partials
+///     stay RESIDENT (no premature D2H); this entry then materializes ONE host
+///     bounce ONLY because there is no P2P fabric to assemble a single device tensor
+///     across the two cards (documented limitation, architecture.md §11.4 no-peer
+///     tier), re-uploaded so the PRIMARY return is still a DeviceF2Blocks. The
+///     per-device compute is still resident; the host bounce is the assembly
+///     transport, not a forced output copy.
+[[nodiscard]] steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
+    steppe::device::Resources& resources,
+    const MatView& Q, const MatView& V, const MatView& N,
+    const BlockPartition& partition,
+    const Precision& precision);
 
 /// Compute the per-block f2 tensor `f2_blocks [P × P × n_block]` + the retained
 /// per-block `Vpair` across the G devices in `resources`, BIT-IDENTICAL to the

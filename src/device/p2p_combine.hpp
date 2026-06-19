@@ -37,6 +37,7 @@
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (public, CUDA-free — the host result)
 #include "device/shard_plan.hpp"    // steppe::device::DeviceShard (CUDA-free plan)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
+#include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
 
 namespace steppe::device {
 
@@ -108,6 +109,19 @@ namespace steppe::device {
 ///         CUDA fault (allocation, the cudaMemcpyPeerAsync DMA, the D2D copy, or the
 ///         final D2H) — peer-enable "already enabled" is NOT a fault (WARN-tolerant).
 [[nodiscard]] F2BlockTensor combine_f2_partials_resident(
+    std::span<DevicePartial> partials,
+    std::span<const steppe::device::DeviceShard> shards,
+    int P, int n_block_full, int root_device_id);
+
+/// DEVICE-RESIDENT assembly (M4.5 device-resident output): identical to
+/// combine_f2_partials_resident — same fixed g=0..G-1 disjoint placement via D2D /
+/// cudaMemcpyPeerAsync of each resident partial into one root-resident full tensor —
+/// but it STOPS before the final D2H and returns the assembled tensor as a VRAM
+/// DeviceF2Blocks (root_device_id-resident). NO host F2BlockTensor, NO final D2H. The
+/// caller may .to_host() it on request. Bit-identical assembly to
+/// combine_f2_partials_resident (same bytes, same placement; §12). block_sizes are
+/// placed host-side in the fixed g order onto the returned handle.
+[[nodiscard]] DeviceF2Blocks combine_f2_partials_resident_device(
     std::span<DevicePartial> partials,
     std::span<const steppe::device::DeviceShard> shards,
     int P, int n_block_full, int root_device_id);

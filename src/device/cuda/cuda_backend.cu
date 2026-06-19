@@ -55,6 +55,8 @@
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
 #include "device/device_partial.hpp"        // steppe::device::DevicePartial (the M4.5 resident handle)
 #include "device/cuda/device_partial_impl.cuh" // DevicePartial::Impl (the DeviceBuffer<double> owners)
+#include "device/device_f2_blocks.hpp"      // steppe::device::DeviceF2Blocks (the M4.5 device-resident FULL result handle)
+#include "device/cuda/device_f2_blocks_impl.cuh" // DeviceF2Blocks::Impl (the DeviceBuffer<double> owners)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
@@ -255,43 +257,41 @@ public:
     /// [P × P × n_block] f2 + Vpair tensors. Only ONE bucket's padded slabs + GEMM
     /// outputs are resident at a time (VRAM-frugal; the spike's grouped design),
     /// alongside the persistent feeder outputs and the resident f2/Vpair tensors.
+    /// M4 host F2BlockTensor — now a THIN WRAPPER over the device-resident primary +
+    /// the opt-in to_host materialization (the M4.5 cure). It runs
+    /// compute_f2_blocks_device (result stays in VRAM) then .to_host() (the ONE D2H +
+    /// host alloc). Bit-identical to the prior body (same GEMM body, same D2H over
+    /// total doubles): the only change is the host alloc/zero/copy is now the opt-in
+    /// to_host, not forced inline. The hot path (the fit handoff) does NOT call this.
     [[nodiscard]] F2BlockTensor compute_f2_blocks(const core::MatView& Q,
                                                   const core::MatView& V,
                                                   const core::MatView& N,
                                                   const int* block_id,
                                                   int n_block,
                                                   const Precision& precision) override {
-        // The shared GEMM body produces the resident f2/Vpair DeviceBuffer pair (NO
-        // D2H, NO free). The HOST override then copies them D2H into a host
-        // F2BlockTensor (the EXACT prior copy-back, gated on total>0) and frees the
-        // buffers at this scope's `return`. Byte-unchanged from the prior single
-        // method (design §3): same GEMM body, same DeviceToHost cudaMemcpyAsync over
-        // total*sizeof(double), same trailing cudaStreamSynchronize.
+        return compute_f2_blocks_device(Q, V, N, block_id, n_block, precision).to_host();
+    }
+
+    /// M4.5 device-resident PRIMARY (the cure). Runs the SAME GEMM body
+    /// (run_f2_blocks_resident), then MOVES the resident f2/Vpair DeviceBuffers into a
+    /// DeviceF2Blocks — NO D2H, NO free, NO host alloc. The full result ESCAPES into
+    /// the handle (VRAM-resident on device_id_). Bit-identical to compute_f2_blocks's
+    /// resident bits (same run_f2_blocks_resident; §12).
+    [[nodiscard]] DeviceF2Blocks compute_f2_blocks_device(
+        const core::MatView& Q, const core::MatView& V, const core::MatView& N,
+        const int* block_id, int n_block, const Precision& precision) override {
         ResidentBlocks rb = run_f2_blocks_resident(Q, V, N, block_id, n_block, precision);
-        F2BlockTensor out;
-        out.P = rb.P;
-        out.n_block = rb.n_block;
-        out.block_sizes = std::move(rb.block_sizes);
-        const std::size_t total = rb.f2.size();  // P*P*n_block (0 on degenerate)
-        // ---- Copy the resident tensors back across the CUDA-free seam ---------
-        // The D2H result vectors (out.f2/out.vpair) are FRESHLY allocated each call,
-        // so caching their registration never hits and a per-call cudaHostRegister
-        // would pay the page-locking tax with zero amortization (a strict loss,
-        // MEASURED — perf-discovery P4). They stay PAGEABLE; only the stable, reused
-        // H2D inputs are pinned.
-        out.f2.resize(total);
-        out.vpair.resize(total);
-        if (total > 0) {
-            guard_device();  // rb lives on device_id_
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), rb.f2.data(),
-                                              total * sizeof(double),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), rb.vpair.data(),
-                                              total * sizeof(double),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        DeviceF2Blocks h;
+        h.P = rb.P;
+        h.n_block = rb.n_block;
+        h.device_id = device_id_;
+        h.block_sizes = std::move(rb.block_sizes);
+        if (h.n_block > 0 && h.P > 0) {
+            h.impl = std::make_unique<DeviceF2Blocks::Impl>();
+            h.impl->f2 = std::move(rb.f2);        // buffers ESCAPE: ownership -> handle
+            h.impl->vpair = std::move(rb.vpair);
         }
-        return out;  // rb's DeviceBuffers free here (the EXACT prior free point)
+        return h;  // NO D2H, NO free — the result STAYS in VRAM
     }
 
     /// M4.5 device-resident override (the cure, doc §4 Item 1). Runs the SAME GEMM

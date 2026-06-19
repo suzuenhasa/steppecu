@@ -25,6 +25,7 @@ add_library(steppe_device STATIC
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
+    cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/p2p_combine.cu           # M4.5: combine_f2_partials_resident — device-resident cudaMemcpyPeer disjoint placement combine
     cpu/cpu_backend.cpp           # REFERENCE backend: scalar host oracle
     resources.cpp                 # M4.5: build_resources — one backend+probe PER device (CUDA-free body)
