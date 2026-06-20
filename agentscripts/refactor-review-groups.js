@@ -45,7 +45,7 @@ const GROUP_DEFS = {
 let A = args
 if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = null } }
 let RUN = (Array.isArray(A) ? A : (typeof A === 'number' ? [A] : [])).map(Number).filter(n => GROUP_DEFS[n])
-if (RUN.length === 0) RUN = [2, 3, 5, 6, 7, 8, 9, 10]   // BATCH 1 (general/mechanical); edit to [11,12,13,14,15,16,17,18,19,20,21,22] for batch 2
+if (RUN.length === 0) RUN = [5, 6, 7, 8, 9, 10]   // BATCH 1b (2/3/4 done; resume 5-10); batch 2 = [11,12,13,14,15,16,17,18,19,20,21,22]
 
 phase('Scope')
 const UNIT_SCHEMA = {
@@ -79,7 +79,7 @@ for (const g of RUN) {
     'GROUP ' + g + ' — ' + def.name + '. Tasks: ' + def.tasks, '',
     'THE UNIT: slug=' + u.slug + '; files: ' + (u.files || []).join(', ') + ' (is_cuda=' + u.is_cuda + ', layer=' + u.layer + ').',
     'DO: (1) Read every file in the unit IN FULL. (2) Check each Group ' + g + ' task with the §12/FP64/scale context. (3) Read the EXISTING file ' + FIND + '/' + u.slug + '.md (it exists from the Group 4 pilot and may already have other groups\' sections). (4) APPEND a new section to it — Write back the FULL existing content PLUS, at the end, exactly:\n\n## Group ' + g + ' — ' + def.name + '\n\n<your findings as `- [TASK][SEVERITY] file:line — desc. Suggested: <dir>.` lines, OR the single line `No Group ' + g + ' issues found.`>\n\n' +
-    'CRITICAL: do NOT remove or alter any existing section (Group 4 or others). Preserve everything; only ADD your "## Group ' + g + '" section at the end. If the file does not exist, create it with `# Review findings — ' + u.slug + '` + `Files: ...` + your section. Cite REAL line numbers; no fabrication. Return a 1-line summary: slug + #HIGH/#MED/#LOW (or "clean").',
+    'CRITICAL: do NOT remove or alter any OTHER group\'s section. Preserve every existing "## Group X" section for X != ' + g + '. IDEMPOTENCY: if a "## Group ' + g + '" section ALREADY exists in the file (you are a re-run after an interruption), REPLACE that one section in place with your fresh findings — do NOT append a duplicate. Otherwise ADD your "## Group ' + g + '" section at the end. If the file does not exist, create it with `# Review findings — ' + u.slug + '` + `Files: ...` + your section. Cite REAL line numbers; no fabrication. Return a 1-line summary: slug + #HIGH/#MED/#LOW (or "clean").',
   ].join('\n'), { label: 'g' + g + ':' + u.slug, phase: 'Group ' + g })))
 
   await agent([
