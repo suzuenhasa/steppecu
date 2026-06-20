@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <span>
@@ -242,6 +243,19 @@ int main(int argc, char** argv) {
     const std::string golden_dir = (argc > 1) ? argv[1] : "tests/reference/goldens/at2";
     std::printf("=== M(fit-6) S8 qpAdm ROTATION test (run_qpadm_search, GPU batched + sharded) ===\n");
     std::printf("golden dir: %s\n", golden_dir.c_str());
+
+    // FAST/THOROUGH split (frozen design): plain `ctest` is the FAST dev loop —
+    // GPU-vs-AT2-golden ONLY (84-model rotation vs golden_rot + G1==G2 + NRBIG-via-
+    // jackknife=None vs golden_fit1). The slow CpuBackend 84-model host-oracle re-
+    // derivation (~371 s) + the synthetic-throughput sweep are opt-in via
+    // STEPPE_THOROUGH=1; the CpuBackend ALSO runs when no GPU is visible (the CI-
+    // without-GPU acceptance gate). Read the env once at start.
+    const bool g_thorough = [] {
+        const char* e = std::getenv("STEPPE_THOROUGH");
+        return e && e[0] == '1';
+    }();
+    std::printf("MODE: %s (set STEPPE_THOROUGH=1 for the CpuBackend oracle + synthetic throughput)\n",
+                g_thorough ? "THOROUGH" : "FAST (GPU-vs-golden only)");
 
     // ---- read the rotation golden + the co-matching f2 fixture -------------------
     GoldenRot G;
@@ -502,8 +516,14 @@ int main(int argc, char** argv) {
             for (int j = 3; j < 43; ++j) m.right.push_back(j);  // nr=39
             m.model_index = 0;
             std::vector<steppe::QpAdmModel> one = {m};
+            // DEFAULT NRBIG-vs-golden gate: run with JackknifePolicy::None so the
+            // ~347 s LOO SE is SKIPPED (it is never asserted) while the cheap-pass
+            // outputs (f4rank / rankdrop / popdrop vs golden_fit1_NRBIG) still gate.
+            // This is exactly what JackknifePolicy::None (qpadm.hpp:48) exists for.
+            steppe::QpAdmOptions nrb_opts = opts;
+            nrb_opts.jackknife = steppe::JackknifePolicy::None;
             const std::vector<steppe::QpAdmResult> rs =
-                steppe::run_qpadm_search(dev, std::span<const steppe::QpAdmModel>(one), opts, res);
+                steppe::run_qpadm_search(dev, std::span<const steppe::QpAdmModel>(one), nrb_opts, res);
             check_eq_int("NRBIG search result count", static_cast<int>(rs.size()), 1);
             if (rs.size() == 1 && rs[0].status == steppe::Status::Ok) {
                 check_eq_int("NRBIG f4rank", rs[0].f4rank, 1);
@@ -512,7 +532,29 @@ int main(int argc, char** argv) {
                     check_close("NRBIG rd[0].chisq", rs[0].rankdrop_chisq.at(0), 52.704281610335912, 1e-6, 1e-9);
                     check_close("NRBIG rd[1].chisq", rs[0].rankdrop_chisq.at(1), 190.83602239090976, 1e-6, 1e-9);
                 }
-                std::printf("  [PASS] NRBIG golden via run_qpadm_search matches golden\n");
+                // popdrop 00/01/10 vs golden_fit1_NRBIG (dof 38/39/39, f4rank 1/0/0) —
+                // mirrors the parity NRBIG popdrop so it is covered in the default.
+                const char*  bpd_pat[3]    = {"00", "01", "10"};
+                const int    bpd_dof[3]    = {38, 39, 39};
+                const int    bpd_f4rank[3] = {1, 0, 0};
+                const double bpd_chisq[3]  = {52.704281610335912, 100.19050317026696, 169.11350353681215};
+                check_eq_int("NRBIG popdrop rows", static_cast<int>(rs[0].popdrop_pat.size()), 3);
+                for (int k = 0; k < 3 && static_cast<std::size_t>(k) < rs[0].popdrop_pat.size(); ++k) {
+                    char nm[48];
+                    const bool pat_ok = (rs[0].popdrop_pat.at(static_cast<std::size_t>(k)) == bpd_pat[k]);
+                    if (!pat_ok) { std::printf("  [FAIL] NRBIG pd[%d].pat got=%s want=%s\n",
+                                   k, rs[0].popdrop_pat.at(static_cast<std::size_t>(k)).c_str(), bpd_pat[k]); ++g_failures; }
+                    std::snprintf(nm, sizeof(nm), "NRBIG pd[%d].dof", k);
+                    check_eq_int(nm, rs[0].popdrop_dof.at(static_cast<std::size_t>(k)), bpd_dof[k]);
+                    std::snprintf(nm, sizeof(nm), "NRBIG pd[%d].f4rank", k);
+                    check_eq_int(nm, rs[0].popdrop_f4rank.at(static_cast<std::size_t>(k)), bpd_f4rank[k]);
+                    std::snprintf(nm, sizeof(nm), "NRBIG pd[%d].chisq", k);
+                    check_close(nm, rs[0].popdrop_chisq.at(static_cast<std::size_t>(k)), bpd_chisq[k], 1e-6, 1e-9);
+                }
+                // SE must be EMPTY under JackknifePolicy::None (proves the SE was skipped).
+                check_true("NRBIG se empty (jackknife=None ⇒ no LOO SE computed)", rs[0].se.empty());
+                std::printf("  [PASS] NRBIG golden via run_qpadm_search(jackknife=None) "
+                            "matches golden (f4rank/rankdrop/popdrop; SE skipped)\n");
             } else {
                 std::printf("  [FAIL] NRBIG search status != Ok\n"); ++g_failures;
             }
@@ -526,8 +568,10 @@ int main(int argc, char** argv) {
     // Enumerate many k-subsets of a larger INDEX pool over the SAME resident f2 (the
     // 8 pool indices 1..8 in pop_order are the sources). The accuracy gate is the
     // validated 84-model set above; this demonstrates the rotation throughput honestly.
+    // THOROUGH-only: this asserts NOTHING against a golden (only a result-count + a
+    // models/sec print) — it is the redundant-cost class, not an acceptance gate.
     // =====================================================================
-    if (gpu_count >= 1) {
+    if (g_thorough && gpu_count >= 1) {
         std::printf("\n-- THROUGHPUT at SCALE (synthetic enumeration; timing only, NO golden) --\n");
         // Source index pool = the 8 pool pops (indices 1..8 in pop_order).
         std::vector<int> pool;
@@ -594,8 +638,13 @@ int main(int argc, char** argv) {
     // =====================================================================
     // (E) HOST-ORACLE overload sanity: run_qpadm_search(F2BlockTensor) == the GPU
     // batched result per model (the CpuBackend per-model oracle; loose localizer).
+    // This is the ~371 s CPU oracle re-derivation of all 84 models (the GPU rotation
+    // itself is ~96 ms); the GPU 84-model weights vs golden_rot above (section A)
+    // already carry the parity gate, so this is the redundant re-derivation + the
+    // no-GPU fallback. THOROUGH-only OR no-GPU: when no GPU is visible this is the
+    // CI-without-GPU acceptance gate (oracle-vs-golden).
     // =====================================================================
-    {
+    if (g_thorough || gpu_count <= 0) {
         std::printf("\n-- HOST-ORACLE overload (CpuBackend per-model loop) sanity --\n");
         steppe::device::Resources cpu_res;
         steppe::device::PerGpuResources cpu; cpu.device_id = -1;
@@ -753,7 +802,11 @@ int main(int argc, char** argv) {
         // REAL 8-pop source pool (indices 1..8 in pop_order) over the SAME real f2 — these
         // are REAL models over REAL f2 (NO synthetic f2, NO synthetic models), repeated to
         // reach a production-scale N. The feasible fraction is REAL (data-determined).
-        {
+        // THOROUGH-only: the 84-model policy asserts (F.1/F.2/F.3) above are the
+        // parity+policy gate and STAY in the default; this 2520-model scale sweep runs
+        // three policies (incl. ALL with full LOO SE over 2520 models) — pure scale cost
+        // that re-asserts only the survivor-SE bit-identity already proven at 84 models.
+        if (g_thorough) {
             std::vector<int> pool; for (int i = 1; i <= 8; ++i) pool.push_back(i);
             std::vector<steppe::QpAdmModel> big;
             auto add_subsets = [&](int ksz) {

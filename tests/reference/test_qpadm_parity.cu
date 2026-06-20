@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <span>
 #include <string>
@@ -165,6 +166,28 @@ int main(int argc, char** argv) {
     std::printf("=== M(fit-1) qpAdm parity test (CpuBackend, FP64) ===\n");
     std::printf("golden dir: %s\n", golden_dir.c_str());
 
+    // FAST/THOROUGH split (frozen design): plain `ctest` is the FAST dev loop that
+    // validates the GPU path vs the AT2 goldens ONLY. The CpuBackend oracle re-
+    // derivation + the NRBIG GPU full LOO-SE (~347 s, never asserted) are opt-in via
+    // STEPPE_THOROUGH=1. The CpuBackend ALSO runs automatically when no GPU is visible
+    // (the CI-without-GPU acceptance gate). Read the env once at start.
+    const bool g_thorough = [] {
+        const char* e = std::getenv("STEPPE_THOROUGH");
+        return e && e[0] == '1';
+    }();
+    // Hoist the GPU probe to the top so Block A (the CpuBackend oracle) can gate on
+    // (g_thorough || gpu_count <= 0): run the CpuBackend whenever the user opted into
+    // thorough OR there is no GPU to validate against.
+    int gpu_count = 0;
+    try {
+        gpu_count = steppe::device::visible_device_count();
+    } catch (const std::exception& e) {
+        std::printf("  [INFO] visible_device_count threw at probe: %s\n", e.what());
+        gpu_count = 0;
+    }
+    std::printf("MODE: %s (set STEPPE_THOROUGH=1 for the CpuBackend oracle + NRBIG full SE)\n",
+                g_thorough ? "THOROUGH" : "FAST (GPU-vs-golden only)");
+
     if (!metadata_gate(golden_dir)) {
         std::printf("RESULT: FAIL (metadata gate)\n");
         return 1;
@@ -176,13 +199,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Resources with a single CpuBackend (no GPU; the M(fit-1) oracle path).
-    steppe::device::Resources resources;
-    steppe::device::PerGpuResources cpu;
-    cpu.device_id = -1;  // CPU
-    cpu.backend = steppe::device::make_cpu_backend();
-    resources.gpus.push_back(std::move(cpu));
-
     // The af6a8c2 model. Fixture pop order (index):
     //   0=England_BellBeaker 1=Czechia_EBA_CordedWare 2=Turkey_N
     //   3=Mbuti 4=Israel_Natufian 5=Iran_GanjDareh_N 6=Han 7=Papuan 8=Karitiana
@@ -193,15 +209,11 @@ int main(int argc, char** argv) {
     model.model_index = 0;
 
     const steppe::QpAdmOptions opts;  // fudge=1e-4, als_iterations=20, rank=-1 (nl-1)
-    const steppe::QpAdmResult res = steppe::run_qpadm(f2, model, opts, resources);
-
-    if (res.status != steppe::Status::Ok) {
-        std::printf("  [FAIL] run_qpadm status != Ok (%d)\n", static_cast<int>(res.status));
-        std::printf("RESULT: FAIL\n");
-        return 1;
-    }
 
     // ---- Golden values (golden_fit0.json; af6a8c2 / admixtools 2.0.10) --------
+    // HOISTED above the THOROUGH gate: the default GPU block re-asserts these SAME
+    // golden constants, so they must be in scope in FAST mode (the CpuBackend re-
+    // derivation below is the THOROUGH-only oracle).
     const double g_w0 = 0.558906248861195;   // CordedWare
     const double g_w1 = 0.441093751138805;   // Turkey_N
     const double g_se = 0.225911861836373;   // both (R-path se ~1.6e-4 off ⇒ loose)
@@ -210,6 +222,37 @@ int main(int argc, char** argv) {
     const double g_chisq = 4.63516296859645;
     const int    g_dof = 4;
     const double g_p = 0.326820092470997;
+    // The CpuBackend oracle rank_Q (full m=10 model); the GPU localizer reads it.
+    // Stays 0 in FAST mode (the gpu-vs-cpu rank_Q localizer is THOROUGH-only).
+    int rsw_rank_Q_ref = 0;
+    // The CpuBackend host-oracle 9-pop fit result, hoisted to outer scope so the
+    // THOROUGH-only GPU-vs-CPU localizers (Block C) can diff against it. Populated
+    // inside the Block-A gate; left default-constructed (and unread) in FAST mode.
+    steppe::QpAdmResult res;
+
+    // =====================================================================
+    // THOROUGH / no-GPU ONLY: the CpuBackend host-oracle re-derivation (the M(fit-1)
+    // bit-exact diff ORACLE + the no-GPU fallback). The GPU path below re-asserts the
+    // SAME golden constants, so this whole span is redundant for a routine GPU run —
+    // it is the on-demand diff localizer + the CI-without-GPU acceptance gate. It also
+    // carries the ~23 s NRBIG CpuBackend run_qpadm (rbig) + the ~347 s NRBIG GPU full
+    // LOO-SE (run_qpadm(devbig)), neither of which is asserted-for-SE. Gate on
+    // (g_thorough || gpu_count <= 0): run whenever thorough OR no GPU is visible.
+    // =====================================================================
+    if (g_thorough || gpu_count <= 0) {
+    // Resources with a single CpuBackend (no GPU; the M(fit-1) oracle path).
+    steppe::device::Resources resources;
+    steppe::device::PerGpuResources cpu;
+    cpu.device_id = -1;  // CPU
+    cpu.backend = steppe::device::make_cpu_backend();
+    resources.gpus.push_back(std::move(cpu));
+
+    res = steppe::run_qpadm(f2, model, opts, resources);
+
+    if (res.status != steppe::Status::Ok) {
+        std::printf("  [FAIL] run_qpadm status != Ok (%d)\n", static_cast<int>(res.status));
+        ++g_failures;
+    }
 
     std::printf("\n-- weights (TIGHT rtol 1e-6) --\n");
     check_close("weight[CordedWare]", res.weight.at(0), g_w0, 1e-6, 1e-12);
@@ -236,7 +279,6 @@ int main(int argc, char** argv) {
     // is the NEXT phase; this asserts the oracle the GPU will be diffed against.
     // =====================================================================
     std::printf("\n========== M(fit-2) RANK TEST / qpWave (CpuBackend ORACLE) ==========\n");
-    int rsw_rank_Q_ref = 0;  // the CpuBackend oracle rank_Q (full m=10 model); the GPU localizer
     {
         // ---- golden_fit0.json res$rankdrop (rows: f4rank DESCENDING = rank1, rank0) ----
         // row0 = rank1: dof=4, chisq=4.63516..., p=0.32682..., dofdiff=6,
@@ -636,23 +678,19 @@ int main(int argc, char** argv) {
                         gQdiag[k], 1e-3, 1e-9);
         }
     }
+    }  // end THOROUGH/no-GPU CpuBackend oracle gate (Block A)
 
     // =====================================================================
     // CUDA BACKEND — the PRODUCTION GPU PATH (M(fit-4)). Upload the golden f2
     // fixture to VRAM as a DeviceF2Blocks, assert it is RESIDENT + a real GPU is
     // bound, run the fit ON THE GPU (run_qpadm(DeviceF2Blocks) → the f4-gather
     // kernel reading resident f2 → jackknife SYRK/cuSOLVER → on-device SVD/ALS/
-    // weight → batched LOO), and assert the GPU result matches the golden AND the
-    // CpuBackend oracle (localization). SKIP cleanly if no CUDA device is visible.
+    // weight → batched LOO), and assert the GPU result matches the golden. SKIP
+    // cleanly if no CUDA device is visible (gpu_count was probed at the top of main).
+    // The DEFAULT (FAST) path is exactly this GPU-vs-golden block: 9-pop fit + SE +
+    // rank/popdrop + X/Q, all vs the AT2 goldens.
     // =====================================================================
     std::printf("\n=== CUDA backend (GPU path, f2 RESIDENT) ===\n");
-    int gpu_count = 0;
-    try {
-        gpu_count = steppe::device::visible_device_count();
-    } catch (const std::exception& e) {
-        std::printf("  [SKIP] visible_device_count threw: %s\n", e.what());
-        gpu_count = 0;
-    }
     if (gpu_count <= 0) {
         std::printf("  [SKIP] no CUDA device visible — CpuBackend path alone gates "
                     "(CI-without-GPU degrades cleanly)\n");
@@ -718,25 +756,29 @@ int main(int argc, char** argv) {
             // Diff ORACLE: GPU == CpuBackend to 1e-9 (localizes a GPU regression
             // against the bit-exact reference, not only the golden constants). The
             // CpuBackend ignores `precision` ⇒ always native ⇒ it is the native oracle
-            // the emulated-SYRK GPU path is diffed against.
-            std::printf("-- GPU(emulated-SYRK) vs CpuBackend oracle (NATIVE) (diff localizer, 1e-9) --\n");
-            check_close("gpu-vs-cpu weight[0]", gpu.weight.at(0), res.weight.at(0), 0.0, 1e-9);
-            check_close("gpu-vs-cpu weight[1]", gpu.weight.at(1), res.weight.at(1), 0.0, 1e-9);
-            check_close("gpu-vs-cpu chisq",     gpu.chisq,        res.chisq,        0.0, 1e-9);
+            // the emulated-SYRK GPU path is diffed against. THOROUGH-only: reads the
+            // CpuBackend oracle `res`, which is only populated under Block A.
+            if (g_thorough) {
+                std::printf("-- GPU(emulated-SYRK) vs CpuBackend oracle (NATIVE) (diff localizer, 1e-9) --\n");
+                check_close("gpu-vs-cpu weight[0]", gpu.weight.at(0), res.weight.at(0), 0.0, 1e-9);
+                check_close("gpu-vs-cpu weight[1]", gpu.weight.at(1), res.weight.at(1), 0.0, 1e-9);
+                check_close("gpu-vs-cpu chisq",     gpu.chisq,        res.chisq,        0.0, 1e-9);
+            }
 
-            // REAL per-quantity deltas of the (now emulated-by-default) SYRK path —
-            // (a) vs the af6a8c2 golden, (b) vs the CpuBackend native oracle. Reported
-            // (the gating is the check_close tiers above); this is the first
-            // informative emulated measurement in the fit.
-            std::printf("-- [INFO] emulated-SYRK per-quantity deltas (vs golden / vs native oracle) --\n");
+            // REAL per-quantity deltas of the (now emulated-by-default) SYRK path
+            // vs the af6a8c2 golden. Reported (the gating is the check_close tiers
+            // above); the vs-native-oracle deltas are THOROUGH-only (they read `res`).
+            std::printf("-- [INFO] emulated-SYRK per-quantity deltas (vs golden) --\n");
             report_delta("emuSYRK weight[CordedWare] vs golden", gpu.weight.at(0), g_w0);
             report_delta("emuSYRK weight[Turkey_N]   vs golden", gpu.weight.at(1), g_w1);
             report_delta("emuSYRK chisq              vs golden", gpu.chisq,        g_chisq);
             report_delta("emuSYRK se[CordedWare]     vs golden", gpu.se.at(0),     g_se);
             report_delta("emuSYRK p                  vs golden", gpu.p,            g_p);
-            report_delta("emuSYRK weight[0] vs native-oracle",   gpu.weight.at(0), res.weight.at(0));
-            report_delta("emuSYRK weight[1] vs native-oracle",   gpu.weight.at(1), res.weight.at(1));
-            report_delta("emuSYRK chisq     vs native-oracle",   gpu.chisq,        res.chisq);
+            if (g_thorough) {
+                report_delta("emuSYRK weight[0] vs native-oracle",   gpu.weight.at(0), res.weight.at(0));
+                report_delta("emuSYRK weight[1] vs native-oracle",   gpu.weight.at(1), res.weight.at(1));
+                report_delta("emuSYRK chisq     vs native-oracle",   gpu.chisq,        res.chisq);
+            }
 
             // =================================================================
             // EXPLORATORY (NON-GATING): the PROMOTED-emulated solve measurement
@@ -756,37 +798,41 @@ int main(int argc, char** argv) {
             // numbers are therefore expected to equal the native path. When a newer
             // cuSOLVER adds the mode the same path will actually promote and this
             // measurement becomes the real emulated-vs-golden delta.
-            std::printf("\n-- [EXPLORATORY, NON-GATING] solves PROMOTED to "
-                        "EmulatedFp64{40} vs GOLDEN (ROADMAP §6 seam) --\n");
-            steppe::ComputeBackend& seam_be = *gpu_res.gpus.at(0).backend;
-            const steppe::Precision emu40{steppe::Precision::Kind::EmulatedFp64, 40};
-            seam_be.set_solve_precision(emu40);
-            const steppe::QpAdmResult gpu_emu =
-                steppe::run_qpadm(dev_f2, model, opts, gpu_res);
-            seam_be.set_solve_precision(steppe::Precision{steppe::Precision::Kind::Fp64});
-            if (gpu_emu.status != steppe::Status::Ok) {
-                std::printf("  [INFO] promoted-emulated run status != Ok (%d) — "
-                            "reported only, not a gate\n",
-                            static_cast<int>(gpu_emu.status));
-            } else {
-                report_delta("emu40 weight[CordedWare] vs golden", gpu_emu.weight.at(0), g_w0);
-                report_delta("emu40 weight[Turkey_N]   vs golden", gpu_emu.weight.at(1), g_w1);
-                report_delta("emu40 chisq               vs golden", gpu_emu.chisq,        g_chisq);
-                report_delta("emu40 se[CordedWare]      vs golden", gpu_emu.se.at(0),     g_se);
-                report_delta("emu40 se[Turkey_N]        vs golden", gpu_emu.se.at(1),     g_se);
-                report_delta("emu40 z[CordedWare]       vs golden", gpu_emu.z.at(0),      g_z0);
-                report_delta("emu40 z[Turkey_N]         vs golden", gpu_emu.z.at(1),      g_z1);
-                report_delta("emu40 p                   vs golden", gpu_emu.p,            g_p);
-                // and against the native GPU path (does promotion perturb the solve?)
-                report_delta("emu40 weight[0] vs native-GPU", gpu_emu.weight.at(0), gpu.weight.at(0));
-                report_delta("emu40 chisq     vs native-GPU", gpu_emu.chisq,        gpu.chisq);
-                std::printf("  [INFO] tier check (informational): weights/chisq within "
-                            "1e-6 of golden? %s ; se/z/p within 1e-3? %s\n",
-                            (rel_within(gpu_emu.weight.at(0), g_w0, 1e-6, 1e-12) &&
-                             rel_within(gpu_emu.weight.at(1), g_w1, 1e-6, 1e-12) &&
-                             rel_within(gpu_emu.chisq, g_chisq, 1e-6, 1e-12)) ? "YES" : "NO",
-                            (rel_within(gpu_emu.se.at(0), g_se, 1e-3, 1e-9) &&
-                             rel_within(gpu_emu.p, g_p, 1e-3, 1e-9)) ? "YES" : "NO");
+            // THOROUGH-only: this re-runs the FULL GPU fit a SECOND time (pure cost,
+            // zero assertions — forward S8 evidence, not an acceptance gate).
+            if (g_thorough) {
+                std::printf("\n-- [EXPLORATORY, NON-GATING] solves PROMOTED to "
+                            "EmulatedFp64{40} vs GOLDEN (ROADMAP §6 seam) --\n");
+                steppe::ComputeBackend& seam_be = *gpu_res.gpus.at(0).backend;
+                const steppe::Precision emu40{steppe::Precision::Kind::EmulatedFp64, 40};
+                seam_be.set_solve_precision(emu40);
+                const steppe::QpAdmResult gpu_emu =
+                    steppe::run_qpadm(dev_f2, model, opts, gpu_res);
+                seam_be.set_solve_precision(steppe::Precision{steppe::Precision::Kind::Fp64});
+                if (gpu_emu.status != steppe::Status::Ok) {
+                    std::printf("  [INFO] promoted-emulated run status != Ok (%d) — "
+                                "reported only, not a gate\n",
+                                static_cast<int>(gpu_emu.status));
+                } else {
+                    report_delta("emu40 weight[CordedWare] vs golden", gpu_emu.weight.at(0), g_w0);
+                    report_delta("emu40 weight[Turkey_N]   vs golden", gpu_emu.weight.at(1), g_w1);
+                    report_delta("emu40 chisq               vs golden", gpu_emu.chisq,        g_chisq);
+                    report_delta("emu40 se[CordedWare]      vs golden", gpu_emu.se.at(0),     g_se);
+                    report_delta("emu40 se[Turkey_N]        vs golden", gpu_emu.se.at(1),     g_se);
+                    report_delta("emu40 z[CordedWare]       vs golden", gpu_emu.z.at(0),      g_z0);
+                    report_delta("emu40 z[Turkey_N]         vs golden", gpu_emu.z.at(1),      g_z1);
+                    report_delta("emu40 p                   vs golden", gpu_emu.p,            g_p);
+                    // and against the native GPU path (does promotion perturb the solve?)
+                    report_delta("emu40 weight[0] vs native-GPU", gpu_emu.weight.at(0), gpu.weight.at(0));
+                    report_delta("emu40 chisq     vs native-GPU", gpu_emu.chisq,        gpu.chisq);
+                    std::printf("  [INFO] tier check (informational): weights/chisq within "
+                                "1e-6 of golden? %s ; se/z/p within 1e-3? %s\n",
+                                (rel_within(gpu_emu.weight.at(0), g_w0, 1e-6, 1e-12) &&
+                                 rel_within(gpu_emu.weight.at(1), g_w1, 1e-6, 1e-12) &&
+                                 rel_within(gpu_emu.chisq, g_chisq, 1e-6, 1e-12)) ? "YES" : "NO",
+                                (rel_within(gpu_emu.se.at(0), g_se, 1e-3, 1e-9) &&
+                                 rel_within(gpu_emu.p, g_p, 1e-3, 1e-9)) ? "YES" : "NO");
+                }
             }
 
             // =================================================================
@@ -872,13 +918,16 @@ int main(int argc, char** argv) {
 
             // GPU == CpuBackend ORACLE to 1e-9 (the localizer: any GPU rank-test
             // regression localizes against the native reference, not only the golden).
-            std::printf("-- GPU rank test vs CpuBackend ORACLE (diff localizer, 1e-9) --\n");
-            check_eq_int("gpu-vs-cpu f4rank", gpu.f4rank, res.f4rank);
-            check_close("gpu-vs-cpu rd[0].chisq", gpu.rankdrop_chisq.at(0), res.rankdrop_chisq.at(0), 0.0, 1e-9);
-            check_close("gpu-vs-cpu rd[1].chisq", gpu.rankdrop_chisq.at(1), res.rankdrop_chisq.at(1), 0.0, 1e-9);
-            check_close("gpu-vs-cpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), res.rankdrop_chisqdiff.at(0), 0.0, 1e-9);
-            check_close("gpu-vs-cpu pd[1].chisq", gpu.popdrop_chisq.at(1), res.popdrop_chisq.at(1), 0.0, 1e-9);
-            check_close("gpu-vs-cpu pd[2].chisq", gpu.popdrop_chisq.at(2), res.popdrop_chisq.at(2), 0.0, 1e-9);
+            // THOROUGH-only: reads the CpuBackend oracle `res` (Block A).
+            if (g_thorough) {
+                std::printf("-- GPU rank test vs CpuBackend ORACLE (diff localizer, 1e-9) --\n");
+                check_eq_int("gpu-vs-cpu f4rank", gpu.f4rank, res.f4rank);
+                check_close("gpu-vs-cpu rd[0].chisq", gpu.rankdrop_chisq.at(0), res.rankdrop_chisq.at(0), 0.0, 1e-9);
+                check_close("gpu-vs-cpu rd[1].chisq", gpu.rankdrop_chisq.at(1), res.rankdrop_chisq.at(1), 0.0, 1e-9);
+                check_close("gpu-vs-cpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), res.rankdrop_chisqdiff.at(0), 0.0, 1e-9);
+                check_close("gpu-vs-cpu pd[1].chisq", gpu.popdrop_chisq.at(1), res.popdrop_chisq.at(1), 0.0, 1e-9);
+                check_close("gpu-vs-cpu pd[2].chisq", gpu.popdrop_chisq.at(2), res.popdrop_chisq.at(2), 0.0, 1e-9);
+            }
 
             // DIRECT GPU rank_sweep (the dispatch report + assert the GPU backend ran it).
             std::printf("-- direct CudaBackend::rank_sweep (dispatch report, ON THE GPU) --\n");
@@ -901,7 +950,10 @@ int main(int argc, char** argv) {
                         "(nl=%d,nr=%d both<=32); rank_Q=%d\n",
                         grsw.svd_path, gsvd_name, gX2.nl, gX2.nr, grsw.rank_Q);
             check_eq_int("gpu svd_path (nl,nr<=32 ⇒ gesvdjBatched)", grsw.svd_path, 1);
-            check_eq_int("gpu-vs-cpu rank_Q", grsw.rank_Q, rsw_rank_Q_ref);
+            // THOROUGH-only: rsw_rank_Q_ref is the CpuBackend oracle rank_Q (Block A),
+            // 0 in FAST mode (gpu rank_Q is reported above either way).
+            if (g_thorough)
+                check_eq_int("gpu-vs-cpu rank_Q", grsw.rank_Q, rsw_rank_Q_ref);
         }
 
         // GPU X/Q localizers: call the CUDA backend's assemble_f4(DeviceF2Blocks) +

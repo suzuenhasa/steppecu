@@ -398,6 +398,22 @@ against [SPEC §13, §18]. **Nothing below is built.**
 GPU-free-testable [SPEC §2, §13]. The device path (M(fit-4)+) is diffed against this oracle at the
 `X`/`Q`/`w`/`χ²` seams [SPEC §12, §13].
 
+**Test policy (FAST/THOROUGH).** The routine `ctest` validates the GPU path against the AT2 goldens
+ONLY (the GPU is golden-validated; the AT2 golden is the source of truth). The CpuBackend is a
+redundant re-derivation + a no-GPU fallback + an on-demand diff localizer — NOT a routine acceptance
+gate. The CpuBackend oracle (`test_qpadm_parity` M(fit-1) block, `test_qpadm_rotation` §E) + the NRBIG
+GPU full LOO-SE + the synthetic at-scale throughput are gated behind `STEPPE_THOROUGH=1` (an env var
+read once at test start; chosen over a ctest label so plain `ctest` stays literally unchanged and the
+per-block split lives where it must — inside the single test `main()`). They also run automatically
+when no GPU is visible (`CUDA_VISIBLE_DEVICES=""`) — the parity Block A and the rotation §E gate on
+`g_thorough || gpu_count <= 0`, preserving the CI-without-GPU acceptance gate. No golden tolerance is
+weakened and the SE math is unchanged — the 9-pop GPU full-SE vs `golden_fit0` stays in the default and
+validates the SE math; NRBIG is validated in the default via a `JackknifePolicy::None`
+`run_qpadm_search` (`f4rank`/rankdrop/popdrop vs `golden_fit1`, the LOO SE skipped). Measured (box5090,
+RELEASE): default qpadm tests ≈ 0.7 s (`qpadm_parity`) + 3.5 s (`qpadm_rotation`); the THOROUGH run
+re-exercises the moved coverage (the CpuBackend oracle, the GPU-vs-CPU 1e-9 localizers, the NRBIG
+bit-identical SE/z anchor, the 2520-model at-scale sweep) and still passes.
+
 ---
 
 ## 3. THE FIRST-MILESTONE FROZEN CONTRACT — M(fit-1)
