@@ -101,5 +101,6 @@ Reclaim core dumps if the disk flooded: `ssh <alias> 'rm -f /var/lib/vastai_kaal
 | tier | CAPABLE (96 GB, P2P OK stock driver) | BUDGET/consumer (32 GB, P2P disabled) |
 | `can_access_peer` | **true** → P2P device-combine | **false** → host-staged combine |
 | runs | AT2 goldens · GDS · `ncu`/nsys re-profiling · deferred D2H pinning | the M5 single-GPU streamed sweep (P=2500=51.5s) · graceful-degrade · daily dev |
+| qpAdm fit / S8 rotation | multi-GPU viable (P2P avoids the host bounce) | **RUN SINGLE-GPU** — no P2P ⇒ f2 replication host-bounces (~3.8s/8.72GB, only ~1.21× @ 9086 real models); multi-GPU rotation deferred (`TODO(multigpu-host-bounce)`) |
 | P_max single-GPU | ~P=768+ in-core; full-autosome P=2500 via M5 streaming | in-core ~P=700; **full-autosome P=2500 completes via M5 streaming (peak ~26 GB)** |
 | gotchas | ephemeral (update alias) · nvcc PATH · $$$ | flaky net (detached runs) · slow CPU · nvcc PATH |
