@@ -130,12 +130,37 @@ namespace {
 /// One-time f2 REPLICATION broadcast (design §3.2): ensure every gpus[g] device has
 /// a resident f2. The input `f2` is resident on ONE device (f2.device_id). For each
 /// device that is NOT that one, materialize once to host (f2.to_host(), the existing
-/// opt-in D2H) and upload (upload_f2_blocks_to_device, the existing H2D). One host
-/// bounce, kB-MB scale, OFF the per-model critical path — NOT a per-model copy. The
-/// device that already holds `f2` reuses the input handle (no copy). The returned
-/// vector is indexed by g; replicas it owns are freed at scope exit (RAII). The
-/// returned pointers are borrowed: replicated[g] points either at &f2 (the resident
-/// device) or into `owned` (a fresh upload).
+/// opt-in D2H) and upload (upload_f2_blocks_to_device, the existing H2D). The device
+/// that already holds `f2` reuses the input handle (no copy). The returned vector is
+/// indexed by g; replicas it owns are freed at scope exit (RAII). The returned
+/// pointers are borrowed: replicated[g] points either at &f2 (the resident device)
+/// or into `owned` (a fresh upload).
+///
+/// ============================ TODO(multigpu-host-bounce) ============================
+/// KNOWN PROBLEM — multi-GPU rotation is bounce-capped on no-P2P cards. DEFERRED.
+/// The single-GPU path (run_qpadm_search G==1 fast path) is the SUPPORTED / recommended
+/// path for now; this G>=2 replication is CORRECT + deterministic (G1==G2 bit-identical)
+/// but throughput-suboptimal — do NOT rely on it for speed until the bounce is removed.
+///
+///   * The doc once said "kB-MB scale" — WRONG. MEASURED on REAL AADR (P=600,
+///     n_block=757): this replication is ~8.72 GB through host (2x D2H + 2x H2D),
+///     ~3.8 s COLD. At 9086 real models G2/G1 only reached 1.21x and never hit 1.5x
+///     in the swept range — the fixed host-bounce dominates until impractically large N.
+///   * ROOT CAUSE: consumer RTX 5090s have GPU<->GPU P2P disabled
+///     (caps.can_access_peer == false), so the device-resident cudaMemcpyPeer fast-path
+///     is unavailable and we fall back to the host-staged transport (upload_f2_blocks_
+///     to_device = to_host()+H2D). P2P-capable cards (e.g. RTX PRO 6000) avoid it.
+///   * DEEPER WART (the "weird orchestration"): the PRECOMPUTE shards SNP tiles across
+///     GPUs then COMBINES the partials down to ONE device; the rotation then
+///     re-broadcasts that single f2 back OUT to the other device here — a
+///     gather-then-scatter round-trip.
+///   * FIX TO ELIMINATE (not reduce): give the rotation a PER-DEVICE PRECOMPUTE path —
+///     each GPU builds its OWN full f2 directly from the genotype stream (zero
+///     cross-GPU transfer, ~2.6 s parallel, CHEAPER than the 3.8 s bounce, works on any
+///     hardware incl. no-P2P). Then no to_host(), no upload, no combine, no replicate.
+///     (Avoid the band-aid of merely pinning the staging: warm pinned DMA drops a
+///     *repeat* replica to ~320 ms, but a single rotation pays the COLD ~3.8 s once.)
+/// ===================================================================================
 struct F2Replication {
     std::vector<const device::DeviceF2Blocks*> per_device;  // borrowed, indexed by g
     std::vector<device::DeviceF2Blocks> owned;              // the fresh uploads (RAII)
@@ -203,10 +228,14 @@ std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
         return results;
     }
 
-    // ---- G >= 2: replicate f2 to every device (one-time, off critical path), shard
-    // the model list contiguously, fan out one jthread per device, each worker fits
-    // its sub-span WHOLLY on its device, writes its results into the pre-sized slots
-    // (race-free: distinct model_index slots per shard), rethrow the lowest-g fault.
+    // ---- G >= 2: replicate f2 to every device (one-time), shard the model list
+    // contiguously, fan out one jthread per device, each worker fits its sub-span
+    // WHOLLY on its device, writes its results into the pre-sized slots (race-free:
+    // distinct model_index slots per shard), rethrow the lowest-g fault.
+    // TODO(multigpu-host-bounce): replicate_f2 here is the ~3.8 s / 8.72 GB host bounce
+    // (no P2P on the 5090s) that caps multi-GPU at ~1.21x on real data — see the big
+    // TODO on replicate_f2 above. Multi-GPU is DEFERRED; prefer G==1 until the
+    // per-device-precompute fix lands.
     const F2Replication rep = replicate_f2(f2, resources);
     const std::vector<core::qpadm::ModelShard> shards =
         core::qpadm::plan_model_shards(n, G);

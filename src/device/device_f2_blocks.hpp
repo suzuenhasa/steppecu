@@ -82,6 +82,13 @@ public:
 /// still a DeviceF2Blocks (the host bounce is the cross-card assembly transport, NOT a
 /// forced output copy; documented limitation, architecture.md §11.4 no-peer tier).
 /// CUDA-FREE decl; defined in cuda/device_f2_blocks.cu. Bit-faithful (raw byte copy).
+///
+/// TODO(multigpu-host-bounce): this H2D, paired with the to_host() D2H, IS the
+/// rotation's cross-GPU replication cost — MEASURED ~8.72 GB / ~3.8 s cold on real
+/// AADR (P=600), which caps the multi-GPU rotation at ~1.21x (no 1.5x crossover in
+/// range). Root cause: no P2P on consumer 5090s. Multi-GPU is DEFERRED; the fix is a
+/// per-device precompute (each GPU builds its own f2, zero cross-GPU transfer) — see
+/// the full TODO on replicate_f2 in src/core/qpadm/model_search.cpp.
 [[nodiscard]] DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_id);
 
 }  // namespace steppe::device
