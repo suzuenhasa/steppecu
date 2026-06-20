@@ -477,11 +477,10 @@ public:
             }
         }
         // Fudge (OQ-4): Qf = Q; diag(Qf) += fudge * tr(Q); Qinv = inverse(Qf).
-        double tr = 0.0;
-        for (int k = 0; k < m; ++k) tr += out.Q[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(k)];
+        // The fudge-ridge idiom is single-sourced in ridge_diagonal ([7.4]); the
+        // trace + diagonal-add op order is byte-identical to the former inline copy.
         std::vector<double> Qf = out.Q;
-        for (int k = 0; k < m; ++k)
-            Qf[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(k)] += fudge * tr;
+        ridge_diagonal(Qf, m, fudge);
         const core::LinAlgStatus st = core::inverse(Qf, m, out.Qinv);
         out.status = st.ok ? Status::Ok : Status::NonSpdCovariance;
         return out;
@@ -779,64 +778,106 @@ private:
             }
     }
 
-    /// AT2 opt_A: A (nl×r) minimizing c(E)'·qinv·c(E), E = xmat - A·B, given B
-    /// (r×nr). Builds B2 = I_{nl} ⊗ B ((nl·r)×m), coeffs = B2·qinv·t(B2)
-    /// ((nl·r)×(nl·r)), rhs = c(t(xmat))·qinv·t(B2), ridge on the diagonal, solve,
-    /// reshape rowwise into A. All matrices column-major; m = nl·nr; the qinv index
-    /// and c(t(xmat)) use the row-major k = j + nr*i order.
-    static std::vector<double> opt_A(const std::vector<double>& B,
-                                     const std::vector<double>& xmat, int nl, int nr, int r,
-                                     const std::vector<double>& qinv, double fudge) {
+    /// Ridge the diagonal of an n×n column-major matrix IN PLACE: tr = Σ diag;
+    /// then diag(mat) += fudge·tr. The single source for the AT2 fudge-ridge idiom
+    /// (OQ-4) used by jackknife_cov (on Qf, dim m) and als_ridge_solve (on coeffs,
+    /// dim t). PARITY: the trace is a plain left-to-right `double` sum over the
+    /// diagonal and the per-diagonal add is `mat += fudge*tr` — byte-identical to
+    /// the three former inline copies, so the oracle stays bit-stable ([7.4]).
+    static void ridge_diagonal(std::vector<double>& mat, int n, double fudge) {
+        double tr = 0.0;
+        for (int k = 0; k < n; ++k)
+            tr += mat[static_cast<std::size_t>(k) + static_cast<std::size_t>(n) * static_cast<std::size_t>(k)];
+        for (int k = 0; k < n; ++k)
+            mat[static_cast<std::size_t>(k) + static_cast<std::size_t>(n) * static_cast<std::size_t>(k)] += fudge * tr;
+    }
+
+    /// xvec[k] = c(t(xmat))[k] = xmat(i,j) for k = i*nr + j (the AT2 row-major
+    /// flatten of t(xmat); m = nl·nr). The single source for the byte-identical
+    /// xvec build shared by opt_A/opt_B ([7.2]); xmat is nl×nr column-major.
+    [[nodiscard]] static std::vector<double> als_xvec(const std::vector<double>& xmat,
+                                                      int nl, int nr) {
         const int m = nl * nr;
-        const int t = nl * r;  // dim of A (vectorized)
-        // B2 is (nl·r) × m. AT2: B2 = diag(nl) %x% B, with R's c(t(xmat)) row-major
-        // (k = j + nr*i) convention. The (a, k) entry: a = i*r + p (block i of B),
-        // k = i'*nr + j ; B2[a,k] = (i==i') ? B[p,j] : 0.
-        // We compute coeffs = B2·qinv·t(B2) and rhs = xvecᵀ·qinv·t(B2) directly.
-        // First W = qinv·t(B2): m × t.  (t(B2) is m × t.)
-        const auto B2 = [&](int a, int k) -> double {
-            const int i = a / r, p = a % r;
-            const int ii = k / nr, j = k % nr;
-            return (i == ii) ? B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)]
-                             : 0.0;
-        };
-        // xvec[k] = c(t(xmat))[k] = xmat(i,j) for k = i*nr + j.
         std::vector<double> xvec(static_cast<std::size_t>(m));
         for (int i = 0; i < nl; ++i)
             for (int j = 0; j < nr; ++j)
                 xvec[static_cast<std::size_t>(i * nr + j)] =
                     xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)];
-        // W = qinv (m×m) · t(B2) (m×t)  → m×t
+        return xvec;
+    }
+
+    /// AT2 GLS-ridge least-squares CORE shared by opt_A and opt_B ([7.1]). Given the
+    /// vectorized linear operator `linop(k, a)` = the m×t Kronecker matrix L (k the
+    /// row-major SNP-pair index 0..m-1, a the vectorized-unknown index 0..t-1),
+    /// solves the ridged normal equations
+    ///   coeffs = Lᵀ·qinv·L  (t×t) ; rhs = xvecᵀ·qinv·L  (length t) ;
+    ///   diag(coeffs) += fudge·tr(coeffs) ;  solved = solve(coeffs, rhs)
+    /// and returns `solved` (length t; EMPTY on a singular solve). qinv is m×m
+    /// column-major; W = qinv·L (m×t) is formed once and reused for both coeffs and
+    /// rhs — the EXACT op order of the two former 58-line copies.
+    ///
+    /// PARITY (load-bearing, architecture.md §12/§13): the accumulation loops here
+    /// are byte-identical to the originals — W's inner sum is over `kc` (the qinv
+    /// column), coeffs' over `k`, rhs' over `k`, all plain left-to-right `double`
+    /// sums; the only per-caller change is the operator value `linop(k, a)`, pure
+    /// index arithmetic yielding the same `double`, so the multiply/add order — and
+    /// therefore the FP64 oracle — is bit-identical to opt_A/opt_B pre-extraction.
+    template <typename Linop>
+    [[nodiscard]] static std::vector<double> als_ridge_solve(
+        const Linop& linop, int m, int t, const std::vector<double>& xvec,
+        const std::vector<double>& qinv, double fudge) {
+        // W = qinv (m×m) · L (m×t) → m×t
         std::vector<double> W(static_cast<std::size_t>(m) * static_cast<std::size_t>(t), 0.0);
         for (int kr = 0; kr < m; ++kr)
             for (int a = 0; a < t; ++a) {
                 double acc = 0.0;
                 for (int kc = 0; kc < m; ++kc)
                     acc += qinv[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(kc)] *
-                           B2(a, kc);
+                           linop(kc, a);
                 W[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)] = acc;
             }
-        // coeffs = B2 (t×m) · W (m×t)  → t×t ; rhs[a] = Σ_k xvec[k]·W[k,a]
+        // coeffs = Lᵀ (t×m) · W (m×t) → t×t ; rhs[a] = Σ_k xvec[k]·W[k,a]
         std::vector<double> coeffs(static_cast<std::size_t>(t) * static_cast<std::size_t>(t), 0.0);
         std::vector<double> rhs(static_cast<std::size_t>(t), 0.0);
         for (int a = 0; a < t; ++a) {
             for (int c = 0; c < t; ++c) {
                 double acc = 0.0;
-                for (int k = 0; k < m; ++k) acc += B2(a, k) * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)];
+                for (int k = 0; k < m; ++k) acc += linop(k, a) * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)];
                 coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(c)] = acc;
             }
             double rr = 0.0;
             for (int k = 0; k < m; ++k) rr += xvec[static_cast<std::size_t>(k)] * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)];
             rhs[static_cast<std::size_t>(a)] = rr;
         }
-        double tr = 0.0;
-        for (int a = 0; a < t; ++a) tr += coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)];
-        for (int a = 0; a < t; ++a) coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)] += fudge * tr;
-        std::vector<double> A2;
-        const core::LinAlgStatus st = core::solve(coeffs, t, rhs, A2);
+        ridge_diagonal(coeffs, t, fudge);
+        std::vector<double> solved;
+        const core::LinAlgStatus st = core::solve(coeffs, t, rhs, solved);
+        if (!st.ok) return {};
+        return solved;
+    }
+
+    /// AT2 opt_A: A (nl×r) minimizing c(E)'·qinv·c(E), E = xmat - A·B, given B
+    /// (r×nr). The operator is B2 = I_{nl} ⊗ B ((nl·r)×m): with a = i*r + p (block i
+    /// of B) and k = i'*nr + j, B2[a,k] = (i==i') ? B[p,j] : 0. als_ridge_solve takes
+    /// L(k, a) = B2[a, k] (the canonical m×t form, args transposed vs B2), then we
+    /// reshape rowwise (A2[a], a = i*r + p ⇒ A(i,p)) into A. Column-major; m = nl·nr.
+    static std::vector<double> opt_A(const std::vector<double>& B,
+                                     const std::vector<double>& xmat, int nl, int nr, int r,
+                                     const std::vector<double>& qinv, double fudge) {
+        const int m = nl * nr;
+        const int t = nl * r;  // dim of A (vectorized)
+        // L(k, a) = B2[a, k] : a = i*r + p, k = i'*nr + j ⇒ (i==i') ? B[p,j] : 0.
+        const auto L = [&](int k, int a) -> double {
+            const int i = a / r, p = a % r;
+            const int ii = k / nr, j = k % nr;
+            return (i == ii) ? B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)]
+                             : 0.0;
+        };
+        const std::vector<double> xvec = als_xvec(xmat, nl, nr);
+        const std::vector<double> A2 = als_ridge_solve(L, m, t, xvec, qinv, fudge);
         // A = matrix(A2, nl, byrow=TRUE): A2[a], a = i*r + p ⇒ A(i,p). Column-major out.
         std::vector<double> A(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
-        if (st.ok)
+        if (!A2.empty())
             for (int i = 0; i < nl; ++i)
                 for (int p = 0; p < r; ++p)
                     A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)] =
@@ -845,57 +886,27 @@ private:
     }
 
     /// AT2 opt_B: B (r×nr) minimizing c(E)'·qinv·c(E), E = xmat - A·B, given A
-    /// (nl×r). Builds A2 = A ⊗ I_{nr} (m×(r·nr)), coeffs = t(A2)·qinv·A2, rhs =
-    /// c(t(xmat))·qinv·A2, ridge, solve, reshape into B (byrow over nr columns).
+    /// (nl×r). The operator is A2 = A ⊗ I_{nr} (m×(r·nr)): row k = i*nr + j, col
+    /// c = p*nr + jc, A2[k,c] = (j==jc) ? A[i,p] : 0 — already the canonical m×t
+    /// form, so als_ridge_solve takes L(k, c) = A2[k, c] directly, then we reshape
+    /// rowwise (B2[c], c = p*nr + j ⇒ B(p,j)) into B. Column-major; m = nl·nr.
     static std::vector<double> opt_B(const std::vector<double>& A,
                                      const std::vector<double>& xmat, int nl, int nr, int r,
                                      const std::vector<double>& qinv, double fudge) {
         const int m = nl * nr;
         const int t = r * nr;  // dim of B (vectorized)
-        // A2 is m × (r·nr). AT2: A2 = A %x% diag(nr). Row k = i*nr + j (row-major),
-        // col c = p*nr + jc. A2[k,c] = (j==jc) ? A[i,p] : 0.
-        const auto A2 = [&](int k, int c) -> double {
+        // L(k, c) = A2[k, c] : k = i*nr + j, c = p*nr + jc ⇒ (j==jc) ? A[i,p] : 0.
+        const auto L = [&](int k, int c) -> double {
             const int i = k / nr, j = k % nr;
             const int p = c / nr, jc = c % nr;
             return (j == jc) ? A[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(p)]
                              : 0.0;
         };
-        std::vector<double> xvec(static_cast<std::size_t>(m));
-        for (int i = 0; i < nl; ++i)
-            for (int j = 0; j < nr; ++j)
-                xvec[static_cast<std::size_t>(i * nr + j)] =
-                    xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)];
-        // W = qinv (m×m) · A2 (m×t) → m×t
-        std::vector<double> W(static_cast<std::size_t>(m) * static_cast<std::size_t>(t), 0.0);
-        for (int kr = 0; kr < m; ++kr)
-            for (int c = 0; c < t; ++c) {
-                double acc = 0.0;
-                for (int kc = 0; kc < m; ++kc)
-                    acc += qinv[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(kc)] *
-                           A2(kc, c);
-                W[static_cast<std::size_t>(kr) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)] = acc;
-            }
-        // coeffs = t(A2) (t×m) · W (m×t) → t×t ; rhs[c] = Σ_k xvec[k]·W[k,c]
-        std::vector<double> coeffs(static_cast<std::size_t>(t) * static_cast<std::size_t>(t), 0.0);
-        std::vector<double> rhs(static_cast<std::size_t>(t), 0.0);
-        for (int a = 0; a < t; ++a) {
-            for (int c = 0; c < t; ++c) {
-                double acc = 0.0;
-                for (int k = 0; k < m; ++k) acc += A2(k, a) * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(c)];
-                coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(c)] = acc;
-            }
-            double rr = 0.0;
-            for (int k = 0; k < m; ++k) rr += xvec[static_cast<std::size_t>(k)] * W[static_cast<std::size_t>(k) + static_cast<std::size_t>(m) * static_cast<std::size_t>(a)];
-            rhs[static_cast<std::size_t>(a)] = rr;
-        }
-        double tr = 0.0;
-        for (int a = 0; a < t; ++a) tr += coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)];
-        for (int a = 0; a < t; ++a) coeffs[static_cast<std::size_t>(a) + static_cast<std::size_t>(t) * static_cast<std::size_t>(a)] += fudge * tr;
-        std::vector<double> B2;
-        const core::LinAlgStatus st = core::solve(coeffs, t, rhs, B2);
+        const std::vector<double> xvec = als_xvec(xmat, nl, nr);
+        const std::vector<double> B2 = als_ridge_solve(L, m, t, xvec, qinv, fudge);
         // B = matrix(B2, ncol=nr, byrow=TRUE): B2[c], c = p*nr + j ⇒ B(p,j). Col-major out.
         std::vector<double> B(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
-        if (st.ok)
+        if (!B2.empty())
             for (int p = 0; p < r; ++p)
                 for (int j = 0; j < nr; ++j)
                     B[static_cast<std::size_t>(p) + static_cast<std::size_t>(r) * static_cast<std::size_t>(j)] =
