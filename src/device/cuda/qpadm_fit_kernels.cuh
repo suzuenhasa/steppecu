@@ -136,6 +136,55 @@ void launch_qpadm_loo_batched(const double* dLoo, const double* dQinv,
                               int nl, int nr, int r, double fudge, int als_iters,
                               int nb, double* dWmat, cudaStream_t stream);
 
+// ---------------------------------------------------------------------------------
+// LARGE-path kernels (the FROZEN CONTRACT §1/§2): models exceeding the bit-parity
+// small envelope (nl>5 || nr>10 || r>4, e.g. NRBIG nr=39). The per-model working set
+// moves OUT of per-thread LOCAL memory (which CUDA reserves for the device's max
+// resident-thread count ⇒ OOM at launch for big nr) into caller-provided VRAM
+// scratch (`dScratch`/`dIntScratch`). The SVD seed is NOT a kernel here — it is the
+// cuSOLVER `large_svd_V` on the host (cuda_backend.cu) followed by
+// `launch_qpadm_seed_from_V` (the cheap GEMM-shaped part of the seed). Same math /
+// same op order as the small templated kernels; native FP64. Single-model-per-launch
+// (grid=1) for THIS milestone; the `dScratch` offset layout is the S8 batching seam.
+// ---------------------------------------------------------------------------------
+
+/// Transpose the nl×nr COLUMN-MAJOR `dXmat` into the nr×nl COLUMN-MAJOR `dXt`
+/// (dXt[j + nr*i] = dXmat[i + nl*j]). One thread per element. Used to orient the
+/// matrix handed to cuSOLVER gesvd as rows>=cols (the §1.3 determinism rule): for the
+/// common large case nr>=nl, Xt is nr×nl (rows>=cols), and U(Xt) == V(Xmat). Native FP64.
+void launch_transpose_small(const double* dXmat, int nl, int nr,
+                            double* dXt, cudaStream_t stream);
+
+/// LARGE-path seed from the cuSOLVER right singular vectors V[:,0:r] (nr×r col-major
+/// in `dVout`, descending). Only the cheap GEMM-shaped part of `dev_seed_ab` AFTER the
+/// SVD: B[p,j] = V[j,p] (r×nr), A = xmat·t(B) (nl×r). No Vfull/W local arrays. Single
+/// thread (one model). Native FP64. Writes dA[nl*r], dB[r*nr] column-major.
+void launch_qpadm_seed_from_V(const double* dXmat, const double* dVout,
+                              int nl, int nr, int r,
+                              double* dA, double* dB, cudaStream_t stream);
+
+/// LARGE-path ALS opt_A/opt_B loop — same math as launch_qpadm_als but the per-model
+/// working set (xvec[m], Wm[m*t], coeffs[t*t], rhs[t], lu[t*t], y[t], piv[t], A2/B2[t])
+/// lives in caller-provided VRAM scratch (dScratch / dIntScratch), so arbitrary
+/// nl/nr/m/r fit. Single-thread kernel (one model). Native FP64. Seeds in dA/dB
+/// (filled by launch_qpadm_seed_from_V); overwrites them with the refined factors. On
+/// a singular ALS system the corresponding factor is left zero (CpuBackend parity).
+void launch_qpadm_als_large(const double* dXmat, const double* dQinv,
+                            int nl, int nr, int r, double fudge, int als_iters,
+                            double* dA, double* dB,
+                            double* dScratch, int* dIntScratch, cudaStream_t stream);
+
+/// LARGE-path weight solve + chisq — same math as launch_qpadm_weights_chisq with
+/// VRAM scratch (RHS[nl*nl], LHS[nl], wv[nl], lu[nl*nl], y[nl], piv[nl], e[m]). Sets
+/// d_status 0=Ok / 6=RankDeficient. For r==0 the trivial path (w=ones, chisq with empty
+/// A,B). Single-thread, native FP64.
+void launch_qpadm_weights_chisq_large(const double* dXmat, const double* dQinv,
+                                      const double* dA, const double* dB,
+                                      int nl, int nr, int r,
+                                      double* dW, double* dchisq, int* d_status,
+                                      double* dScratch, int* dIntScratch,
+                                      cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_QPADM_FIT_KERNELS_CUH

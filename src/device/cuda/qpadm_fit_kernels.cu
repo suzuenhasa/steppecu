@@ -44,18 +44,16 @@ constexpr int kQpMaxR  = 4;
 constexpr int kQpMaxM  = kQpMaxNl * kQpMaxNr;  // 50
 constexpr int kQpMaxT  = (kQpMaxNl > kQpMaxNr ? kQpMaxNl : kQpMaxNr) * kQpMaxR;  // max(nl,nr)*r = 40
 
-// NOTE (M(fit-2) nr>32 fallback): the on-device transliterated LA kernels CANNOT be
-// widened to nr=39. CUDA reserves a kernel's per-thread LOCAL memory for the device's
-// MAX resident-thread count (not just the threads launched), so even a 1-thread
-// kernel with a large per-thread frame (Wm[m*t] grows with nr) trips
-// cudaErrorMemoryAllocation at launch (measured on box5090: kQpBigNr=40 ⇒ OOM). So
-// the nr>32 GPU rank sweep is NOT served by these stacked-local kernels — it is the
-// documented cuSOLVER-routing PENDING seam (fit-engine.md §1.4 / the M(fit-2)
-// contract §5): the nr>32 fixture validates the SWEEP MATH on the CPU oracle, and the
-// CudaBackend::rank_sweep guards nr>32 (the host caller reports the SKIP +
-// gesvd-would-select dispatch). The properly-resident nr>32 path needs the kernels
-// rewritten to take VRAM scratch (a follow-on); within M(fit-2) the GATE is the
-// nr<=32 batched golden, which these small-bound kernels serve bit-exactly.
+// NOTE (the small-bound envelope): these stacked-LOCAL templated kernels serve ONLY
+// the bit-parity SMALL path (nl<=5, nr<=10, r<=4 — the 9-pop golden is far inside).
+// CUDA reserves a kernel's per-thread LOCAL memory for the device's MAX resident-
+// thread count, so a large per-thread frame (Wm[m*t] grows with nr) trips
+// cudaErrorMemoryAllocation at launch even single-threaded (measured on box5090:
+// kQpBigNr=40 ⇒ OOM). So a model exceeding the envelope (e.g. NRBIG nr=39) does NOT
+// run on these kernels — it runs on the LARGE path (the cuSOLVER SVD `large_svd_V`
+// in cuda_backend.cu + the VRAM-scratch `*_large` kernels at the bottom of this file,
+// the FROZEN CONTRACT §1/§2). CudaBackend dispatches on `model_fits_small_path`. The
+// nr>32 path is no longer a PENDING seam — it RUNS ON THE GPU (fit-engine.md §1.4).
 
 // --- Device small-dense LA (transliterating small_linalg.hpp, native FP64) --------
 // Single-thread helpers used inside the rank-test / ALS / weight / chisq / LOO
@@ -577,6 +575,236 @@ __global__ void weights_chisq_kernel(const double* __restrict__ dXmat,
     *d_status = 0;
 }
 
+// ---------------------------------------------------------------------------------
+// LARGE-path device helpers (the FROZEN CONTRACT §2.2): VRAM-scratch versions of
+// opt_A / opt_B / chisq / seed-from-V. SAME math + SAME op order as the templated
+// small kernels above, but every per-model working array is a `double*` into caller-
+// provided VRAM (so arbitrary nl/nr/m/r fit — no per-thread local frame to OOM at
+// launch). Single thread per model. Native FP64. The scratch layout (offsets the
+// launch wrapper precomputes) is documented at each call.
+// ---------------------------------------------------------------------------------
+
+/// opt_A (large) — core::opt_A (cpu_backend.cpp:652-709) with VRAM scratch. B (r×nr)
+/// in, A (nl×r) out. Scratch: xvec[m], Wm[m*t], coeffs[t*t], rhs[t], A2[t], lu[t*t],
+/// y[t]; ipiv[t] (int). t = nl*r. Same op order as dev_opt_A.
+__device__ inline void dev_opt_A_large(const double* B, const double* xmat,
+                                       int nl, int nr, int r, const double* qinv,
+                                       double fudge, double* Aout,
+                                       double* xvec, double* Wm, double* coeffs,
+                                       double* rhs, double* A2, double* lu, double* y,
+                                       int* ipiv) {
+    const int m = nl * nr;
+    const int t = nl * r;
+    for (int i = 0; i < nl; ++i)
+        for (int j = 0; j < nr; ++j)
+            xvec[i * nr + j] = xmat[i + nl * j];
+    auto B2 = [&](int a, int k) -> double {
+        const int i = a / r, p = a % r;
+        const int ii = k / nr, j = k % nr;
+        return (i == ii) ? B[p + r * j] : 0.0;
+    };
+    for (int kr = 0; kr < m; ++kr)
+        for (int a = 0; a < t; ++a) {
+            double acc = 0.0;
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(a, kc);
+            Wm[kr + m * a] = acc;
+        }
+    for (int a = 0; a < t; ++a) {
+        for (int c = 0; c < t; ++c) {
+            double acc = 0.0;
+            for (int k = 0; k < m; ++k) acc += B2(a, k) * Wm[k + m * c];
+            coeffs[a + t * c] = acc;
+        }
+        double rr = 0.0;
+        for (int k = 0; k < m; ++k) rr += xvec[k] * Wm[k + m * a];
+        rhs[a] = rr;
+    }
+    double tr = 0.0;
+    for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
+    for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
+    for (int i = 0; i < nl * r; ++i) Aout[i] = 0.0;
+    if (dev_solve(coeffs, t, rhs, A2, lu, ipiv, y)) {
+        for (int i = 0; i < nl; ++i)
+            for (int p = 0; p < r; ++p)
+                Aout[i + nl * p] = A2[i * r + p];
+    }
+}
+
+/// opt_B (large) — core::opt_B (cpu_backend.cpp:715-768) with VRAM scratch. A (nl×r)
+/// in, B (r×nr) out. Scratch as dev_opt_A_large; t = r*nr.
+__device__ inline void dev_opt_B_large(const double* A, const double* xmat,
+                                       int nl, int nr, int r, const double* qinv,
+                                       double fudge, double* Bout,
+                                       double* xvec, double* Wm, double* coeffs,
+                                       double* rhs, double* B2v, double* lu, double* y,
+                                       int* ipiv) {
+    const int m = nl * nr;
+    const int t = r * nr;
+    for (int i = 0; i < nl; ++i)
+        for (int j = 0; j < nr; ++j)
+            xvec[i * nr + j] = xmat[i + nl * j];
+    auto A2f = [&](int k, int c) -> double {
+        const int i = k / nr, j = k % nr;
+        const int p = c / nr, jc = c % nr;
+        return (j == jc) ? A[i + nl * p] : 0.0;
+    };
+    for (int kr = 0; kr < m; ++kr)
+        for (int c = 0; c < t; ++c) {
+            double acc = 0.0;
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, c);
+            Wm[kr + m * c] = acc;
+        }
+    for (int a = 0; a < t; ++a) {
+        for (int c = 0; c < t; ++c) {
+            double acc = 0.0;
+            for (int k = 0; k < m; ++k) acc += A2f(k, a) * Wm[k + m * c];
+            coeffs[a + t * c] = acc;
+        }
+        double rr = 0.0;
+        for (int k = 0; k < m; ++k) rr += xvec[k] * Wm[k + m * a];
+        rhs[a] = rr;
+    }
+    double tr = 0.0;
+    for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
+    for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
+    for (int i = 0; i < r * nr; ++i) Bout[i] = 0.0;
+    if (dev_solve(coeffs, t, rhs, B2v, lu, ipiv, y)) {
+        for (int p = 0; p < r; ++p)
+            for (int j = 0; j < nr; ++j)
+                Bout[p + r * j] = B2v[p * nr + j];
+    }
+}
+
+/// chisq (large) — core::chisq_of (cpu_backend.cpp:833-858) with VRAM scratch e[m].
+__device__ inline double dev_chisq_of_large(const double* xmat, const double* A,
+                                            const double* B, int nl, int nr, int r,
+                                            const double* qinv, double* e) {
+    const int m = nl * nr;
+    for (int i = 0; i < nl; ++i)
+        for (int j = 0; j < nr; ++j) {
+            double ab = 0.0;
+            for (int p = 0; p < r; ++p) ab += A[i + nl * p] * B[p + r * j];
+            e[i * nr + j] = xmat[i + nl * j] - ab;
+        }
+    double acc = 0.0;
+    for (int a = 0; a < m; ++a) {
+        double row = 0.0;
+        for (int b = 0; b < m; ++b) row += qinv[a + m * b] * e[b];
+        acc += e[a] * row;
+    }
+    return acc;
+}
+
+// --- LARGE-path transpose (nl×nr col-major xmat -> nr×nl col-major Xt) ------------
+__global__ void transpose_small_kernel(const double* __restrict__ dXmat,
+                                       int nl, int nr, double* __restrict__ dXt) {
+    const long total = static_cast<long>(nl) * static_cast<long>(nr);
+    for (long idx = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int i = static_cast<int>(idx % nl);   // xmat row    (0..nl-1)
+        const int j = static_cast<int>(idx / nl);   // xmat col    (0..nr-1)
+        dXt[j + static_cast<long>(nr) * i] = dXmat[i + static_cast<long>(nl) * j];
+    }
+}
+
+// --- LARGE-path seed from V[:,0:r] (single thread) -------------------------------
+// dVout is nr×r col-major (the leading r right singular vectors, descending). B = t(V):
+// B[p,j] = V[j,p]; A = xmat·t(B). No SVD here (cuSOLVER did it on the host).
+__global__ void seed_from_V_kernel(const double* __restrict__ dXmat,
+                                   const double* __restrict__ dVout,
+                                   int nl, int nr, int r,
+                                   double* __restrict__ dA, double* __restrict__ dB) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (r <= 0) return;
+    for (int p = 0; p < r; ++p)
+        for (int j = 0; j < nr; ++j)
+            dB[p + r * j] = dVout[j + static_cast<long>(nr) * p];
+    for (int i = 0; i < nl; ++i)
+        for (int p = 0; p < r; ++p) {
+            double acc = 0.0;
+            for (int j = 0; j < nr; ++j)
+                acc += dXmat[i + static_cast<long>(nl) * j] * dB[p + r * j];
+            dA[i + static_cast<long>(nl) * p] = acc;
+        }
+}
+
+// --- LARGE-path ALS opt_A/opt_B loop (single thread; VRAM scratch) ---------------
+// Scratch layout (dScratch, all double): t = max(nl,nr)*r is the wide upper bound for
+// opt_A's t=nl*r AND opt_B's t=r*nr (both ≤ max(nl,nr)*r), so one layout serves both.
+//   xvec[m] | Wm[m*t] | coeffs[t*t] | rhs[t] | A2/B2[t] | lu[t*t] | y[t]
+// dIntScratch: ipiv[t].
+__global__ void als_large_kernel(const double* __restrict__ dXmat,
+                                 const double* __restrict__ dQinv,
+                                 int nl, int nr, int r, double fudge, int als_iters,
+                                 double* __restrict__ dA, double* __restrict__ dB,
+                                 double* __restrict__ dScratch,
+                                 int* __restrict__ dIntScratch) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (r <= 0) return;
+    const int m = nl * nr;
+    const int t = (nl > nr ? nl : nr) * r;  // wide bound covering nl*r and r*nr
+    double* xvec   = dScratch;
+    double* Wm     = xvec + m;
+    double* coeffs = Wm + static_cast<long>(m) * t;
+    double* rhs    = coeffs + static_cast<long>(t) * t;
+    double* tmp    = rhs + t;        // A2 / B2v
+    double* lu     = tmp + t;
+    double* y      = lu + static_cast<long>(t) * t;
+    int*    ipiv   = dIntScratch;
+    for (int it = 0; it < als_iters; ++it) {
+        dev_opt_A_large(dB, dXmat, nl, nr, r, dQinv, fudge, dA,
+                        xvec, Wm, coeffs, rhs, tmp, lu, y, ipiv);
+        dev_opt_B_large(dA, dXmat, nl, nr, r, dQinv, fudge, dB,
+                        xvec, Wm, coeffs, rhs, tmp, lu, y, ipiv);
+    }
+}
+
+// --- LARGE-path weight solve + chisq (single thread; VRAM scratch) ---------------
+// Scratch layout (dScratch): RHS[nl*nl] | wv[nl] | lu[nl*nl] | y[nl] | e[m].
+// dIntScratch: piv[nl].
+__global__ void weights_chisq_large_kernel(const double* __restrict__ dXmat,
+                                           const double* __restrict__ dQinv,
+                                           const double* __restrict__ dA,
+                                           const double* __restrict__ dB,
+                                           int nl, int nr, int r,
+                                           double* __restrict__ dW,
+                                           double* __restrict__ dchisq,
+                                           int* __restrict__ d_status,
+                                           double* __restrict__ dScratch,
+                                           int* __restrict__ dIntScratch) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    double* RHS = dScratch;
+    double* wv  = RHS + static_cast<long>(nl) * nl;
+    double* lu  = wv + nl;
+    double* y   = lu + static_cast<long>(nl) * nl;
+    double* e   = y + nl;
+    int*    piv = dIntScratch;
+    if (r == 0) {
+        for (int i = 0; i < nl; ++i) dW[i] = 1.0;
+        *dchisq = dev_chisq_of_large(dXmat, dA, dB, nl, nr, 0, dQinv, e);
+        *d_status = 0;
+        return;
+    }
+    const int rp = r + 1;
+    auto xm = [&](int i, int p) -> double { return (p < r) ? dA[i + nl * p] : 1.0; };
+    for (int i = 0; i < nl; ++i) {
+        for (int ip = 0; ip < nl; ++ip) {
+            double acc = 0.0;
+            for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
+            RHS[i + nl * ip] = acc;
+        }
+    }
+    // LHS = ones (xm(i,r) == 1); solve RHS·wv = 1.
+    double* LHS = e;  // reuse e as the nl-length RHS vector (e has m >= nl slots)
+    for (int i = 0; i < nl; ++i) LHS[i] = 1.0;
+    if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) { *d_status = 6; return; }
+    double sum = 0.0;
+    for (int i = 0; i < nl; ++i) sum += wv[i];
+    for (int i = 0; i < nl; ++i) dW[i] = wv[i] / sum;
+    *dchisq = dev_chisq_of_large(dXmat, dA, dB, nl, nr, r, dQinv, e);
+    *d_status = 0;
+}
+
 // --- S7 batched LOO re-fits (one thread per replicate block) ---------------------
 __global__ void loo_batched_kernel(const double* __restrict__ dLoo,
                                    const double* __restrict__ dQinv,
@@ -691,6 +919,44 @@ void launch_qpadm_loo_batched(const double* dLoo, const double* dQinv,
     const int grid = (nb + block - 1) / block;
     loo_batched_kernel<<<grid, block, 0, stream>>>(dLoo, dQinv, nl, nr, r, fudge,
                                                    als_iters, nb, dWmat);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_transpose_small(const double* dXmat, int nl, int nr,
+                            double* dXt, cudaStream_t stream) {
+    const long total = static_cast<long>(nl) * nr;
+    if (total <= 0) return;
+    const int block = 256;
+    const int grid = static_cast<int>((total + block - 1) / block);
+    transpose_small_kernel<<<grid, block, 0, stream>>>(dXmat, nl, nr, dXt);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_seed_from_V(const double* dXmat, const double* dVout,
+                              int nl, int nr, int r,
+                              double* dA, double* dB, cudaStream_t stream) {
+    seed_from_V_kernel<<<1, 1, 0, stream>>>(dXmat, dVout, nl, nr, r, dA, dB);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_als_large(const double* dXmat, const double* dQinv,
+                            int nl, int nr, int r, double fudge, int als_iters,
+                            double* dA, double* dB,
+                            double* dScratch, int* dIntScratch, cudaStream_t stream) {
+    als_large_kernel<<<1, 1, 0, stream>>>(dXmat, dQinv, nl, nr, r, fudge, als_iters,
+                                          dA, dB, dScratch, dIntScratch);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_weights_chisq_large(const double* dXmat, const double* dQinv,
+                                      const double* dA, const double* dB,
+                                      int nl, int nr, int r,
+                                      double* dW, double* dchisq, int* d_status,
+                                      double* dScratch, int* dIntScratch,
+                                      cudaStream_t stream) {
+    weights_chisq_large_kernel<<<1, 1, 0, stream>>>(dXmat, dQinv, dA, dB, nl, nr, r,
+                                                    dW, dchisq, d_status,
+                                                    dScratch, dIntScratch);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

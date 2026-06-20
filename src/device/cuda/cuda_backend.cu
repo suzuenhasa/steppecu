@@ -1467,6 +1467,159 @@ public:
         return out;
     }
 
+    // =====================================================================
+    // LARGE-path helpers (the FROZEN CONTRACT §1/§2): arbitrary nl/nr via cuSOLVER
+    // SVD + dynamic VRAM scratch. Used when a model exceeds the bit-parity small
+    // envelope (model_fits_small_path == false, e.g. NRBIG nr=39). The small path is
+    // UNTOUCHED (the 9-pop golden takes the on-device Jacobi). Native FP64 (§4: the
+    // SVD + Qinv quadratic form are ill-conditioned/oracle-grade; no emulation).
+    // =====================================================================
+
+    /// True iff the model fits the on-device Jacobi small-LA bit-parity envelope
+    /// (kQpMaxNl/Nr/R, qpadm_fit_kernels.cu). Inside ⇒ the untouched small path
+    /// (byte-for-byte 9-pop golden parity); outside ⇒ the cuSOLVER large path.
+    static bool model_fits_small_path(int nl, int nr, int r) {
+        return nl <= 5 && nr <= 10 && r <= 4;  // the kQpMax* bit-parity envelope
+    }
+
+    /// Compute the leading-r right singular vectors V[:,0:r] (nr×r, col-major) of the
+    /// nl×nr col-major `dXmat` via cuSOLVER, native FP64, deterministic, on stream_.
+    /// Writes dVout[nr*r] col-major (descending singular value order). The §1.3
+    /// orientation rule (cuSOLVER gesvd is deterministic only for rows>=cols):
+    ///   * common large case nr>=nl: hand Xt = transpose(xmat) (nr×nl, rows>=cols) to
+    ///     cuSOLVER; then U(Xt) == V(xmat) ⇒ read the leading r cols of U into dVout.
+    ///   * rare nl>nr: hand xmat itself (nl×nr, rows>=cols); V(xmat) = VT's leading r
+    ///     rows ⇒ transpose them into dVout.
+    /// Routine (§1.4): gesvdj (one-sided Jacobi) for both dims <=32; gesvd otherwise.
+    /// `dXt` is the nr×nl transpose scratch (only used in the nr>=nl branch). The
+    /// math-mode is native (no CusolverMathModeScope for emulation — §1.5/§4).
+    void large_svd_V(const double* dXmat, int nl, int nr, int r,
+                     double* dVout, double* dXt, cudaStream_t stream) {
+        if (r <= 0) return;
+        solver_.set_stream(stream);
+        DeviceBuffer<int> dInfo(1);
+        if (nr >= nl) {
+            // Xt = transpose(xmat): nr×nl, rows(=nr) >= cols(=nl). U(Xt) == V(xmat).
+            launch_transpose_small(dXmat, nl, nr, dXt, stream);
+            const int rows = nr, cols = nl;  // rows>=cols ✓
+            DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
+            DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));  // econ: rows×cols
+            if (nl <= 32 && nr <= 32) {
+                // gesvdj (one-sided Jacobi, single matrix), economy U (rows×cols).
+                gesvdjInfo_t params = nullptr;
+                CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
+                DeviceBuffer<double> dVt(static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols));
+                int lwork = 0;
+                CUSOLVER_CHECK(cusolverDnDgesvdj_bufferSize(
+                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
+                    dXt, rows, dS.data(), dU.data(), rows, dVt.data(), cols, &lwork, params));
+                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                CUSOLVER_CHECK(cusolverDnDgesvdj(
+                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
+                    dXt, rows, dS.data(), dU.data(), rows, dVt.data(), cols,
+                    dWork.data(), lwork, dInfo.data(), params));
+                CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(params));
+            } else {
+                // gesvd: jobu='S' (economy U), jobvt='N' (V of Xt unused). Descending.
+                int lwork = 0;
+                CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(solver_.get(), rows, cols, &lwork));
+                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                CUSOLVER_CHECK(cusolverDnDgesvd(
+                    solver_.get(), 'S', 'N', rows, cols, dXt, rows, dS.data(),
+                    dU.data(), rows, /*VT*/nullptr, cols, dWork.data(), lwork,
+                    /*rwork*/nullptr, dInfo.data()));
+            }
+            // dU is nr×cols (rows×cols) col-major; copy its leading r columns to dVout
+            // (nr×r col-major). Contiguous prefix since lda(dU)=rows=nr.
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                dVout, dU.data(),
+                static_cast<std::size_t>(nr) * static_cast<std::size_t>(r) * sizeof(double),
+                cudaMemcpyDeviceToDevice, stream));
+        } else {
+            // nl>nr: hand xmat itself (nl×nr, rows>=cols). V(xmat) = VT^T leading r rows.
+            // cuSOLVER gesvd/gesvdj OVERWRITE A, so copy dXmat into a non-const scratch
+            // (dA2, sized nl*nr) — the const dXmat must survive for the seed/ALS kernels.
+            const int rows = nl, cols = nr;  // rows>=cols ✓
+            DeviceBuffer<double> dA2(static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                dA2.data(), dXmat,
+                static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr) * sizeof(double),
+                cudaMemcpyDeviceToDevice, stream));
+            DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
+            DeviceBuffer<double> dVt(static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols));
+            if (nl <= 32 && nr <= 32) {
+                gesvdjInfo_t params = nullptr;
+                CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
+                DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
+                int lwork = 0;
+                CUSOLVER_CHECK(cusolverDnDgesvdj_bufferSize(
+                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
+                    dA2.data(), rows, dS.data(), dU.data(), rows, dVt.data(), cols, &lwork, params));
+                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                CUSOLVER_CHECK(cusolverDnDgesvdj(
+                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
+                    dA2.data(), rows, dS.data(), dU.data(), rows, dVt.data(), cols,
+                    dWork.data(), lwork, dInfo.data(), params));
+                CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(params));
+            } else {
+                int lwork = 0;
+                CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(solver_.get(), rows, cols, &lwork));
+                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                CUSOLVER_CHECK(cusolverDnDgesvd(
+                    solver_.get(), 'N', 'S', rows, cols, dA2.data(), rows, dS.data(),
+                    /*U*/nullptr, rows, dVt.data(), cols, dWork.data(), lwork,
+                    /*rwork*/nullptr, dInfo.data()));
+            }
+            // V[:,p] = VT[p,:] (VT is cols×cols col-major): dVout[j + nr*p] = dVt[p + cols*j].
+            launch_transpose_small(dVt.data(), cols, cols, dXt, stream);
+            // dXt now holds V (cols×cols col-major); copy its leading r columns to dVout.
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                dVout, dXt,
+                static_cast<std::size_t>(nr) * static_cast<std::size_t>(r) * sizeof(double),
+                cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+
+    /// Dynamic VRAM scratch sizes for the large-path ALS + weight/chisq (§2.3).
+    /// dbl: the union of the ALS layout (xvec[m] | Wm[m*t] | coeffs[t*t] | rhs[t] |
+    /// tmp[t] | lu[t*t] | y[t], t = max(nl,nr)*r) and the weight/chisq layout
+    /// (RHS[nl*nl] | wv[nl] | lu[nl*nl] | y[nl] | e[m]); take the max so ONE buffer
+    /// serves both kernels. int: max(t, nl) pivots.
+    static std::size_t large_dbl_scratch(int nl, int nr, int r) {
+        const std::size_t m = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        const std::size_t t = static_cast<std::size_t>(nl > nr ? nl : nr) *
+                              static_cast<std::size_t>(r > 0 ? r : 1);
+        const std::size_t als = m + m * t + t * t + t + t + t * t + t;
+        const std::size_t wc  = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nl)
+                              + static_cast<std::size_t>(nl)
+                              + static_cast<std::size_t>(nl) * static_cast<std::size_t>(nl)
+                              + static_cast<std::size_t>(nl) + m;
+        return als > wc ? als : wc;
+    }
+    static std::size_t large_int_scratch(int nl, int nr, int r) {
+        const std::size_t t = static_cast<std::size_t>(nl > nr ? nl : nr) *
+                              static_cast<std::size_t>(r > 0 ? r : 1);
+        return (t > static_cast<std::size_t>(nl) ? t : static_cast<std::size_t>(nl));
+    }
+
+    /// LARGE-path single-model fit: cuSOLVER SVD seed (r>0) → ALS opt_A/opt_B → the
+    /// constrained weight solve + chisq, all RESIDENT on stream_. The caller supplies
+    /// the device buffers (dXmat/dQinv/dA/dB/dW/dchisq/dStatus + the VRAM scratch
+    /// dVout/dXt/dScratch/dIntScratch). Mirrors the small-path seed→als→weights triple.
+    void large_fit_one(const double* dXmat, const double* dQinv, int nl, int nr, int r,
+                       double fudge, int als_iters, double* dA, double* dB, double* dW,
+                       double* dchisq, int* dStatus, double* dVout, double* dXt,
+                       double* dScratch, int* dIntScratch, cudaStream_t stream) {
+        if (r > 0) {
+            large_svd_V(dXmat, nl, nr, r, dVout, dXt, stream);
+            launch_qpadm_seed_from_V(dXmat, dVout, nl, nr, r, dA, dB, stream);
+            launch_qpadm_als_large(dXmat, dQinv, nl, nr, r, fudge, als_iters,
+                                   dA, dB, dScratch, dIntScratch, stream);
+        }
+        launch_qpadm_weights_chisq_large(dXmat, dQinv, dA, dB, nl, nr, r,
+                                         dW, dchisq, dStatus, dScratch, dIntScratch, stream);
+    }
+
     /// S5 — rank test / SVD seed + chisq on the GPU (the FROZEN CONTRACT §2c).
     /// xmat from x_total, on-device Jacobi SVD seed, chisq quadratic form. Native FP64.
     [[nodiscard]] GlsWeights rank_test(const F4Blocks& x,
@@ -1478,7 +1631,7 @@ public:
         GlsWeights gw;
         gw.r = r;
         const int nl = x.nl, nr = x.nr, m = nl * nr;
-        assert_qpadm_model_fits(nl, nr, r);
+        const bool small = model_fits_small_path(nl, nr, r);
         gw.A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
         gw.B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
         if (m <= 0) { gw.status = Status::Ok; return gw; }
@@ -1498,11 +1651,26 @@ public:
                                           static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
         launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
-        launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
-        // chisq with the SEED factors (rank_test is the seed; design §4 S5).
-        launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                   nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
-                                   stream_.get());
+        if (small) {
+            launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+            // chisq with the SEED factors (rank_test is the seed; design §4 S5).
+            launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                       nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                       stream_.get());
+        } else {  // LARGE path: cuSOLVER SVD seed + VRAM-scratch weight/chisq (no ALS).
+            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1));
+            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
+            DeviceBuffer<double> dScratch(large_dbl_scratch(nl, nr, r));
+            DeviceBuffer<int>    dIntScratch(large_int_scratch(nl, nr, r));
+            if (r > 0) {
+                large_svd_V(dXmat.data(), nl, nr, r, dVout.data(), dXt.data(), stream_.get());
+                launch_qpadm_seed_from_V(dXmat.data(), dVout.data(), nl, nr, r,
+                                         dA.data(), dB.data(), stream_.get());
+            }
+            launch_qpadm_weights_chisq_large(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                             nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                             dScratch.data(), dIntScratch.data(), stream_.get());
+        }
         double chisq = 0.0;
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -1530,13 +1698,15 @@ public:
     /// next-lower rank; the last row NA), f4rank (the smallest non-rejected rank), and
     /// rank_Q (numerical rank of Q via core::jacobi_svd — observability only, computed
     /// host-side bit-identically to the oracle; NOT on the rank-test math path). The
-    /// per-rank SVD is recomputed by seed_ab each r — the deterministic Jacobi is
-    /// bit-identical on the same input, so this is exact (the SVD-once kernel is an S8
-    /// follow-on). Native FP64 throughout (the §4 carve-out: SVD + the Qinv quadratic
-    /// form are ill-conditioned/cuSOLVER ⇒ native; precision is ignored here, exactly
-    /// like the oracle). DISPATCH report (SPEC §5:231): svd_path = 1 (gesvdjBatched
-    /// would-select) iff nl,nr<=32 else 2 (per-model gesvd); the EXECUTED SVD is the
-    /// on-device Jacobi at all sizes (the cuSOLVER routing is the PENDING seam).
+    /// per-rank SVD is recomputed each r. Native FP64 throughout (the §4 carve-out:
+    /// SVD + the Qinv quadratic form are ill-conditioned/cuSOLVER ⇒ native; precision
+    /// is ignored here, exactly like the oracle). DISPATCH (the FROZEN CONTRACT §3.2,
+    /// now the TRUE EXECUTED path): a model inside the bit-parity envelope (nl<=5,
+    /// nr<=10, r<=4) runs the on-device Jacobi small path UNCHANGED; a model outside it
+    /// (e.g. NRBIG nr=39) runs the cuSOLVER LARGE path (gesvdj for both dims<=32, gesvd
+    /// for >32) + VRAM scratch. svd_path REPORTS the executed routine: 1 = gesvdj /
+    /// Jacobi (both dims<=32); 2 = gesvd (>32). The test asserts svd_path==2 for NRBIG
+    /// and ==1 for the 9-pop. NRBIG now GATES on the GPU (no longer a PENDING seam).
     [[nodiscard]] RankSweep rank_sweep(const F4Blocks& x,
                                        const JackknifeCov& cov,
                                        double alpha,
@@ -1552,9 +1722,9 @@ public:
             rs.status = Status::RankDeficient;
             return rs;
         }
-        // The widest fit in the sweep is rank rmax — guard against it ONCE (the
-        // device small-LA scratch bounds; the host caller never round-trips the model).
-        assert_qpadm_model_fits(nl, nr, rmax);
+        // The widest fit in the sweep is rank rmax — it decides the path (small vs
+        // large) for the whole sweep (the bit-parity envelope is monotone in r).
+        const bool small = model_fits_small_path(nl, nr, rmax);
         if (m <= 0) { rs.status = Status::Ok; return rs; }
 
         // ---- upload x_total + Qinv ONCE; build dXmat ONCE (V/A/B reread per r) ----
@@ -1567,6 +1737,13 @@ public:
         DeviceBuffer<double> dW(static_cast<std::size_t>(nl > 0 ? nl : 1));
         DeviceBuffer<double> dchisq(1);
         DeviceBuffer<int> dStatus(1);
+        // LARGE-path VRAM scratch (sized for the widest rank rmax; reused every r).
+        // Allocated even on the small path (size 1) — trivial and keeps the code one
+        // shape; the large branch is the only consumer.
+        DeviceBuffer<double> dVout(small ? 1 : static_cast<std::size_t>(nr) * static_cast<std::size_t>(rmax > 0 ? rmax : 1));
+        DeviceBuffer<double> dXt(small ? 1 : static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
+        DeviceBuffer<double> dScratch(small ? 1 : large_dbl_scratch(nl, nr, rmax));
+        DeviceBuffer<int>    dIntScratch(small ? 1 : large_int_scratch(nl, nr, rmax));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotal.data(), x.x_total.data(),
                                           static_cast<std::size_t>(m) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
@@ -1584,14 +1761,21 @@ public:
         for (int r = 0; r <= rmax; ++r) {
             // seed → ALS (r>0) then the constrained weight solve + chisq — exactly
             // the M(fit-4) gls_weights device flow (reused, no new chisq math).
-            if (r > 0) {
-                launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
-                launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
-                                 opts.als_iterations, dA.data(), dB.data(), stream_.get());
+            if (small) {
+                if (r > 0) {
+                    launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+                    launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                                     opts.als_iterations, dA.data(), dB.data(), stream_.get());
+                }
+                launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                           nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                           stream_.get());
+            } else {  // LARGE path (cuSOLVER SVD seed + VRAM-scratch ALS + weight/chisq).
+                large_fit_one(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                              opts.als_iterations, dA.data(), dB.data(), dW.data(),
+                              dchisq.data(), dStatus.data(), dVout.data(), dXt.data(),
+                              dScratch.data(), dIntScratch.data(), stream_.get());
             }
-            launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                       nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
-                                       stream_.get());
             int status_i = 0;
             double chisq = 0.0;
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
@@ -1672,7 +1856,7 @@ public:
         GlsWeights gw;
         gw.r = r;
         const int nl = x.nl, nr = x.nr, m = nl * nr;
-        assert_qpadm_model_fits(nl, nr, r);
+        const bool small = model_fits_small_path(nl, nr, r);
         gw.A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
         gw.B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
         gw.w.assign(static_cast<std::size_t>(nl), 0.0);
@@ -1693,14 +1877,25 @@ public:
                                           static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
         launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
-        if (r > 0) {
-            launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
-            launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
-                             opts.als_iterations, dA.data(), dB.data(), stream_.get());
+        if (small) {
+            if (r > 0) {
+                launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+                launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                                 opts.als_iterations, dA.data(), dB.data(), stream_.get());
+            }
+            launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                       nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                       stream_.get());
+        } else {  // LARGE path (drives the NRBIG popdrop reduced fits).
+            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1));
+            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
+            DeviceBuffer<double> dScratch(large_dbl_scratch(nl, nr, r));
+            DeviceBuffer<int>    dIntScratch(large_int_scratch(nl, nr, r));
+            large_fit_one(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                          opts.als_iterations, dA.data(), dB.data(), dW.data(),
+                          dchisq.data(), dStatus.data(), dVout.data(), dXt.data(),
+                          dScratch.data(), dIntScratch.data(), stream_.get());
         }
-        launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                   nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
-                                   stream_.get());
         int status_i = 0;
         double chisq = 0.0;
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
@@ -1737,7 +1932,7 @@ public:
         (void)precision;
         guard_device();
         const int nl = x.nl, nr = x.nr, m = nl * nr, nb = x.n_block;
-        assert_qpadm_model_fits(nl, nr, r);
+        const bool small = model_fits_small_path(nl, nr, r);
         std::vector<double> wmat(static_cast<std::size_t>(nb < 0 ? 0 : nb) *
                                  static_cast<std::size_t>(nl), 0.0);
         if (m <= 0 || nb <= 0 || nl <= 0) return wmat;
@@ -1751,8 +1946,50 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
                                           static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        launch_qpadm_loo_batched(dLoo.data(), dQinv.data(), nl, nr, r, opts.fudge,
-                                 opts.als_iterations, nb, dWmat.data(), stream_.get());
+        if (small) {
+            launch_qpadm_loo_batched(dLoo.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                                     opts.als_iterations, nb, dWmat.data(), stream_.get());
+        } else {
+            // LARGE-path LOO (the FROZEN CONTRACT §3.4): the many-thread batched LOO
+            // kernel is small-bound only, so for the large model run the per-block fit
+            // SERIALLY over blocks on stream_, reusing the large-path SVD seed + ALS +
+            // weight kernels (correct + RESIDENT, not batched-fast). This is the S8
+            // batched-large follow-on seam (each block's xmat is one slice of dLoo). The
+            // NRBIG se/z are NOT in the contract gate (§5.4) — this keeps NRBIG fully on
+            // the GPU and the weights correct, without a new many-thread large kernel.
+            DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
+            DeviceBuffer<double> dA(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1));
+            DeviceBuffer<double> dB(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr));
+            DeviceBuffer<double> dW(static_cast<std::size_t>(nl));
+            DeviceBuffer<double> dchisq(1);
+            DeviceBuffer<int>    dStatus(1);
+            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1));
+            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
+            DeviceBuffer<double> dScratch(large_dbl_scratch(nl, nr, r));
+            DeviceBuffer<int>    dIntScratch(large_int_scratch(nl, nr, r));
+            for (int b = 0; b < nb; ++b) {
+                // xmat_b from x_loo[:,:,b] (row-major k=j+nr*i ⇒ xmat(i,j) at i+nl*j) —
+                // the same reshape the batched kernel does; here a tiny single-thread copy.
+                launch_qpadm_xmat_from_rowmajor(
+                    dLoo.data() + static_cast<std::size_t>(m) * static_cast<std::size_t>(b),
+                    nl, nr, dXmat.data(), stream_.get());
+                large_fit_one(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                              opts.als_iterations, dA.data(), dB.data(), dW.data(),
+                              dchisq.data(), dStatus.data(), dVout.data(), dXt.data(),
+                              dScratch.data(), dIntScratch.data(), stream_.get());
+                // Copy this block's weights into row b (status!=0 ⇒ leave zeros).
+                int status_i = 0;
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
+                                                  cudaMemcpyDeviceToHost, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+                if (status_i == 0) {
+                    STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                        dWmat.data() + static_cast<std::size_t>(b) * static_cast<std::size_t>(nl),
+                        dW.data(), static_cast<std::size_t>(nl) * sizeof(double),
+                        cudaMemcpyDeviceToDevice, stream_.get()));
+                }
+            }
+        }
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(wmat.data(), dWmat.data(),
                                           static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -1761,29 +1998,6 @@ public:
     }
 
 private:
-    /// Fail-fast if a qpAdm model exceeds the on-device small-LA scratch bounds
-    /// (qpadm_fit_kernels.cu kQpMaxNl/kQpMaxNr/kQpMaxR). The golden is nl=2, nr=5,
-    /// r=1 — far inside; a larger model would index past the fixed local arrays in the
-    /// device LA kernels (silent corruption), so reject it here (architecture.md §2
-    /// fail-fast). These bounds cover realistic qpAdm models; a future batched-search
-    /// milestone can widen them by moving the kernel scratch to VRAM. Used by
-    /// rank_test, rank_sweep (M(fit-2)), gls_weights, and the batched LOO. NOTE
-    /// (M(fit-2)): nr>32 CANNOT be served by these stacked-local kernels (CUDA reserves
-    /// per-thread local for the device max resident-thread count ⇒ a big nr trips OOM
-    /// at launch even single-threaded; measured on box5090). So nr>32 is the documented
-    /// cuSOLVER-routing PENDING seam — rank_sweep guards it and the host reports the
-    /// SKIP; the nr>32 SWEEP MATH is validated on the CpuBackend oracle.
-    static void assert_qpadm_model_fits(int nl, int nr, int r) {
-        constexpr int kMaxNl = 5, kMaxNr = 10, kMaxR = 4;
-        if (nl > kMaxNl || nr > kMaxNr || r > kMaxR) {
-            throw std::runtime_error(
-                "CudaBackend qpAdm fit: model exceeds the on-device small-LA scratch "
-                "bounds (nl<=5, nr<=10, r<=4); the nr>32 path is the cuSOLVER-routing "
-                "PENDING seam (validated on the CpuBackend oracle) — widen kQpMax* in "
-                "qpadm_fit_kernels.cu (VRAM scratch) to serve it on the GPU");
-        }
-    }
-
     /// Make THIS backend's device current at every compute entry (architecture.md
     /// §11.4 SPMG: `cudaSetDevice` to switch per device). One backend is bound to one
     /// device (backend.hpp per-device-instance contract); a single host process may

@@ -335,11 +335,12 @@ int main(int argc, char** argv) {
         check_eq_int("svd_path (nl,nr<=32 ⇒ gesvdjBatched)", rsw.svd_path, 1);
     }
 
-    // ---- nr>32 FALLBACK fixture (gesvd dispatch): the CpuBackend rank test on a
+    // ---- nr>32 fixture (cuSOLVER gesvd LARGE path): the rank test on a
     //      REAL-AADR >32-right model (golden_fit1_NRBIG.json: nl=2, nr=39, P=43).
-    //      Validates the SWEEP MATH (chisq/dof/p/rankdrop/popdrop) at a large model;
-    //      the EXECUTED SVD is the on-device Jacobi at all sizes (the cuSOLVER gesvd
-    //      routing is the PENDING seam) — svd_path REPORTS gesvd would-select (2).
+    //      Validates the SWEEP MATH (chisq/dof/p/rankdrop/popdrop) at a large model on
+    //      the CpuBackend ORACLE, then RUNS THE SAME MODEL ON THE GPU (the LARGE path:
+    //      cuSOLVER gesvd SVD seed + VRAM-scratch ALS/weight/chisq, f2 RESIDENT) and
+    //      GATES the GPU result against the golden — svd_path 2 = gesvd EXECUTED.
     //      The fixture is optional (skip cleanly if absent).
     //
     //      The golden rankdrop/popdrop (golden_fit1_NRBIG.json) was computed by AT2
@@ -421,22 +422,19 @@ int main(int argc, char** argv) {
                 const steppe::JackknifeCov covb =
                     beb.jackknife_cov(Xb, std::span<const int>(f2big.block_sizes), 1e-4, precb);
                 const steppe::RankSweep rswb = beb.rank_sweep(Xb, covb, opts.rank_alpha, opts, precb);
-                std::printf("  [INFO] nr>32 svd_path=%d (gesvd would-select; nl=%d nr=%d); "
-                            "executed=on-device Jacobi (cuSOLVER routing PENDING)\n",
+                std::printf("  [INFO] nr>32 svd_path=%d (gesvd; nl=%d nr=%d); CpuBackend "
+                            "oracle (on-device Jacobi); GPU large path checked below\n",
                             rswb.svd_path, Xb.nl, Xb.nr);
                 check_eq_int("nr>32 svd_path (nr>32 ⇒ gesvd)", rswb.svd_path, 2);
 
-                // ---- nr>32 ON THE GPU (the gesvd-FALLBACK deliverable status) ----
-                // The on-device transliterated rank-sweep kernels CANNOT serve nr=39:
-                // CUDA reserves a kernel's per-thread LOCAL memory for the device's max
-                // resident-thread count, so a big-nr per-thread frame trips
-                // cudaErrorMemoryAllocation at launch even single-threaded (measured on
-                // box5090). So the nr>32 GPU rank sweep is the documented cuSOLVER-
-                // routing PENDING seam (M(fit-2) contract §5): the GPU rank_sweep GUARDS
-                // nr>32 and THROWS the small-LA-bounds message; we catch it and report
-                // the SKIP + the gesvd-would-select dispatch. The nr>32 SWEEP MATH is
-                // GATED on the CpuBackend oracle above (chisq/dof/rankdrop/popdrop all
-                // PASS); the GPU validates the nr<=32 batched golden bit-exactly. ------
+                // ---- nr>32 RUNNING ON THE GPU (the FROZEN CONTRACT §5.1 GATE) ----
+                // The LARGE path (cuSOLVER gesvd SVD seed + VRAM-scratch ALS/weight/
+                // chisq, the FROZEN CONTRACT §1/§2) now SERVES nr=39 RESIDENT on the GPU.
+                // The GPU rank_sweep no longer throws — it EXECUTES and GATES against the
+                // AT2 golden (dof 38/78, chisq 52.7043/190.836 rtol 1e-6, dofdiff 40,
+                // chisqdiff) + a GPU-vs-CPU-oracle localizer. f2 is RESIDENT (devbig in
+                // VRAM); the gather/jackknife/SVD/ALS run on the device — no host round-
+                // trip of the big tensor. -------------------------------------------
                 int gpu_count_big = 0;
                 try { gpu_count_big = steppe::device::visible_device_count(); }
                 catch (...) { gpu_count_big = 0; }
@@ -453,27 +451,76 @@ int main(int argc, char** argv) {
                     f2big_up.vpair.assign(f2big.f2.size(), 0.0);
                     steppe::device::DeviceF2Blocks devbig =
                         steppe::device::upload_f2_blocks_to_device(f2big_up, 0);
+                    // Assert f2 RESIDENT in VRAM (the binding requirement: no host round-trip).
+                    check_eq_int("nr>32 f2 resident (f2_device != null)",
+                                 devbig.f2_device() != nullptr ? 1 : 0, 1);
+                    check_eq_int("nr>32 f2 resident !empty", devbig.empty() ? 0 : 1, 1);
                     steppe::ComputeBackend& gbeb = *gpu_big.gpus.at(0).backend;
                     const steppe::F4Blocks gXb =
                         gbeb.assemble_f4(devbig, std::span<const int>(lidxb),
                                          std::span<const int>(ridxb), precb);
                     const steppe::JackknifeCov gcovb =
                         gbeb.jackknife_cov(gXb, std::span<const int>(f2big.block_sizes), 1e-4, precb);
-                    try {
-                        const steppe::RankSweep grswb =
-                            gbeb.rank_sweep(gXb, gcovb, opts.rank_alpha, opts, precb);
-                        // If the GPU ever serves nr>32 (VRAM-scratch kernels), GATE it.
-                        check_eq_int("nr>32 GPU f4rank", grswb.f4rank, b_f4rank);
-                        check_close("nr>32 GPU rd[0].chisq", grswb.rd_chisq.at(0), brd_chisq[0], 1e-6, 1e-9);
-                        check_close("nr>32 GPU rd[1].chisq", grswb.rd_chisq.at(1), brd_chisq[1], 1e-6, 1e-9);
-                        std::printf("  [INFO] nr>32 GPU sweep EXECUTED (VRAM-scratch path live); "
-                                    "svd_path=%d\n", grswb.svd_path);
-                    } catch (const std::exception& e) {
-                        std::printf("  [SKIP] nr>32 GPU sweep PENDING (on-device kernel bounds): "
-                                    "%s\n", e.what());
-                        std::printf("  [INFO] nr>32 GPU dispatch = gesvd would-select (nl=%d nr=%d); "
-                                    "SWEEP MATH gated on the CpuBackend oracle above\n",
-                                    gXb.nl, gXb.nr);
+                    const steppe::RankSweep grswb =
+                        gbeb.rank_sweep(gXb, gcovb, opts.rank_alpha, opts, precb);
+                    std::printf("  [INFO] nr>32 GPU rank_sweep EXECUTED (cuSOLVER gesvd "
+                                "large path, f2 RESIDENT); svd_path=%d (2=gesvd)\n",
+                                grswb.svd_path);
+                    check_eq_int("nr>32 GPU f4rank", grswb.f4rank, b_f4rank);              // 1
+                    check_eq_int("nr>32 GPU svd_path (gesvd executed)", grswb.svd_path, 2);
+                    check_eq_int("nr>32 GPU rd rows", static_cast<int>(grswb.rd_chisq.size()), 2);
+                    check_close("nr>32 GPU rd[0].chisq", grswb.rd_chisq.at(0), brd_chisq[0], 1e-6, 1e-9);  // 52.7043
+                    check_close("nr>32 GPU rd[1].chisq", grswb.rd_chisq.at(1), brd_chisq[1], 1e-6, 1e-9);  // 190.836
+                    check_eq_int("nr>32 GPU rd[0].dof", grswb.rd_dof.at(0), brd_dof[0]);   // 38
+                    check_eq_int("nr>32 GPU rd[1].dof", grswb.rd_dof.at(1), brd_dof[1]);   // 78
+                    check_eq_int("nr>32 GPU rd[0].dofdiff", grswb.rd_dofdiff.at(0), brd_dofdiff);  // 40
+                    check_close("nr>32 GPU rd[0].chisqdiff", grswb.rd_chisqdiff.at(0), brd_chisqdiff, 1e-6, 1e-9);
+                    // GPU-vs-CPU-oracle localizer (cuSOLVER SVD vs core::jacobi_svd seed,
+                    // then identical ALS): bit-close in practice. The golden tier (1e-6)
+                    // above is non-negotiable; this localizer is 1e-7 (the §5.1 relaxation
+                    // allowed ONLY for the SVD-seed delta, NOT the golden tier).
+                    check_close("nr>32 GPU-vs-CPU rd[0].chisq", grswb.rd_chisq.at(0), rswb.rd_chisq.at(0), 0.0, 1e-7);
+                    check_close("nr>32 GPU-vs-CPU rd[1].chisq", grswb.rd_chisq.at(1), rswb.rd_chisq.at(1), 0.0, 1e-7);
+
+                    // ---- nr>32 popdrop ON THE GPU (the FROZEN CONTRACT §5.2) ----
+                    // Run the full run_qpadm on the RESIDENT devbig (mirrors the 9-pop GPU
+                    // block); this drives gls_weights' large path for the reduced popdrop
+                    // models. Assert the popdrop 00/01/10 rows match the golden ON THE GPU.
+                    const steppe::QpAdmResult gpu_big_res =
+                        steppe::run_qpadm(devbig, big, opts, gpu_big);
+                    if (gpu_big_res.status != steppe::Status::Ok) {
+                        std::printf("  [FAIL] nr>32 GPU run_qpadm status != Ok (%d)\n",
+                                    static_cast<int>(gpu_big_res.status));
+                        ++g_failures;
+                    } else {
+                        std::printf("  [INFO] nr>32 GPU run_qpadm EXECUTED (f2 RESIDENT); "
+                                    "f4rank=%d\n", gpu_big_res.f4rank);
+                        check_eq_int("nr>32 GPU rankdrop f4rank", gpu_big_res.f4rank, b_f4rank);
+                        check_eq_int("nr>32 GPU rankdrop rows",
+                                     static_cast<int>(gpu_big_res.rankdrop_f4rank.size()), 2);
+                        for (int k = 0; k < 2; ++k) {
+                            char nm[56];
+                            std::snprintf(nm, sizeof(nm), "nr>32 GPU rd[%d].dof", k);
+                            check_eq_int(nm, gpu_big_res.rankdrop_dof.at(static_cast<std::size_t>(k)), brd_dof[k]);
+                            std::snprintf(nm, sizeof(nm), "nr>32 GPU rd[%d].chisq", k);
+                            check_close(nm, gpu_big_res.rankdrop_chisq.at(static_cast<std::size_t>(k)), brd_chisq[k], 1e-6, 1e-9);
+                        }
+                        std::printf("-- nr>32 GPU popdrop vs GOLDEN (rows 00/01/10) [ran ON THE GPU] --\n");
+                        check_eq_int("nr>32 GPU popdrop rows",
+                                     static_cast<int>(gpu_big_res.popdrop_pat.size()), 3);
+                        for (int k = 0; k < 3 && static_cast<std::size_t>(k) < gpu_big_res.popdrop_pat.size(); ++k) {
+                            char nm[56];
+                            const bool pat_ok = (gpu_big_res.popdrop_pat.at(static_cast<std::size_t>(k)) == bpd_pat[k]);
+                            std::printf("  [%s] nr>32 GPU pd[%d].pat got=%s want=%s\n", pat_ok ? "PASS" : "FAIL",
+                                        k, gpu_big_res.popdrop_pat.at(static_cast<std::size_t>(k)).c_str(), bpd_pat[k]);
+                            if (!pat_ok) ++g_failures;
+                            std::snprintf(nm, sizeof(nm), "nr>32 GPU pd[%d].dof", k);
+                            check_eq_int(nm, gpu_big_res.popdrop_dof.at(static_cast<std::size_t>(k)), bpd_dof[k]);
+                            std::snprintf(nm, sizeof(nm), "nr>32 GPU pd[%d].f4rank", k);
+                            check_eq_int(nm, gpu_big_res.popdrop_f4rank.at(static_cast<std::size_t>(k)), bpd_f4rank[k]);
+                            std::snprintf(nm, sizeof(nm), "nr>32 GPU pd[%d].chisq", k);
+                            check_close(nm, gpu_big_res.popdrop_chisq.at(static_cast<std::size_t>(k)), bpd_chisq[k], 1e-6, 1e-9);
+                        }
                     }
                 }
             }
