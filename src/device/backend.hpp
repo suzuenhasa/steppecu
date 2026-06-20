@@ -305,6 +305,33 @@ struct BackendCapabilities {
     bool emulated_fp64_honorable = false;
 };
 
+class ComputeBackend;  // fwd for the fit_models_batched default delegate below
+
+namespace core::qpadm {
+/// The CUDA-FREE per-model default body of ComputeBackend::fit_models_batched
+/// (defined in steppe_core, src/core/qpadm/model_search.cpp). It drives each model's
+/// assemble_f4 → run_impl chain through `be`'s OWN device virtuals — so the device
+/// backend runs resident batched GPU kernels and the CPU backend runs the scalar
+/// oracle, with NO per-backend override. Declared here so the inline base virtual
+/// can delegate to it without backend.hpp depending on the core qpadm headers
+/// (the symbol is pulled in ONLY when the rotation is actually used).
+[[nodiscard]] std::vector<QpAdmResult> fit_models_batched_default(
+    ComputeBackend& be, const steppe::device::DeviceF2Blocks& f2,
+    std::span<const QpAdmModel> models, const QpAdmOptions& opts);
+
+/// CUDA-FREE mirror of CudaBackend::model_fits_small_path (the kQpMax* bit-parity
+/// envelope: nl<=5, nr<=10, r<=4). The S8 orchestrator (run_qpadm_search, core)
+/// partitions the model list by this predicate: small-path models route to the
+/// device-BATCHED virtual fit_models_batched (the cuSOLVER-batched rotation
+/// primitive); the large/>32 tail routes to the per-model fit_models_batched_default
+/// (one device dispatch per model is correct for the tail, design §5). It is the SAME
+/// envelope the CudaBackend dispatches on, declared here so the host orchestrator can
+/// bucket WITHOUT naming the CUDA backend. nl = left.size(), nr = right.size()-1,
+/// r = (opts.rank<0 ? nl-1 : opts.rank).
+[[nodiscard]] bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts);
+
+}  // namespace core::qpadm
+
 /// Abstract compute backend. One interface, two implementations (CUDA, CPU
 /// reference). All device operations route through here; `core` never issues a
 /// GEMM/SVD/Cholesky itself (architecture.md §2, §8). Move-only ownership of
@@ -655,6 +682,49 @@ public:
             "ComputeBackend::gls_weights_loo_batched: not implemented by this backend");
     }
 
+    /// S8 — BATCHED qpAdm fit over MANY same-shape models against ONE device-resident
+    /// f2 (the rotation primitive; design §1.6 / the M(fit-6) FROZEN CONTRACT §2.2).
+    /// Fits all `models` (a bucket of identical (nl,nr,r)) WHOLLY on this backend's
+    /// device in ONE batched dispatch — NOT a per-model host loop: the S3 f4 gather +
+    /// loo/total/xtau over a (k,b,MODEL) grid reading the resident f2 with per-model
+    /// index arenas; the covariance Q via cublasDgemmStridedBatched (engages
+    /// `precision`); the SPD inverse Qinv via cuSOLVER potrfBatched + potrsBatched
+    /// across models; the rank sweep + weight solve + chisq + LOO-SE + popdrop via a
+    /// MODEL-batched kernel (one thread per model, the proven loo_batched_kernel lift).
+    /// `run_qpadm_search` calls THIS for the SMALL-path bucket (the rotation common
+    /// case); the >32 / large tail it routes to fit_models_batched_default (one device
+    /// dispatch per model is correct for the tail). Each result's model_index ECHOES
+    /// models[i].model_index. Domain outcomes are per-result `status`
+    /// (RankDeficient/NonSpdCovariance), NEVER a throw — record-and-continue (a search of thousands must not abort on one
+    /// degenerate model). `precision` governs the matmul sub-steps (default
+    /// EmulatedFp64{40}); SVD/Qinv/chi^2 native by the §1.4 carve-out + the
+    /// set_solve_precision promotion seam.
+    ///
+    /// NON-PURE: the base provides a per-model DEFAULT (it delegates to
+    /// core::qpadm::fit_models_batched_default — assemble_f4 → run_impl per model
+    /// through THIS backend's own device virtuals). The CudaBackend OVERRIDES this with
+    /// the genuine model-BATCHED device path (the deliverable). The CpuBackend does NOT
+    /// override — it inherits the per-model default (a host loop is the CORRECT shape
+    /// for the parity oracle, design §2.3). The orchestrator run_qpadm_search shards
+    /// `models` across Resources::gpus and calls this once per device sub-span.
+    ///
+    /// The base body cannot name core::qpadm::fit_models_batched_default inline (that
+    /// would pull steppe_core into every TU that instantiates the vtable, incl. host-
+    /// only unit TUs), so it throws a SENTINEL; run_qpadm_search NEVER reaches it (it
+    /// dispatches small-path models to the override and large-path models to
+    /// fit_models_batched_default directly). The sentinel only fires if a future caller
+    /// invokes the virtual on a backend that did not override it.
+    [[nodiscard]] virtual std::vector<QpAdmResult> fit_models_batched(
+        const steppe::device::DeviceF2Blocks& f2,
+        std::span<const QpAdmModel> models,
+        const QpAdmOptions& opts,
+        const Precision& precision) {
+        (void)f2; (void)models; (void)opts; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::fit_models_batched: this backend has no batched override "
+            "(route through core::qpadm::fit_models_batched_default instead)");
+    }
+
     /// Probe the capability tier of THE device this backend instance is bound to
     /// (the per-device-instance contract above): compute capability, total/free
     /// VRAM, whether this device can peer-access the other visible devices, and
@@ -677,6 +747,16 @@ public:
     [[nodiscard]] virtual BackendCapabilities capabilities() const {
         return BackendCapabilities{};
     }
+
+    /// S8 instrumentation (observability only; NOT on the numeric path): the number of
+    /// BATCHED model-dispatches this backend has issued through fit_models_batched —
+    /// ONE per same-shape (nl,nr,r) bucket (or VRAM sub-chunk), NOT one per model. The
+    /// rotation test asserts this is << the model count (a few buckets, not thousands
+    /// of per-model launches) to PROVE the rotation ran GPU-BATCHED, not as a per-model
+    /// host loop. Base returns 0 (a backend with no batched override never increments
+    /// it — the CpuBackend oracle). The CUDA backend increments it once per bucket
+    /// chunk. Monotonic across calls on one instance.
+    [[nodiscard]] virtual std::size_t batched_dispatch_count() const { return 0; }
 };
 
 }  // namespace steppe

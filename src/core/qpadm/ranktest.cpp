@@ -89,18 +89,33 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
 
     F4Blocks xr; JackknifeCov cr;
     reduce_rows(x, cov, surv, xr, cr);
+    const int nl_red = static_cast<int>(surv.size());
 
+    // AT2 res$popdrop fits EACH (sub-)model at its FULL rank f4rank = len(surv)-1 (the
+    // default rank for a qpAdm fit, NOT a rank-decision): the probe over the rotation
+    // shows the popdrop `f4rank` column is exactly len(surv)-1 for every row, the dof
+    // is (nl_red-r)*(nr-r) with r=nl_red-1, and the weights are the rank-(nl_red-1)
+    // fit (the same rank the top-level qpAdm weights use). The rank-DECISION (the
+    // smallest non-rejected rank from the sweep) is a SEPARATE quantity, reported on
+    // the top-level RankSweep.f4rank — NOT the popdrop column. Earlier this used
+    // rs.f4rank, which COINCIDED with len(surv)-1 on the nl=2 goldens (9-pop / NRBIG)
+    // but DIVERGED on nl>=3 rotation models (rank-decision 0/1 vs fitted rank 2),
+    // mis-fitting the full popdrop row's weights/chisq/feasible. The run_rank_sweep is
+    // still issued (its chisq/dof/p at r=nl_red-1 are the reported row values; the
+    // f4rank column is the fitted rank).
+    const int r_fit = nl_red - 1;
     const RankSweep rs = run_rank_sweep(be, xr, cr, opts.rank_alpha, opts, precision);
-    row.f4rank = rs.f4rank;
-    row.dof = rs.dof[static_cast<std::size_t>(rs.f4rank)];
-    row.chisq = rs.chisq[static_cast<std::size_t>(rs.f4rank)];
-    row.p = rs.p[static_cast<std::size_t>(rs.f4rank)];
+    const std::size_t ri = static_cast<std::size_t>(r_fit < 0 ? 0 : r_fit);
+    row.f4rank = r_fit;
+    row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : (xr.nl - r_fit) * (xr.nr - r_fit);
+    row.chisq = (ri < rs.chisq.size()) ? rs.chisq[ri] : 0.0;
+    row.p = (ri < rs.p.size()) ? rs.p[ri] : 0.0;
     row.status = rs.status;
 
-    // Per-source weights at the chosen rank (length nl_full; NaN for dropped slots).
+    // Per-source weights at the FITTED rank (length nl_full; NaN for dropped slots).
     row.weight.assign(static_cast<std::size_t>(nl_full),
                       std::numeric_limits<double>::quiet_NaN());
-    const GlsWeights gw = gls_weights(be, xr, cr, rs.f4rank, opts, precision);
+    const GlsWeights gw = gls_weights(be, xr, cr, r_fit, opts, precision);
     if (gw.status == Status::Ok && gw.w.size() == surv.size()) {
         for (std::size_t s = 0; s < surv.size(); ++s)
             row.weight[static_cast<std::size_t>(surv[s])] = gw.w[s];

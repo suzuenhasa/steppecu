@@ -76,7 +76,11 @@ add_library(steppe_core STATIC
     # drivers; the orchestrator + S7 SE + pchisq compile here.
     qpadm/qpadm_fit.cpp
     qpadm/ranktest.cpp
-    qpadm/nested_models.cpp)
+    qpadm/nested_models.cpp
+    # M(fit-6) S8 ROTATION: the model-space search orchestrator (run_qpadm_search +
+    # the base fit_models_batched default) + the GPU-free model->device shard planner.
+    qpadm/model_search.cpp
+    qpadm/model_search_core.cpp)
 add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core

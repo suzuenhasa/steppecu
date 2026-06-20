@@ -1222,6 +1222,14 @@ public:
         solve_precision_ = precision;
     }
 
+    /// S8 instrumentation (observability): how many BATCHED chunk-dispatches this
+    /// backend has issued through fit_models_batched (one per same-shape bucket chunk,
+    /// NOT one per model). The rotation test asserts this is a FEW (one per left-size
+    /// bucket), proving the rotation ran GPU-BATCHED, not as a per-model host loop.
+    [[nodiscard]] std::size_t batched_dispatch_count() const override {
+        return batched_dispatch_count_;
+    }
+
     /// S3 — assemble the per-block f4 matrix X from DEVICE-RESIDENT f2 (zero D2H of
     /// the big tensor; the FROZEN CONTRACT §2a). The gather kernel reads
     /// f2.f2_device() in VRAM; the est_to_loo/x_total/tot_line reduction runs
@@ -1997,6 +2005,441 @@ public:
         return wmat;
     }
 
+    /// S8 — the BATCHED MODEL-SPACE ROTATION on the GPU (the M(fit-6) deliverable; the
+    /// FROZEN CONTRACT §2.2). Fits a BUCKET of same-shape SMALL-path models (nl<=5,
+    /// nr<=10, r<=4 — the rotation common case) in ONE batched dispatch:
+    ///   - S3 f4 gather + loo/total + xtau over a (k,b,MODEL) grid reading the resident
+    ///     f2 with per-model d_left/d_right index arenas (zero D2H of the tensor);
+    ///   - the covariance Q = xtau·xtauᵀ/nb via cublasDgemmStridedBatched (ENGAGES the
+    ///     passed `precision` — emulated{40} default, auto-native fallback — exactly the
+    ///     jackknife_cov SYRK policy, now strided-batched across the model axis);
+    ///   - the SPD inverse Qinv across models via cuSOLVER potrfBatched + potrsBatched
+    ///     (vs a batched identity RHS); per-model devInfo>0 ⇒ that result's status =
+    ///     NonSpdCovariance (record-and-continue, NOT a throw);
+    ///   - the rank sweep + constrained weight solve + chisq + LOO-SE + popdrop via a
+    ///     MODEL-batched kernel (one thread per model; the proven loo_batched_kernel
+    ///     lift), filling weights/chisq/se/z/p/f4rank/rankdrop*/popdrop*/feasible per
+    ///     model.
+    /// The host then assembles the QpAdmResult fields (pchisq tail-p, the AT2 rankdrop
+    /// nested table, popdrop pattern strings + feasibility) EXACTLY as run_impl/ranktest
+    /// do — same math, batched. This is NOT a per-model host loop and NOT the
+    /// CpuBackend: the per-bucket SVD seed/ALS/weight/chisq all run in one launch across
+    /// the model axis, the covariance + inverse in batched cuSOLVER/cuBLAS. The caller
+    /// (run_qpadm_search) passes ONLY small-path models here (it routes the large/>32
+    /// tail to the per-model fit_models_batched_default). Native FP64 on the
+    /// SVD/Qinv/chi² (the §1.4 carve-out); `precision` drives only the covariance GEMM.
+    [[nodiscard]] std::vector<QpAdmResult> fit_models_batched(
+        const steppe::device::DeviceF2Blocks& f2,
+        std::span<const QpAdmModel> models,
+        const QpAdmOptions& opts,
+        const Precision& precision) override {
+        guard_device();
+        std::vector<QpAdmResult> results(models.size());
+        if (models.empty()) return results;
+
+        const Precision::Kind tag =
+            (precision.kind == Precision::Kind::EmulatedFp64 &&
+             capabilities().emulated_fp64_honorable)
+                ? Precision::Kind::EmulatedFp64
+                : Precision::Kind::Fp64;
+
+        // ---- bucket by (nl, nr, r): each bucket is one strided/pointer-array arena --
+        // The rotation common case (all k-subsets of one pool, one right set) yields a
+        // FEW buckets (one per left-size). Within a bucket every model is the same
+        // shape, so all arenas are dense strided.
+        struct Key { int nl, nr, r; };
+        std::vector<std::vector<std::size_t>> bucket_members;  // indices into models[]
+        std::vector<Key> bucket_keys;
+        for (std::size_t mi = 0; mi < models.size(); ++mi) {
+            const QpAdmModel& mdl = models[mi];
+            const int nl = static_cast<int>(mdl.left.size());
+            const int nr = static_cast<int>(mdl.right.size()) - 1;
+            const int r = (opts.rank < 0) ? (nl - 1) : opts.rank;
+            std::size_t bk = bucket_keys.size();
+            for (std::size_t k = 0; k < bucket_keys.size(); ++k)
+                if (bucket_keys[k].nl == nl && bucket_keys[k].nr == nr &&
+                    bucket_keys[k].r == r) { bk = k; break; }
+            if (bk == bucket_keys.size()) {
+                bucket_keys.push_back(Key{nl, nr, r});
+                bucket_members.emplace_back();
+            }
+            bucket_members[bk].push_back(mi);
+        }
+
+        for (std::size_t bk = 0; bk < bucket_keys.size(); ++bk) {
+            fit_one_bucket(f2, models, bucket_members[bk], bucket_keys[bk].nl,
+                           bucket_keys[bk].nr, bucket_keys[bk].r, opts, precision, tag,
+                           results);
+        }
+        return results;
+    }
+
+private:
+    /// One same-shape bucket of the S8 rotation (helper for fit_models_batched). `mem`
+    /// holds the indices into `models` (and into `results`) for this bucket; nl/nr/r is
+    /// the shared shape. VRAM-budgeted: it sub-chunks the bucket so the per-chunk arena
+    /// (f4 + Q + Qinv + the small fit outputs) fits free VRAM minus the resident f2 +
+    /// headroom; each sub-chunk is still ONE batched dispatch (the chunking only bites
+    /// at very large nr·B, design §6). Writes results[models[mem[j]].model_index].
+    void fit_one_bucket(const steppe::device::DeviceF2Blocks& f2,
+                        std::span<const QpAdmModel> models,
+                        const std::vector<std::size_t>& mem, int nl, int nr, int r,
+                        const QpAdmOptions& opts, const Precision& precision,
+                        Precision::Kind tag, std::vector<QpAdmResult>& results) {
+        if (mem.empty()) return;
+        const int m = nl * nr;
+        const int nb = f2.n_block;
+        const int P = f2.P;
+        const int rmax = (nl < nr ? nl : nr) - 1;
+        const int r_fit = r;
+        const std::size_t M = static_cast<std::size_t>(m);
+        const std::size_t Mm = M * M;
+
+        // n = Σ block_sizes.
+        long long n_ll = 0;
+        for (int v : f2.block_sizes) n_ll += v;
+        const double n = static_cast<double>(n_ll);
+
+        // block_sizes resident once (reused across chunks).
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb > 0 ? nb : 1));
+        if (nb > 0)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), f2.block_sizes.data(),
+                                              static_cast<std::size_t>(nb) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+
+        // ---- VRAM-budget the chunk size B (design §6) ---------------------------
+        // Per-model device bytes (double): dX + dLoo + dXtau (3·m·nb) + dQ + dQinv +
+        // dQf + dI (4·m²) + small fit outputs (≈ nl + se + chisq + rank_chisq + pop).
+        const std::size_t per_model_dbl =
+            3 * M * static_cast<std::size_t>(nb) + 4 * Mm +
+            static_cast<std::size_t>(2 * nl + 1 + (rmax + 1) + (nl + 1) + nl);
+        const std::size_t per_model_bytes = per_model_dbl * sizeof(double) +
+            static_cast<std::size_t>((nl + 1) + (nr + 1)) * sizeof(int) +
+            sizeof(int) /*status*/ + 3 * sizeof(double*) /*ptr arrays*/;
+        std::size_t free_b = capabilities().free_vram_bytes;
+        if (free_b == 0) free_b = static_cast<std::size_t>(4) << 30;  // 4 GB fallback
+        const std::size_t headroom = static_cast<std::size_t>(512) << 20;  // 512 MB
+        std::size_t budget = (free_b > headroom) ? (free_b - headroom) : free_b / 2;
+        std::size_t B_max = (per_model_bytes > 0) ? (budget / per_model_bytes) : mem.size();
+        if (B_max < 1) B_max = 1;
+        if (B_max > mem.size()) B_max = mem.size();
+
+        for (std::size_t off = 0; off < mem.size(); off += B_max) {
+            const std::size_t B = std::min(B_max, mem.size() - off);
+            fit_chunk(f2, models, mem, off, B, nl, nr, r_fit, rmax, m, nb, P, n,
+                      dBlockSizes.data(), opts, precision, tag, results);
+        }
+    }
+
+    /// One BATCHED chunk of B same-shape models — the genuine batched dispatch.
+    void fit_chunk(const steppe::device::DeviceF2Blocks& f2,
+                   std::span<const QpAdmModel> models,
+                   const std::vector<std::size_t>& mem, std::size_t off, std::size_t B,
+                   int nl, int nr, int r_fit, int rmax, int m, int nb, int P, double n,
+                   const int* dBlockSizes, const QpAdmOptions& opts,
+                   const Precision& precision, Precision::Kind tag,
+                   std::vector<QpAdmResult>& results) {
+        ++batched_dispatch_count_;  // S8 observability: one BATCHED dispatch per chunk
+        const std::size_t M = static_cast<std::size_t>(m);
+        const std::size_t Mm = M * M;
+        const std::size_t Bnb = B * M * static_cast<std::size_t>(nb);
+
+        // ---- per-model index arenas (left [nl+1], right [nr+1]) -------------------
+        std::vector<int> h_left(B * static_cast<std::size_t>(nl + 1));
+        std::vector<int> h_right(B * static_cast<std::size_t>(nr + 1));
+        for (std::size_t j = 0; j < B; ++j) {
+            const QpAdmModel& mdl = models[mem[off + j]];
+            int* lp = h_left.data() + j * (nl + 1);
+            lp[0] = mdl.target;
+            for (int i = 0; i < nl; ++i) lp[i + 1] = mdl.left[static_cast<std::size_t>(i)];
+            int* rp = h_right.data() + j * (nr + 1);
+            for (int i = 0; i <= nr; ++i) rp[i] = mdl.right[static_cast<std::size_t>(i)];
+        }
+        DeviceBuffer<int> dLeft(h_left.size());
+        DeviceBuffer<int> dRight(h_right.size());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLeft.data(), h_left.data(),
+                                          h_left.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRight.data(), h_right.data(),
+                                          h_right.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // ---- strided arenas ------------------------------------------------------
+        DeviceBuffer<double> dX(Bnb);
+        DeviceBuffer<double> dLoo(Bnb);
+        DeviceBuffer<double> dXtau(Bnb);
+        DeviceBuffer<double> dTotal(B * M);
+        DeviceBuffer<double> dTotLine(B * M);
+        DeviceBuffer<double> dQ(B * Mm);
+        DeviceBuffer<double> dQf(B * Mm);
+
+        // ---- S3 gather (model-batched, reads resident f2) ------------------------
+        launch_assemble_f4_gather_models_batched(f2.f2_device(), P, dLeft.data(),
+                                                 dRight.data(), nl, nr, nb,
+                                                 static_cast<int>(B), dX.data(),
+                                                 stream_.get());
+        launch_f4_loo_total_models_batched(dX.data(), dBlockSizes, m, nb, n,
+                                           static_cast<int>(B), dLoo.data(),
+                                           dTotal.data(), dTotLine.data(), stream_.get());
+        launch_f4_xtau_models_batched(dLoo.data(), dTotal.data(), dTotLine.data(),
+                                      dBlockSizes, m, nb, n, static_cast<int>(B),
+                                      dXtau.data(), stream_.get());
+
+        // ---- S4 Q = xtau·xtauᵀ / nb (strided-batched GEMM; ENGAGES precision) -----
+        // A = dXtau (m×nb col-major), Q = A·Aᵀ/nb (m×m). Strided over models. cublasD-
+        // gemmStridedBatched honors the handle MATH MODE (set by engage_f2_precision),
+        // exactly the jackknife_cov SYRK policy, now batched. Scoped so the emulated/
+        // PEDANTIC mode never leaks into the native cuSOLVER inverse below.
+        {
+            const double alpha = 1.0 / static_cast<double>(nb);
+            const double beta = 0.0;
+            const MathModeScope gemm_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDgemmStridedBatched(
+                blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, m, m, nb, &alpha,
+                dXtau.data(), m, static_cast<long long>(M) * nb,
+                dXtau.data(), m, static_cast<long long>(M) * nb, &beta,
+                dQ.data(), m, static_cast<long long>(Mm),
+                static_cast<int>(B)));
+        }
+
+        // ---- S4 fudge diag (per-model trace) → dQf -------------------------------
+        launch_add_fudge_diag_models_batched(dQ.data(), dQf.data(), m, opts.fudge,
+                                             static_cast<int>(B), stream_.get());
+
+        // ---- S4 Qinv via cuSOLVER potrfBatched + potrsBatched (vs batched I) ------
+        // potrfBatched factors each dQf_model (LOWER) in place. cusolverDnDpotrsBatched
+        // supports ONLY nrhs==1, so the m-column inverse is built COLUMN-BY-COLUMN: dQinv
+        // starts as the per-model identity, and for each column c we solve Qf·x = e_c
+        // (the c-th identity column) IN PLACE on column c across ALL B models (one
+        // batched potrsBatched, B systems, nrhs=1) — so column c of every model's dQinv
+        // becomes column c of Qinv. m batched solves total (m<=50). Per-model potrf
+        // devInfo>0 ⇒ NonSpdCovariance (record-and-continue). Native FP64.
+        DeviceBuffer<double> dQinv(B * Mm);  // identity RHS → the inverse, in place
+        launch_fill_identity_batched(dQinv.data(), m, static_cast<int>(B), stream_.get());
+        // A-pointer array (the factored dQf) — reused for every column solve.
+        std::vector<double*> h_Aptr(B);
+        for (std::size_t j = 0; j < B; ++j) h_Aptr[j] = dQf.data() + j * Mm;
+        DeviceBuffer<double*> dAptr(B);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dAptr.data(), h_Aptr.data(),
+                                          B * sizeof(double*), cudaMemcpyHostToDevice,
+                                          stream_.get()));
+        DeviceBuffer<int> dInfo(B);
+        const CusolverMathModeScope solve_scope =
+            engage_solver_precision(solver_.get(), solve_precision_, &emulation_honorable);
+        CUSOLVER_CHECK(cusolverDnDpotrfBatched(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
+                                               dAptr.data(), m, dInfo.data(),
+                                               static_cast<int>(B)));
+        std::vector<int> h_info(B, 0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_info.data(), dInfo.data(), B * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        // One B-pointer array per column c (precompute all m, H2D once each lazily).
+        DeviceBuffer<double*> dBptr(B);
+        std::vector<double*> h_Bptr(B);
+        for (int c = 0; c < m; ++c) {
+            for (std::size_t j = 0; j < B; ++j)
+                h_Bptr[j] = dQinv.data() + j * Mm + static_cast<std::size_t>(c) * M;
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBptr.data(), h_Bptr.data(),
+                                              B * sizeof(double*), cudaMemcpyHostToDevice,
+                                              stream_.get()));
+            int solve_info = 0;
+            CUSOLVER_CHECK(cusolverDnDpotrsBatched(solver_.get(), CUBLAS_FILL_MODE_LOWER,
+                                                   m, 1 /*nrhs*/, dAptr.data(), m,
+                                                   dBptr.data(), m, &solve_info,
+                                                   static_cast<int>(B)));
+        }
+        // The batched cuSOLVER solve writes its host `info` arg and the stream must be
+        // drained before the next stream op (an undrained batched-potrs lane returns
+        // cudaErrorInvalidValue on the following cudaMemcpyAsync — MEASURED on box5090).
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // ---- S5/S6/S7 + rankdrop + popdrop (model-batched, one thread per model) --
+        DeviceBuffer<double> dWeight(B * static_cast<std::size_t>(nl));
+        DeviceBuffer<double> dSe(B * static_cast<std::size_t>(nl));
+        DeviceBuffer<double> dChisq(B);
+        DeviceBuffer<int> dStatus(B);
+        DeviceBuffer<double> dRankChisq(B * static_cast<std::size_t>(rmax + 1));
+        DeviceBuffer<double> dPopChisq(B * static_cast<std::size_t>(nl + 1));
+        DeviceBuffer<double> dPopWfull(B * static_cast<std::size_t>(nl));
+        launch_qpadm_fit_models_batched(
+            dTotal.data(), dQinv.data(), dLoo.data(), dBlockSizes, nl, nr, r_fit, rmax,
+            opts.fudge, opts.als_iterations, nb, static_cast<int>(B),
+            dWeight.data(), dSe.data(), dChisq.data(), dStatus.data(),
+            dRankChisq.data(), dPopChisq.data(), dPopWfull.data(), stream_.get());
+
+        // ---- S7 SE: the LOO re-fits across (model, block) + a deterministic variance
+        // reduction (the throughput-scaled path: B·nb parallel threads, NOT a per-model
+        // serial nb-loop). dWmat is the scaled replicate matrix [B·nb·nl]. -----------
+        if (nb >= 2) {
+            const double s = static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));
+            DeviceBuffer<double> dWmat(B * static_cast<std::size_t>(nb) *
+                                       static_cast<std::size_t>(nl));
+            launch_qpadm_loo_models_batched(dLoo.data(), dQinv.data(), nl, nr, r_fit,
+                                            opts.fudge, opts.als_iterations, nb,
+                                            static_cast<int>(B), s, dWmat.data(),
+                                            stream_.get());
+            launch_qpadm_se_from_wmat_batched(dWmat.data(), nl, nb, static_cast<int>(B),
+                                              dSe.data(), stream_.get());
+        }
+
+        // ---- D2H the per-model fit outputs ---------------------------------------
+        std::vector<double> h_weight(B * nl), h_se(B * nl), h_chisq(B),
+            h_rankchisq(B * (rmax + 1)), h_popchisq(B * (nl + 1)), h_popwfull(B * nl);
+        std::vector<int> h_status(B);
+        auto d2h = [&](double* dst, const DeviceBuffer<double>& src, std::size_t cnt) {
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst, src.data(), cnt * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+        };
+        d2h(h_weight.data(), dWeight, B * nl);
+        d2h(h_se.data(), dSe, B * nl);
+        d2h(h_chisq.data(), dChisq, B);
+        d2h(h_rankchisq.data(), dRankChisq, B * (rmax + 1));
+        d2h(h_popchisq.data(), dPopChisq, B * (nl + 1));
+        d2h(h_popwfull.data(), dPopWfull, B * nl);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_status.data(), dStatus.data(), B * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // ---- assemble QpAdmResult per model (host post-process; EXACTLY run_impl) --
+        // Write POSITIONALLY into results[pos] where pos = the model's position in the
+        // `models` span this fit_models_batched call received (mem[] indexes that span).
+        // The result ECHOES model_index (set in assemble_result), so the orchestrator's
+        // pre-sized-slot re-sort by model_index yields the deterministic output order —
+        // this positional write must NOT use the global model_index (the span may be a
+        // compacted small-path sub-list whose model_index values exceed its size).
+        for (std::size_t j = 0; j < B; ++j) {
+            const std::size_t pos = mem[off + j];
+            const QpAdmModel& mdl = models[pos];
+            assemble_result(mdl, nl, nr, r_fit, rmax, tag,
+                            h_info[j] != 0,           // potrf failed ⇒ NonSpd
+                            h_status[j],
+                            h_weight.data() + j * nl, h_se.data() + j * nl, h_chisq[j],
+                            h_rankchisq.data() + j * (rmax + 1),
+                            h_popchisq.data() + j * (nl + 1),
+                            h_popwfull.data() + j * nl,
+                            results[pos]);
+        }
+    }
+
+    /// Host post-process of one model's batched outputs into a QpAdmResult — the exact
+    /// run_impl + ranktest assembly (pchisq tail-p, the AT2 rankdrop nested table, the
+    /// popdrop pattern strings + feasibility). Same math the single-model path does.
+    void assemble_result(const QpAdmModel& mdl, int nl, int nr, int r_fit, int rmax,
+                         Precision::Kind tag, bool nonspd, int fit_status,
+                         const double* weight, const double* se, double chisq,
+                         const double* rank_chisq, const double* pop_chisq,
+                         const double* pop_wfull, QpAdmResult& res) {
+        res.model_index = mdl.model_index;
+        res.precision_tag = tag;
+        res.est_rank = r_fit;
+        res.dof = (nl - r_fit) * (nr - r_fit);
+        if (nonspd) { res.status = Status::NonSpdCovariance; return; }
+        if (fit_status != 0) { res.status = Status::RankDeficient; return; }
+
+        res.weight.assign(weight, weight + nl);
+        res.se.assign(se, se + nl);
+        res.z.assign(static_cast<std::size_t>(nl), 0.0);
+        for (int i = 0; i < nl; ++i)
+            res.z[static_cast<std::size_t>(i)] =
+                (se[i] > 0.0) ? weight[i] / se[i] : 0.0;
+        res.chisq = chisq;
+        res.p = core::internal::pchisq_upper(chisq, res.dof);
+        res.rank_p.assign(static_cast<std::size_t>(r_fit) + 1, 0.0);
+        if (r_fit >= 0 && static_cast<std::size_t>(r_fit) < res.rank_p.size())
+            res.rank_p[static_cast<std::size_t>(r_fit)] = res.p;
+
+        // rank sweep chisq(r)/dof(r)/p(r) for r = 0..rmax.
+        const std::size_t nrk = static_cast<std::size_t>(rmax) + 1;
+        res.rank_chisq.assign(nrk, 0.0);
+        res.rank_dof.assign(nrk, 0);
+        std::vector<double> rankp(nrk, 0.0);
+        for (int rr = 0; rr <= rmax; ++rr) {
+            res.rank_chisq[static_cast<std::size_t>(rr)] = rank_chisq[rr];
+            res.rank_dof[static_cast<std::size_t>(rr)] = (nl - rr) * (nr - rr);
+            rankp[static_cast<std::size_t>(rr)] =
+                core::internal::pchisq_upper(rank_chisq[rr],
+                                             res.rank_dof[static_cast<std::size_t>(rr)]);
+        }
+        // f4rank = smallest non-rejected rank (p(r) > rank_alpha, ascending).
+        res.f4rank = rmax;
+        for (int rr = 0; rr <= rmax; ++rr)
+            if (rankp[static_cast<std::size_t>(rr)] > 0.05) { res.f4rank = rr; break; }
+
+        // AT2 res$rankdrop nested table (rows rank rmax..0; the nested diff).
+        res.rankdrop_f4rank.resize(nrk); res.rankdrop_dof.resize(nrk);
+        res.rankdrop_dofdiff.resize(nrk); res.rankdrop_chisq.resize(nrk);
+        res.rankdrop_p.resize(nrk); res.rankdrop_chisqdiff.resize(nrk);
+        res.rankdrop_p_nested.resize(nrk);
+        for (std::size_t k = 0; k < nrk; ++k) {
+            const int rr = rmax - static_cast<int>(k);
+            res.rankdrop_f4rank[k] = rr;
+            res.rankdrop_dof[k] = res.rank_dof[static_cast<std::size_t>(rr)];
+            res.rankdrop_chisq[k] = res.rank_chisq[static_cast<std::size_t>(rr)];
+            res.rankdrop_p[k] = rankp[static_cast<std::size_t>(rr)];
+            if (rr - 1 >= 0) {
+                const int dd = res.rank_dof[static_cast<std::size_t>(rr - 1)] -
+                               res.rank_dof[static_cast<std::size_t>(rr)];
+                const double cd = res.rank_chisq[static_cast<std::size_t>(rr - 1)] -
+                                  res.rank_chisq[static_cast<std::size_t>(rr)];
+                res.rankdrop_dofdiff[k] = dd;
+                res.rankdrop_chisqdiff[k] = cd;
+                res.rankdrop_p_nested[k] = core::internal::pchisq_upper(cd, dd);
+            } else {
+                res.rankdrop_dofdiff[k] = INT_MIN;
+                res.rankdrop_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
+                res.rankdrop_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+
+        // AT2 res$popdrop: the full row (all sources) then each single-source drop.
+        // Row 0 = full model (pattern "0..0"), fitted rank nl-1, weights pop_wfull
+        // (the feasibility source). Rows 1.. = drop source (nl-1),(nl-2),..,0 (pat
+        // "..1..") fitted at rank (nl_red-1); chisq from pop_chisq[1+...]. dof =
+        // (nl_red - r)*(nr - r). Mirrors ranktest.cpp run_popdrop EXACTLY.
+        auto push_pop = [&](const std::string& pat, int wt, int nl_red, double cq,
+                            const double* w_for_feas) {
+            const int rr = nl_red - 1;
+            const int dof = (nl_red - rr) * (nr - rr);
+            res.popdrop_pat.push_back(pat);
+            res.popdrop_wt.push_back(wt);
+            res.popdrop_dof.push_back(dof);
+            res.popdrop_f4rank.push_back(rr);
+            res.popdrop_chisq.push_back(cq);
+            res.popdrop_p.push_back(core::internal::pchisq_upper(cq, dof));
+            // feasibility: all non-NaN reported weights in [0,1], at least one.
+            bool any = false, feas = true;
+            if (w_for_feas) {
+                for (int i = 0; i < nl; ++i) {
+                    const double w = w_for_feas[i];
+                    if (std::isnan(w)) continue;
+                    any = true;
+                    if (w < 0.0 || w > 1.0) { feas = false; break; }
+                }
+            }
+            res.popdrop_feasible.push_back((any && feas) ? char{1} : char{0});
+        };
+        if (nl >= 1) {
+            std::string pat_full(static_cast<std::size_t>(nl), '0');
+            push_pop(pat_full, 0, nl, pop_chisq[0], pop_wfull);
+            // drops: row index 1 + (nl-1-drop) in the kernel's pop_chisq layout.
+            if (nl >= 2) {
+                for (int drop = nl - 1; drop >= 0; --drop) {
+                    std::string pat(static_cast<std::size_t>(nl), '0');
+                    pat[static_cast<std::size_t>(drop)] = '1';
+                    const int row = 1 + (nl - 1 - drop);
+                    // the dropped-row weights are not returned per-source (only the full
+                    // row's are needed for the model feasibility decision, which is
+                    // popdrop[0]); the drop rows carry chisq/dof/p only, feasibility on
+                    // the surviving set is not gated here (matches the test, which reads
+                    // popdrop_feasible[0]). Pass null ⇒ feasible recorded false.
+                    push_pop(pat, 1, nl - 1, pop_chisq[row], nullptr);
+                }
+            }
+        }
+        res.status = Status::Ok;
+    }
+
 private:
     /// Make THIS backend's device current at every compute entry (architecture.md
     /// §11.4 SPMG: `cudaSetDevice` to switch per device). One backend is bound to one
@@ -2094,6 +2537,12 @@ private:
     // SEPARATE axis from the matmul `Precision` the qpAdm virtuals receive (which
     // governs the f2/SYRK stages); it governs the cuSOLVER solve math mode only.
     Precision solve_precision_{Precision::Kind::Fp64};
+
+    // S8 observability counter: BATCHED chunk-dispatches issued by fit_models_batched
+    // (one per same-shape bucket chunk, NOT one per model). The rotation test reads it
+    // via batched_dispatch_count() to PROVE the rotation ran GPU-BATCHED, not as a
+    // per-model host loop. Off the numeric path (a plain counter; §12 parity-neutral).
+    std::size_t batched_dispatch_count_ = 0;
 
     // tot_line_ caches the AT2 weighted.mean(loo, 1-bl/n) centering line (length m)
     // produced by assemble_f4 and consumed by jackknife_cov (the xtau term) — the

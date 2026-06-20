@@ -825,7 +825,422 @@ __global__ void loo_batched_kernel(const double* __restrict__ dLoo,
         dWmat[static_cast<long>(b) * nl + i] = (st == 0) ? w[i] : 0.0;
 }
 
+// =================================================================================
+// M(fit-6) S8 MODEL-BATCHED kernels (the ROTATION primitive). Each kernel adds a
+// `model` grid axis and reads/writes a per-model SLICE of a strided arena. Same math,
+// same op order, native FP64 — the model axis is the only addition. They serve the
+// SMALL-path bit-parity bucket (nl<=5, nr<=10, r<=4); the host bucketer guarantees
+// that envelope before launching, so the kQpMax* per-thread local bound holds even
+// with one thread per model (MANY resident threads ⇒ the SMALL bound, like the
+// proven loo_batched_kernel). See the .cuh for the per-kernel contracts.
+// =================================================================================
+
+// --- S3 f4-gather (model-batched): grid over (k+m*b, model) ----------------------
+__global__ void assemble_f4_gather_models_kernel(const double* __restrict__ f2, int P,
+                                                 const int* __restrict__ d_left_arena,
+                                                 const int* __restrict__ d_right_arena,
+                                                 int nl, int nr, int nb, int n_models,
+                                                 double* __restrict__ dX) {
+    const long m = static_cast<long>(nl) * nr;
+    const long per = m * nb;                         // elements per model
+    const long total = per * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / per);
+        const long idx = gid - static_cast<long>(model) * per;  // k + m*b within model
+        const int k = static_cast<int>(idx % m);
+        const int b = static_cast<int>(idx / m);
+        const int i = k / nr;  // left source index (0..nl-1)
+        const int j = k % nr;  // right index       (0..nr-1)
+        const int* lft = d_left_arena + static_cast<long>(model) * (nl + 1);
+        const int* rgt = d_right_arena + static_cast<long>(model) * (nr + 1);
+        const int L0 = lft[0];
+        const int R0 = rgt[0];
+        const int Li = lft[i + 1];
+        const int Rj = rgt[j + 1];
+        const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
+        const auto at = [&](int a, int c) -> double {
+            return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
+        };
+        dX[gid] = 0.5 * (at(Li, R0) + at(L0, Rj) - at(L0, R0) - at(Li, Rj));
+    }
+}
+
+// --- S3 est_to_loo + x_total + tot_line (model-batched): one thread per (k, model) -
+__global__ void f4_loo_total_models_kernel(const double* __restrict__ dX,
+                                           const int* __restrict__ d_block_sizes,
+                                           int m, int nb, double n, int n_models,
+                                           double* __restrict__ dLoo,
+                                           double* __restrict__ dTotal,
+                                           double* __restrict__ dTotLine) {
+    const long total = static_cast<long>(m) * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / m);
+        const int k = static_cast<int>(gid % m);
+        const long base = static_cast<long>(model) * m * nb;  // this model's dX/dLoo slice
+        double num = 0.0;
+        for (int b = 0; b < nb; ++b)
+            num += dX[base + k + static_cast<long>(m) * b] *
+                   static_cast<double>(d_block_sizes[b]);
+        const double tot_ij = num / n;
+        for (int b = 0; b < nb; ++b) {
+            const double bl = static_cast<double>(d_block_sizes[b]);
+            const double rel = bl / n;
+            const double xv = dX[base + k + static_cast<long>(m) * b];
+            dLoo[base + k + static_cast<long>(m) * b] = (tot_ij - xv * rel) / (1.0 - rel);
+        }
+        double wln = 0.0, wld = 0.0;
+        for (int b = 0; b < nb; ++b) {
+            const double w = 1.0 - static_cast<double>(d_block_sizes[b]) / n;
+            wln += dLoo[base + k + static_cast<long>(m) * b] * w;
+            wld += w;
+        }
+        const double tot_line = wln / wld;
+        dTotLine[static_cast<long>(model) * m + k] = tot_line;
+        double diffsum = 0.0, wbn = 0.0;
+        for (int b = 0; b < nb; ++b) {
+            const double loo = dLoo[base + k + static_cast<long>(m) * b];
+            diffsum += tot_line - loo;
+            wbn += loo * static_cast<double>(d_block_sizes[b]);
+        }
+        dTotal[static_cast<long>(model) * m + k] = diffsum + wbn / n;
+    }
+}
+
+// --- S4 xtau (model-batched): one thread per (k+m*b, model) -----------------------
+__global__ void f4_xtau_models_kernel(const double* __restrict__ dLoo,
+                                      const double* __restrict__ dEst,
+                                      const double* __restrict__ dTotLine,
+                                      const int* __restrict__ d_block_sizes,
+                                      int m, int nb, double n, int n_models,
+                                      double* __restrict__ dXtau) {
+    const long per = static_cast<long>(m) * nb;
+    const long total = per * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / per);
+        const long idx = gid - static_cast<long>(model) * per;  // k + m*b
+        const int k = static_cast<int>(idx % m);
+        const int b = static_cast<int>(idx / m);
+        const double bl = static_cast<double>(d_block_sizes[b]);
+        const double h = n / bl;
+        const double sh = sqrt(h - 1.0);
+        const double loo = dLoo[gid];
+        const double est = dEst[static_cast<long>(model) * m + k];
+        const double tl = dTotLine[static_cast<long>(model) * m + k];
+        dXtau[gid] = (est * h - loo * (h - 1.0) - tl) / sh;
+    }
+}
+
+// --- per-model fudge-diag (model-batched): one block per model -------------------
+__global__ void add_fudge_diag_models_kernel(const double* __restrict__ dQ,
+                                             double* __restrict__ dQf, int m,
+                                             double fudge, int n_models) {
+    const int model = blockIdx.x;
+    if (model >= n_models) return;
+    const long base = static_cast<long>(model) * m * m;
+    // Thread 0 computes the trace (m tiny); copy + fudge handled by all threads.
+    __shared__ double s_tr;
+    if (threadIdx.x == 0) {
+        double tr = 0.0;
+        for (int k = 0; k < m; ++k) tr += dQ[base + k + static_cast<long>(m) * k];
+        s_tr = tr;
+    }
+    __syncthreads();
+    const double add = fudge * s_tr;
+    for (int e = threadIdx.x; e < m * m; e += blockDim.x) {
+        const int col = e / m, row = e % m;
+        dQf[base + e] = dQ[base + e] + ((row == col) ? add : 0.0);
+    }
+}
+
+// --- batched identity RHS arena --------------------------------------------------
+__global__ void fill_identity_batched_kernel(double* __restrict__ dI, int m,
+                                             int n_models) {
+    const long per = static_cast<long>(m) * m;
+    const long total = per * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const long e = gid % per;
+        const int col = static_cast<int>(e / m), row = static_cast<int>(e % m);
+        dI[gid] = (row == col) ? 1.0 : 0.0;
+    }
+}
+
+// --- the MODEL-BATCHED full fit (one thread per model) ---------------------------
+// Reduced-row popdrop bound: nl<=kQpMaxNl rows ⇒ a reduced model keeps nl_red<=nl
+// rows. The reduced xmat (m_red<=kQpMaxM) and reduced Qinv (m_red*m_red<=kQpMaxM^2)
+// live in per-thread local — at the SMALL bound m<=50 ⇒ m_red^2<=2500 doubles=20 KB.
+// Combined with dev_als_weights' SMALL-bound scratch this stays inside the per-thread
+// frame the loo_batched_kernel already proved launchable. The host bucketer enforces
+// the envelope.
+__global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
+                                        const double* __restrict__ dQinv,
+                                        const double* __restrict__ dLoo,
+                                        const int* __restrict__ d_block_sizes,
+                                        int nl, int nr, int r_fit, int rmax,
+                                        double fudge, int als_iters, int nb, int n_models,
+                                        double* __restrict__ d_weight,
+                                        double* __restrict__ d_se,
+                                        double* __restrict__ d_chisq,
+                                        int* __restrict__ d_status,
+                                        double* __restrict__ d_rank_chisq,
+                                        double* __restrict__ d_pop_chisq,
+                                        double* __restrict__ d_pop_wfull) {
+    const int model = blockIdx.x * blockDim.x + threadIdx.x;
+    if (model >= n_models) return;
+    const int m = nl * nr;
+    const double* total = dTotal + static_cast<long>(model) * m;
+    const double* qinv  = dQinv  + static_cast<long>(model) * m * m;
+    (void)dLoo; (void)d_se;  // the LOO (SE) now runs in a separate batched kernel.
+
+    // ---- xmat (col-major) from x_total (row-major k = j + nr*i) -------------------
+    double xmat[kQpMaxM];
+    for (int i = 0; i < nl; ++i)
+        for (int j = 0; j < nr; ++j)
+            xmat[i + nl * j] = total[j + nr * i];
+
+    // ---- the full-rank fit at r_fit (weights + chisq) ----------------------------
+    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq;
+    int st = dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
+        xmat, nl, nr, r_fit, qinv, fudge, als_iters, /*seed=*/true, A, B, w, &chisq);
+    d_status[model] = st;
+    for (int i = 0; i < nl; ++i)
+        d_weight[static_cast<long>(model) * nl + i] = (st == 0) ? w[i] : 0.0;
+    d_chisq[model] = chisq;
+
+    // ---- the rank sweep r = 0..rmax (chisq(r); reuses the SAME xmat + qinv) -------
+    for (int rr = 0; rr <= rmax; ++rr) {
+        double Ar[kQpMaxT], Br[kQpMaxT], wr[kQpMaxNl], cr;
+        dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
+            xmat, nl, nr, rr, qinv, fudge, als_iters, /*seed=*/true, Ar, Br, wr, &cr);
+        d_rank_chisq[static_cast<long>(model) * (rmax + 1) + rr] = cr;
+    }
+
+    // NOTE: the LOO SE is NOT computed here (it would serialize nb=702 ALS fits per
+    // model-thread — the throughput wall). It runs as a SEPARATE batched kernel with
+    // one thread per (model, block) (qpadm_loo_models_kernel) + a deterministic
+    // variance reduction (qpadm_se_from_wmat_kernel) — good occupancy, deterministic
+    // op order (no atomics) so G=1==G=2 bit-identical. d_se is filled by that kernel.
+
+    // ---- popdrop (leave-one-LEFT-SOURCE-out) over the per-model X + Qinv ----------
+    // Row 0 = the FULL model (all nl rows). Rows 1..nl = drop source (nl-1), (nl-2),
+    // ..., 0 (the AT2 order). Each reduced model is fit at rank nl_red-1 (the FITTED
+    // rank, per ranktest.cpp popdrop_one). The FULL row's weights are the feasibility
+    // source (d_pop_wfull). Reduced xmat / Qinv are extracted from this model's slices.
+    auto fit_reduced = [&](const int* surv, int nl_red, double* w_red, double* chisq_red) -> int {
+        const int m_red = nl_red * nr;
+        double xr[kQpMaxM];
+        for (int ii = 0; ii < nl_red; ++ii)
+            for (int j = 0; j < nr; ++j)
+                xr[ii + nl_red * j] = total[j + nr * surv[ii]];  // col-major reduced xmat
+        double qr[kQpMaxM * kQpMaxM];
+        // ind[a] = surv[a/nr]*nr + (a%nr); qr[a + m_red*b] = qinv[ind[a] + m*ind[b]].
+        for (int a = 0; a < m_red; ++a) {
+            const int ia = surv[a / nr] * nr + (a % nr);
+            for (int bb = 0; bb < m_red; ++bb) {
+                const int ib = surv[bb / nr] * nr + (bb % nr);
+                qr[a + m_red * bb] = qinv[ia + m * ib];
+            }
+        }
+        const int r_red = nl_red - 1;
+        double Ar[kQpMaxT], Br[kQpMaxT];
+        return dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
+            xr, nl_red, nr, r_red, qr, fudge, als_iters, /*seed=*/true, Ar, Br,
+            w_red, chisq_red);
+    };
+
+    // Full row (index 0).
+    {
+        int surv[kQpMaxNl];
+        for (int i = 0; i < nl; ++i) surv[i] = i;
+        double wr[kQpMaxNl], cr;
+        const int s0 = fit_reduced(surv, nl, wr, &cr);
+        d_pop_chisq[static_cast<long>(model) * (nl + 1) + 0] = cr;
+        for (int i = 0; i < nl; ++i)
+            d_pop_wfull[static_cast<long>(model) * nl + i] =
+                (s0 == 0) ? wr[i] : (0.0 / 0.0);  // NaN on a singular reduced fit
+    }
+    // Single-source drops (only for nl>=2). Row index = 1 + (nl-1-drop) so the array
+    // order is drop=(nl-1), (nl-2), ..., 0 (the AT2 order).
+    if (nl >= 2) {
+        for (int drop = nl - 1; drop >= 0; --drop) {
+            int surv[kQpMaxNl];
+            int cnt = 0;
+            for (int i = 0; i < nl; ++i) if (i != drop) surv[cnt++] = i;
+            double wr[kQpMaxNl], cr;
+            fit_reduced(surv, cnt, wr, &cr);
+            const int row = 1 + (nl - 1 - drop);
+            d_pop_chisq[static_cast<long>(model) * (nl + 1) + row] = cr;
+        }
+    }
+}
+
+// --- S7 LOO per-block re-fits (model-batched): one thread per (model, block) ------
+// Each thread fits ONE block's leave-one-out weights for ONE model, writing the
+// SCALED weight vector (s = (nb-1)/sqrt(nb)) into dWmat[model*nb*nl + b*nl + i]. This
+// replaces the per-model serial nb-loop (the throughput wall) with B*nb parallel
+// threads. dQinv/dLoo are per-model slices. Native FP64. (st!=0 ⇒ zeros for that row.)
+__global__ void qpadm_loo_models_kernel(const double* __restrict__ dLoo,
+                                        const double* __restrict__ dQinv,
+                                        int nl, int nr, int r_fit, double fudge,
+                                        int als_iters, int nb, int n_models, double s,
+                                        double* __restrict__ dWmat) {
+    const long total = static_cast<long>(nb) * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / nb);
+        const int b = static_cast<int>(gid % nb);
+        const int m = nl * nr;
+        const double* qinv = dQinv + static_cast<long>(model) * m * m;
+        const double* loo = dLoo + static_cast<long>(model) * m * nb;
+        double xb[kQpMaxM];
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j)
+                xb[i + nl * j] = loo[(j + nr * i) + static_cast<long>(m) * b];
+        double Ab[kQpMaxT], Bb[kQpMaxT], wb[kQpMaxNl], cb;
+        const int sb = dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
+            xb, nl, nr, r_fit, qinv, fudge, als_iters, /*seed=*/true, Ab, Bb, wb, &cb);
+        double* row = dWmat + (static_cast<long>(model) * nb + b) * nl;
+        for (int i = 0; i < nl; ++i) row[i] = (sb == 0) ? s * wb[i] : 0.0;
+    }
+}
+
+// --- S7 SE from the wmat (model-batched): one thread per (model, weight col) ------
+// SE[i] = sqrt( Σ_b (wmat[b,i] - mean_i)^2 / (nb-1) ), mean_i = Σ_b wmat[b,i]/nb. The
+// reduction order is FIXED (ascending b) ⇒ deterministic (no atomics) so G=1==G=2
+// bit-identical. Matches se_from_loo's sample_cov_diag (FP64; the long-double oracle
+// accumulator becomes FP64 — SE is not in the rotation parity gate, only determinism).
+__global__ void qpadm_se_from_wmat_kernel(const double* __restrict__ dWmat,
+                                          int nl, int nb, int n_models,
+                                          double* __restrict__ d_se) {
+    const long total = static_cast<long>(nl) * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / nl);
+        const int i = static_cast<int>(gid % nl);
+        const double* w = dWmat + static_cast<long>(model) * nb * nl;
+        if (nb < 2) { d_se[gid] = 0.0; continue; }
+        double mean = 0.0;
+        for (int b = 0; b < nb; ++b) mean += w[static_cast<long>(b) * nl + i];
+        mean /= static_cast<double>(nb);
+        double var = 0.0;
+        for (int b = 0; b < nb; ++b) {
+            const double d = w[static_cast<long>(b) * nl + i] - mean;
+            var += d * d;
+        }
+        d_se[gid] = sqrt(var / static_cast<double>(nb - 1));
+    }
+}
+
 }  // namespace
+
+void launch_assemble_f4_gather_models_batched(const double* f2, int P,
+                                              const int* d_left_arena,
+                                              const int* d_right_arena,
+                                              int nl, int nr, int nb, int n_models,
+                                              double* dX, cudaStream_t stream) {
+    const long total = static_cast<long>(nl) * nr * nb * n_models;
+    if (total <= 0) return;
+    const int block = 256;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
+        f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, dX);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_sizes,
+                                        int m, int nb, double n, int n_models,
+                                        double* dLoo, double* dTotal, double* dTotLine,
+                                        cudaStream_t stream) {
+    const long total = static_cast<long>(m) * n_models;
+    if (total <= 0 || nb <= 0) return;
+    const int block = 128;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    f4_loo_total_models_kernel<<<grid, block, 0, stream>>>(
+        dX, d_block_sizes, m, nb, n, n_models, dLoo, dTotal, dTotLine);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
+                                   const double* dTotLine, const int* d_block_sizes,
+                                   int m, int nb, double n, int n_models,
+                                   double* dXtau, cudaStream_t stream) {
+    const long total = static_cast<long>(m) * nb * n_models;
+    if (total <= 0) return;
+    const int block = 256;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    f4_xtau_models_kernel<<<grid, block, 0, stream>>>(
+        dLoo, dEst, dTotLine, d_block_sizes, m, nb, n, n_models, dXtau);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_add_fudge_diag_models_batched(const double* dQ, double* dQf, int m,
+                                          double fudge, int n_models, cudaStream_t stream) {
+    if (m <= 0 || n_models <= 0) return;
+    int block = (m * m < 256) ? ((m * m + 31) / 32 * 32) : 256;
+    if (block < 32) block = 32;
+    add_fudge_diag_models_kernel<<<n_models, block, 0, stream>>>(
+        dQ, dQf, m, fudge, n_models);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t stream) {
+    const long total = static_cast<long>(m) * m * n_models;
+    if (total <= 0) return;
+    const int block = 256;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    fill_identity_batched_kernel<<<grid, block, 0, stream>>>(dI, m, n_models);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_fit_models_batched(const double* dTotal, const double* dQinv,
+                                     const double* dLoo, const int* d_block_sizes,
+                                     int nl, int nr, int r_fit, int rmax,
+                                     double fudge, int als_iters, int nb, int n_models,
+                                     double* d_weight, double* d_se, double* d_chisq,
+                                     int* d_status, double* d_rank_chisq,
+                                     double* d_pop_chisq, double* d_pop_wfull,
+                                     cudaStream_t stream) {
+    if (n_models <= 0) return;
+    const int block = 64;
+    const int grid = (n_models + block - 1) / block;
+    qpadm_fit_models_kernel<<<grid, block, 0, stream>>>(
+        dTotal, dQinv, dLoo, d_block_sizes, nl, nr, r_fit, rmax, fudge, als_iters,
+        nb, n_models, d_weight, d_se, d_chisq, d_status, d_rank_chisq,
+        d_pop_chisq, d_pop_wfull);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
+                                     int nl, int nr, int r_fit, double fudge,
+                                     int als_iters, int nb, int n_models, double s,
+                                     double* dWmat, cudaStream_t stream) {
+    const long total = static_cast<long>(nb) * n_models;
+    if (total <= 0) return;
+    const int block = 128;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    qpadm_loo_models_kernel<<<grid, block, 0, stream>>>(
+        dLoo, dQinv, nl, nr, r_fit, fudge, als_iters, nb, n_models, s, dWmat);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
+                                       int n_models, double* d_se, cudaStream_t stream) {
+    const long total = static_cast<long>(nl) * n_models;
+    if (total <= 0) return;
+    const int block = 128;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
 
 void launch_assemble_f4_gather(const double* f2, int P,
                                const int* d_left, const int* d_right,

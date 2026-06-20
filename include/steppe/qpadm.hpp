@@ -147,6 +147,30 @@ struct QpAdmResult {
                                     const QpAdmOptions& opts,
                                     device::Resources& resources);
 
+// ---- M(fit-6) S8 ROTATION / model-space search ------------------------------
+/// S8 ROTATION — fit a POOL of candidate models against the SAME device-resident
+/// f2_blocks, BATCHED on the GPU and SHARDED across Resources::gpus, returning a
+/// per-model result table in INPUT ORDER (deterministic regardless of GPU count).
+/// Each model is fit WHOLLY on one device (zero inter-GPU traffic); domain outcomes
+/// (RankDeficient/NonSpdCovariance) are per-model `status`, NEVER exceptions — a
+/// search of thousands of models must record-and-continue (design §1.5).
+/// results[i].model_index == models[i].model_index (the caller's stable identity);
+/// the returned vector is ordered so results[k].model_index resolves the k-th input.
+[[nodiscard]] std::vector<QpAdmResult> run_qpadm_search(
+    const device::DeviceF2Blocks& f2,
+    std::span<const QpAdmModel> models,
+    const QpAdmOptions& opts,
+    device::Resources& resources);
+
+/// HOST-ORACLE / parity overload (the CpuBackend reads host memory directly): every
+/// model is routed through resources.gpus[0].backend's per-model oracle loop. This is
+/// the bit-exact reference the device batched path is diffed against.
+[[nodiscard]] std::vector<QpAdmResult> run_qpadm_search(
+    const F2BlockTensor& f2_host,
+    std::span<const QpAdmModel> models,
+    const QpAdmOptions& opts,
+    device::Resources& resources);
+
 // ---- M(fit-2) qpWave (rank-sufficiency sweep WITHOUT a target) ---------------
 /// qpWave-only: the rank-sufficiency sweep for whether the nl left pops are
 /// consistent with rank r (the rankdrop machinery WITHOUT a target — left = all

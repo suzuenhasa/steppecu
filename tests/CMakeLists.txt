@@ -429,6 +429,39 @@ set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_parity
          COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- M(fit-6) S8 qpAdm ROTATION test (the model-space search acceptance gate) ----
+# CUDA TU: reads the REAL AT2 rotation golden (goldens/at2/golden_rot.json) + the
+# co-matching f2 fixture (fixtures/f2_rot.bin), uploads f2 RESIDENT to VRAM, and runs
+# the BATCHED, MULTI-GPU-SHARDED rotation steppe::run_qpadm_search on the CudaBackend
+# (NOT the CpuBackend). It gates: per-model parity vs the golden (weights rtol 1e-6,
+# p/feasible loose/decision, f4rank exact) for the validated 84-model set; G=1 vs G=2
+# bit-identical + identically-ordered determinism; no regression on the 9-pop + NRBIG
+# single-model goldens via a 1-element search; and REPORTS the 1-GPU + 2-GPU
+# throughput (models/sec) at the validated N and a synthetic scale-N (timing only, NO
+# per-model golden). The GPU blocks SKIP cleanly if <1 / <2 devices visible (box5090
+# has 2). Self-checking main() (exits non-zero on failure; CTest gates on the exit
+# code). Named .cu so it device-links steppe_device's RDC kernels and constructs a
+# real CudaBackend. Links steppe::core (run_qpadm_search) + steppe::device.
+add_executable(test_qpadm_rotation reference/test_qpadm_rotation.cu)
+target_link_libraries(test_qpadm_rotation
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpadm_rotation PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpadm_rotation
+         COMMAND test_qpadm_rotation "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+# --- M(fit-6) S8 model-search shard planner unit test (GPU-free) -----------------
+# Pure C++ TU (no CUDA, no GPU, no io, no data): drives
+# steppe::core::qpadm::plan_model_shards (the model->device shard plan) + the
+# pre-sized-slot re-sort discipline in isolation — the GPU-free coverage gate for the
+# determinism mechanism run_qpadm_search relies on (the proven test_shard_plan /
+# test_f2_blocks_multigpu pattern). Links steppe::core (the plan_model_shards
+# out-of-line symbol) + steppe::core_internal (the src/ include root resolving
+# "core/qpadm/model_search_core.hpp") + steppe::api. Self-checking main().
+add_executable(test_model_search_core unit/test_model_search_core.cpp)
+target_link_libraries(test_model_search_core
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME model_search_core_unit COMMAND test_model_search_core)
+
 # --- Host-only unit test of the backend-factory single source (X-9/B8) --------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend_factory.hpp
 # and static_asserts that BOTH factories — make_cpu_backend AND make_cuda_backend —

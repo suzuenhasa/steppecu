@@ -185,6 +185,99 @@ void launch_qpadm_weights_chisq_large(const double* dXmat, const double* dQinv,
                                       double* dScratch, int* dIntScratch,
                                       cudaStream_t stream);
 
+// ---------------------------------------------------------------------------------
+// M(fit-6) S8 MODEL-BATCHED kernels (the ROTATION primitive — the FROZEN CONTRACT
+// §2.2). The single-model launchers above are LIFTED to a MODEL-batch axis: each
+// kernel adds a `model` grid dimension and reads/writes a per-model SLICE of a
+// strided arena. ONE batched dispatch fits a whole BUCKET of B same-shape
+// (nl,nr,r) models — NOT a per-model host loop. Same math, same op order, native
+// FP64 (the gate carve-out); the model axis is the only addition. These serve the
+// SMALL-path bit-parity bucket (nl<=5, nr<=10, r<=4 — the rotation common case);
+// the >32 / large tail still runs the per-model device path (one dispatch/model is
+// correct for the tail, design §5). The covariance Q (strided-batched GEMM) and the
+// Qinv (cuSOLVER potrfBatched/potrsBatched) live in cuda_backend.cu — these kernels
+// are the element-wise / small-reduction / single-thread-per-model steps.
+// ---------------------------------------------------------------------------------
+
+/// S3 f4-gather, MODEL-BATCHED. Grid over (k + m*b, model). Reads the RESIDENT f2
+/// tensor `f2` (col-major i + P*j + P*P*b) with PER-MODEL index arenas
+/// `d_left_arena` ([B][nl+1] row-major) / `d_right_arena` ([B][nr+1]) and writes the
+/// strided arena `dX` (per-model slice dX + model*(m*nb), layout k + m*b). Native FP64.
+void launch_assemble_f4_gather_models_batched(const double* f2, int P,
+                                              const int* d_left_arena,
+                                              const int* d_right_arena,
+                                              int nl, int nr, int nb, int n_models,
+                                              double* dX, cudaStream_t stream);
+
+/// S3 est_to_loo + x_total + tot_line, MODEL-BATCHED. One thread per (k, model); reduces
+/// over nb blocks of THIS model's dX slice (dX + model*(m*nb)) reproducing the FP64 op
+/// order. Writes per-model slices dLoo[m*nb], dTotal[m], dTotLine[m]. Native FP64.
+void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_sizes,
+                                        int m, int nb, double n, int n_models,
+                                        double* dLoo, double* dTotal, double* dTotLine,
+                                        cudaStream_t stream);
+
+/// S4 xtau pseudo-values, MODEL-BATCHED. One thread per (k + m*b, model). Reads this
+/// model's dLoo/dEst(=dTotal)/dTotLine slices and writes dXtau slice (col-major k+m*b
+/// per model, the layout the strided-batched SYRK/GEMM consumes). Native FP64.
+void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
+                                   const double* dTotLine, const int* d_block_sizes,
+                                   int m, int nb, double n, int n_models,
+                                   double* dXtau, cudaStream_t stream);
+
+/// Per-model fudge-diag, MODEL-BATCHED. For each model: tr = trace(Q_model) (computed
+/// in-thread), then Qf_model.diag += fudge*tr. dQ is the input strided arena (m*m per
+/// model, col-major), dQf the output copy. One block per model (or grid-stride). Native FP64.
+void launch_add_fudge_diag_models_batched(const double* dQ, double* dQf, int m,
+                                          double fudge, int n_models, cudaStream_t stream);
+
+/// Build a BATCHED identity RHS arena [m*m*B] (per-model m×m identity, col-major) for
+/// the cuSOLVER potrsBatched inverse. One thread per (element, model). Native FP64.
+void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t stream);
+
+/// The MODEL-BATCHED fit: ONE thread per model runs the WHOLE small-path qpAdm fit
+/// (the FROZEN CONTRACT §2c/§2d/§2e + M(fit-2) rank-sweep + popdrop) for its model,
+/// reading per-model slices of `dTotal` (x_total, m per model), `dQinv` (m*m per model,
+/// the batched Cholesky inverse), `dLoo` (m*nb per model), and `d_block_sizes`. It
+/// transliterates run_impl exactly (seed -> ALS -> constrained weight solve -> chisq;
+/// the rank sweep r=0..rmax; the per-block LOO re-fits -> SE diag; the popdrop
+/// leave-one-LEFT-out reduced fits over the per-model X+Qinv). Per model it writes:
+///   d_weight[B*nl]       (full-rank weights, Σ=1; 0 on RankDeficient)
+///   d_se[B*nl]           (jackknife SE diag, native-FP64 sample variance / nb-1)
+///   d_chisq[B]           (fitted-rank chisq)
+///   d_status[B]          (0 Ok / 6 RankDeficient)
+///   d_rank_chisq[B*(rmax+1)]   (chisq(r) for r=0..rmax)
+///   d_pop_chisq[B*(nl+1)]      (popdrop chisq: full row, then each single-source drop)
+///   d_pop_wfull[B*nl]          (FULL-model popdrop-row weights at rank nl-1, the feasibility source)
+/// The host assembles the QpAdmResult fields (p via pchisq, rankdrop nested table,
+/// popdrop pattern strings + feasibility) from these — exactly as run_impl/ranktest do.
+/// `rmax` = min(nl,nr)-1; `r_fit` (= the reported rank) is nl-1 by default (opts.rank<0).
+/// MANY threads ⇒ the SMALL per-thread local bound (kQpMax*); the host bucketer
+/// guarantees nl<=5, nr<=10, r<=4 before launching. Native FP64.
+void launch_qpadm_fit_models_batched(const double* dTotal, const double* dQinv,
+                                     const double* dLoo, const int* d_block_sizes,
+                                     int nl, int nr, int r_fit, int rmax,
+                                     double fudge, int als_iters, int nb, int n_models,
+                                     double* d_weight, double* d_se, double* d_chisq,
+                                     int* d_status, double* d_rank_chisq,
+                                     double* d_pop_chisq, double* d_pop_wfull,
+                                     cudaStream_t stream);
+
+/// S7 LOO per-block re-fits, MODEL-BATCHED across (model, block) — the throughput-
+/// scaled SE source. One thread per (model, b) fits that block's leave-one-out weights
+/// and writes the SCALED weight vector (×s, s=(nb-1)/sqrt(nb)) to dWmat[model*nb*nl +
+/// b*nl + i]. B·nb parallel threads (vs the per-model serial nb-loop). Native FP64.
+void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
+                                     int nl, int nr, int r_fit, double fudge,
+                                     int als_iters, int nb, int n_models, double s,
+                                     double* dWmat, cudaStream_t stream);
+
+/// S7 SE diag from the LOO wmat, MODEL-BATCHED across (model, weight col). One thread
+/// per (model, i): SE[i] = sqrt(Σ_b (wmat[b,i]-mean_i)²/(nb-1)) in a FIXED reduction
+/// order (deterministic, no atomics ⇒ G=1==G=2 bit-identical). Writes d_se[B*nl]. Native FP64.
+void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
+                                       int n_models, double* d_se, cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_QPADM_FIT_KERNELS_CUH
