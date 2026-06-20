@@ -319,13 +319,16 @@ namespace core::qpadm {
     ComputeBackend& be, const steppe::device::DeviceF2Blocks& f2,
     std::span<const QpAdmModel> models, const QpAdmOptions& opts);
 
-/// CUDA-FREE mirror of CudaBackend::model_fits_small_path (the kQpMax* bit-parity
-/// envelope: nl<=5, nr<=10, r<=4). The S8 orchestrator (run_qpadm_search, core)
-/// partitions the model list by this predicate: small-path models route to the
-/// device-BATCHED virtual fit_models_batched (the cuSOLVER-batched rotation
-/// primitive); the large/>32 tail routes to the per-model fit_models_batched_default
-/// (one device dispatch per model is correct for the tail, design §5). It is the SAME
-/// envelope the CudaBackend dispatches on, declared here so the host orchestrator can
+/// CUDA-FREE host gate for the kQpMax* bit-parity envelope (nl<=kQpMaxNl=5,
+/// nr<=kQpMaxNr=10, r<=kQpMaxR=4 — the SINGLE SOURCE: core/qpadm/qpadm_bounds.hpp).
+/// The S8 orchestrator (run_qpadm_search, core) partitions the model list by this
+/// predicate: small-path models route to the device-BATCHED virtual
+/// fit_models_batched (the cuSOLVER-batched rotation primitive); the large/>32 tail
+/// routes to the per-model fit_models_batched_default (one device dispatch per model
+/// is correct for the tail, design §5). It delegates to the SAME qpadm_bounds.hpp
+/// predicate that CudaBackend::model_fits_small_path dispatches on AND that sizes the
+/// kernel per-thread arrays, so this host gate cannot drift wider than those arrays
+/// (a wider gate would overflow them — UB). Declared here so the host orchestrator can
 /// bucket WITHOUT naming the CUDA backend. nl = left.size(), nr = right.size()-1,
 /// r = (opts.rank<0 ? nl-1 : opts.rank).
 [[nodiscard]] bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts);

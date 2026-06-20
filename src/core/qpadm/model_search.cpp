@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/qpadm/model_search_core.hpp"  // plan_model_shards, ModelShard
+#include "core/qpadm/qpadm_bounds.hpp"       // model_fits_small_path — the SINGLE-SOURCE kQpMax* envelope
 #include "core/qpadm/qpadm_fit.hpp"          // run_impl, left_with_target
 #include "device/backend.hpp"                // ComputeBackend
 #include "device/device_f2_blocks.hpp"       // DeviceF2Blocks, upload_f2_blocks_to_device
@@ -63,14 +64,18 @@ std::vector<QpAdmResult> fit_models_batched_default(
     return out;
 }
 
-// CUDA-FREE mirror of CudaBackend::model_fits_small_path (the kQpMax* bit-parity
-// envelope nl<=5, nr<=10, r<=4). Used by run_qpadm_search to partition the model list:
-// small-path → the device-BATCHED fit_models_batched virtual; large → per-model.
+// CUDA-FREE host gate for the kQpMax* bit-parity small-path envelope. Used by
+// run_qpadm_search to partition the model list: small-path → the device-BATCHED
+// fit_models_batched virtual; large → per-model. Delegates to the SINGLE SOURCE
+// (qpadm_bounds.hpp model_fits_small_path) that ALSO sizes the kernel per-thread
+// arrays and backs CudaBackend::model_fits_small_path — so the host partition gate
+// cannot drift wider than the kernel arrays it routes into (a wider gate would admit
+// an oversized model and overflow the fixed device local arrays — UB).
 bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts) {
     const int nl = static_cast<int>(model.left.size());
     const int nr = static_cast<int>(model.right.size()) - 1;
     const int r = (opts.rank < 0) ? (nl - 1) : opts.rank;
-    return nl <= 5 && nr <= 10 && r <= 4;
+    return model_fits_small_path(nl, nr, r);
 }
 
 // Fit a shard of models on `be` (one device): SMALL-path models go through the device-

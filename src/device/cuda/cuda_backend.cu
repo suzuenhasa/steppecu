@@ -56,6 +56,7 @@
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/pchisq.hpp"         // core::internal::pchisq_upper (M(fit-2) rank-test p; the ONE shared special fn)
 #include "core/internal/small_linalg.hpp"   // core::jacobi_svd (M(fit-2) rank_Q diagnostic; bit-identical to the CPU oracle)
+#include "core/qpadm/qpadm_bounds.hpp"       // core::qpadm::model_fits_small_path — the SINGLE-SOURCE small-path envelope (kQpMax*)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
 #include "device/device_partial.hpp"        // steppe::device::DevicePartial (the M4.5 resident handle)
@@ -1483,11 +1484,14 @@ public:
     // SVD + Qinv quadratic form are ill-conditioned/oracle-grade; no emulation).
     // =====================================================================
 
-    /// True iff the model fits the on-device Jacobi small-LA bit-parity envelope
-    /// (kQpMaxNl/Nr/R, qpadm_fit_kernels.cu). Inside ⇒ the untouched small path
-    /// (byte-for-byte 9-pop golden parity); outside ⇒ the cuSOLVER large path.
+    /// True iff the model fits the on-device small-LA bit-parity envelope
+    /// (kQpMaxNl/Nr/R). Inside ⇒ the untouched small path (byte-for-byte 9-pop
+    /// golden parity); outside ⇒ the cuSOLVER large path. Delegates to the SINGLE
+    /// SOURCE (core/qpadm/qpadm_bounds.hpp) that ALSO sizes the kernel per-thread
+    /// arrays and gates the host core partition (model_search.cpp) — so this
+    /// dispatch gate cannot drift wider than the kernel arrays it routes into.
     static bool model_fits_small_path(int nl, int nr, int r) {
-        return nl <= 5 && nr <= 10 && r <= 4;  // the kQpMax* bit-parity envelope
+        return core::qpadm::model_fits_small_path(nl, nr, r);
     }
 
     /// Compute the leading-r right singular vectors V[:,0:r] (nr×r, col-major) of the

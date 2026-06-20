@@ -19,6 +19,7 @@
 // qpadm_fit_kernels.cuh; the kernel bodies + <<<>>> are confined here (§7).
 #include <cuda_runtime.h>
 
+#include "core/qpadm/qpadm_bounds.hpp"      // kQpMaxNl/Nr/R/M/T — the SINGLE-SOURCE small-path envelope
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_CHECK_KERNEL
 #include "device/cuda/qpadm_fit_kernels.cuh"
 
@@ -29,20 +30,19 @@ namespace steppe::device {
 // exceeding them would index out of the fixed local arrays; the host caller asserts
 // the model fits before launching (cuda_backend.cu).
 namespace {
-// Bounds chosen to cover common qpAdm models (left sources nl<=5, right outgroups
-// nr<=10, rank r<=4) while keeping the single-thread LA's per-thread LOCAL-MEMORY
-// frame small enough to launch (the dominant scratch is Wm[m*t] and coeffs[t*t];
-// at these bounds m<=50, t<=40 ⇒ Wm<=50*40=2000 doubles=16 KB, coeffs<=40*40=1600
-// doubles=12.5 KB — modest per-thread local memory). CUDA local memory is reserved
-// per-thread across the device, so over-large fixed arrays trip
-// cudaErrorMemoryAllocation at launch even for a 1-thread kernel; these bounds keep
-// it well under that. The golden is nl=2, nr=5, r=1 (m=10, t<=5) — far inside. The
-// host caller fails fast if a model exceeds them (cuda_backend.cu qpAdm fit guard).
-constexpr int kQpMaxNl = 5;
-constexpr int kQpMaxNr = 10;
-constexpr int kQpMaxR  = 4;
-constexpr int kQpMaxM  = kQpMaxNl * kQpMaxNr;  // 50
-constexpr int kQpMaxT  = (kQpMaxNl > kQpMaxNr ? kQpMaxNl : kQpMaxNr) * kQpMaxR;  // max(nl,nr)*r = 40
+// THE SINGLE SOURCE of the envelope lives in core/qpadm/qpadm_bounds.hpp (CUDA-free,
+// so the host core gate model_search.cpp + the device backend cuda_backend.cu + this
+// kernel TU all reference the SAME values — no drift). These `constexpr int` are
+// usable in the array-bound / template-non-type contexts below exactly as the local
+// definitions were. The bound rationale (per-thread local-memory budget: m<=50, t<=40
+// ⇒ modest frame; over-large frames trip cudaErrorMemoryAllocation at launch) is
+// documented at the constants' home. We bring the names into this namespace so the
+// kernel bodies read them unqualified.
+using core::qpadm::kQpMaxNl;
+using core::qpadm::kQpMaxNr;
+using core::qpadm::kQpMaxR;
+using core::qpadm::kQpMaxM;
+using core::qpadm::kQpMaxT;
 
 // NOTE (the small-bound envelope): these stacked-LOCAL templated kernels serve ONLY
 // the bit-parity SMALL path (nl<=5, nr<=10, r<=4 — the 9-pop golden is far inside).
