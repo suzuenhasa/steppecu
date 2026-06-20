@@ -185,6 +185,23 @@ void launch_qpadm_weights_chisq_large(const double* dXmat, const double* dQinv,
                                       double* dScratch, int* dIntScratch,
                                       cudaStream_t stream);
 
+/// LARGE-path PARALLEL LOO re-fits — the throughput-scaled large-model jackknife SE.
+/// One thread per (model, block) runs the SAME als_large + weights_chisq_large math as
+/// the serial large path, seeded from a per-(model,block) cuSOLVER SVD slice (dAseed/
+/// dBseed, precomputed host-side so the seed is BIT-IDENTICAL), using a per-thread slice
+/// of a runtime-sized VRAM arena (stride dbl_refit doubles / int_refit ints per refit;
+/// layout xmat[m]|A[nl*r]|B[r*nr]|union[large_dbl_scratch]). Writes the UNSCALED
+/// normalized weights to dWmat[(model*nb + b)*nl + i] (status!=0 ⇒ zeros). Replaces the
+/// host nb-serial refit loop with nb (and the future B·nb) concurrent refits ⇒ the SE is
+/// bit-identical (only the parallelism changes), the host long-double variance reduction
+/// in se_from_loo is unchanged. Native FP64.
+void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
+                                    const double* dAseed, const double* dBseed,
+                                    int nl, int nr, int r, double fudge, int als_iters,
+                                    int nb, int n_models, long dbl_refit, long int_refit,
+                                    double* dScratch, int* dIntScratch, double* dWmat,
+                                    cudaStream_t stream);
+
 // ---------------------------------------------------------------------------------
 // M(fit-6) S8 MODEL-BATCHED kernels (the ROTATION primitive — the FROZEN CONTRACT
 // §2.2). The single-model launchers above are LIFTED to a MODEL-batch axis: each

@@ -805,6 +805,119 @@ __global__ void weights_chisq_large_kernel(const double* __restrict__ dXmat,
     *d_status = 0;
 }
 
+// --- LARGE-path PARALLEL LOO re-fits (one thread per (model, block)) --------------
+// The large-model jackknife SE was the throughput wall: the host ran nb (=701 for
+// NRBIG) leave-one-block-out refits SERIALLY, each a cuSOLVER SVD seed + a single-
+// thread ALS chain + weight solve, with a per-block host round-trip. The refits are
+// INDEPENDENT, so this kernel runs all nb (and the future B·nb) refits CONCURRENTLY:
+// one thread per (model, block), each reusing the SAME `*_large` device helpers as the
+// serial path — only WHERE the scratch lives changes (a per-thread slice of a runtime-
+// sized VRAM arena instead of one single-model buffer) and that the loop is parallel.
+//
+// PARITY (bit-identical SE): the SVD seed is precomputed on the host (Stage A) with the
+// SAME cuSOLVER gesvd `large_svd_V`+`seed_from_V` per block (it is NOT recomputed here —
+// an on-device Jacobi seed would shift the ALS fixed point in the LSBs). Each thread
+// copies its dAseed/dBseed slice, then runs the EXACT als_large + weights_chisq_large
+// math in the SAME op order ⇒ each refit's normalized weights are BIT-IDENTICAL to the
+// serial path's. chisq is dead output here (gls_weights_loo_batched discards it) ⇒ the
+// dev_chisq_of_large call is skipped (an omission of unused output, not a math change).
+//
+// Per-thread scratch (dScratch slice, stride = `dbl_refit` the host sizer returns):
+//   xmat[m] | A[nl*r] | B[r*nr] | union[large_dbl_scratch(nl,nr,r)]
+// where `union` is the SAME max(als,wc) layout als_large_kernel / weights_chisq_large_
+// kernel carve (t = max(nl,nr)*r). dIntScratch slice stride = `int_refit` =
+// large_int_scratch (max(t,nl) pivots). Writes UNSCALED w to dWmat (status!=0 ⇒ zeros,
+// matching the serial path's zero-init + status guard). One model here (n_models=1 for
+// NRBIG); the model axis is the S8 batching seam.
+__global__ void loo_large_batched_kernel(const double* __restrict__ dLoo,
+                                         const double* __restrict__ dQinv,
+                                         const double* __restrict__ dAseed,
+                                         const double* __restrict__ dBseed,
+                                         int nl, int nr, int r, double fudge,
+                                         int als_iters, int nb, int n_models,
+                                         long dbl_refit, long int_refit,
+                                         double* __restrict__ dScratch,
+                                         int* __restrict__ dIntScratch,
+                                         double* __restrict__ dWmat) {
+    const long total = static_cast<long>(nb) * n_models;
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int model = static_cast<int>(gid / nb);
+        const int b     = static_cast<int>(gid % nb);
+        const int m = nl * nr;
+        const double* qinv = dQinv + static_cast<long>(model) * m * m;
+        const double* loo  = dLoo  + static_cast<long>(model) * m * nb;
+        // This thread's scratch slice (no overlap across threads ⇒ race-free).
+        double* base = dScratch + gid * dbl_refit;
+        int*    ibase = dIntScratch + gid * int_refit;
+        double* xmat = base;                                   // m
+        double* A    = xmat + m;                               // nl*r
+        double* B    = A + static_cast<long>(nl) * (r > 0 ? r : 1);   // r*nr
+        double* sc   = B + static_cast<long>(r > 0 ? r : 1) * nr;     // union scratch
+        // xmat_b from loo[:,:,b]: row-major k=j+nr*i ⇒ xmat(i,j) at i+nl*j (same reshape
+        // as the serial xmat_from_rowmajor + the small loo_batched_kernel).
+        for (int i = 0; i < nl; ++i)
+            for (int j = 0; j < nr; ++j)
+                xmat[i + nl * j] = loo[(j + nr * i) + static_cast<long>(m) * b];
+        // ---- the ALS opt_A/opt_B loop (seeded from this block's dAseed/dBseed) -------
+        if (r > 0) {
+            const double* As = dAseed + gid * static_cast<long>(nl) * r;
+            const double* Bs = dBseed + gid * static_cast<long>(r) * nr;
+            for (int i = 0; i < nl * r; ++i) A[i] = As[i];
+            for (int i = 0; i < r * nr; ++i) B[i] = Bs[i];
+            // SAME union layout als_large_kernel carves (t = max(nl,nr)*r).
+            const int t = (nl > nr ? nl : nr) * r;
+            double* xvec   = sc;
+            double* Wm     = xvec + m;
+            double* coeffs = Wm + static_cast<long>(m) * t;
+            double* rhs    = coeffs + static_cast<long>(t) * t;
+            double* tmp    = rhs + t;          // A2 / B2v
+            double* lu     = tmp + t;
+            double* y      = lu + static_cast<long>(t) * t;
+            int*    ipiv   = ibase;
+            for (int it = 0; it < als_iters; ++it) {
+                dev_opt_A_large(B, xmat, nl, nr, r, qinv, fudge, A,
+                                xvec, Wm, coeffs, rhs, tmp, lu, y, ipiv);
+                dev_opt_B_large(A, xmat, nl, nr, r, qinv, fudge, B,
+                                xvec, Wm, coeffs, rhs, tmp, lu, y, ipiv);
+            }
+        }
+        // ---- the constrained weight solve + normalize (weights_chisq_large math) -----
+        // SAME wc layout weights_chisq_large_kernel carves: RHS[nl*nl]|wv[nl]|lu[nl*nl]|
+        // y[nl]|e[m] (e reused as the nl-length LHS = ones, e has m>=nl slots). chisq is
+        // dead output here, so dev_chisq_of_large is skipped.
+        double* row = dWmat + (static_cast<long>(model) * nb + b) * nl;
+        double* RHS = sc;
+        double* wv  = RHS + static_cast<long>(nl) * nl;
+        double* lu  = wv + nl;
+        double* y   = lu + static_cast<long>(nl) * nl;
+        double* e   = y + nl;
+        int*    piv = ibase;
+        if (r == 0) {
+            for (int i = 0; i < nl; ++i) row[i] = 1.0;   // status Ok, w = ones (Σ=1 after norm)
+            continue;
+        }
+        const int rp = r + 1;
+        auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
+        for (int i = 0; i < nl; ++i) {
+            for (int ip = 0; ip < nl; ++ip) {
+                double acc = 0.0;
+                for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
+                RHS[i + nl * ip] = acc;
+            }
+        }
+        double* LHS = e;
+        for (int i = 0; i < nl; ++i) LHS[i] = 1.0;
+        if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) {
+            for (int i = 0; i < nl; ++i) row[i] = 0.0;   // RankDeficient ⇒ zeros (status guard)
+            continue;
+        }
+        double sum = 0.0;
+        for (int i = 0; i < nl; ++i) sum += wv[i];
+        for (int i = 0; i < nl; ++i) row[i] = wv[i] / sum;  // UNSCALED (host scales by (nb-1)/√nb)
+    }
+}
+
 // --- S7 batched LOO re-fits (one thread per replicate block) ---------------------
 __global__ void loo_batched_kernel(const double* __restrict__ dLoo,
                                    const double* __restrict__ dQinv,
@@ -1420,6 +1533,23 @@ void launch_qpadm_weights_chisq_large(const double* dXmat, const double* dQinv,
     weights_chisq_large_kernel<<<1, 1, 0, stream>>>(dXmat, dQinv, dA, dB, nl, nr, r,
                                                     dW, dchisq, d_status,
                                                     dScratch, dIntScratch);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
+                                    const double* dAseed, const double* dBseed,
+                                    int nl, int nr, int r, double fudge, int als_iters,
+                                    int nb, int n_models, long dbl_refit, long int_refit,
+                                    double* dScratch, int* dIntScratch, double* dWmat,
+                                    cudaStream_t stream) {
+    const long total = static_cast<long>(nb) * n_models;
+    if (total <= 0) return;
+    const int block = 64;  // large per-thread VRAM-scratch refit ⇒ small block, grid-stride
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    loo_large_batched_kernel<<<grid, block, 0, stream>>>(
+        dLoo, dQinv, dAseed, dBseed, nl, nr, r, fudge, als_iters, nb, n_models,
+        dbl_refit, int_refit, dScratch, dIntScratch, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

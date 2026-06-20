@@ -39,6 +39,7 @@
 // CpuBackend path alone still gates (CI-without-GPU degrades cleanly; box5090 always
 // has a GPU). The CpuBackend block ALWAYS runs.
 
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -59,6 +60,20 @@
 namespace {
 
 int g_failures = 0;
+
+// NRBIG (nl=2, nr=39, nb=701) PRE-FIX (serial large-LOO) GPU jackknife se/z — the
+// BIT-IDENTITY anchor for the parallel large-LOO. Captured from the BEFORE run on
+// box5090 (serial host nb-loop). The parallel kernel reuses the SAME cuSOLVER SVD
+// seed + the SAME als_large/weight math (only the loop parallelizes) ⇒ the post-fix
+// GPU se/z MUST equal these EXACTLY (rtol=atol=0). See the gate at the NRBIG block.
+// Captured from the BEFORE (serial large-LOO) GPU run on box5090 (cuSOLVER gesvd
+// seed path, qpadm_parity = 369.79 s). The GPU differs from the CpuBackend ORACLE
+// (Jacobi seed) at the ~2e-11 SVD-seed localizer level — so the anchor is the GPU
+// SERIAL value, the one the parallel kernel (same cuSOLVER seed) must reproduce EXACTLY.
+constexpr double kNrbigPreSe0 = 0.15871216584857264;
+constexpr double kNrbigPreSe1 = 0.15871216584857259;
+constexpr double kNrbigPreZ0  = 4.9857579543926072;
+constexpr double kNrbigPreZ1  = 1.3149562640378851;
 
 void check_close(const char* what, double got, double want, double rtol, double atol) {
     const double tol = atol + rtol * std::fabs(want);
@@ -368,6 +383,13 @@ int main(int argc, char** argv) {
                             static_cast<int>(rbig.status));
                 ++g_failures;
             } else {
+                // NRBIG CpuBackend-ORACLE jackknife SE/z (the ground-truth the GPU large
+                // LOO must match; the GPU uses cuSOLVER SVD vs the oracle Jacobi seed ⇒
+                // bit-close, the SVD-seed localizer tier). Dumped to full precision.
+                if (rbig.se.size() >= 2 && rbig.z.size() >= 2) {
+                    std::printf("  [INFO] NRBIG ORACLE se=[%.17g, %.17g] z=[%.17g, %.17g]\n",
+                                rbig.se.at(0), rbig.se.at(1), rbig.z.at(0), rbig.z.at(1));
+                }
                 // golden_fit1_NRBIG.json res$rankdrop (rows rank1, rank0; read_f2 form):
                 const int    b_f4rank = 1;
                 const int    brd_dof[2]    = {38, 78};
@@ -486,8 +508,17 @@ int main(int argc, char** argv) {
                     // Run the full run_qpadm on the RESIDENT devbig (mirrors the 9-pop GPU
                     // block); this drives gls_weights' large path for the reduced popdrop
                     // models. Assert the popdrop 00/01/10 rows match the golden ON THE GPU.
+                    // The NRBIG jackknife SE (the ~701-block LOO) is the parallel large-LOO
+                    // gate: time this run (was ~371 s SERIAL; now the parallel kernel) and
+                    // dump the se/z to prove BIT-IDENTITY vs the pre-fix value.
+                    const auto t_big0 = std::chrono::steady_clock::now();
                     const steppe::QpAdmResult gpu_big_res =
                         steppe::run_qpadm(devbig, big, opts, gpu_big);
+                    const auto t_big1 = std::chrono::steady_clock::now();
+                    const double big_secs =
+                        std::chrono::duration<double>(t_big1 - t_big0).count();
+                    std::printf("  [TIME] NRBIG GPU run_qpadm (incl. ~701-block LOO SE) = "
+                                "%.3f s\n", big_secs);
                     if (gpu_big_res.status != steppe::Status::Ok) {
                         std::printf("  [FAIL] nr>32 GPU run_qpadm status != Ok (%d)\n",
                                     static_cast<int>(gpu_big_res.status));
@@ -495,6 +526,31 @@ int main(int argc, char** argv) {
                     } else {
                         std::printf("  [INFO] nr>32 GPU run_qpadm EXECUTED (f2 RESIDENT); "
                                     "f4rank=%d\n", gpu_big_res.f4rank);
+                        // ---- NRBIG GPU jackknife SE/z (the parallel large-LOO output) ----
+                        // BIT-IDENTITY gate: these MUST equal the PRE-FIX (serial large LOO)
+                        // GPU se/z exactly (the parallel kernel reuses the SAME cuSOLVER SVD
+                        // seed + the SAME als_large/weight math, only the loop parallelizes).
+                        // The pre-fix values were captured from the BEFORE run; assert ==.
+                        if (gpu_big_res.se.size() >= 2 && gpu_big_res.z.size() >= 2) {
+                            std::printf("  [INFO] NRBIG GPU se=[%.17g, %.17g] z=[%.17g, %.17g]\n",
+                                        gpu_big_res.se.at(0), gpu_big_res.se.at(1),
+                                        gpu_big_res.z.at(0), gpu_big_res.z.at(1));
+                            // Pre-fix (serial large-LOO) GPU se/z — the BIT-IDENTITY anchor.
+                            const double pre_se[2] = {kNrbigPreSe0, kNrbigPreSe1};
+                            const double pre_z[2]  = {kNrbigPreZ0,  kNrbigPreZ1};
+                            const char* qn[2] = {"CordedWare", "Turkey_N"};
+                            for (int i = 0; i < 2; ++i) {
+                                char nm[72];
+                                const double dse = std::fabs(gpu_big_res.se.at(static_cast<std::size_t>(i)) - pre_se[i]);
+                                const double dz  = std::fabs(gpu_big_res.z.at(static_cast<std::size_t>(i)) - pre_z[i]);
+                                std::snprintf(nm, sizeof(nm), "NRBIG GPU se[%s] bit-identical", qn[i]);
+                                check_close(nm, gpu_big_res.se.at(static_cast<std::size_t>(i)), pre_se[i], 0.0, 0.0);
+                                std::snprintf(nm, sizeof(nm), "NRBIG GPU z[%s] bit-identical", qn[i]);
+                                check_close(nm, gpu_big_res.z.at(static_cast<std::size_t>(i)), pre_z[i], 0.0, 0.0);
+                                std::printf("  [INFO] NRBIG GPU |dse[%s]|=%.3g |dz[%s]|=%.3g (vs pre-fix)\n",
+                                            qn[i], dse, qn[i], dz);
+                            }
+                        }
                         check_eq_int("nr>32 GPU rankdrop f4rank", gpu_big_res.f4rank, b_f4rank);
                         check_eq_int("nr>32 GPU rankdrop rows",
                                      static_cast<int>(gpu_big_res.rankdrop_f4rank.size()), 2);

@@ -1610,6 +1610,17 @@ public:
         return (t > static_cast<std::size_t>(nl) ? t : static_cast<std::size_t>(nl));
     }
 
+    /// Per-refit DOUBLE scratch stride for the PARALLEL large-LOO kernel. Each thread
+    /// owns its xmat[m] + A[nl*r] + B[r*nr] + the als/weights union (large_dbl_scratch),
+    /// so one thread's slice is self-contained (no cross-thread aliasing ⇒ deterministic).
+    static std::size_t large_loo_dbl_refit(int nl, int nr, int r) {
+        const std::size_t m  = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        const std::size_t rr = static_cast<std::size_t>(r > 0 ? r : 1);
+        const std::size_t a  = static_cast<std::size_t>(nl) * rr;          // A[nl*r]
+        const std::size_t bb = rr * static_cast<std::size_t>(nr);          // B[r*nr]
+        return m + a + bb + large_dbl_scratch(nl, nr, r);
+    }
+
     /// LARGE-path single-model fit: cuSOLVER SVD seed (r>0) → ALS opt_A/opt_B → the
     /// constrained weight solve + chisq, all RESIDENT on stream_. The caller supplies
     /// the device buffers (dXmat/dQinv/dA/dB/dW/dchisq/dStatus + the VRAM scratch
@@ -1958,45 +1969,64 @@ public:
             launch_qpadm_loo_batched(dLoo.data(), dQinv.data(), nl, nr, r, opts.fudge,
                                      opts.als_iterations, nb, dWmat.data(), stream_.get());
         } else {
-            // LARGE-path LOO (the FROZEN CONTRACT §3.4): the many-thread batched LOO
-            // kernel is small-bound only, so for the large model run the per-block fit
-            // SERIALLY over blocks on stream_, reusing the large-path SVD seed + ALS +
-            // weight kernels (correct + RESIDENT, not batched-fast). This is the S8
-            // batched-large follow-on seam (each block's xmat is one slice of dLoo). The
-            // NRBIG se/z are NOT in the contract gate (§5.4) — this keeps NRBIG fully on
-            // the GPU and the weights correct, without a new many-thread large kernel.
-            DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
-            DeviceBuffer<double> dA(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1));
-            DeviceBuffer<double> dB(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr));
-            DeviceBuffer<double> dW(static_cast<std::size_t>(nl));
-            DeviceBuffer<double> dchisq(1);
-            DeviceBuffer<int>    dStatus(1);
-            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1));
-            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
-            DeviceBuffer<double> dScratch(large_dbl_scratch(nl, nr, r));
-            DeviceBuffer<int>    dIntScratch(large_int_scratch(nl, nr, r));
-            for (int b = 0; b < nb; ++b) {
-                // xmat_b from x_loo[:,:,b] (row-major k=j+nr*i ⇒ xmat(i,j) at i+nl*j) —
-                // the same reshape the batched kernel does; here a tiny single-thread copy.
-                launch_qpadm_xmat_from_rowmajor(
-                    dLoo.data() + static_cast<std::size_t>(m) * static_cast<std::size_t>(b),
-                    nl, nr, dXmat.data(), stream_.get());
-                large_fit_one(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
-                              opts.als_iterations, dA.data(), dB.data(), dW.data(),
-                              dchisq.data(), dStatus.data(), dVout.data(), dXt.data(),
-                              dScratch.data(), dIntScratch.data(), stream_.get());
-                // Copy this block's weights into row b (status!=0 ⇒ leave zeros).
-                int status_i = 0;
-                STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
-                                                  cudaMemcpyDeviceToHost, stream_.get()));
-                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-                if (status_i == 0) {
-                    STEPPE_CUDA_CHECK(cudaMemcpyAsync(
-                        dWmat.data() + static_cast<std::size_t>(b) * static_cast<std::size_t>(nl),
-                        dW.data(), static_cast<std::size_t>(nl) * sizeof(double),
-                        cudaMemcpyDeviceToDevice, stream_.get()));
+            // LARGE-path LOO — NOW PARALLEL (was a serial nb-loop, the ~371 s NRBIG
+            // wall). The nb leave-one-block-out refits are INDEPENDENT, so run them
+            // CONCURRENTLY (gpu-large-models: runtime-sized device workspace, not fixed
+            // per-thread local). TWO stages:
+            //   Stage A — per-block cuSOLVER SVD seed (large_svd_V + seed_from_V) into
+            //     nb-strided dAseed/dBseed arenas, all async-enqueued on stream_ with NO
+            //     per-block cudaStreamSynchronize (the dominant 701× host round-trip is
+            //     gone). The SVD stays cuSOLVER gesvd per block ⇒ the seed is BIT-
+            //     IDENTICAL to the serial path (an on-device Jacobi seed would shift the
+            //     ALS fixed point in the LSBs ⇒ SE not bit-identical).
+            //   Stage B — ONE many-thread launch (one thread per (model,block)) runs the
+            //     EXACT als_large + weight-solve math from a per-thread VRAM-arena slice.
+            // The wmat is bit-identical to the serial loop (only the parallelism + scratch
+            // location change); se_from_loo's host long-double variance reduction is
+            // untouched ⇒ the NRBIG se/z stay bit-identical and G1==G2 holds.
+            const int n_models = 1;  // single-model SE here; the model axis is the S8 seam
+            // nb-strided Stage-A scratch + seed arenas.
+            DeviceBuffer<double> dXmatB(static_cast<std::size_t>(m) * static_cast<std::size_t>(nb));
+            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1) *
+                                       static_cast<std::size_t>(nb));
+            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1) *
+                                     static_cast<std::size_t>(nb));
+            DeviceBuffer<double> dAseed(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1) *
+                                        static_cast<std::size_t>(nb));
+            DeviceBuffer<double> dBseed(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr) *
+                                        static_cast<std::size_t>(nb));
+            // Stage-B per-refit VRAM arenas (one slice per (model,block) thread).
+            const std::size_t dbl_refit = large_loo_dbl_refit(nl, nr, r);
+            const std::size_t int_refit = large_int_scratch(nl, nr, r);
+            const std::size_t n_refit   = static_cast<std::size_t>(nb) * static_cast<std::size_t>(n_models);
+            DeviceBuffer<double> dScratch(dbl_refit * n_refit);
+            DeviceBuffer<int>    dIntScratch(int_refit * n_refit);
+            // ---- Stage A: per-block cuSOLVER SVD seed (NO per-block sync) ----
+            if (r > 0) {
+                for (int b = 0; b < nb; ++b) {
+                    const std::size_t ob = static_cast<std::size_t>(b);
+                    double* xmat_b = dXmatB.data() + static_cast<std::size_t>(m) * ob;
+                    launch_qpadm_xmat_from_rowmajor(
+                        dLoo.data() + static_cast<std::size_t>(m) * ob, nl, nr, xmat_b,
+                        stream_.get());
+                    large_svd_V(xmat_b, nl, nr, r,
+                                dVout.data() + static_cast<std::size_t>(nr) * r * ob,
+                                dXt.data() + static_cast<std::size_t>(nr) * nl * ob,
+                                stream_.get());
+                    launch_qpadm_seed_from_V(
+                        xmat_b, dVout.data() + static_cast<std::size_t>(nr) * r * ob,
+                        nl, nr, r,
+                        dAseed.data() + static_cast<std::size_t>(nl) * r * ob,
+                        dBseed.data() + static_cast<std::size_t>(r) * nr * ob,
+                        stream_.get());
                 }
             }
+            // ---- Stage B: ONE parallel kernel — all nb refits concurrent ----
+            launch_qpadm_loo_large_batched(
+                dLoo.data(), dQinv.data(), dAseed.data(), dBseed.data(),
+                nl, nr, r, opts.fudge, opts.als_iterations, nb, n_models,
+                static_cast<long>(dbl_refit), static_cast<long>(int_refit),
+                dScratch.data(), dIntScratch.data(), dWmat.data(), stream_.get());
         }
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(wmat.data(), dWmat.data(),
                                           static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) * sizeof(double),

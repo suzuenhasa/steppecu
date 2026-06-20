@@ -131,6 +131,23 @@ does NOT re-invert per replicate), giving `wmat[b,:]`; `se = sqrt(diag(cov(wmat)
 scaling; drop non-finite replicates (`finreps`). `z = weight/se`. So S7's per-model cost ≈ `n_block ×`
 the weight solve (OQ-7, §6 — must be a batched device op, not `n_block` host launches).
 
+**S7 LARGE-path LOO is PARALLEL** (`gls_weights_loo_batched`, the large/`nr>10` branch). The small
+path was always batched (`loo_batched_kernel`, one thread per block); the large path (NRBIG nl=2 nr=39
+nb=701) USED to fall back to a host `for b` loop — `n_block` SERIAL cuSOLVER-SVD + single-thread-ALS
+refits with a per-block host round-trip (the ~371 s NRBIG SE wall). The refits are INDEPENDENT, so the
+large path now runs them CONCURRENTLY in two stages: **Stage A** precomputes the per-block cuSOLVER
+`gesvd` SVD seed (`large_svd_V` + `seed_from_V`) into `nb`-strided `dAseed`/`dBseed` arenas with NO
+per-block `cudaStreamSynchronize` (the seed stays cuSOLVER `gesvd` so it is BIT-IDENTICAL to the serial
+path — an on-device Jacobi seed would shift the ALS fixed point in the LSBs); **Stage B** is ONE
+many-thread kernel (`loo_large_batched_kernel`, one thread per `(model,block)`) that runs the EXACT
+`als_large` + constrained-weight-solve math from a per-thread slice of a runtime-sized VRAM arena
+(stride `large_loo_dbl_refit` = `xmat[m]+A[nl*r]+B[r*nr]+large_dbl_scratch`; no fixed per-thread local
+arrays ⇒ arbitrary `nl/nr/m/r` fit). Each thread writes only its own `dWmat` row + arena slice (no
+atomics, no aliasing ⇒ order-independent), and `se_from_loo`'s host long-double variance reduction is
+UNCHANGED — so the NRBIG `se`/`z` are BIT-IDENTICAL to the serial path and G=1==G=2 holds. Occupancy
+is limited by the large per-thread scratch, but `n_block` low-occupancy parallel refits ≫ `n_block`
+serial. (The `n_models` axis is the S8 batched-large seam; for the single-model NRBIG it is 1.)
+
 **S8 — model-space search.** Each model is a self-contained S3→S7 chain over its own pop-subset
 gather from the shared resident `f2_blocks`; the rotation shards models across GPUs (§1.6).
 
