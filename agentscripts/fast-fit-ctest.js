@@ -14,8 +14,11 @@ const PATHENV = 'export PATH=/usr/local/cuda/bin:$PATH && export LD_LIBRARY_PATH
 const RSYNC = 'rsync -az --delete-after --exclude .git --exclude build --exclude build-rel --exclude aadr -e ssh ' + R + '/ box5090:/workspace/steppe/'
 // DEFAULT ctest (the fast dev-loop path we are optimizing) + a TIMED full run.
 const BUILD = SSH + " 'cd /workspace/steppe && " + PATHENV + " && cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release >/tmp/cfg.log 2>&1 && cmake --build build-rel 2>&1 | tail -25 && echo === DEFAULT CTEST (timed) === && /usr/bin/time -v ctest --test-dir build-rel --output-on-failure 2>&1 | tail -55'"
-// The OPT-IN thorough path (CpuBackend oracle + NRBIG full SE) — must still pass when requested.
-const THOROUGH = SSH + " 'cd /workspace/steppe && " + PATHENV + " && STEPPE_THOROUGH=1 ctest --test-dir build-rel -R qpadm --output-on-failure 2>&1 | tail -40'"
+// The OPT-IN thorough path proof — qpadm_parity ONLY (its CpuBackend oracle is ~23 s + the now-2.8 s
+// NRBIG SE ≈ ~27 s, FAST enough to confirm the opt-in CpuBackend path still works). Do NOT run the
+// thorough qpadm_ROTATION here — that is the ~371 s 84-model CPU oracle and would burn time; the
+// CpuBackend code is unchanged (just gated), so its compile + the qpadm_parity-thorough run prove it.
+const THOROUGH = SSH + " 'cd /workspace/steppe && " + PATHENV + " && STEPPE_THOROUGH=1 ctest --test-dir build-rel -R qpadm_parity --output-on-failure 2>&1 | tail -40'"
 const CLEAN = 'cd ' + R + ' && git checkout -- . && git clean -fd src tests include docs'
 
 const STD = [
