@@ -1,8 +1,10 @@
 // tests/reference/test_qpadm_parity.cpp
 //
-// M(fit-1) ACCEPTANCE: the first steppe qpAdm GLS fit (CpuBackend reference,
-// native FP64, ONE model) validated to tolerance parity against the af6a8c2
-// ADMIXTOOLS 2 golden (tests/reference/goldens/at2/, admixtools 2.0.10, R 4.3.3).
+// qpAdm fit ACCEPTANCE: the steppe qpAdm GLS fit (ONE model, native FP64) validated
+// to tolerance parity against the af6a8c2 ADMIXTOOLS 2 golden (tests/reference/
+// goldens/at2/, admixtools 2.0.10, R 4.3.3) on BOTH backends — the CpuBackend
+// reference (M(fit-1): the bit-exact diff oracle + the no-GPU fallback) AND the CUDA
+// backend (M(fit-4): the PRODUCTION GPU path, f2 RESIDENT in VRAM).
 //
 // f2-SOURCE (the chosen isolation strategy, design §5, BINDING): feed steppe the
 // SAME f2 AT2 used — the committed binary fixture
@@ -24,8 +26,18 @@
 //   tier here), the primary gate is weights/chisq/dof/p (afprod, tight).
 //
 // Self-checking main(): returns non-zero on any failure (CTest gates on the exit
-// code). No GoogleTest dependency. CUDA-FREE (CpuBackend only) — this is the §4
-// layering proof: the fit reference compiles + runs with no GPU.
+// code). No GoogleTest dependency.
+//
+// M(fit-4) EXTENSION: this now exercises BOTH backends — the CpuBackend (the
+// bit-exact diff ORACLE + the no-GPU fallback) AND the CUDA backend (the PRODUCTION
+// GPU PATH). The GPU run uploads the golden f2 fixture to VRAM as a DeviceF2Blocks,
+// asserts f2 is RESIDENT + a real GPU is bound (caps.compute_major), runs the fit on
+// the GPU (run_qpadm(DeviceF2Blocks) → the f4-gather kernel reading resident f2 →
+// jackknife SYRK/cuSOLVER → on-device SVD/ALS/weight → batched LOO), and asserts the
+// GPU weights/chisq/dof/p match the af6a8c2 golden AND match the CpuBackend oracle to
+// 1e-9 (localization). If no CUDA device is visible the GPU block prints SKIP and the
+// CpuBackend path alone still gates (CI-without-GPU degrades cleanly; box5090 always
+// has a GPU). The CpuBackend block ALWAYS runs.
 
 #include <cmath>
 #include <cstdio>
@@ -36,7 +48,8 @@
 #include <vector>
 
 #include "device/backend.hpp"          // steppe::ComputeBackend, F4Blocks, JackknifeCov, Precision
-#include "device/backend_factory.hpp"  // steppe::device::make_cpu_backend
+#include "device/backend_factory.hpp"  // steppe::device::make_cpu_backend, make_cuda_backend, visible_device_count
+#include "device/device_f2_blocks.hpp" // steppe::device::DeviceF2Blocks, upload_f2_blocks_to_device (the GPU-resident input)
 #include "device/resources.hpp"        // steppe::device::Resources / PerGpuResources
 #include "steppe/error.hpp"            // steppe::Status
 #include "steppe/fstats.hpp"           // steppe::F2BlockTensor
@@ -231,6 +244,115 @@ int main(int argc, char** argv) {
             char nm[32];
             std::snprintf(nm, sizeof(nm), "Q_diag[%d]", k);
             check_close(nm, cov.Q.at(static_cast<std::size_t>(k) + 5u * static_cast<std::size_t>(k)),
+                        gQdiag[k], 1e-3, 1e-9);
+        }
+    }
+
+    // =====================================================================
+    // CUDA BACKEND — the PRODUCTION GPU PATH (M(fit-4)). Upload the golden f2
+    // fixture to VRAM as a DeviceF2Blocks, assert it is RESIDENT + a real GPU is
+    // bound, run the fit ON THE GPU (run_qpadm(DeviceF2Blocks) → the f4-gather
+    // kernel reading resident f2 → jackknife SYRK/cuSOLVER → on-device SVD/ALS/
+    // weight → batched LOO), and assert the GPU result matches the golden AND the
+    // CpuBackend oracle (localization). SKIP cleanly if no CUDA device is visible.
+    // =====================================================================
+    std::printf("\n=== CUDA backend (GPU path, f2 RESIDENT) ===\n");
+    int gpu_count = 0;
+    try {
+        gpu_count = steppe::device::visible_device_count();
+    } catch (const std::exception& e) {
+        std::printf("  [SKIP] visible_device_count threw: %s\n", e.what());
+        gpu_count = 0;
+    }
+    if (gpu_count <= 0) {
+        std::printf("  [SKIP] no CUDA device visible — CpuBackend path alone gates "
+                    "(CI-without-GPU degrades cleanly)\n");
+    } else {
+        // Build a GPU Resources (one CudaBackend bound to device 0).
+        steppe::device::Resources gpu_res;
+        steppe::device::PerGpuResources g0;
+        g0.device_id = 0;
+        g0.backend = steppe::device::make_cuda_backend(0);
+        g0.caps = g0.backend->capabilities();
+        gpu_res.gpus.push_back(std::move(g0));
+
+        // Prove a real CudaBackend (not CpuBackend whose caps are all-zero).
+        const steppe::BackendCapabilities& caps = gpu_res.gpus.at(0).caps;
+        check_eq_int("gpu caps.device_count>=1", caps.device_count >= 1 ? 1 : 0, 1);
+        check_eq_int("gpu caps.compute_major>=1", caps.compute_major >= 1 ? 1 : 0, 1);
+        std::printf("  GPU compute capability sm_%d%d, device_count=%d\n",
+                    caps.compute_major, caps.compute_minor, caps.device_count);
+
+        // Upload the golden f2 fixture to VRAM as a DeviceF2Blocks (the contract's
+        // "the golden f2 fixture is loaded into a DeviceF2Blocks for the GPU fit").
+        // The fit reads block_sizes, NOT vpair (OQ-3), and read_fixture leaves vpair
+        // empty; upload_f2_blocks_to_device copies BOTH slabs, so size vpair to match
+        // (zeros — the fit never reads it; the f2 slab carries the golden numbers).
+        steppe::F2BlockTensor f2_up = f2;
+        f2_up.vpair.assign(f2.f2.size(), 0.0);
+        steppe::device::DeviceF2Blocks dev_f2 =
+            steppe::device::upload_f2_blocks_to_device(f2_up, 0);
+        // Assert f2 RESIDENT in VRAM (the binding requirement: no host round-trip).
+        check_eq_int("f2 resident (f2_device != null)", dev_f2.f2_device() != nullptr ? 1 : 0, 1);
+        check_eq_int("f2 resident device_id==0", dev_f2.device_id, 0);
+        check_eq_int("f2 resident !empty", dev_f2.empty() ? 0 : 1, 1);
+        check_eq_int("f2 resident n_block", dev_f2.n_block, f2.n_block);
+
+        // Run the fit ON THE GPU (the DeviceF2Blocks overload = the production entry).
+        const steppe::QpAdmResult gpu = steppe::run_qpadm(dev_f2, model, opts, gpu_res);
+        if (gpu.status != steppe::Status::Ok) {
+            std::printf("  [FAIL] GPU run_qpadm status != Ok (%d)\n",
+                        static_cast<int>(gpu.status));
+            ++g_failures;
+        } else {
+            std::printf("\n-- GPU weights vs GOLDEN (TIGHT rtol 1e-6) --\n");
+            check_close("gpu weight[CordedWare]", gpu.weight.at(0), g_w0, 1e-6, 1e-12);
+            check_close("gpu weight[Turkey_N]",   gpu.weight.at(1), g_w1, 1e-6, 1e-12);
+            std::printf("-- GPU chisq (TIGHT) / dof (EXACT) --\n");
+            check_close("gpu chisq", gpu.chisq, g_chisq, 1e-6, 1e-12);
+            check_eq_int("gpu dof", gpu.dof, g_dof);
+            std::printf("-- GPU se / z / p (LOOSE rtol 1e-3) --\n");
+            check_close("gpu se[CordedWare]", gpu.se.at(0), g_se, 1e-3, 1e-9);
+            check_close("gpu se[Turkey_N]",   gpu.se.at(1), g_se, 1e-3, 1e-9);
+            check_close("gpu z[CordedWare]",  gpu.z.at(0),  g_z0, 1e-3, 1e-6);
+            check_close("gpu z[Turkey_N]",    gpu.z.at(1),  g_z1, 1e-3, 1e-6);
+            check_close("gpu p", gpu.p, g_p, 1e-3, 1e-9);
+
+            // Diff ORACLE: GPU == CpuBackend to 1e-9 (localizes a GPU regression
+            // against the bit-exact reference, not only the golden constants).
+            std::printf("-- GPU vs CpuBackend oracle (diff localizer, 1e-9) --\n");
+            check_close("gpu-vs-cpu weight[0]", gpu.weight.at(0), res.weight.at(0), 0.0, 1e-9);
+            check_close("gpu-vs-cpu weight[1]", gpu.weight.at(1), res.weight.at(1), 0.0, 1e-9);
+            check_close("gpu-vs-cpu chisq",     gpu.chisq,        res.chisq,        0.0, 1e-9);
+        }
+
+        // GPU X/Q localizers: call the CUDA backend's assemble_f4(DeviceF2Blocks) +
+        // jackknife_cov directly (proving S3/S4 ran on the GPU over resident f2).
+        std::printf("\n-- GPU S3/S4 slice cross-check (LOCALIZER, loose rtol 1e-3) --\n");
+        const double gX[5] = {0.000204208644854152, 0.000158461166756911,
+                              -2.44579443823133e-05, -2.42885897838109e-05,
+                              -3.27534454121373e-05};
+        const double gQdiag[5] = {4.83261400481559e-09, 4.38937359295631e-09,
+                                  2.43374449452477e-09, 3.18630101668274e-09,
+                                  4.5704478312779e-09};
+        steppe::ComputeBackend& gbe = *gpu_res.gpus.at(0).backend;
+        const std::vector<int> lidx = {1, 2};
+        const std::vector<int> ridx = {3, 4, 5, 6, 7, 8};
+        const steppe::Precision gprec{steppe::Precision::Kind::Fp64};
+        const steppe::F4Blocks gX_blocks =
+            gbe.assemble_f4(dev_f2, std::span<const int>(lidx),
+                            std::span<const int>(ridx), gprec);
+        const steppe::JackknifeCov gcov =
+            gbe.jackknife_cov(gX_blocks, std::span<const int>(f2.block_sizes), 1e-4, gprec);
+        for (int j = 0; j < 5; ++j) {
+            char nm[40];
+            std::snprintf(nm, sizeof(nm), "gpu X_slice[%d]", j);
+            check_close(nm, gX_blocks.x_total.at(static_cast<std::size_t>(j)), gX[j], 1e-3, 1e-9);
+        }
+        for (int k = 0; k < 5; ++k) {
+            char nm[40];
+            std::snprintf(nm, sizeof(nm), "gpu Q_diag[%d]", k);
+            check_close(nm, gcov.Q.at(static_cast<std::size_t>(k) + 5u * static_cast<std::size_t>(k)),
                         gQdiag[k], 1e-3, 1e-9);
         }
     }

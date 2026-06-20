@@ -37,6 +37,7 @@
 // place a host caller meets the GPU f2 path; `core` reaches it solely through the
 // CUDA-free ComputeBackend interface in device/backend.hpp.
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -65,7 +66,8 @@
 #include "device/cuda/block_sink.cuh"       // M5: BlockSink, HostRamSink, DiskSink, kStreamStagingSlots
 #include "device/stream_f2_blocks.hpp"      // M5: StreamTarget (the CUDA-free streamed-tier request)
 #include "device/f2_blocks_out.hpp"         // M5: DiskF2Blocks (the Disk descriptor DiskSink populates)
-#include "device/cuda/handles.hpp"          // CublasHandle (RAII)
+#include "device/cuda/handles.hpp"          // CublasHandle, CusolverDnHandle (RAII)
+#include "device/cuda/qpadm_fit_kernels.cuh" // M(fit-4): f4 gather + loo/total + xtau + small-LA launch wrappers
 #include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
@@ -115,6 +117,9 @@ public:
         // `set_stream` re-apply has it.
         blas_.set_workspace(workspace_.data(), workspace_.bytes());
         blas_.set_stream(stream_.get());
+        // cuSOLVER shares the ONE per-device statistic stream (§12 single-stream
+        // determinism); no workspace re-apply hazard (CusolverDnHandle::set_stream).
+        solver_.set_stream(stream_.get());
     }
 
     /// The factored GEMM body's output (run_f2_blocks_resident): the resident
@@ -1186,7 +1191,387 @@ public:
         return caps;
     }
 
+    // =====================================================================
+    // qpAdm fit-engine virtuals ON THE GPU (the FROZEN CONTRACT §2; M(fit-4)).
+    // The PRODUCTION GPU path: f2 stays RESIDENT in VRAM (the gather kernel
+    // reads f2.f2_device() directly — no D2H, no host round-trip of the big
+    // tensor), and every step runs on the device (gather/loo/xtau kernels,
+    // cublasDsyrk for Q, cusolverDn Cholesky for Qinv, the on-device
+    // transliterated small-LA for the SVD seed / ALS / weight / chisq, and the
+    // BATCHED on-device LOO re-fits for S7). The only host transfers are the
+    // small fit intermediates that cross the CUDA-free F4Blocks/JackknifeCov/
+    // GlsWeights seam (X/loo/total m*nb, Q/Qinv m²) — KB-scale, inherent to the
+    // existing host-vector seam. The numbers reproduce the bit-exact FP64
+    // CpuBackend oracle (the parity anchor) so the GPU result matches the
+    // af6a8c2 golden. Native FP64 end-to-end (the parity gate; §12).
+    // =====================================================================
+
+    /// S3 — assemble the per-block f4 matrix X from DEVICE-RESIDENT f2 (zero D2H of
+    /// the big tensor; the FROZEN CONTRACT §2a). The gather kernel reads
+    /// f2.f2_device() in VRAM; the est_to_loo/x_total/tot_line reduction runs
+    /// on-device; only the small X/loo/total cross the seam. Native FP64.
+    [[nodiscard]] F4Blocks assemble_f4(const steppe::device::DeviceF2Blocks& f2,
+                                       std::span<const int> left_idx,
+                                       std::span<const int> right_idx,
+                                       const Precision& precision) override {
+        (void)precision;  // native FP64 (OQ-5; the cancellation-sensitive f-stat diff)
+        guard_device();
+
+        const int nl = static_cast<int>(left_idx.size()) - 1;
+        const int nr = static_cast<int>(right_idx.size()) - 1;
+        const int nb = f2.n_block;
+        const int P = f2.P;
+
+        F4Blocks out;
+        out.nl = nl;
+        out.nr = nr;
+        out.n_block = nb;
+        const std::size_t m = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb < 0 ? 0 : nb), 0.0);
+        out.x_total.assign(m, 0.0);
+        out.x_loo.assign(m * static_cast<std::size_t>(nb < 0 ? 0 : nb), 0.0);
+        tot_line_.assign(m, 0.0);
+        if (nl <= 0 || nr <= 0 || nb <= 0 || f2.f2_device() == nullptr) return out;
+
+        // H2D the small model index vectors (length nl+1 / nr+1).
+        DeviceBuffer<int> dLeft(left_idx.size());
+        DeviceBuffer<int> dRight(right_idx.size());
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLeft.data(), left_idx.data(),
+                                          left_idx.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRight.data(), right_idx.data(),
+                                          right_idx.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), f2.block_sizes.data(),
+                                          static_cast<std::size_t>(nb) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // Device-resident X / loo / total / tot_line.
+        DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dTotal(m);
+        DeviceBuffer<double> dTotLine(m);
+
+        // S3 gather (reads RESIDENT f2; native FP64 4-slab combine).
+        launch_assemble_f4_gather(f2.f2_device(), P, dLeft.data(), dRight.data(),
+                                  nl, nr, nb, dX.data(), stream_.get());
+
+        // n = Σ block_sizes (host int → double; the jackknife normalizer).
+        long long n_ll = 0;
+        for (int v : f2.block_sizes) n_ll += v;
+        const double n = static_cast<double>(n_ll);
+
+        // est_to_loo + x_total + tot_line (on-device reduction; FP64 op order).
+        launch_f4_loo_total(dX.data(), dBlockSizes.data(),
+                            static_cast<int>(m), nb, n,
+                            dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
+
+        // D2H the small fit intermediates across the CUDA-free seam.
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
+                                          m * static_cast<std::size_t>(nb) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
+                                          m * static_cast<std::size_t>(nb) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
+                                          m * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(tot_line_.data(), dTotLine.data(),
+                                          m * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
+    /// S3 host-oracle overload — NOT the GPU path. The CudaBackend implements only
+    /// the DeviceF2Blocks form (zero D2H of the resident tensor); a host
+    /// F2BlockTensor would force the big tensor onto the device only to read it back,
+    /// which is the CpuBackend's oracle door, not the production GPU path.
+    [[nodiscard]] F4Blocks assemble_f4(const F2BlockTensor& f2,
+                                       std::span<const int> left_idx,
+                                       std::span<const int> right_idx,
+                                       const Precision& precision) override {
+        (void)f2; (void)left_idx; (void)right_idx; (void)precision;
+        throw std::runtime_error(
+            "CudaBackend::assemble_f4(host): the GPU path reads DEVICE-RESIDENT f2 "
+            "(assemble_f4(DeviceF2Blocks)); the host-tensor overload is the CpuBackend "
+            "oracle door");
+    }
+
+    /// S4 — weighted block-jackknife covariance Q + Qinv on the GPU (the FROZEN
+    /// CONTRACT §2b). xtau kernel → cublasDsyrk Q (well-conditioned; FP64 gate) →
+    /// fudge diag → cusolverDn Cholesky potrf/potri Qinv (ill-conditioned; native
+    /// FP64). devInfo>0 ⇒ NonSpdCovariance (value, not throw). Native FP64.
+    [[nodiscard]] JackknifeCov jackknife_cov(const F4Blocks& x,
+                                             std::span<const int> block_sizes,
+                                             double fudge,
+                                             const Precision& precision) override {
+        (void)precision;  // native FP64
+        guard_device();
+
+        const int m = x.nl * x.nr;
+        const int nb = x.n_block;
+        JackknifeCov out;
+        out.m = m;
+        if (m <= 0 || nb <= 0) { out.status = Status::Ok; return out; }
+        const std::size_t M = static_cast<std::size_t>(m);
+
+        // n = Σ block_sizes.
+        long long n_ll = 0;
+        for (int b = 0; b < nb; ++b) n_ll += block_sizes[static_cast<std::size_t>(b)];
+        const double n = static_cast<double>(n_ll);
+
+        // Upload loo / est / tot_line / block_sizes; form xtau (col-major k + m*b).
+        DeviceBuffer<double> dLoo(M * static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dEst(M);
+        DeviceBuffer<double> dTotLine(M);
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dXtau(M * static_cast<std::size_t>(nb));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLoo.data(), x.x_loo.data(),
+                                          M * static_cast<std::size_t>(nb) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dEst.data(), x.x_total.data(),
+                                          M * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotLine.data(), tot_line_.data(),
+                                          M * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
+                                          static_cast<std::size_t>(nb) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_f4_xtau(dLoo.data(), dEst.data(), dTotLine.data(), dBlockSizes.data(),
+                       m, nb, n, dXtau.data(), stream_.get());
+
+        // Q = xtau·xtauᵀ / nb (UNFUDGED, symmetric m×m), cublasDsyrk LOWER, OP_N
+        // (n=m, k=nb, A=dXtau lda=m). The well-conditioned covariance SYRK; native
+        // FP64 for the gate. Then mirror lower→upper so Q is full (CpuBackend writes
+        // both triangles).
+        DeviceBuffer<double> dQ(M * M);
+        const double alpha = 1.0 / static_cast<double>(nb);
+        const double beta = 0.0;
+        CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+                                 m, nb, &alpha, dXtau.data(), m, &beta, dQ.data(), m));
+        launch_symmetrize_lower_to_full(dQ.data(), m, stream_.get());
+        out.Q.assign(M * M, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.Q.data(), dQ.data(), M * M * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // tr(Q) (host; m tiny) → fudged copy Qf = Q; diag += fudge*tr.
+        double tr = 0.0;
+        for (int k = 0; k < m; ++k) tr += out.Q[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(k)];
+        DeviceBuffer<double> dQf(M * M);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQf.data(), dQ.data(), M * M * sizeof(double),
+                                          cudaMemcpyDeviceToDevice, stream_.get()));
+        launch_add_fudge_diag(dQf.data(), m, fudge, tr, stream_.get());
+
+        // Qinv = inverse(Qf), native FP64, cusolverDn Cholesky potrf + potri (the
+        // §12 SPD path). potrf factors in place; potri overwrites with the inverse
+        // (filling LOWER); symmetrize to full. devInfo>0 ⇒ NonSpdCovariance.
+        DeviceBuffer<int> dInfo(1);
+        int lwork_f = 0;
+        CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
+                                                   m, dQf.data(), m, &lwork_f));
+        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork_f > 0 ? lwork_f : 1));
+        CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
+                                        dQf.data(), m, dWork.data(), lwork_f, dInfo.data()));
+        int info = 0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        if (info != 0) {  // not SPD / singular pivot → domain outcome
+            out.status = Status::NonSpdCovariance;
+            return out;
+        }
+        CUSOLVER_CHECK(cusolverDnDpotri(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
+                                        dQf.data(), m, dWork.data(), lwork_f, dInfo.data()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        if (info != 0) {
+            out.status = Status::NonSpdCovariance;
+            return out;
+        }
+        launch_symmetrize_lower_to_full(dQf.data(), m, stream_.get());
+        out.Qinv.assign(M * M, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.Qinv.data(), dQf.data(), M * M * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.status = Status::Ok;
+        return out;
+    }
+
+    /// S5 — rank test / SVD seed + chisq on the GPU (the FROZEN CONTRACT §2c).
+    /// xmat from x_total, on-device Jacobi SVD seed, chisq quadratic form. Native FP64.
+    [[nodiscard]] GlsWeights rank_test(const F4Blocks& x,
+                                       const JackknifeCov& cov,
+                                       int r,
+                                       const Precision& precision) override {
+        (void)precision;
+        guard_device();
+        GlsWeights gw;
+        gw.r = r;
+        const int nl = x.nl, nr = x.nr, m = nl * nr;
+        assert_qpadm_model_fits(nl, nr, r);
+        gw.A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
+        gw.B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
+        if (m <= 0) { gw.status = Status::Ok; return gw; }
+
+        DeviceBuffer<double> dTotal(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
+        DeviceBuffer<double> dA(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1));
+        DeviceBuffer<double> dB(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr));
+        DeviceBuffer<double> dW(static_cast<std::size_t>(nl));
+        DeviceBuffer<double> dchisq(1);
+        DeviceBuffer<int> dStatus(1);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotal.data(), x.x_total.data(),
+                                          static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
+                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
+        launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+        // chisq with the SEED factors (rank_test is the seed; design §4 S5).
+        launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                   nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                   stream_.get());
+        double chisq = 0.0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        if (r > 0) {
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.A.data(), dA.data(),
+                                              gw.A.size() * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.B.data(), dB.data(),
+                                              gw.B.size() * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+        }
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        gw.chisq = chisq;
+        gw.status = Status::Ok;
+        return gw;
+    }
+
+    /// S6 — GLS weights via AT2 ALS on the GPU (the FROZEN CONTRACT §2d). xmat from
+    /// x_total → on-device SVD seed → 20 ALS opt_A/opt_B iters → constrained weight
+    /// solve → normalize Σw=1 → chisq. All on-device, native FP64.
+    [[nodiscard]] GlsWeights gls_weights(const F4Blocks& x,
+                                         const JackknifeCov& cov,
+                                         int r,
+                                         const QpAdmOptions& opts,
+                                         const Precision& precision) override {
+        (void)precision;
+        guard_device();
+        GlsWeights gw;
+        gw.r = r;
+        const int nl = x.nl, nr = x.nr, m = nl * nr;
+        assert_qpadm_model_fits(nl, nr, r);
+        gw.A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
+        gw.B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
+        gw.w.assign(static_cast<std::size_t>(nl), 0.0);
+        if (m <= 0 || nl <= 0) { gw.status = Status::Ok; return gw; }
+
+        DeviceBuffer<double> dTotal(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
+        DeviceBuffer<double> dA(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1));
+        DeviceBuffer<double> dB(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr));
+        DeviceBuffer<double> dW(static_cast<std::size_t>(nl));
+        DeviceBuffer<double> dchisq(1);
+        DeviceBuffer<int> dStatus(1);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotal.data(), x.x_total.data(),
+                                          static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
+                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
+        if (r > 0) {
+            launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+            launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                             opts.als_iterations, dA.data(), dB.data(), stream_.get());
+        }
+        launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                   nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                   stream_.get());
+        int status_i = 0;
+        double chisq = 0.0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.w.data(), dW.data(),
+                                          static_cast<std::size_t>(nl) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        if (r > 0) {
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.A.data(), dA.data(),
+                                              gw.A.size() * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.B.data(), dB.data(),
+                                              gw.B.size() * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+        }
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        gw.chisq = chisq;
+        if (status_i == 6) { gw.status = Status::RankDeficient; return gw; }
+        gw.status = Status::Ok;
+        return gw;
+    }
+
+    /// S7 — BATCHED leave-one-block-out weight re-fits on the GPU (the FROZEN
+    /// CONTRACT §2e). Upload x_loo + Qinv ONCE; one batched device launch runs all
+    /// nb per-block fits (xmat from loo[:,:,b] → seed → ALS → weight solve →
+    /// normalize), REUSING Qinv unchanged (the AT2 parity pin). Returns wmat
+    /// [nb*nl] row-major. This replaces the 708 host gls_weights calls with a single
+    /// batched device kernel (NOT a host loop). Native FP64.
+    [[nodiscard]] std::vector<double> gls_weights_loo_batched(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) override {
+        (void)precision;
+        guard_device();
+        const int nl = x.nl, nr = x.nr, m = nl * nr, nb = x.n_block;
+        assert_qpadm_model_fits(nl, nr, r);
+        std::vector<double> wmat(static_cast<std::size_t>(nb < 0 ? 0 : nb) *
+                                 static_cast<std::size_t>(nl), 0.0);
+        if (m <= 0 || nb <= 0 || nl <= 0) return wmat;
+
+        DeviceBuffer<double> dLoo(static_cast<std::size_t>(m) * static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
+        DeviceBuffer<double> dWmat(static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLoo.data(), x.x_loo.data(),
+                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(nb) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
+                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_qpadm_loo_batched(dLoo.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                                 opts.als_iterations, nb, dWmat.data(), stream_.get());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(wmat.data(), dWmat.data(),
+                                          static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return wmat;
+    }
+
 private:
+    /// Fail-fast if a qpAdm model exceeds the on-device small-LA scratch bounds
+    /// (qpadm_fit_kernels.cu kQpMaxNl/kQpMaxNr/kQpMaxR). The golden is nl=2, nr=5,
+    /// r=1 — far inside; a larger model would index past the fixed local arrays in
+    /// the device LA kernels (silent corruption), so reject it here (architecture.md
+    /// §2 fail-fast). These bounds cover realistic qpAdm models; a future batched-
+    /// search milestone can widen them.
+    static void assert_qpadm_model_fits(int nl, int nr, int r) {
+        constexpr int kMaxNl = 5, kMaxNr = 10, kMaxR = 4;
+        if (nl > kMaxNl || nr > kMaxNr || r > kMaxR) {
+            throw std::runtime_error(
+                "CudaBackend qpAdm fit: model exceeds the on-device small-LA scratch "
+                "bounds (nl<=5, nr<=10, r<=4); widen kQpMax* in qpadm_fit_kernels.cu");
+        }
+    }
+
     /// Make THIS backend's device current at every compute entry (architecture.md
     /// §11.4 SPMG: `cudaSetDevice` to switch per device). One backend is bound to one
     /// device (backend.hpp per-device-instance contract); a single host process may
@@ -1262,7 +1647,22 @@ private:
     // bind to `device_id_`.
     Stream stream_{};
     CublasHandle blas_{};
+    // Dense-cuSOLVER handle for the qpAdm fit small-LA (Qinv Cholesky potrf/potri,
+    // the FROZEN CONTRACT §1b). Declared AFTER blas_ so it constructs on device_id_
+    // (its context binds to the device current at cusolverDnCreate, like cuBLAS
+    // §2.1.2 — device_id_'s initializer made it current) and is destroyed BEFORE
+    // stream_ (declaration-order teardown: stream_ outlives the handle whose stream
+    // it is). Shares the ONE per-device statistic stream (§12 single-stream
+    // determinism); no second stream, no search-stream pool for this single-model
+    // milestone (the FROZEN CONTRACT §1b: the batched S7 runs on stream_).
+    CusolverDnHandle solver_{};
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
+
+    // tot_line_ caches the AT2 weighted.mean(loo, 1-bl/n) centering line (length m)
+    // produced by assemble_f4 and consumed by jackknife_cov (the xtau term) — the
+    // GPU mirror of the CpuBackend's private tot_line_ member (cpu_backend.cpp:531).
+    // One model is fit at a time on this backend instance; rebuilt per assemble_f4.
+    std::vector<double> tot_line_{};
 
     // AMORTIZED H2D pinned-input registry (P4/L2; perf-discovery.md). Holds the
     // persistent `cudaHostRegister`s of the Q/V/N H2D source pages so the page-locking

@@ -543,6 +543,25 @@ public:
             "ComputeBackend::gls_weights: not implemented by this backend");
     }
 
+    /// S7 — BATCHED leave-one-block-out weight re-fits (design §1.2 S7; AT2
+    /// get_weights_covariance). For each block b in 0..n_block-1, re-solve the GLS
+    /// weights using x.x_loo[:,:,b] as the xmat (REUSING cov.Qinv unchanged — the
+    /// AT2 parity pin: AT2 does NOT re-invert per replicate). Returns the AT2
+    /// replicate matrix wmat[n_block*nl], ROW-MAJOR (b*nl + i). The CUDA backend
+    /// runs all n_block re-fits as BATCHED on-device solves (getrfBatched /
+    /// getrsBatched, batchCount=n_block — NOT a host loop); the CpuBackend overrides
+    /// with the per-block host loop (the bit-exact oracle). Native FP64. NON-PURE:
+    /// the base throws (the established backend.hpp pattern). This is the batched-
+    /// capable S7 seam that makes se_from_loo backend-agnostic (the host loop body
+    /// moves into the CpuBackend override).
+    [[nodiscard]] virtual std::vector<double> gls_weights_loo_batched(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) {
+        (void)x; (void)cov; (void)r; (void)opts; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::gls_weights_loo_batched: not implemented by this backend");
+    }
+
     /// Probe the capability tier of THE device this backend instance is bound to
     /// (the per-device-instance contract above): compute capability, total/free
     /// VRAM, whether this device can peer-access the other visible devices, and

@@ -42,35 +42,19 @@ SeResult se_from_loo(ComputeBackend& be, const F4Blocks& x, const JackknifeCov& 
                      int r, const QpAdmOptions& opts, const std::vector<double>& weight,
                      const Precision& precision) {
     const int nl = x.nl;
-    const int nr = x.nr;
     const int nb = x.n_block;
-    const int m = nl * nr;
-    const std::size_t M = static_cast<std::size_t>(m);
 
     SeResult out;
     out.se.assign(static_cast<std::size_t>(nl), 0.0);
     out.z.assign(static_cast<std::size_t>(nl), 0.0);
     if (nb < 2 || nl <= 0) return out;
 
-    // wmat: nb × nl row-major (the AT2 replicate matrix).
-    std::vector<double> wmat(static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl), 0.0);
-    for (int b = 0; b < nb; ++b) {
-        // One-block F4Blocks whose x_total is the LOO replicate slice loo[:,:,b];
-        // gls_weights reads x_total → xmat, so this re-fits the b-th replicate.
-        F4Blocks rep;
-        rep.nl = nl;
-        rep.nr = nr;
-        rep.n_block = 1;
-        rep.x_total.assign(M, 0.0);
-        for (int k = 0; k < m; ++k)
-            rep.x_total[static_cast<std::size_t>(k)] =
-                x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
-        const GlsWeights gw = be.gls_weights(rep, cov, r, opts, precision);
-        for (int i = 0; i < nl; ++i)
-            wmat[static_cast<std::size_t>(b) * static_cast<std::size_t>(nl) +
-                 static_cast<std::size_t>(i)] =
-                (i < static_cast<int>(gw.w.size())) ? gw.w[static_cast<std::size_t>(i)] : 0.0;
-    }
+    // wmat: nb × nl row-major (the AT2 replicate matrix). The per-block re-fits run
+    // through the BATCHED-capable backend seam (gls_weights_loo_batched): the CUDA
+    // backend runs all nb on-device in one batched launch; the CpuBackend overrides
+    // it with the oracle host loop (the FROZEN CONTRACT §2e). se_from_loo is now
+    // backend-agnostic — it no longer hard-codes the host loop.
+    std::vector<double> wmat = be.gls_weights_loo_batched(x, cov, r, opts, precision);
 
     // AT2 (!boot): wmat <- wmat * (numreps-1)/sqrt(numreps); se = sqrt(diag(cov(wmat))).
     const double scale = static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));

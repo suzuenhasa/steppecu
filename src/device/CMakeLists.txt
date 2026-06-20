@@ -22,6 +22,7 @@
 add_library(steppe_device STATIC
     cuda/f2_block_kernel.cu       # 3-GEMM reformulation + fixed-slice Ozaki + assemble (single block)
     cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
+    cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
@@ -51,7 +52,7 @@ target_include_directories(steppe_device PUBLIC
 
 target_link_libraries(steppe_device
     PUBLIC  steppe::api steppe::core_internal     # public, CUDA-FREE seam + shared helpers
-    PRIVATE steppe::warnings CUDA::cudart CUDA::cublas)  # CUDA stays PRIVATE → layering
+    PRIVATE steppe::warnings CUDA::cudart CUDA::cublas CUDA::cusolver)  # CUDA stays PRIVATE → layering
 
 # Fixed-slice Ozaki engagement symbols (cublasSetEmulationStrategy /
 # cublasSetFixedPointEmulationMantissaControl /

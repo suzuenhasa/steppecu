@@ -114,12 +114,15 @@ struct MultiGpuTimings {
 
 /// One per device in DeviceConfig::devices, RAII-owned (architecture.md §9
 /// PerGpuResources). M4.5-precompute-focused: the per-device backend (which itself
-/// owns the device's single statistic stream + cuBLAS handle + emulated-FP64
-/// determinism workspace, cuda_backend.cu) + that device's PROBED capability tier
-/// + its physical CUDA ordinal. cuSOLVER / NCCL are intentionally absent: the
+/// owns the device's single statistic stream + cuBLAS handle + cuSOLVER handle +
+/// emulated-FP64 determinism workspace, cuda_backend.cu) + that device's PROBED
+/// capability tier + its physical CUDA ordinal. NCCL is intentionally absent: the
 /// precompute combine is cudaMemcpyPeer (P2P tier) or host-staged (baseline),
-/// NEVER an NCCL AllReduce (architecture.md §11.4, §12); cuSOLVER lands with the
-/// S4-S8 fit engine (a later workflow).
+/// NEVER an NCCL AllReduce (architecture.md §11.4, §12). The cuSOLVER handle for the
+/// S4-S8 fit engine landed with M(fit-4): it lives INSIDE CudaBackend (like blas_/
+/// stream_/workspace_, the DRY rule §8) — NO struct field is added here
+/// (PerGpuResources holds the backend by unique_ptr<ComputeBackend>; the handle is
+/// owned one layer down).
 ///
 /// MOVE-ONLY: it owns a unique_ptr<ComputeBackend>, so the whole struct is
 /// move-only (default-move/no-copy synthesized) — exactly the §9 move-only

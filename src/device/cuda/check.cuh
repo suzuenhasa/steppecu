@@ -31,6 +31,7 @@
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 
 #include <exception>
 #include <source_location>
@@ -102,6 +103,45 @@ private:
     std::string msg_;
 };
 
+/// Typed exception thrown on a nonzero cuSOLVER status. Like cuBLAS, cuSOLVER has
+/// no `cudaGetErrorString` equivalent, so the status enum is mapped to its symbolic
+/// name here. Thrown — never `exit()` — so the qpAdm fit can catch it and the API
+/// can translate it (architecture.md §7, §10). NOTE: cuSOLVER's per-call
+/// `int* devInfo` (factorization/solve outcome) is NOT routed through this — a
+/// `*devInfo > 0` (singular/not-SPD) is a DOMAIN OUTCOME mapped to a Status value
+/// (the FROZEN CONTRACT §1c); only the API status (bad handle / alloc / arch) throws.
+class CusolverError : public std::exception {
+public:
+    CusolverError(cusolverStatus_t status, const char* expr,
+                  const std::source_location& loc)
+        : status_(status) {
+        msg_ = std::string(loc.file_name()) + ":" +
+               std::to_string(loc.line()) + " (" + loc.function_name() +
+               "): '" + expr + "' -> " + status_name(status);
+    }
+    [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
+    [[nodiscard]] cusolverStatus_t status() const noexcept { return status_; }
+
+    /// Symbolic name for a cuSOLVER status (cuSOLVER has no `cudaGetErrorString`).
+    [[nodiscard]] static const char* status_name(cusolverStatus_t s) noexcept {
+        switch (s) {
+            case CUSOLVER_STATUS_SUCCESS:           return "CUSOLVER_STATUS_SUCCESS";
+            case CUSOLVER_STATUS_NOT_INITIALIZED:   return "CUSOLVER_STATUS_NOT_INITIALIZED";
+            case CUSOLVER_STATUS_ALLOC_FAILED:      return "CUSOLVER_STATUS_ALLOC_FAILED";
+            case CUSOLVER_STATUS_INVALID_VALUE:     return "CUSOLVER_STATUS_INVALID_VALUE";
+            case CUSOLVER_STATUS_ARCH_MISMATCH:     return "CUSOLVER_STATUS_ARCH_MISMATCH";
+            case CUSOLVER_STATUS_EXECUTION_FAILED:  return "CUSOLVER_STATUS_EXECUTION_FAILED";
+            case CUSOLVER_STATUS_INTERNAL_ERROR:    return "CUSOLVER_STATUS_INTERNAL_ERROR";
+            case CUSOLVER_STATUS_NOT_SUPPORTED:     return "CUSOLVER_STATUS_NOT_SUPPORTED";
+            default:                                return "CUSOLVER_STATUS_UNKNOWN";
+        }
+    }
+
+private:
+    cusolverStatus_t status_;
+    std::string msg_;
+};
+
 namespace detail {
 
 // The source_location defaults to the call site (std::source_location::current()
@@ -154,6 +194,12 @@ inline void cublas_check(cublasStatus_t status, const char* expr,
     if (status != CUBLAS_STATUS_SUCCESS) throw CublasError(status, expr, loc);
 }
 
+inline void cusolver_check(cusolverStatus_t status, const char* expr,
+                           const std::source_location& loc =
+                               std::source_location::current()) {
+    if (status != CUSOLVER_STATUS_SUCCESS) throw CusolverError(status, expr, loc);
+}
+
 }  // namespace detail
 
 }  // namespace steppe::device
@@ -186,6 +232,14 @@ inline void cublas_check(cublasStatus_t status, const char* expr,
 /// Usage: `CUBLAS_CHECK(cublasGemmEx(...));`
 #define CUBLAS_CHECK(expr) \
     ::steppe::device::detail::cublas_check((expr), #expr)
+
+/// Check a cuSOLVER (dense) API call; throw CusolverError with file:line on a
+/// nonzero API status. The ONE cuSOLVER error check in the codebase. This is for
+/// the API status only — the per-call `int* devInfo` (singular/not-SPD outcome) is
+/// a DOMAIN OUTCOME the qpAdm fit maps to a Status value, NOT thrown (the FROZEN
+/// CONTRACT §1c). Usage: `CUSOLVER_CHECK(cusolverDnDpotrf(...));`
+#define CUSOLVER_CHECK(expr) \
+    ::steppe::device::detail::cusolver_check((expr), #expr)
 
 /// Post-launch kernel check (architecture.md §7). `cudaGetLastError()` surfaces a
 /// bad launch configuration synchronously; the debug-only `cudaDeviceSynchronize`

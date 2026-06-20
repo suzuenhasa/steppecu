@@ -518,6 +518,41 @@ public:
         return als_weights(xmat, nl, nr, r, cov.Qinv, opts);
     }
 
+    /// S7 — leave-one-block-out weight re-fits (the ORACLE host loop). This is the
+    /// per-block re-solve body that se_from_loo used to run inline (nested_models.cpp
+    /// host loop); moving it here behind the batched-capable virtual makes se_from_loo
+    /// backend-agnostic (the CUDA backend runs the SAME re-fits BATCHED on-device; the
+    /// FROZEN CONTRACT §2e). For each block b: build a one-block F4Blocks whose
+    /// x_total is the LOO replicate slice loo[:,:,b] (gls_weights reads x_total →
+    /// xmat), REUSING cov.Qinv unchanged (the AT2 parity pin). Returns wmat[nb*nl]
+    /// row-major (b*nl + i). Native FP64.
+    [[nodiscard]] std::vector<double> gls_weights_loo_batched(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) override {
+        const int nl = x.nl, nr = x.nr, nb = x.n_block;
+        const int m = nl * nr;
+        const std::size_t M = static_cast<std::size_t>(m);
+        std::vector<double> wmat(static_cast<std::size_t>(nb < 0 ? 0 : nb) *
+                                 static_cast<std::size_t>(nl), 0.0);
+        if (m <= 0 || nb <= 0 || nl <= 0) return wmat;
+        for (int b = 0; b < nb; ++b) {
+            F4Blocks rep;
+            rep.nl = nl;
+            rep.nr = nr;
+            rep.n_block = 1;
+            rep.x_total.assign(M, 0.0);
+            for (int k = 0; k < m; ++k)
+                rep.x_total[static_cast<std::size_t>(k)] =
+                    x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
+            const GlsWeights gw = gls_weights(rep, cov, r, opts, precision);
+            for (int i = 0; i < nl; ++i)
+                wmat[static_cast<std::size_t>(b) * static_cast<std::size_t>(nl) +
+                     static_cast<std::size_t>(i)] =
+                    (i < static_cast<int>(gw.w.size())) ? gw.w[static_cast<std::size_t>(i)] : 0.0;
+        }
+        return wmat;
+    }
+
     // ---- AT2 ALS shared with S7 (a public-on-the-class entry for the LOO re-fit;
     //      design §3 nested_models reuses gls_weights per LOO block). The S7
     //      driver in core/qpadm calls gls_weights with a one-block F4Blocks, so no

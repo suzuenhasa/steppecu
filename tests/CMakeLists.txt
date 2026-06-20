@@ -404,21 +404,24 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME config_unit COMMAND test_config)
 
-# --- M(fit-1) qpAdm parity test (the Phase-2 first-fit acceptance gate) --------
-# CUDA-FREE host C++ driven through the CpuBackend reference (native FP64): reads
-# the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the SAME
-# f2 ADMIXTOOLS 2 read internally — runs the single-model qpAdm fit
-# (steppe::run_qpadm, S3->S4->S6->S7) and asserts weights/chisq/dof/p + the S3/S4
-# X/Q slice cross-check vs the af6a8c2 golden (design docs/design/fit-engine.md;
-# the M(fit-1) FROZEN CONTRACT). Self-checking main() (exits non-zero on failure;
-# CTest gates on the exit code), so it does NOT link gtest_main.
+# --- qpAdm parity test (the Phase-2 fit acceptance gate, BOTH backends) ---------
+# Reads the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the
+# SAME f2 ADMIXTOOLS 2 read internally — and runs the single-model qpAdm fit
+# (steppe::run_qpadm, S3->S4->S6->S7) on BOTH backends: the CpuBackend reference
+# (M(fit-1): the bit-exact diff oracle + the no-GPU fallback) AND the CUDA backend
+# (M(fit-4): the PRODUCTION GPU path — uploads the fixture to VRAM as a
+# DeviceF2Blocks, asserts f2 RESIDENT + a real GPU bound, runs the fit on the GPU,
+# asserts weights/chisq/dof/p vs the af6a8c2 golden AND vs the CpuBackend oracle to
+# 1e-9). Plus the S3/S4 X/Q slice cross-check on both. Self-checking main() (exits
+# non-zero on failure; CTest gates on the exit code), so it does NOT link gtest_main.
 #
-# The TU itself is host-only C++ (no CUDA kernels) — it is the §4 layering proof
-# that the fit reference compiles + runs with no GPU. It is named .cu only so the
-# executable device-links steppe_device's RDC kernels (CUDA_SEPARABLE_COMPILATION),
-# the same path every other reference test that links steppe::device uses; the GPU
-# is never touched at run time (CpuBackend only). Links steppe::core (run_qpadm) +
-# steppe::device (make_cpu_backend + the four fit virtuals on CpuBackend).
+# The GPU block SKIPs cleanly (prints SKIP, still exits via the CpuBackend gate) when
+# no CUDA device is visible — so this remains the §4 layering proof that the fit
+# reference runs with no GPU, while exercising the real GPU path on box5090. Named .cu
+# so it device-links steppe_device's RDC kernels (CUDA_SEPARABLE_COMPILATION) and can
+# construct a real CudaBackend. Links steppe::core (run_qpadm) + steppe::device
+# (make_cpu_backend / make_cuda_backend + the fit virtuals on both backends); cuSOLVER
+# links transitively through steppe_device.
 add_executable(test_qpadm_parity reference/test_qpadm_parity.cu)
 target_link_libraries(test_qpadm_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)

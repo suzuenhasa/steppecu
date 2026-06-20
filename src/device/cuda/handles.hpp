@@ -46,6 +46,7 @@
 #define STEPPE_DEVICE_CUDA_HANDLES_HPP
 
 #include <cublas_v2.h>
+#include <cusolverDn.h>    // cusolverDnHandle_t (the qpAdm fit small-LA: potrf/getrf/gesvdj)
 #include <cuda_runtime.h>  // cudaGetDevice (debug device-ordinal record-and-assert)
 
 #include <cstddef>
@@ -260,6 +261,83 @@ private:
 
     cublasHandle_t h_ = nullptr;  // non-owning: the CublasHandle owns the context
     cublasMath_t prev_ = CUBLAS_DEFAULT_MATH;  // captured mode to restore (defensive default)
+};
+
+/// Owning, move-only dense-cuSOLVER handle — the qpAdm fit's small-LA primitive
+/// home (Cholesky potrf/potri for the SPD Qinv, LU getrf/getrs + batched for the
+/// ALS/weight/LOO solves, Jacobi gesvdj for the rank-test SVD seed; the FROZEN
+/// CONTRACT §1a). Mirrors `CublasHandle` (RAII, move-only, device-ordinal
+/// record-and-assert): the context binds to the CUDA context current at
+/// `cusolverDnCreate` (cuSOLVER, like cuBLAS §2.1.2), so the caller /
+/// `PerGpuResources` selects the device BEFORE constructing it. Unlike
+/// `CublasHandle`, cuSOLVER has NO workspace-reset hazard — `cusolverDnSetStream`
+/// does not touch any pinned workspace, so `set_stream` does not re-apply anything
+/// (workspaces in the modern cuSOLVER dense API are passed per-call). Created once
+/// in the backend ctor and reused; the dtor routes a nonzero
+/// `cusolverDnDestroy` to the §7 teardown-warning sink (never throws).
+class CusolverDnHandle {
+public:
+    /// Create the dense-cuSOLVER handle ON THE CURRENTLY-CURRENT DEVICE and record
+    /// that ordinal (cuSOLVER binds to the current CUDA context at create, like
+    /// cuBLAS §2.1.2). Caller/PerGpuResources selects the device BEFORE constructing.
+    CusolverDnHandle() {
+        STEPPE_CUDA_CHECK(cudaGetDevice(&device_id_));
+        CUSOLVER_CHECK(cusolverDnCreate(&h_));
+    }
+    CusolverDnHandle(CusolverDnHandle&& o) noexcept
+        : h_(std::exchange(o.h_, nullptr)), device_id_(o.device_id_) {}
+    CusolverDnHandle& operator=(CusolverDnHandle&& o) noexcept {
+        if (this != &o) {
+            destroy();
+            h_ = std::exchange(o.h_, nullptr);
+            device_id_ = o.device_id_;
+        }
+        return *this;
+    }
+    CusolverDnHandle(const CusolverDnHandle&) = delete;
+    CusolverDnHandle& operator=(const CusolverDnHandle&) = delete;
+    ~CusolverDnHandle() { destroy(); }
+
+    /// Bind the cuSOLVER stream (no workspace-reset hazard — unlike
+    /// `cublasSetStream` it does not touch any pinned workspace, so no re-apply).
+    void set_stream(cudaStream_t stream) {
+        assert_on_creation_device();
+        CUSOLVER_CHECK(cusolverDnSetStream(h_, stream));
+    }
+    [[nodiscard]] cusolverDnHandle_t get() const noexcept { return h_; }
+    [[nodiscard]] int device_id() const noexcept { return device_id_; }
+
+private:
+    /// Debug-only record-and-ASSERT that the CURRENTLY-current CUDA device matches
+    /// the one this handle was created on (architecture.md §7, §11.4) — identical in
+    /// spirit to CublasHandle::assert_on_creation_device. cuSOLVER couples its
+    /// context to the device current at `cusolverDnCreate`, so configuring/issuing
+    /// work while a different device is current is a multi-GPU bug. NEVER calls
+    /// `cudaSetDevice` (no hidden global mutable state). Compiled out under NDEBUG.
+    void assert_on_creation_device() const noexcept {
+        STEPPE_DEBUG_ONLY(
+            int current = -1;
+            const cudaError_t e = cudaGetDevice(&current);
+            STEPPE_ASSERT(e == cudaSuccess,
+                          "cudaGetDevice failed while checking CusolverDnHandle device ordinal");
+            STEPPE_ASSERT(current == device_id_,
+                          "CusolverDnHandle used on a CUDA device different from the one it was "
+                          "created on (cuSOLVER context binds to the creation device, like "
+                          "cuBLAS §2.1.2; architecture.md §11.4)"));
+    }
+    void destroy() noexcept {
+        if (h_) {
+            const cusolverStatus_t s = cusolverDnDestroy(h_);
+            if (s != CUSOLVER_STATUS_SUCCESS) {
+                STEPPE_LOG_WARN("cusolverDnDestroy at teardown: %s",
+                                CusolverError::status_name(s));
+            }
+        }
+        h_ = nullptr;
+    }
+
+    cusolverDnHandle_t h_ = nullptr;
+    int device_id_ = -1;
 };
 
 }  // namespace steppe::device
