@@ -39,6 +39,7 @@
 // CpuBackend path alone still gates (CI-without-GPU degrades cleanly; box5090 always
 // has a GPU). The CpuBackend block ALWAYS runs.
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -209,6 +210,275 @@ int main(int argc, char** argv) {
     check_close("z[CordedWare]",  res.z.at(0),  g_z0, 1e-3, 1e-6);
     check_close("z[Turkey_N]",    res.z.at(1),  g_z1, 1e-3, 1e-6);
     check_close("p", res.p, g_p, 1e-3, 1e-9);
+
+    // =====================================================================
+    // M(fit-2) RANK TEST / qpWave on the CpuBackend (the native ORACLE; the
+    // parity step, NOT the deliverable). Validates the rank sweep (per-rank
+    // chisq/dof/p), the AT2 res$rankdrop nested table, and the AT2 res$popdrop
+    // leave-one-LEFT-SOURCE-out table against golden_fit0.json (the nr<=32 batched
+    // gate). f4rank/dof/dofdiff EXACT; chisq/chisqdiff TIGHT (rtol 1e-6); p/p_nested
+    // /rank-decision LOOSE (rtol 1e-3). The GPU deliverable (CudaBackend::rank_sweep)
+    // is the NEXT phase; this asserts the oracle the GPU will be diffed against.
+    // =====================================================================
+    std::printf("\n========== M(fit-2) RANK TEST / qpWave (CpuBackend ORACLE) ==========\n");
+    int rsw_rank_Q_ref = 0;  // the CpuBackend oracle rank_Q (full m=10 model); the GPU localizer
+    {
+        // ---- golden_fit0.json res$rankdrop (rows: f4rank DESCENDING = rank1, rank0) ----
+        // row0 = rank1: dof=4, chisq=4.63516..., p=0.32682..., dofdiff=6,
+        //               chisqdiff=27.3346..., p_nested=1.2533e-4
+        // row1 = rank0: dof=10, chisq=31.9698..., p=4.0511e-4, NA, NA, NA
+        const int    grd_f4rank[2]   = {1, 0};
+        const int    grd_dof[2]      = {4, 10};
+        const double grd_chisq[2]    = {4.63516296859645, 31.9697628796068};
+        const double grd_p[2]        = {0.326820092470997, 0.000405109973855609};
+        const int    grd_dofdiff     = 6;                    // row0 only (row1 = NA)
+        const double grd_chisqdiff   = 27.3345999110104;     // row0 only
+        const double grd_p_nested    = 0.000125328972063141; // row0 only
+        const int    g_f4rank        = 1;                    // AT2 res$f4rank
+
+        // The full QpAdmResult already carries the M(fit-2) surface (run_impl filled it).
+        std::printf("-- rankdrop table (from run_qpadm result) --\n");
+        check_eq_int("rankdrop rows", static_cast<int>(res.rankdrop_f4rank.size()), 2);
+        check_eq_int("f4rank (res$f4rank)", res.f4rank, g_f4rank);
+        for (int k = 0; k < 2; ++k) {
+            char nm[48];
+            std::snprintf(nm, sizeof(nm), "rd[%d].f4rank", k);
+            check_eq_int(nm, res.rankdrop_f4rank.at(static_cast<std::size_t>(k)), grd_f4rank[k]);
+            std::snprintf(nm, sizeof(nm), "rd[%d].dof", k);
+            check_eq_int(nm, res.rankdrop_dof.at(static_cast<std::size_t>(k)), grd_dof[k]);
+            std::snprintf(nm, sizeof(nm), "rd[%d].chisq", k);
+            check_close(nm, res.rankdrop_chisq.at(static_cast<std::size_t>(k)), grd_chisq[k], 1e-6, 1e-12);
+            std::snprintf(nm, sizeof(nm), "rd[%d].p", k);
+            check_close(nm, res.rankdrop_p.at(static_cast<std::size_t>(k)), grd_p[k], 1e-3, 1e-9);
+        }
+        // nested diff: row0 (rank1 vs rank0) populated; row1 (rank0) = NA.
+        check_eq_int("rd[0].dofdiff", res.rankdrop_dofdiff.at(0), grd_dofdiff);
+        check_close("rd[0].chisqdiff", res.rankdrop_chisqdiff.at(0), grd_chisqdiff, 1e-6, 1e-12);
+        check_close("rd[0].p_nested",  res.rankdrop_p_nested.at(0),  grd_p_nested, 1e-3, 1e-9);
+        const bool row1_na = (res.rankdrop_dofdiff.at(1) == INT_MIN) &&
+                             std::isnan(res.rankdrop_chisqdiff.at(1)) &&
+                             std::isnan(res.rankdrop_p_nested.at(1));
+        std::printf("  [%s] %-28s (dofdiff=%d chisqdiff/p_nested=NaN)\n",
+                    row1_na ? "PASS" : "FAIL", "rd[1] is NA (last row)",
+                    res.rankdrop_dofdiff.at(1));
+        if (!row1_na) ++g_failures;
+
+        // ---- per-rank sweep: chisq(0)=rank0, chisq(1)=rank1 (ASCENDING index) ----
+        std::printf("-- per-rank sweep (chisq[r], dof[r]) --\n");
+        check_eq_int("sweep ranks", static_cast<int>(res.rank_chisq.size()), 2);
+        check_close("chisq[r=0]", res.rank_chisq.at(0), grd_chisq[1], 1e-6, 1e-12); // rank0
+        check_close("chisq[r=1]", res.rank_chisq.at(1), grd_chisq[0], 1e-6, 1e-12); // rank1
+        check_eq_int("dof[r=0]", res.rank_dof.at(0), grd_dof[1]);
+        check_eq_int("dof[r=1]", res.rank_dof.at(1), grd_dof[0]);
+
+        // ---- res$popdrop (rows "00","01","10"): leave-one-LEFT-SOURCE-out ----
+        // "00" full: dof=4, chisq=4.63516..., p=0.32682..., f4rank=1, feasible=TRUE
+        // "01" drop Turkey_N: dof=5, chisq=13.1352..., p=0.0221..., f4rank=0, TRUE
+        // "10" drop CordedWare: dof=5, chisq=17.1407..., p=0.00424..., f4rank=0, TRUE
+        const char*  gpd_pat[3]    = {"00", "01", "10"};
+        const int    gpd_wt[3]     = {0, 1, 1};
+        const int    gpd_dof[3]    = {4, 5, 5};
+        const double gpd_chisq[3]  = {4.63516296859645, 13.1352334823443, 17.1406935861748};
+        const double gpd_p[3]      = {0.326820092470997, 0.0221439104360255, 0.00424055405322031};
+        const int    gpd_f4rank[3] = {1, 0, 0};
+        const bool   gpd_feas[3]   = {true, true, true};
+        std::printf("-- popdrop table (from run_qpadm result) --\n");
+        check_eq_int("popdrop rows", static_cast<int>(res.popdrop_pat.size()), 3);
+        for (int k = 0; k < 3 && static_cast<std::size_t>(k) < res.popdrop_pat.size(); ++k) {
+            char nm[48];
+            const bool pat_ok = (res.popdrop_pat.at(static_cast<std::size_t>(k)) == gpd_pat[k]);
+            std::printf("  [%s] pd[%d].pat got=%s want=%s\n", pat_ok ? "PASS" : "FAIL",
+                        k, res.popdrop_pat.at(static_cast<std::size_t>(k)).c_str(), gpd_pat[k]);
+            if (!pat_ok) ++g_failures;
+            std::snprintf(nm, sizeof(nm), "pd[%d].wt", k);
+            check_eq_int(nm, res.popdrop_wt.at(static_cast<std::size_t>(k)), gpd_wt[k]);
+            std::snprintf(nm, sizeof(nm), "pd[%d].dof", k);
+            check_eq_int(nm, res.popdrop_dof.at(static_cast<std::size_t>(k)), gpd_dof[k]);
+            std::snprintf(nm, sizeof(nm), "pd[%d].f4rank", k);
+            check_eq_int(nm, res.popdrop_f4rank.at(static_cast<std::size_t>(k)), gpd_f4rank[k]);
+            std::snprintf(nm, sizeof(nm), "pd[%d].chisq", k);
+            check_close(nm, res.popdrop_chisq.at(static_cast<std::size_t>(k)), gpd_chisq[k], 1e-6, 1e-12);
+            std::snprintf(nm, sizeof(nm), "pd[%d].p", k);
+            check_close(nm, res.popdrop_p.at(static_cast<std::size_t>(k)), gpd_p[k], 1e-3, 1e-9);
+            const bool feas_ok = (res.popdrop_feasible.at(static_cast<std::size_t>(k)) != 0) == gpd_feas[k];
+            std::snprintf(nm, sizeof(nm), "pd[%d].feasible", k);
+            std::printf("  [%s] %-24s got=%d want=%d\n", feas_ok ? "PASS" : "FAIL", nm,
+                        res.popdrop_feasible.at(static_cast<std::size_t>(k)) != 0, gpd_feas[k]);
+            if (!feas_ok) ++g_failures;
+        }
+
+        // ---- DIRECT backend rank_sweep call (the dispatch report + localizer) ----
+        std::printf("-- direct CpuBackend::rank_sweep (dispatch report) --\n");
+        steppe::ComputeBackend& be2 = *resources.gpus.at(0).backend;
+        const std::vector<int> lidx2 = {0, 1, 2};  // [target, CordedWare, Turkey_N]
+        const std::vector<int> ridx2 = {3, 4, 5, 6, 7, 8};
+        const steppe::Precision prec2{steppe::Precision::Kind::Fp64};
+        const steppe::F4Blocks X2 = be2.assemble_f4(f2, std::span<const int>(lidx2),
+                                                    std::span<const int>(ridx2), prec2);
+        const steppe::JackknifeCov cov2 =
+            be2.jackknife_cov(X2, std::span<const int>(f2.block_sizes), 1e-4, prec2);
+        const steppe::RankSweep rsw = be2.rank_sweep(X2, cov2, opts.rank_alpha, opts, prec2);
+        rsw_rank_Q_ref = rsw.rank_Q;  // captured for the GPU localizer (GPU rank_Q == this)
+        check_eq_int("direct f4rank", rsw.f4rank, g_f4rank);
+        // rank_Q is observability (non-gating). The full 2-source model's Q is m=10
+        // (full numerical rank 10). The golden model_well_determined.rank_Q=5 is the
+        // SLICE (single-leftref nr×nr=5×5) Q rank, a DIFFERENT quantity — so we
+        // REPORT rsw.rank_Q here, not gate it against the slice's 5.
+        std::printf("  [INFO] direct rank_Q (full m=10 model) = %d "
+                    "(golden model_well_determined.rank_Q=5 is the 5x5 SLICE Q)\n",
+                    rsw.rank_Q);
+        const char* svd_name = (rsw.svd_path == 1) ? "gesvdjBatched would-select"
+                             : (rsw.svd_path == 2) ? "gesvd would-select"
+                                                   : "jacobi(executed)";
+        std::printf("  [INFO] svd_path=%d (%s); executed=on-device Jacobi (nl=%d,nr=%d both<=32)\n",
+                    rsw.svd_path, svd_name, X2.nl, X2.nr);
+        check_eq_int("svd_path (nl,nr<=32 ⇒ gesvdjBatched)", rsw.svd_path, 1);
+    }
+
+    // ---- nr>32 FALLBACK fixture (gesvd dispatch): the CpuBackend rank test on a
+    //      REAL-AADR >32-right model (golden_fit1_NRBIG.json: nl=2, nr=39, P=43).
+    //      Validates the SWEEP MATH (chisq/dof/p/rankdrop/popdrop) at a large model;
+    //      the EXECUTED SVD is the on-device Jacobi at all sizes (the cuSOLVER gesvd
+    //      routing is the PENDING seam) — svd_path REPORTS gesvd would-select (2).
+    //      The fixture is optional (skip cleanly if absent).
+    //
+    //      The golden rankdrop/popdrop (golden_fit1_NRBIG.json) was computed by AT2
+    //      from the SAME read_f2(outdir,pops=...) f2 object that this fixture was
+    //      dumped from (golden_fit1_generate.R), so it is BIT-CONSISTENT with the
+    //      fixture — chisq is TIGHT (rtol 1e-6), dof/dofdiff/f4rank EXACT, like the
+    //      9-pop gate. This is the NON-GATING fallback fixture (the 9-pop nr≤32
+    //      batched golden above is the PRIMARY gate); it validates the SWEEP MATH at
+    //      a >32-right model + the gesvd dispatch report. ---------------------------
+    {
+        std::printf("\n-- nr>32 gesvd-FALLBACK fixture (CpuBackend ORACLE; golden_fit1_NRBIG) --\n");
+        steppe::F2BlockTensor f2big;
+        if (!read_fixture(golden_dir + "/fixtures/f2_fit1_NRBIG.bin", f2big)) {
+            std::printf("  [SKIP] nr>32 fixture absent — 9-pop gate stands; dispatch PENDING\n");
+        } else {
+            // pop_order: 0=England_BellBeaker 1=CordedWare 2=Turkey_N 3..41=right (39).
+            steppe::QpAdmModel big;
+            big.target = 0; big.left = {1, 2};
+            big.right.clear();
+            for (int j = 3; j < 43; ++j) big.right.push_back(j);  // 40 right pops (R0..R39) ⇒ nr=39
+            big.model_index = 2;
+            const steppe::QpAdmResult rbig = steppe::run_qpadm(f2big, big, opts, resources);
+            if (rbig.status != steppe::Status::Ok) {
+                std::printf("  [FAIL] nr>32 run_qpadm status != Ok (%d)\n",
+                            static_cast<int>(rbig.status));
+                ++g_failures;
+            } else {
+                // golden_fit1_NRBIG.json res$rankdrop (rows rank1, rank0; read_f2 form):
+                const int    b_f4rank = 1;
+                const int    brd_dof[2]    = {38, 78};
+                const double brd_chisq[2]  = {52.704281610335912, 190.83602239090976};
+                const double brd_p[2]      = {0.05678246029948012, 1.922125797354803e-11};
+                const int    brd_dofdiff   = 40;
+                const double brd_chisqdiff = 138.131740780574;
+                const double brd_p_nested  = 1.00598619034513e-12;
+                check_eq_int("nr>32 f4rank", rbig.f4rank, b_f4rank);
+                check_eq_int("nr>32 rankdrop rows", static_cast<int>(rbig.rankdrop_f4rank.size()), 2);
+                for (int k = 0; k < 2; ++k) {
+                    char nm[48];
+                    std::snprintf(nm, sizeof(nm), "nr>32 rd[%d].dof", k);
+                    check_eq_int(nm, rbig.rankdrop_dof.at(static_cast<std::size_t>(k)), brd_dof[k]);
+                    std::snprintf(nm, sizeof(nm), "nr>32 rd[%d].chisq", k);
+                    check_close(nm, rbig.rankdrop_chisq.at(static_cast<std::size_t>(k)), brd_chisq[k], 1e-6, 1e-9);
+                    std::snprintf(nm, sizeof(nm), "nr>32 rd[%d].p", k);
+                    check_close(nm, rbig.rankdrop_p.at(static_cast<std::size_t>(k)), brd_p[k], 1e-3, 1e-12);
+                }
+                check_eq_int("nr>32 rd[0].dofdiff", rbig.rankdrop_dofdiff.at(0), brd_dofdiff);
+                check_close("nr>32 rd[0].chisqdiff", rbig.rankdrop_chisqdiff.at(0), brd_chisqdiff, 1e-6, 1e-9);
+                check_close("nr>32 rd[0].p_nested",  rbig.rankdrop_p_nested.at(0),  brd_p_nested, 1e-3, 1e-13);
+
+                // popdrop ("00","01","10"):
+                const char*  bpd_pat[3]   = {"00", "01", "10"};
+                const int    bpd_dof[3]   = {38, 39, 39};
+                const double bpd_chisq[3] = {52.704281610335912, 100.19050317026696, 169.11350353681215};
+                const int    bpd_f4rank[3]= {1, 0, 0};
+                check_eq_int("nr>32 popdrop rows", static_cast<int>(rbig.popdrop_pat.size()), 3);
+                for (int k = 0; k < 3 && static_cast<std::size_t>(k) < rbig.popdrop_pat.size(); ++k) {
+                    char nm[48];
+                    const bool pat_ok = (rbig.popdrop_pat.at(static_cast<std::size_t>(k)) == bpd_pat[k]);
+                    if (!pat_ok) ++g_failures;
+                    std::printf("  [%s] nr>32 pd[%d].pat got=%s want=%s\n", pat_ok ? "PASS" : "FAIL",
+                                k, rbig.popdrop_pat.at(static_cast<std::size_t>(k)).c_str(), bpd_pat[k]);
+                    std::snprintf(nm, sizeof(nm), "nr>32 pd[%d].dof", k);
+                    check_eq_int(nm, rbig.popdrop_dof.at(static_cast<std::size_t>(k)), bpd_dof[k]);
+                    std::snprintf(nm, sizeof(nm), "nr>32 pd[%d].f4rank", k);
+                    check_eq_int(nm, rbig.popdrop_f4rank.at(static_cast<std::size_t>(k)), bpd_f4rank[k]);
+                    std::snprintf(nm, sizeof(nm), "nr>32 pd[%d].chisq", k);
+                    check_close(nm, rbig.popdrop_chisq.at(static_cast<std::size_t>(k)), bpd_chisq[k], 1e-6, 1e-9);
+                }
+
+                // dispatch report: nr=39>32 ⇒ gesvd would-select (svd_path=2).
+                steppe::ComputeBackend& beb = *resources.gpus.at(0).backend;
+                const std::vector<int> lidxb = {0, 1, 2};
+                std::vector<int> ridxb;
+                for (int j = 3; j < 43; ++j) ridxb.push_back(j);  // 40 right pops ⇒ nr=39
+                const steppe::Precision precb{steppe::Precision::Kind::Fp64};
+                const steppe::F4Blocks Xb = beb.assemble_f4(f2big, std::span<const int>(lidxb),
+                                                            std::span<const int>(ridxb), precb);
+                const steppe::JackknifeCov covb =
+                    beb.jackknife_cov(Xb, std::span<const int>(f2big.block_sizes), 1e-4, precb);
+                const steppe::RankSweep rswb = beb.rank_sweep(Xb, covb, opts.rank_alpha, opts, precb);
+                std::printf("  [INFO] nr>32 svd_path=%d (gesvd would-select; nl=%d nr=%d); "
+                            "executed=on-device Jacobi (cuSOLVER routing PENDING)\n",
+                            rswb.svd_path, Xb.nl, Xb.nr);
+                check_eq_int("nr>32 svd_path (nr>32 ⇒ gesvd)", rswb.svd_path, 2);
+
+                // ---- nr>32 ON THE GPU (the gesvd-FALLBACK deliverable status) ----
+                // The on-device transliterated rank-sweep kernels CANNOT serve nr=39:
+                // CUDA reserves a kernel's per-thread LOCAL memory for the device's max
+                // resident-thread count, so a big-nr per-thread frame trips
+                // cudaErrorMemoryAllocation at launch even single-threaded (measured on
+                // box5090). So the nr>32 GPU rank sweep is the documented cuSOLVER-
+                // routing PENDING seam (M(fit-2) contract §5): the GPU rank_sweep GUARDS
+                // nr>32 and THROWS the small-LA-bounds message; we catch it and report
+                // the SKIP + the gesvd-would-select dispatch. The nr>32 SWEEP MATH is
+                // GATED on the CpuBackend oracle above (chisq/dof/rankdrop/popdrop all
+                // PASS); the GPU validates the nr<=32 batched golden bit-exactly. ------
+                int gpu_count_big = 0;
+                try { gpu_count_big = steppe::device::visible_device_count(); }
+                catch (...) { gpu_count_big = 0; }
+                if (gpu_count_big <= 0) {
+                    std::printf("  [SKIP] nr>32 GPU sweep: no CUDA device visible\n");
+                } else {
+                    steppe::device::Resources gpu_big;
+                    steppe::device::PerGpuResources gb;
+                    gb.device_id = 0;
+                    gb.backend = steppe::device::make_cuda_backend(0);
+                    gb.caps = gb.backend->capabilities();
+                    gpu_big.gpus.push_back(std::move(gb));
+                    steppe::F2BlockTensor f2big_up = f2big;
+                    f2big_up.vpair.assign(f2big.f2.size(), 0.0);
+                    steppe::device::DeviceF2Blocks devbig =
+                        steppe::device::upload_f2_blocks_to_device(f2big_up, 0);
+                    steppe::ComputeBackend& gbeb = *gpu_big.gpus.at(0).backend;
+                    const steppe::F4Blocks gXb =
+                        gbeb.assemble_f4(devbig, std::span<const int>(lidxb),
+                                         std::span<const int>(ridxb), precb);
+                    const steppe::JackknifeCov gcovb =
+                        gbeb.jackknife_cov(gXb, std::span<const int>(f2big.block_sizes), 1e-4, precb);
+                    try {
+                        const steppe::RankSweep grswb =
+                            gbeb.rank_sweep(gXb, gcovb, opts.rank_alpha, opts, precb);
+                        // If the GPU ever serves nr>32 (VRAM-scratch kernels), GATE it.
+                        check_eq_int("nr>32 GPU f4rank", grswb.f4rank, b_f4rank);
+                        check_close("nr>32 GPU rd[0].chisq", grswb.rd_chisq.at(0), brd_chisq[0], 1e-6, 1e-9);
+                        check_close("nr>32 GPU rd[1].chisq", grswb.rd_chisq.at(1), brd_chisq[1], 1e-6, 1e-9);
+                        std::printf("  [INFO] nr>32 GPU sweep EXECUTED (VRAM-scratch path live); "
+                                    "svd_path=%d\n", grswb.svd_path);
+                    } catch (const std::exception& e) {
+                        std::printf("  [SKIP] nr>32 GPU sweep PENDING (on-device kernel bounds): "
+                                    "%s\n", e.what());
+                        std::printf("  [INFO] nr>32 GPU dispatch = gesvd would-select (nl=%d nr=%d); "
+                                    "SWEEP MATH gated on the CpuBackend oracle above\n",
+                                    gXb.nl, gXb.nr);
+                    }
+                }
+            }
+        }
+    }
 
     // ---- S3/S4 localizer: the committed X/Q slice = f4(Czechia, Turkey_N; Mbuti,
     //      Rj), i.e. a model with target=Czechia, single source=Turkey_N. This is
@@ -415,6 +685,120 @@ int main(int argc, char** argv) {
                             (rel_within(gpu_emu.se.at(0), g_se, 1e-3, 1e-9) &&
                              rel_within(gpu_emu.p, g_p, 1e-3, 1e-9)) ? "YES" : "NO");
             }
+
+            // =================================================================
+            // M(fit-2) GPU RANK TEST / qpWave — THE DELIVERABLE, THE GATE. The
+            // `gpu` QpAdmResult above ALREADY carries the rankdrop/popdrop tables
+            // filled by run_impl through CudaBackend::rank_sweep + run_popdrop —
+            // i.e. THE RANK SWEEP RAN ON THE GPU (f2 resident, the f4-gather →
+            // jackknife SYRK → on-device seed/ALS/weight/chisq per r → host
+            // dof/p/rankdrop/f4rank). Assert it reproduces the AT2 goldens
+            // (golden_fit0.json rankdrop/popdrop) AND matches the CpuBackend
+            // oracle to 1e-9 (the localizer). The CpuBackend constants are the
+            // SAME row-for-row goldens checked in the oracle block above.
+            // -----------------------------------------------------------------
+            std::printf("\n-- GPU RANK TEST vs GOLDEN (rankdrop, TIGHT chisq rtol 1e-6) [ran ON THE GPU] --\n");
+            const int    grd_f4rank[2] = {1, 0};
+            const int    grd_dof[2]    = {4, 10};
+            const double grd_chisq[2]  = {4.63516296859645, 31.9697628796068};
+            const double grd_p[2]      = {0.326820092470997, 0.000405109973855609};
+            const int    grd_dofdiff   = 6;
+            const double grd_chisqdiff = 27.3345999110104;
+            const double grd_p_nested  = 0.000125328972063141;
+            const int    g_f4rank      = 1;
+            check_eq_int("gpu rankdrop rows", static_cast<int>(gpu.rankdrop_f4rank.size()), 2);
+            check_eq_int("gpu f4rank (res$f4rank)", gpu.f4rank, g_f4rank);
+            for (int k = 0; k < 2 && static_cast<std::size_t>(k) < gpu.rankdrop_f4rank.size(); ++k) {
+                char nm[56];
+                std::snprintf(nm, sizeof(nm), "gpu rd[%d].f4rank", k);
+                check_eq_int(nm, gpu.rankdrop_f4rank.at(static_cast<std::size_t>(k)), grd_f4rank[k]);
+                std::snprintf(nm, sizeof(nm), "gpu rd[%d].dof", k);
+                check_eq_int(nm, gpu.rankdrop_dof.at(static_cast<std::size_t>(k)), grd_dof[k]);
+                std::snprintf(nm, sizeof(nm), "gpu rd[%d].chisq", k);
+                check_close(nm, gpu.rankdrop_chisq.at(static_cast<std::size_t>(k)), grd_chisq[k], 1e-6, 1e-12);
+                std::snprintf(nm, sizeof(nm), "gpu rd[%d].p", k);
+                check_close(nm, gpu.rankdrop_p.at(static_cast<std::size_t>(k)), grd_p[k], 1e-3, 1e-9);
+            }
+            check_eq_int("gpu rd[0].dofdiff", gpu.rankdrop_dofdiff.at(0), grd_dofdiff);
+            check_close("gpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), grd_chisqdiff, 1e-6, 1e-12);
+            check_close("gpu rd[0].p_nested",  gpu.rankdrop_p_nested.at(0),  grd_p_nested, 1e-3, 1e-9);
+            const bool gpu_row1_na = (gpu.rankdrop_dofdiff.at(1) == INT_MIN) &&
+                                     std::isnan(gpu.rankdrop_chisqdiff.at(1)) &&
+                                     std::isnan(gpu.rankdrop_p_nested.at(1));
+            std::printf("  [%s] gpu rd[1] is NA (last row, dofdiff=%d)\n",
+                        gpu_row1_na ? "PASS" : "FAIL", gpu.rankdrop_dofdiff.at(1));
+            if (!gpu_row1_na) ++g_failures;
+
+            std::printf("-- GPU per-rank sweep (chisq[r], dof[r]) --\n");
+            check_eq_int("gpu sweep ranks", static_cast<int>(gpu.rank_chisq.size()), 2);
+            check_close("gpu chisq[r=0]", gpu.rank_chisq.at(0), grd_chisq[1], 1e-6, 1e-12);
+            check_close("gpu chisq[r=1]", gpu.rank_chisq.at(1), grd_chisq[0], 1e-6, 1e-12);
+            check_eq_int("gpu dof[r=0]", gpu.rank_dof.at(0), grd_dof[1]);
+            check_eq_int("gpu dof[r=1]", gpu.rank_dof.at(1), grd_dof[0]);
+
+            std::printf("-- GPU popdrop vs GOLDEN (rows 00/01/10) [ran ON THE GPU] --\n");
+            const char*  gpd_pat[3]    = {"00", "01", "10"};
+            const int    gpd_wt[3]     = {0, 1, 1};
+            const int    gpd_dof[3]    = {4, 5, 5};
+            const double gpd_chisq[3]  = {4.63516296859645, 13.1352334823443, 17.1406935861748};
+            const double gpd_p[3]      = {0.326820092470997, 0.0221439104360255, 0.00424055405322031};
+            const int    gpd_f4rank[3] = {1, 0, 0};
+            const bool   gpd_feas[3]   = {true, true, true};
+            check_eq_int("gpu popdrop rows", static_cast<int>(gpu.popdrop_pat.size()), 3);
+            for (int k = 0; k < 3 && static_cast<std::size_t>(k) < gpu.popdrop_pat.size(); ++k) {
+                char nm[56];
+                const bool pat_ok = (gpu.popdrop_pat.at(static_cast<std::size_t>(k)) == gpd_pat[k]);
+                std::printf("  [%s] gpu pd[%d].pat got=%s want=%s\n", pat_ok ? "PASS" : "FAIL",
+                            k, gpu.popdrop_pat.at(static_cast<std::size_t>(k)).c_str(), gpd_pat[k]);
+                if (!pat_ok) ++g_failures;
+                std::snprintf(nm, sizeof(nm), "gpu pd[%d].wt", k);
+                check_eq_int(nm, gpu.popdrop_wt.at(static_cast<std::size_t>(k)), gpd_wt[k]);
+                std::snprintf(nm, sizeof(nm), "gpu pd[%d].dof", k);
+                check_eq_int(nm, gpu.popdrop_dof.at(static_cast<std::size_t>(k)), gpd_dof[k]);
+                std::snprintf(nm, sizeof(nm), "gpu pd[%d].f4rank", k);
+                check_eq_int(nm, gpu.popdrop_f4rank.at(static_cast<std::size_t>(k)), gpd_f4rank[k]);
+                std::snprintf(nm, sizeof(nm), "gpu pd[%d].chisq", k);
+                check_close(nm, gpu.popdrop_chisq.at(static_cast<std::size_t>(k)), gpd_chisq[k], 1e-6, 1e-12);
+                std::snprintf(nm, sizeof(nm), "gpu pd[%d].p", k);
+                check_close(nm, gpu.popdrop_p.at(static_cast<std::size_t>(k)), gpd_p[k], 1e-3, 1e-9);
+                const bool feas_ok = (gpu.popdrop_feasible.at(static_cast<std::size_t>(k)) != 0) == gpd_feas[k];
+                std::printf("  [%s] gpu pd[%d].feasible got=%d want=%d\n", feas_ok ? "PASS" : "FAIL",
+                            k, gpu.popdrop_feasible.at(static_cast<std::size_t>(k)) != 0, gpd_feas[k]);
+                if (!feas_ok) ++g_failures;
+            }
+
+            // GPU == CpuBackend ORACLE to 1e-9 (the localizer: any GPU rank-test
+            // regression localizes against the native reference, not only the golden).
+            std::printf("-- GPU rank test vs CpuBackend ORACLE (diff localizer, 1e-9) --\n");
+            check_eq_int("gpu-vs-cpu f4rank", gpu.f4rank, res.f4rank);
+            check_close("gpu-vs-cpu rd[0].chisq", gpu.rankdrop_chisq.at(0), res.rankdrop_chisq.at(0), 0.0, 1e-9);
+            check_close("gpu-vs-cpu rd[1].chisq", gpu.rankdrop_chisq.at(1), res.rankdrop_chisq.at(1), 0.0, 1e-9);
+            check_close("gpu-vs-cpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), res.rankdrop_chisqdiff.at(0), 0.0, 1e-9);
+            check_close("gpu-vs-cpu pd[1].chisq", gpu.popdrop_chisq.at(1), res.popdrop_chisq.at(1), 0.0, 1e-9);
+            check_close("gpu-vs-cpu pd[2].chisq", gpu.popdrop_chisq.at(2), res.popdrop_chisq.at(2), 0.0, 1e-9);
+
+            // DIRECT GPU rank_sweep (the dispatch report + assert the GPU backend ran it).
+            std::printf("-- direct CudaBackend::rank_sweep (dispatch report, ON THE GPU) --\n");
+            steppe::ComputeBackend& gbe2 = *gpu_res.gpus.at(0).backend;
+            const std::vector<int> glidx2 = {0, 1, 2};   // [target, CordedWare, Turkey_N]
+            const std::vector<int> gridx2 = {3, 4, 5, 6, 7, 8};
+            const steppe::Precision gprec2{steppe::Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+            const steppe::F4Blocks gX2 =
+                gbe2.assemble_f4(dev_f2, std::span<const int>(glidx2),
+                                 std::span<const int>(gridx2), gprec2);
+            const steppe::JackknifeCov gcov2 =
+                gbe2.jackknife_cov(gX2, std::span<const int>(f2.block_sizes), opts.fudge, gprec2);
+            const steppe::RankSweep grsw =
+                gbe2.rank_sweep(gX2, gcov2, opts.rank_alpha, opts, gprec2);
+            check_eq_int("direct gpu f4rank", grsw.f4rank, g_f4rank);
+            const char* gsvd_name = (grsw.svd_path == 1) ? "gesvdjBatched would-select"
+                                  : (grsw.svd_path == 2) ? "gesvd would-select"
+                                                         : "on-device Jacobi (executed)";
+            std::printf("  [INFO] gpu svd_path=%d (%s); executed=on-device Jacobi "
+                        "(nl=%d,nr=%d both<=32); rank_Q=%d\n",
+                        grsw.svd_path, gsvd_name, gX2.nl, gX2.nr, grsw.rank_Q);
+            check_eq_int("gpu svd_path (nl,nr<=32 ⇒ gesvdjBatched)", grsw.svd_path, 1);
+            check_eq_int("gpu-vs-cpu rank_Q", grsw.rank_Q, rsw_rank_Q_ref);
         }
 
         // GPU X/Q localizers: call the CUDA backend's assemble_f4(DeviceF2Blocks) +

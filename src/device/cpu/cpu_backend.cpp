@@ -45,9 +45,11 @@
 // `import steppe` work without a GPU and is the correctness anchor the GPU is
 // diffed against (architecture.md §8, §13).
 
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <vector>
@@ -55,6 +57,7 @@
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/decode_af.hpp"     // genotype_code, accumulate_genotype, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
+#include "core/internal/pchisq.hpp"        // core::internal::pchisq_upper (M(fit-2) rank-test p-value)
 #include "core/internal/small_linalg.hpp"  // core::solve/inverse/jacobi_svd (the qpAdm reference solvers)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
 #include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult, F4Blocks/...
@@ -501,6 +504,103 @@ public:
         gw.chisq = chisq_of(xmat, gw.A, gw.B, nl, nr, r, cov.Qinv);
         gw.status = Status::Ok;
         return gw;
+    }
+
+    /// S5 SWEEP — the qpWave / qpAdm RANK TEST over r = 0..rmax (rmax =
+    /// min(nl,nr)-1). The native ORACLE the GPU rank_sweep is diffed against
+    /// (M(fit-2)). Per r: chisq(r) = the rank-r ALS-refined residual quadratic form
+    /// (REUSES `als_weights`@808 — the exact M(fit-1)/M(fit-4) chisq machinery,
+    /// including the r==0 trivial branch); dof(r) = (nl-r)*(nr-r); p(r) =
+    /// pchisq_upper. Then the AT2 res$rankdrop nested table (rows f4rank DESCENDING
+    /// rmax..0; the nested diff compares each row to the next-lower rank, the last
+    /// row NA) and f4rank (the smallest non-rejected rank: ASCENDING scan, the first
+    /// r with p(r) > alpha). Native FP64 throughout (CpuBackend ignores precision).
+    [[nodiscard]] RankSweep rank_sweep(const F4Blocks& x,
+                                       const JackknifeCov& cov,
+                                       double alpha,
+                                       const QpAdmOptions& opts,
+                                       const Precision& precision) override {
+        (void)precision;  // the oracle is ALWAYS native FP64 (§4 carve-out)
+        RankSweep rs;
+        const int nl = x.nl, nr = x.nr;
+        const int m = nl * nr;
+        const int rmax = (nl < nr ? nl : nr) - 1;
+        if (rmax < 0) {  // a degenerate (0-row/0-col) model — no candidate rank
+            rs.status = Status::RankDeficient;
+            rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;
+            return rs;
+        }
+        std::vector<double> xmat = xmat_from_total(x);
+
+        // ---- per-rank sweep (chisq via the ALS-refined rank-r fit) ----
+        rs.chisq.assign(static_cast<std::size_t>(rmax) + 1, 0.0);
+        rs.dof.assign(static_cast<std::size_t>(rmax) + 1, 0);
+        rs.p.assign(static_cast<std::size_t>(rmax) + 1, 0.0);
+        bool degenerate = false;
+        for (int r = 0; r <= rmax; ++r) {
+            const GlsWeights gw = als_weights(xmat, nl, nr, r, cov.Qinv, opts);
+            if (gw.status != Status::Ok) degenerate = true;
+            rs.chisq[static_cast<std::size_t>(r)] = gw.chisq;
+            rs.dof[static_cast<std::size_t>(r)] = (nl - r) * (nr - r);
+            rs.p[static_cast<std::size_t>(r)] =
+                core::internal::pchisq_upper(gw.chisq, rs.dof[static_cast<std::size_t>(r)]);
+        }
+
+        // ---- AT2 res$rankdrop nested table (rows: rank rmax, rmax-1, ..., 0) ----
+        const std::size_t n = static_cast<std::size_t>(rmax) + 1;
+        rs.rd_f4rank.resize(n); rs.rd_dof.resize(n); rs.rd_chisq.resize(n);
+        rs.rd_p.resize(n); rs.rd_dofdiff.resize(n);
+        rs.rd_chisqdiff.resize(n); rs.rd_p_nested.resize(n);
+        for (std::size_t k = 0; k < n; ++k) {
+            const int r = rmax - static_cast<int>(k);  // this row's rank (descending)
+            rs.rd_f4rank[k] = r;
+            rs.rd_dof[k] = rs.dof[static_cast<std::size_t>(r)];
+            rs.rd_chisq[k] = rs.chisq[static_cast<std::size_t>(r)];
+            rs.rd_p[k] = rs.p[static_cast<std::size_t>(r)];
+            if (r - 1 >= 0) {  // nested diff to the next-lower rank (r-1)
+                const int dd = rs.dof[static_cast<std::size_t>(r - 1)] -
+                               rs.dof[static_cast<std::size_t>(r)];
+                const double cd = rs.chisq[static_cast<std::size_t>(r - 1)] -
+                                  rs.chisq[static_cast<std::size_t>(r)];
+                rs.rd_dofdiff[k] = dd;
+                rs.rd_chisqdiff[k] = cd;
+                rs.rd_p_nested[k] = core::internal::pchisq_upper(cd, dd);
+            } else {  // the last row (rank 0): NA
+                rs.rd_dofdiff[k] = INT_MIN;
+                rs.rd_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
+                rs.rd_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+
+        // ---- f4rank: the smallest non-rejected rank (p(r) > alpha, ASCENDING) ----
+        rs.f4rank = rmax;  // fallback: the highest rank if all rejected
+        for (int r = 0; r <= rmax; ++r) {
+            if (rs.p[static_cast<std::size_t>(r)] > alpha) { rs.f4rank = r; break; }
+        }
+
+        // ---- rank_Q: numerical rank of the (unfudged) covariance Q (m×m) ----
+        // AT2 model_well_determined$rank_Q: the count of singular values of Q above
+        // a relative tolerance (here ~ m·eps·σ_max). Observability (not gated).
+        if (!cov.Q.empty() && cov.m == m) {
+            const core::SvdResult sq = core::jacobi_svd(cov.Q, m, m);
+            const double smax = sq.S.empty() ? 0.0 : sq.S.front();
+            const double tol = smax * static_cast<double>(m) *
+                               std::numeric_limits<double>::epsilon();
+            int rk = 0;
+            for (double s : sq.S) if (s > tol) ++rk;
+            rs.rank_Q = rk;
+        } else {
+            rs.rank_Q = m;
+        }
+
+        // ---- dispatch report (SPEC §5:231): which SVD path WOULD be selected ----
+        // 1 = gesvdjBatched (nl,nr<=32); 2 = per-model gesvd (else). The EXECUTED
+        // SVD is the deterministic Jacobi seed at all sizes (M(fit-2) decision).
+        rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;
+
+        rs.status = degenerate ? Status::RankDeficient
+                               : (cov.status != Status::Ok ? cov.status : Status::Ok);
+        return rs;
     }
 
     /// S6 — GLS weights via AT2 ALS (design §4 S6; AT2 qpadm_weights). svd seed →

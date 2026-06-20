@@ -75,6 +75,7 @@ add_library(steppe_core STATIC
     # CudaBackend in M(fit-4)). f4_matrix/jackknife/gls_solve are header-only thin
     # drivers; the orchestrator + S7 SE + pchisq compile here.
     qpadm/qpadm_fit.cpp
+    qpadm/ranktest.cpp
     qpadm/nested_models.cpp)
 add_library(steppe::core ALIAS steppe_core)
 

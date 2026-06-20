@@ -23,6 +23,8 @@
 #ifndef STEPPE_QPADM_HPP
 #define STEPPE_QPADM_HPP
 
+#include <span>
+#include <string>
 #include <vector>
 
 #include "steppe/config.hpp"  // steppe::Precision
@@ -61,6 +63,11 @@ struct QpAdmOptions {
     /// AT2 does NOT clip; weights may exit [0,1] (an infeasible model is a domain
     /// outcome, not an error).
     bool allow_negative_weights = true;
+
+    /// M(fit-2) rank-decision significance (AT2 res$f4rank default 0.05): f4rank is
+    /// the smallest candidate rank r whose model is NOT rejected at this alpha
+    /// (p(r) > alpha). Named (not a magic literal), recorded in the golden meta.
+    double rank_alpha = 0.05;
 };
 
 // ---- The model + the result (CUDA-free value shapes) ------------------------
@@ -99,6 +106,19 @@ struct QpAdmResult {
 
     int est_rank = 0;  ///< the rank used for the reported weights (== r).
 
+    // ---- M(fit-2) rank test / qpWave (appended; non-breaking) ----------------
+    std::vector<double> rank_chisq;  ///< chisq(r) per candidate rank r=0..rmax.
+    std::vector<int>    rank_dof;    ///< dof(r) per candidate rank.
+    int                 f4rank = 0;  ///< the smallest non-rejected rank (AT2 res$f4rank).
+    // rankdrop nested table (mirrors RankSweep.rd_*; AT2 res$rankdrop row order):
+    std::vector<int>    rankdrop_f4rank, rankdrop_dof, rankdrop_dofdiff;
+    std::vector<double> rankdrop_chisq, rankdrop_p, rankdrop_chisqdiff, rankdrop_p_nested;
+    // popdrop table (AT2 res$popdrop):
+    std::vector<std::string> popdrop_pat;
+    std::vector<int>         popdrop_wt, popdrop_dof, popdrop_f4rank;
+    std::vector<double>      popdrop_chisq, popdrop_p;
+    std::vector<char>        popdrop_feasible;  ///< char (0/1) to keep the value-type CUDA-free + vector<bool>-free.
+
     /// PER-MODEL outcome (Ok/RankDeficient/NonSpdCovariance); NEVER an exception
     /// for a domain outcome (architecture.md §10).
     Status status = Status::Ok;
@@ -126,6 +146,38 @@ struct QpAdmResult {
                                     const QpAdmModel& model,
                                     const QpAdmOptions& opts,
                                     device::Resources& resources);
+
+// ---- M(fit-2) qpWave (rank-sufficiency sweep WITHOUT a target) ---------------
+/// qpWave-only: the rank-sufficiency sweep for whether the nl left pops are
+/// consistent with rank r (the rankdrop machinery WITHOUT a target — left = all
+/// the left pops, no target prepend; left[0] is the qpWave reference row).
+/// Returns the per-rank table + f4rank. fit-engine.md §3 M(fit-2) item (4).
+struct QpWaveResult {
+    std::vector<double> rank_chisq;
+    std::vector<int>    rank_dof;
+    std::vector<double> rank_p;
+    std::vector<int>    rankdrop_f4rank, rankdrop_dof, rankdrop_dofdiff;
+    std::vector<double> rankdrop_chisq, rankdrop_p, rankdrop_chisqdiff, rankdrop_p_nested;
+    int                 f4rank = 0;
+    int                 est_rank = 0;
+    Status              status = Status::Ok;
+    Precision::Kind     precision_tag = Precision::Kind::Fp64;
+};
+
+/// qpWave over DEVICE-RESIDENT f2 (GPU-first). `left` is the FULL left set (no
+/// target prepend; left[0] is the qpWave reference); `right` is R0..R_nr.
+[[nodiscard]] QpWaveResult run_qpwave(const device::DeviceF2Blocks& f2,
+                                      std::span<const int> left,
+                                      std::span<const int> right,
+                                      const QpAdmOptions& opts,
+                                      device::Resources& resources);
+
+/// qpWave host-oracle overload (the CpuBackend reads a host F2BlockTensor).
+[[nodiscard]] QpWaveResult run_qpwave(const F2BlockTensor& f2_host,
+                                      std::span<const int> left,
+                                      std::span<const int> right,
+                                      const QpAdmOptions& opts,
+                                      device::Resources& resources);
 
 }  // namespace steppe
 

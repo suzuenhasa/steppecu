@@ -5,12 +5,15 @@
 #include <cmath>
 #include <cstddef>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
+#include "core/internal/pchisq.hpp"     // core::internal::pchisq_upper (the ONE special function)
 #include "core/qpadm/f4_matrix.hpp"      // S3 driver
 #include "core/qpadm/gls_solve.hpp"      // S6 driver
 #include "core/qpadm/jackknife.hpp"      // S4 driver
 #include "core/qpadm/nested_models.hpp"  // se_from_loo (S7)
+#include "core/qpadm/ranktest.hpp"       // M(fit-2) run_rank_sweep / run_popdrop / run_qpwave_impl
 #include "device/backend.hpp"            // ComputeBackend, F4Blocks, JackknifeCov, GlsWeights
 #include "device/device_f2_blocks.hpp"   // device::DeviceF2Blocks (S3 device-resident input)
 #include "device/resources.hpp"          // device::Resources (the injected backend bundle)
@@ -19,51 +22,6 @@
 #include "steppe/fstats.hpp"             // F2BlockTensor
 
 namespace steppe::core::qpadm {
-
-namespace {
-
-/// Regularized lower incomplete gamma P(a, x) by series (good for x < a+1) and the
-/// continued-fraction form Q(a, x) (good for x >= a+1). Standard NR recipe; double
-/// precision is ample for the loose p tier (OQ-13).
-[[nodiscard]] double gammp_series(double a, double x) {
-    const int kMaxIter = 1000;
-    const double kEps = 1e-15;
-    double ap = a;
-    double sum = 1.0 / a;
-    double del = sum;
-    for (int n = 0; n < kMaxIter; ++n) {
-        ap += 1.0;
-        del *= x / ap;
-        sum += del;
-        if (std::fabs(del) < std::fabs(sum) * kEps) break;
-    }
-    return sum * std::exp(-x + a * std::log(x) - std::lgamma(a));
-}
-
-[[nodiscard]] double gammq_cf(double a, double x) {
-    const int kMaxIter = 1000;
-    const double kEps = 1e-15;
-    const double kFpMin = 1e-300;
-    double b = x + 1.0 - a;
-    double c = 1.0 / kFpMin;
-    double d = 1.0 / b;
-    double h = d;
-    for (int i = 1; i <= kMaxIter; ++i) {
-        const double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
-        b += 2.0;
-        d = an * d + b;
-        if (std::fabs(d) < kFpMin) d = kFpMin;
-        c = b + an / c;
-        if (std::fabs(c) < kFpMin) c = kFpMin;
-        d = 1.0 / d;
-        const double del = d * c;
-        h *= del;
-        if (std::fabs(del - 1.0) < kEps) break;
-    }
-    return std::exp(-x + a * std::log(x) - std::lgamma(a)) * h;
-}
-
-}  // namespace
 
 std::vector<int> left_with_target(const QpAdmModel& model) {
     std::vector<int> left_idx;
@@ -135,17 +93,82 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     if (r >= 0 && static_cast<std::size_t>(r) < res.rank_p.size())
         res.rank_p[static_cast<std::size_t>(r)] = res.p;
 
+    // M(fit-2) — the RANK SWEEP + the AT2 res$rankdrop nested table (the sweep over
+    // r=0..rmax + f4rank). Reuses the same X + cov; the precision carve-out (§4)
+    // holds the SVD/chisq native. The popdrop is filled by the run_qpadm overloads
+    // (it re-gathers a reduced X from the f2 SOURCE, which run_impl does not hold).
+    // NOTE (M(fit-2) build order): the CpuBackend (the ORACLE) implements rank_sweep
+    // now; the CudaBackend (THE deliverable) implements it in the NEXT phase. Until
+    // then a backend without the override throws "not implemented" — caught here so
+    // the existing green GPU fit path is not broken (the rankdrop/popdrop fields stay
+    // empty on such a backend, a non-breaking absence). The GPU-deliverable phase
+    // replaces this with the CudaBackend override and the test asserts the GPU path.
+    // NOTE: the popdrop (AT2 res$popdrop) operates on the SAME already-computed X +
+    // cov (admixtools::drop_pops subsets rows of f4_est + the qinv block; NO
+    // re-gather, NO re-jackknife), so it is filled HERE inside run_impl (it does not
+    // need the f2 source). Both rankdrop + popdrop route through rank_sweep, guarded
+    // together: a backend without the override (the GPU deliverable phase) leaves
+    // these fields empty (non-breaking) rather than throwing out of the fit.
+    try {
+        const RankSweep rs = run_rank_sweep(be, X, cov, opts.rank_alpha, opts, prec);
+        res.rank_chisq = rs.chisq;
+        res.rank_dof = rs.dof;
+        res.f4rank = rs.f4rank;
+        res.rankdrop_f4rank = rs.rd_f4rank;
+        res.rankdrop_dof = rs.rd_dof;
+        res.rankdrop_dofdiff = rs.rd_dofdiff;
+        res.rankdrop_chisq = rs.rd_chisq;
+        res.rankdrop_p = rs.rd_p;
+        res.rankdrop_chisqdiff = rs.rd_chisqdiff;
+        res.rankdrop_p_nested = rs.rd_p_nested;
+
+        // res$popdrop (leave-one-LEFT-SOURCE-out), on the same X + cov.
+        const std::vector<PopDropRow> pd = run_popdrop(be, X, cov, opts, prec);
+        for (const PopDropRow& row : pd) {
+            res.popdrop_pat.push_back(row.pat);
+            res.popdrop_wt.push_back(row.wt);
+            res.popdrop_dof.push_back(row.dof);
+            res.popdrop_f4rank.push_back(row.f4rank);
+            res.popdrop_chisq.push_back(row.chisq);
+            res.popdrop_p.push_back(row.p);
+            res.popdrop_feasible.push_back(row.feasible ? char{1} : char{0});
+        }
+    } catch (const std::runtime_error&) {
+        // backend has no rank_sweep override yet (the GPU deliverable phase) — the
+        // rankdrop/popdrop fields remain empty; the single-rank fit is unaffected.
+    }
+
     res.status = Status::Ok;
     return res;
 }
 
+namespace {
+
+/// Build a QpWaveResult from a RankSweep (qpWave = the sweep WITHOUT a target; the
+/// SAME rank_sweep machinery, the orchestrator just gathers X with no target).
+QpWaveResult qpwave_from_sweep(const RankSweep& rs, Precision::Kind tag) {
+    QpWaveResult qw;
+    qw.rank_chisq = rs.chisq;
+    qw.rank_dof = rs.dof;
+    qw.rank_p = rs.p;
+    qw.rankdrop_f4rank = rs.rd_f4rank;
+    qw.rankdrop_dof = rs.rd_dof;
+    qw.rankdrop_dofdiff = rs.rd_dofdiff;
+    qw.rankdrop_chisq = rs.rd_chisq;
+    qw.rankdrop_p = rs.rd_p;
+    qw.rankdrop_chisqdiff = rs.rd_chisqdiff;
+    qw.rankdrop_p_nested = rs.rd_p_nested;
+    qw.f4rank = rs.f4rank;
+    qw.est_rank = rs.f4rank;
+    qw.status = rs.status;
+    qw.precision_tag = tag;
+    return qw;
+}
+
+}  // namespace
+
 double pchisq_upper(double x, int dof) {
-    if (dof <= 0) return std::nan("");
-    if (x <= 0.0) return 1.0;
-    const double a = 0.5 * static_cast<double>(dof);
-    const double xx = 0.5 * x;
-    if (xx < a + 1.0) return 1.0 - gammp_series(a, xx);  // Q = 1 - P
-    return gammq_cf(a, xx);
+    return core::internal::pchisq_upper(x, dof);  // the ONE shared special function
 }
 
 }  // namespace steppe::core::qpadm
@@ -165,6 +188,7 @@ QpAdmResult run_qpadm(const device::DeviceF2Blocks& f2, const QpAdmModel& model,
     // S3 — device-resident assemble (zero D2H on the CUDA path).
     F4Blocks X = core::qpadm::assemble_f4(be, f2, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);
+    // run_impl fills the M(fit-2) rankdrop + popdrop (both on the same X + cov).
     return core::qpadm::run_impl(be, std::move(X),
                                  std::span<const int>(f2.block_sizes), model, opts);
 }
@@ -180,8 +204,52 @@ QpAdmResult run_qpadm(const F2BlockTensor& f2_host, const QpAdmModel& model,
     // S3 — host-oracle assemble (the CpuBackend reads host memory directly).
     F4Blocks X = core::qpadm::assemble_f4(be, f2_host, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);
+    // run_impl fills the M(fit-2) rankdrop + popdrop (both on the same X + cov).
     return core::qpadm::run_impl(be, std::move(X),
                                  std::span<const int>(f2_host.block_sizes), model, opts);
+}
+
+// ---- qpWave (M(fit-2) item (4): the rank sweep WITHOUT a target) -------------
+namespace {
+
+/// Shared qpWave body: gather X with `left` as the rows DIRECTLY (NO target
+/// prepend; left[0] is the qpWave reference, nl = left.size()-1), run S4 + the
+/// rank_sweep, and map to a QpWaveResult. Templated on the f2 SOURCE.
+template <class F2Src>
+QpWaveResult run_qpwave_impl(ComputeBackend& be, const F2Src& f2,
+                             std::span<const int> left, std::span<const int> right,
+                             const QpAdmOptions& opts) {
+    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+    // qpWave: NO target prepend — `left` IS the rows (left[0] the reference).
+    F4Blocks X = core::qpadm::assemble_f4(be, f2, left, right, prec);
+    const JackknifeCov cov =
+        core::qpadm::jackknife_cov(be, X, std::span<const int>(f2.block_sizes), opts.fudge, prec);
+    const Precision::Kind tag = (prec.kind == Precision::Kind::EmulatedFp64 &&
+                                 be.capabilities().emulated_fp64_honorable)
+                                    ? Precision::Kind::EmulatedFp64
+                                    : Precision::Kind::Fp64;
+    if (cov.status != Status::Ok) {
+        QpWaveResult qw; qw.status = cov.status; qw.precision_tag = tag; return qw;
+    }
+    const RankSweep rs =
+        core::qpadm::run_rank_sweep(be, X, cov, opts.rank_alpha, opts, prec);
+    return core::qpadm::qpwave_from_sweep(rs, tag);
+}
+
+}  // namespace
+
+QpWaveResult run_qpwave(const device::DeviceF2Blocks& f2, std::span<const int> left,
+                        std::span<const int> right, const QpAdmOptions& opts,
+                        device::Resources& resources) {
+    ComputeBackend& be = *resources.gpus.at(0).backend;
+    return run_qpwave_impl(be, f2, left, right, opts);
+}
+
+QpWaveResult run_qpwave(const F2BlockTensor& f2_host, std::span<const int> left,
+                        std::span<const int> right, const QpAdmOptions& opts,
+                        device::Resources& resources) {
+    ComputeBackend& be = *resources.gpus.at(0).backend;
+    return run_qpwave_impl(be, f2_host, left, right, opts);
 }
 
 }  // namespace steppe

@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "steppe/config.hpp"        // steppe::Precision
@@ -134,6 +135,58 @@ struct GlsWeights {
 
     /// RankDeficient if svd(X)/the constrained solve degenerates (value, not throw).
     Status status = Status::Ok;
+};
+
+/// S5 sweep output: the qpWave / qpAdm rank test over r = 0..rmax (rmax =
+/// min(nl,nr)-1). Per-rank chisq/dof; the AT2 res$rankdrop nested table; f4rank
+/// (the smallest non-rejected rank). All host-pure value data (CUDA-free seam).
+/// Native FP64 (SVD + Qinv quadratic form are cuSOLVER/ill-conditioned; §1.4).
+struct RankSweep {
+    // ---- per-rank sweep (index = candidate rank r, 0..rmax) ----
+    std::vector<double> chisq;   ///< [rmax+1] chisq(r) = vec(E_r)'Qinv vec(E_r) at the ALS-refined rank-r fit.
+    std::vector<int>    dof;     ///< [rmax+1] (nl-r)*(nr-r).
+    std::vector<double> p;       ///< [rmax+1] pchisq_upper(chisq(r), dof(r)).
+
+    // ---- AT2 res$rankdrop nested table (rows = r descending: rmax..0) ----
+    //   The AT2 rankdrop row order is f4rank DESCENDING (top row = highest rank
+    //   tested = rmax; last row = 0). dofdiff/chisqdiff/p_nested compare row k to
+    //   the NEXT row (k+1), i.e. rank (rmax-k) vs (rmax-k-1); the last row is NA.
+    std::vector<int>    rd_f4rank;    ///< [rmax+1] the rank of this row (rmax, rmax-1, ..., 0).
+    std::vector<int>    rd_dof;       ///< [rmax+1] dof at this rank.
+    std::vector<double> rd_chisq;     ///< [rmax+1] chisq at this rank.
+    std::vector<double> rd_p;         ///< [rmax+1] p at this rank.
+    std::vector<int>    rd_dofdiff;   ///< [rmax+1] dof(next) - dof(this); INT_MIN ⇒ NA (last row).
+    std::vector<double> rd_chisqdiff; ///< [rmax+1] chisq(next) - chisq(this); NaN ⇒ NA (last row).
+    std::vector<double> rd_p_nested;  ///< [rmax+1] pchisq_upper(chisqdiff, dofdiff); NaN ⇒ NA (last row).
+
+    int f4rank = 0;  ///< the smallest non-rejected rank (the AT2 res$f4rank); see §3 decision rule.
+    int rank_Q = 0;  ///< numerical rank of Q (the golden model_well_determined.rank_Q).
+
+    /// DISPATCH report (SPEC §5:231; observability only). 0 = on-device Jacobi
+    /// (the path EXECUTED at these sizes by M(fit-4)); 1 = gesvdjBatched WOULD be
+    /// selected (nl,nr<=32); 2 = per-model gesvd WOULD be selected (else). The
+    /// executed SVD is the deterministic on-device Jacobi at all sizes in M(fit-2);
+    /// the cuSOLVER routing is the documented PENDING seam (fit-engine.md §1.4).
+    int svd_path = 0;
+
+    Status status = Status::Ok;  ///< NonSpdCovariance / RankDeficient propagate as values.
+};
+
+/// S5 popdrop output: AT2 res$popdrop — leave-one-LEFT-SOURCE-out feasibility.
+/// One row per pattern over the nl left SOURCES (AT2 keeps the full model row
+/// "0..0" plus each single-drop). Built by the HOST orchestrator (it re-runs the
+/// fit on the reduced left set), NOT a backend virtual — recorded here for the
+/// contract shape (src/core/qpadm/ranktest.cpp).
+struct PopDropRow {
+    std::string         pat;        ///< AT2 bit pattern over the nl sources (e.g. "00","01","10"); "1"=dropped.
+    int                 wt = 0;     ///< number of sources dropped (popcount(pat)).
+    int                 dof = 0;
+    double              chisq = 0.0;
+    double              p = 0.0;
+    int                 f4rank = 0;
+    std::vector<double> weight;     ///< per-source weight for the SURVIVING sources (NaN for a dropped slot).
+    bool                feasible = false;  ///< AT2 feasible: all surviving weights in [0,1] (the §3 rule).
+    Status              status = Status::Ok;
 };
 
 /// A CUDA-FREE, NON-OWNING view of one packed genotype tile + its population
@@ -543,6 +596,29 @@ public:
         (void)x; (void)cov; (void)r; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::rank_test: not implemented by this backend");
+    }
+
+    /// S5 SWEEP — the qpWave / qpAdm rank test over ALL candidate ranks r = 0..rmax
+    /// (rmax = min(nl,nr)-1), producing the per-rank chisq/dof/p, the AT2 res$rankdrop
+    /// nested table, and f4rank (the smallest non-rejected rank). Reuses the rank-r ALS
+    /// machinery (the rank_test seed → als refine → chisq quadratic form) per r; the
+    /// SVD is recomputed per r (the deterministic on-device Jacobi is bit-identical on
+    /// the same input, so per-r recompute is exact; the SVD-once kernel is an S8
+    /// follow-on). `alpha` is the rank-decision significance (AT2 default 0.05; §3).
+    /// The popdrop table is built by the HOST orchestrator (it re-gathers a reduced X),
+    /// NOT here. NON-PURE: base throws (the established backend.hpp pattern). DISPATCH
+    /// (SPEC §5:231): the backend REPORTS which SVD path the model WOULD take
+    /// (gesvdjBatched iff nl,nr<=32 else per-model gesvd) on RankSweep.svd_path —
+    /// observability; the executed SVD is the deterministic on-device Jacobi (M(fit-4))
+    /// at these sizes. Native FP64 (SVD + Qinv quadratic form).
+    [[nodiscard]] virtual RankSweep rank_sweep(const F4Blocks& x,
+                                               const JackknifeCov& cov,
+                                               double alpha,
+                                               const QpAdmOptions& opts,
+                                               const Precision& precision) {
+        (void)x; (void)cov; (void)alpha; (void)opts; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::rank_sweep: not implemented by this backend");
     }
 
     /// S6 — GLS weights via AT2 ALS (OQ-1, the load-bearing primitive). Seed A,B

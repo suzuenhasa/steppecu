@@ -44,6 +44,19 @@ constexpr int kQpMaxR  = 4;
 constexpr int kQpMaxM  = kQpMaxNl * kQpMaxNr;  // 50
 constexpr int kQpMaxT  = (kQpMaxNl > kQpMaxNr ? kQpMaxNl : kQpMaxNr) * kQpMaxR;  // max(nl,nr)*r = 40
 
+// NOTE (M(fit-2) nr>32 fallback): the on-device transliterated LA kernels CANNOT be
+// widened to nr=39. CUDA reserves a kernel's per-thread LOCAL memory for the device's
+// MAX resident-thread count (not just the threads launched), so even a 1-thread
+// kernel with a large per-thread frame (Wm[m*t] grows with nr) trips
+// cudaErrorMemoryAllocation at launch (measured on box5090: kQpBigNr=40 ⇒ OOM). So
+// the nr>32 GPU rank sweep is NOT served by these stacked-local kernels — it is the
+// documented cuSOLVER-routing PENDING seam (fit-engine.md §1.4 / the M(fit-2)
+// contract §5): the nr>32 fixture validates the SWEEP MATH on the CPU oracle, and the
+// CudaBackend::rank_sweep guards nr>32 (the host caller reports the SKIP +
+// gesvd-would-select dispatch). The properly-resident nr>32 path needs the kernels
+// rewritten to take VRAM scratch (a follow-on); within M(fit-2) the GATE is the
+// nr<=32 batched golden, which these small-bound kernels serve bit-exactly.
+
 // --- Device small-dense LA (transliterating small_linalg.hpp, native FP64) --------
 // Single-thread helpers used inside the rank-test / ALS / weight / chisq / LOO
 // kernels. They reproduce the CpuBackend's exact scalar operations + order so the
@@ -166,13 +179,19 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
 
 /// Seed A,B from svd(xmat) at rank r — core::seed_AB (cpu_backend.cpp:626-644).
 /// B = t(V[:,0:r]) (r×nr): B[p,j]=V[j,p]; A = xmat·t(B) (nl×r). Native FP64.
+/// Templated on the per-thread local-array bound (MAXNL/MAXNR/MAXR): the single-
+/// thread sweep kernels instantiate it at a BIG bound (nr>32 fallback) while the
+/// many-thread LOO batched kernel uses the SMALL bound — so widening the sweep's
+/// scratch never bloats the batched kernel's per-thread local memory (the launch
+/// constraint; the kQpMax* rationale at the top of this file).
+template <int MAXNL, int MAXNR, int MAXR>
 __device__ inline void dev_seed_ab(const double* xmat, int nl, int nr, int r,
                                    double* A, double* B) {
-    double W[kQpMaxNl * kQpMaxNr];
-    double Vfull[kQpMaxNr * kQpMaxNr];
-    double sigma[kQpMaxNr];
-    int order[kQpMaxNr];
-    double Vout[kQpMaxNr * kQpMaxR];
+    double W[MAXNL * MAXNR];
+    double Vfull[MAXNR * MAXNR];
+    double sigma[MAXNR];
+    int order[MAXNR];
+    double Vout[MAXNR * MAXR];
     dev_jacobi_svd_V(xmat, nl, nr, r, W, Vfull, sigma, order, Vout);
     for (int p = 0; p < r; ++p)
         for (int j = 0; j < nr; ++j)
@@ -189,13 +208,16 @@ __device__ inline void dev_seed_ab(const double* xmat, int nl, int nr, int r,
 /// opt_A — core::opt_A (cpu_backend.cpp:652-709). Given B (r×nr), returns A (nl×r).
 /// __noinline__ so its large local frame (Wm/coeffs) does NOT stack with opt_B's in
 /// the ALS-loop kernels (keeps the per-thread local-memory reservation small enough
-/// to launch — see the kQpMax* bound rationale).
+/// to launch — see the kQpMax* bound rationale). Templated on the local-array bound
+/// (MAXM/MAXT) so the single-thread sweep can use a big bound while the batched LOO
+/// kernel keeps the small one.
+template <int MAXM, int MAXT>
 __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
                                        int nl, int nr, int r, const double* qinv,
                                        double fudge, double* Aout) {
     const int m = nl * nr;
     const int t = nl * r;
-    double xvec[kQpMaxM];
+    double xvec[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
@@ -205,15 +227,15 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
         const int ii = k / nr, j = k % nr;
         return (i == ii) ? B[p + r * j] : 0.0;
     };
-    double Wm[kQpMaxM * kQpMaxT];  // m×t
+    double Wm[MAXM * MAXT];  // m×t
     for (int kr = 0; kr < m; ++kr)
         for (int a = 0; a < t; ++a) {
             double acc = 0.0;
             for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(a, kc);
             Wm[kr + m * a] = acc;
         }
-    double coeffs[kQpMaxT * kQpMaxT];
-    double rhs[kQpMaxT];
+    double coeffs[MAXT * MAXT];
+    double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
@@ -227,8 +249,8 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
     double tr = 0.0;
     for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
     for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    double A2[kQpMaxT], lu[kQpMaxT * kQpMaxT], y[kQpMaxT];
-    int piv[kQpMaxT];
+    double A2[MAXT], lu[MAXT * MAXT], y[MAXT];
+    int piv[MAXT];
     for (int i = 0; i < nl * r; ++i) Aout[i] = 0.0;
     if (dev_solve(coeffs, t, rhs, A2, lu, piv, y)) {
         for (int i = 0; i < nl; ++i)
@@ -238,13 +260,15 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
 }
 
 /// opt_B — core::opt_B (cpu_backend.cpp:715-768). Given A (nl×r), returns B (r×nr).
-/// __noinline__ (see dev_opt_A) so its frame does not stack with opt_A's.
+/// __noinline__ (see dev_opt_A) so its frame does not stack with opt_A's. Templated
+/// on the local-array bound (MAXM/MAXT), see dev_opt_A.
+template <int MAXM, int MAXT>
 __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
                                        int nl, int nr, int r, const double* qinv,
                                        double fudge, double* Bout) {
     const int m = nl * nr;
     const int t = r * nr;
-    double xvec[kQpMaxM];
+    double xvec[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
@@ -254,15 +278,15 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
         const int p = c / nr, jc = c % nr;
         return (j == jc) ? A[i + nl * p] : 0.0;
     };
-    double Wm[kQpMaxM * kQpMaxT];
+    double Wm[MAXM * MAXT];
     for (int kr = 0; kr < m; ++kr)
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
             for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, c);
             Wm[kr + m * c] = acc;
         }
-    double coeffs[kQpMaxT * kQpMaxT];
-    double rhs[kQpMaxT];
+    double coeffs[MAXT * MAXT];
+    double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
@@ -276,8 +300,8 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
     double tr = 0.0;
     for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
     for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    double B2v[kQpMaxT], lu[kQpMaxT * kQpMaxT], y[kQpMaxT];
-    int piv[kQpMaxT];
+    double B2v[MAXT], lu[MAXT * MAXT], y[MAXT];
+    int piv[MAXT];
     for (int i = 0; i < r * nr; ++i) Bout[i] = 0.0;
     if (dev_solve(coeffs, t, rhs, B2v, lu, piv, y)) {
         for (int p = 0; p < r; ++p)
@@ -288,12 +312,13 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
 
 /// chisq = vec(E)'·qinv·vec(E), E = xmat - A·B, row-major vec — core::chisq_of
 /// (cpu_backend.cpp:833-858). Native FP64 (CpuBackend uses long double; FP64 matches
-/// the golden chisq to the gate tier).
+/// the golden chisq to the gate tier). Templated on MAXM (the residual-vector bound).
+template <int MAXM>
 __device__ inline double dev_chisq_of(const double* xmat, const double* A,
                                       const double* B, int nl, int nr, int r,
                                       const double* qinv) {
     const int m = nl * nr;
-    double e[kQpMaxM];
+    double e[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j) {
             double ab = 0.0;
@@ -312,29 +337,34 @@ __device__ inline double dev_chisq_of(const double* xmat, const double* A,
 /// Full als_weights body — core::als_weights (cpu_backend.cpp:773-826). Refines A,B
 /// (seeded externally if r>0), runs the constrained weight solve, normalizes Σw=1,
 /// computes chisq. Returns 0=Ok / 6=RankDeficient. `A`/`B` are caller scratch
-/// (refined in place). When `seed`==true, seeds A,B from svd(xmat) first.
+/// (refined in place). When `seed`==true, seeds A,B from svd(xmat) first. Templated
+/// on the local-array bounds (MAXNL/MAXNR/MAXR ⇒ MAXM/MAXT) so the single-thread
+/// sweep and the many-thread batched LOO can pick different per-thread budgets.
+template <int MAXNL, int MAXNR, int MAXR>
 __device__ inline int dev_als_weights(const double* xmat, int nl, int nr, int r,
                                       const double* qinv, double fudge, int als_iters,
                                       bool seed, double* A, double* B,
                                       double* w_out, double* chisq_out) {
+    constexpr int MAXM = MAXNL * MAXNR;
+    constexpr int MAXT = (MAXNL > MAXNR ? MAXNL : MAXNR) * MAXR;
     if (r == 0) {
         for (int i = 0; i < nl; ++i) w_out[i] = 1.0;
-        *chisq_out = dev_chisq_of(xmat, A, B, nl, nr, 0, qinv);
+        *chisq_out = dev_chisq_of<MAXM>(xmat, A, B, nl, nr, 0, qinv);
         return 0;
     }
-    if (seed) dev_seed_ab(xmat, nl, nr, r, A, B);
-    double Atmp[kQpMaxT], Btmp[kQpMaxT];
+    if (seed) dev_seed_ab<MAXNL, MAXNR, MAXR>(xmat, nl, nr, r, A, B);
+    double Atmp[MAXT], Btmp[MAXT];
     for (int it = 0; it < als_iters; ++it) {
-        dev_opt_A(B, xmat, nl, nr, r, qinv, fudge, Atmp);
+        dev_opt_A<MAXM, MAXT>(B, xmat, nl, nr, r, qinv, fudge, Atmp);
         for (int i = 0; i < nl * r; ++i) A[i] = Atmp[i];
-        dev_opt_B(A, xmat, nl, nr, r, qinv, fudge, Btmp);
+        dev_opt_B<MAXM, MAXT>(A, xmat, nl, nr, r, qinv, fudge, Btmp);
         for (int i = 0; i < r * nr; ++i) B[i] = Btmp[i];
     }
     // Constrained weight solve: xm(i,p)=A(i,p) for p<r, xm(i,r)=1.
     const int rp = r + 1;
     auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
-    double RHS[kQpMaxNl * kQpMaxNl];
-    double LHS[kQpMaxNl];
+    double RHS[MAXNL * MAXNL];
+    double LHS[MAXNL];
     for (int i = 0; i < nl; ++i) {
         for (int ip = 0; ip < nl; ++ip) {
             double acc = 0.0;
@@ -343,13 +373,13 @@ __device__ inline int dev_als_weights(const double* xmat, int nl, int nr, int r,
         }
         LHS[i] = xm(i, r);  // = 1
     }
-    double wv[kQpMaxNl], lu[kQpMaxNl * kQpMaxNl], y[kQpMaxNl];
-    int piv[kQpMaxNl];
+    double wv[MAXNL], lu[MAXNL * MAXNL], y[MAXNL];
+    int piv[MAXNL];
     if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) return 6;  // RankDeficient
     double sum = 0.0;
     for (int i = 0; i < nl; ++i) sum += wv[i];
     for (int i = 0; i < nl; ++i) w_out[i] = wv[i] / sum;
-    *chisq_out = dev_chisq_of(xmat, A, B, nl, nr, r, qinv);
+    *chisq_out = dev_chisq_of<MAXM>(xmat, A, B, nl, nr, r, qinv);
     return 0;
 }
 
@@ -481,7 +511,7 @@ __global__ void seed_ab_kernel(const double* __restrict__ dXmat, int nl, int nr,
                                int r, double* __restrict__ dA, double* __restrict__ dB) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     if (r <= 0) return;
-    dev_seed_ab(dXmat, nl, nr, r, dA, dB);
+    dev_seed_ab<kQpMaxNl, kQpMaxNr, kQpMaxR>(dXmat, nl, nr, r, dA, dB);
 }
 
 // --- S6 ALS opt_A/opt_B loop (single thread; seeds already in dA/dB) -------------
@@ -490,13 +520,15 @@ __global__ void als_kernel(const double* __restrict__ dXmat, const double* __res
                            double* __restrict__ dA, double* __restrict__ dB) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     if (r <= 0) return;
-    double A[kQpMaxT], B[kQpMaxT], Atmp[kQpMaxT], Btmp[kQpMaxT];
+    constexpr int MAXM = kQpMaxM;
+    constexpr int MAXT = kQpMaxT;
+    double A[MAXT], B[MAXT], Atmp[MAXT], Btmp[MAXT];
     for (int i = 0; i < nl * r; ++i) A[i] = dA[i];
     for (int i = 0; i < r * nr; ++i) B[i] = dB[i];
     for (int it = 0; it < als_iters; ++it) {
-        dev_opt_A(B, dXmat, nl, nr, r, dQinv, fudge, Atmp);
+        dev_opt_A<MAXM, MAXT>(B, dXmat, nl, nr, r, dQinv, fudge, Atmp);
         for (int i = 0; i < nl * r; ++i) A[i] = Atmp[i];
-        dev_opt_B(A, dXmat, nl, nr, r, dQinv, fudge, Btmp);
+        dev_opt_B<MAXM, MAXT>(A, dXmat, nl, nr, r, dQinv, fudge, Btmp);
         for (int i = 0; i < r * nr; ++i) B[i] = Btmp[i];
     }
     for (int i = 0; i < nl * r; ++i) dA[i] = A[i];
@@ -513,12 +545,14 @@ __global__ void weights_chisq_kernel(const double* __restrict__ dXmat,
                                      double* __restrict__ dchisq,
                                      int* __restrict__ d_status) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
-    double A[kQpMaxT], B[kQpMaxT];
+    constexpr int MAXM = kQpMaxM;
+    constexpr int MAXT = kQpMaxT;
+    double A[MAXT], B[MAXT];
     for (int i = 0; i < nl * r; ++i) A[i] = dA[i];
     for (int i = 0; i < r * nr; ++i) B[i] = dB[i];
     if (r == 0) {
         for (int i = 0; i < nl; ++i) dW[i] = 1.0;
-        *dchisq = dev_chisq_of(dXmat, A, B, nl, nr, 0, dQinv);
+        *dchisq = dev_chisq_of<MAXM>(dXmat, A, B, nl, nr, 0, dQinv);
         *d_status = 0;
         return;
     }
@@ -539,7 +573,7 @@ __global__ void weights_chisq_kernel(const double* __restrict__ dXmat,
     double sum = 0.0;
     for (int i = 0; i < nl; ++i) sum += wv[i];
     for (int i = 0; i < nl; ++i) dW[i] = wv[i] / sum;
-    *dchisq = dev_chisq_of(dXmat, A, B, nl, nr, r, dQinv);
+    *dchisq = dev_chisq_of<MAXM>(dXmat, A, B, nl, nr, r, dQinv);
     *d_status = 0;
 }
 
@@ -556,9 +590,9 @@ __global__ void loo_batched_kernel(const double* __restrict__ dLoo,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xmat[i + nl * j] = dLoo[(j + nr * i) + static_cast<long>(m) * b];
-    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq;
-    const int st = dev_als_weights(xmat, nl, nr, r, dQinv, fudge, als_iters,
-                                   /*seed=*/true, A, B, w, &chisq);
+    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq;            // many-thread ⇒ SMALL bound
+    const int st = dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
+        xmat, nl, nr, r, dQinv, fudge, als_iters, /*seed=*/true, A, B, w, &chisq);
     for (int i = 0; i < nl; ++i)
         dWmat[static_cast<long>(b) * nl + i] = (st == 0) ? w[i] : 0.0;
 }

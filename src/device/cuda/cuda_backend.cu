@@ -41,6 +41,8 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <climits>    // INT_MIN — the AT2 rankdrop "NA" sentinel (M(fit-2))
+#include <cmath>      // std::numeric_limits / quiet_NaN for the rankdrop NA encoding (M(fit-2))
 #include <cstddef>
 #include <cstdint>
 #include <cstring>    // std::memcpy — staging->result slice copy (P5/d2h-speed)
@@ -52,6 +54,8 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
+#include "core/internal/pchisq.hpp"         // core::internal::pchisq_upper (M(fit-2) rank-test p; the ONE shared special fn)
+#include "core/internal/small_linalg.hpp"   // core::jacobi_svd (M(fit-2) rank_Q diagnostic; bit-identical to the CPU oracle)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
 #include "device/device_partial.hpp"        // steppe::device::DevicePartial (the M4.5 resident handle)
@@ -1516,6 +1520,145 @@ public:
         return gw;
     }
 
+    /// S5 SWEEP — the qpWave / qpAdm RANK TEST over r = 0..rmax (rmax = min(nl,nr)-1)
+    /// ON THE GPU (M(fit-2), THE deliverable). Mirrors the CpuBackend oracle
+    /// (cpu_backend.cpp rank_sweep) op-for-op but runs the per-rank fit on the device:
+    /// upload x_total + Qinv ONCE; build dXmat ONCE; then for each r run the SAME
+    /// M(fit-4) device machinery (seed → ALS → weights+chisq) and read back chisq(r).
+    /// The host then forms dof(r) = (nl-r)*(nr-r), p(r) = pchisq_upper, the AT2
+    /// res$rankdrop nested table (rows f4rank DESCENDING; the nested diff to the
+    /// next-lower rank; the last row NA), f4rank (the smallest non-rejected rank), and
+    /// rank_Q (numerical rank of Q via core::jacobi_svd — observability only, computed
+    /// host-side bit-identically to the oracle; NOT on the rank-test math path). The
+    /// per-rank SVD is recomputed by seed_ab each r — the deterministic Jacobi is
+    /// bit-identical on the same input, so this is exact (the SVD-once kernel is an S8
+    /// follow-on). Native FP64 throughout (the §4 carve-out: SVD + the Qinv quadratic
+    /// form are ill-conditioned/cuSOLVER ⇒ native; precision is ignored here, exactly
+    /// like the oracle). DISPATCH report (SPEC §5:231): svd_path = 1 (gesvdjBatched
+    /// would-select) iff nl,nr<=32 else 2 (per-model gesvd); the EXECUTED SVD is the
+    /// on-device Jacobi at all sizes (the cuSOLVER routing is the PENDING seam).
+    [[nodiscard]] RankSweep rank_sweep(const F4Blocks& x,
+                                       const JackknifeCov& cov,
+                                       double alpha,
+                                       const QpAdmOptions& opts,
+                                       const Precision& precision) override {
+        (void)precision;  // native FP64 by carve-out (§4) — match the oracle exactly
+        guard_device();
+        RankSweep rs;
+        const int nl = x.nl, nr = x.nr, m = nl * nr;
+        const int rmax = (nl < nr ? nl : nr) - 1;
+        rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;  // dispatch report (always set)
+        if (rmax < 0) {  // a degenerate (0-row/0-col) model — no candidate rank
+            rs.status = Status::RankDeficient;
+            return rs;
+        }
+        // The widest fit in the sweep is rank rmax — guard against it ONCE (the
+        // device small-LA scratch bounds; the host caller never round-trips the model).
+        assert_qpadm_model_fits(nl, nr, rmax);
+        if (m <= 0) { rs.status = Status::Ok; return rs; }
+
+        // ---- upload x_total + Qinv ONCE; build dXmat ONCE (V/A/B reread per r) ----
+        DeviceBuffer<double> dTotal(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
+        const std::size_t cap = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);  // ≥ nl*r and r*nr for r≤rmax
+        DeviceBuffer<double> dA(cap > 0 ? cap : 1);
+        DeviceBuffer<double> dB(cap > 0 ? cap : 1);
+        DeviceBuffer<double> dW(static_cast<std::size_t>(nl > 0 ? nl : 1));
+        DeviceBuffer<double> dchisq(1);
+        DeviceBuffer<int> dStatus(1);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotal.data(), x.x_total.data(),
+                                          static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
+                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
+
+        // ---- per-rank sweep (chisq via the ALS-refined rank-r fit, on the GPU) ----
+        const std::size_t n = static_cast<std::size_t>(rmax) + 1;
+        rs.chisq.assign(n, 0.0);
+        rs.dof.assign(n, 0);
+        rs.p.assign(n, 0.0);
+        bool degenerate = false;
+        for (int r = 0; r <= rmax; ++r) {
+            // seed → ALS (r>0) then the constrained weight solve + chisq — exactly
+            // the M(fit-4) gls_weights device flow (reused, no new chisq math).
+            if (r > 0) {
+                launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
+                launch_qpadm_als(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
+                                 opts.als_iterations, dA.data(), dB.data(), stream_.get());
+            }
+            launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
+                                       nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                       stream_.get());
+            int status_i = 0;
+            double chisq = 0.0;
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            if (status_i != 0) degenerate = true;
+            rs.chisq[static_cast<std::size_t>(r)] = chisq;
+            rs.dof[static_cast<std::size_t>(r)] = (nl - r) * (nr - r);
+            rs.p[static_cast<std::size_t>(r)] =
+                core::internal::pchisq_upper(chisq, rs.dof[static_cast<std::size_t>(r)]);
+        }
+
+        // ---- AT2 res$rankdrop nested table (rows: rank rmax, rmax-1, ..., 0) ----
+        rs.rd_f4rank.resize(n); rs.rd_dof.resize(n); rs.rd_chisq.resize(n);
+        rs.rd_p.resize(n); rs.rd_dofdiff.resize(n);
+        rs.rd_chisqdiff.resize(n); rs.rd_p_nested.resize(n);
+        for (std::size_t k = 0; k < n; ++k) {
+            const int r = rmax - static_cast<int>(k);  // this row's rank (descending)
+            rs.rd_f4rank[k] = r;
+            rs.rd_dof[k] = rs.dof[static_cast<std::size_t>(r)];
+            rs.rd_chisq[k] = rs.chisq[static_cast<std::size_t>(r)];
+            rs.rd_p[k] = rs.p[static_cast<std::size_t>(r)];
+            if (r - 1 >= 0) {  // nested diff to the next-lower rank (r-1) — NATIVE
+                const int dd = rs.dof[static_cast<std::size_t>(r - 1)] -
+                               rs.dof[static_cast<std::size_t>(r)];
+                const double cd = rs.chisq[static_cast<std::size_t>(r - 1)] -
+                                  rs.chisq[static_cast<std::size_t>(r)];
+                rs.rd_dofdiff[k] = dd;
+                rs.rd_chisqdiff[k] = cd;
+                rs.rd_p_nested[k] = core::internal::pchisq_upper(cd, dd);
+            } else {  // the last row (rank 0): NA
+                rs.rd_dofdiff[k] = INT_MIN;
+                rs.rd_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
+                rs.rd_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+
+        // ---- f4rank: the smallest non-rejected rank (p(r) > alpha, ASCENDING) ----
+        rs.f4rank = rmax;  // fallback: the highest rank if all rejected
+        for (int r = 0; r <= rmax; ++r) {
+            if (rs.p[static_cast<std::size_t>(r)] > alpha) { rs.f4rank = r; break; }
+        }
+
+        // ---- rank_Q: numerical rank of the (unfudged) covariance Q (m×m) ----
+        // Observability only (the golden model_well_determined.rank_Q diagnostic, NOT
+        // gated; it is a derived property of Q, off the rank-test math path). Computed
+        // host-side via core::jacobi_svd — BIT-IDENTICAL to the CpuBackend oracle, so
+        // the GPU rank_Q == CPU rank_Q exactly (the localizer holds).
+        if (!cov.Q.empty() && cov.m == m) {
+            const core::SvdResult sq = core::jacobi_svd(cov.Q, m, m);
+            const double smax = sq.S.empty() ? 0.0 : sq.S.front();
+            const double tol = smax * static_cast<double>(m) *
+                               std::numeric_limits<double>::epsilon();
+            int rk = 0;
+            for (double s : sq.S) if (s > tol) ++rk;
+            rs.rank_Q = rk;
+        } else {
+            rs.rank_Q = m;
+        }
+
+        rs.status = degenerate ? Status::RankDeficient
+                               : (cov.status != Status::Ok ? cov.status : Status::Ok);
+        return rs;
+    }
+
     /// S6 — GLS weights via AT2 ALS on the GPU (the FROZEN CONTRACT §2d). xmat from
     /// x_total → on-device SVD seed → 20 ALS opt_A/opt_B iters → constrained weight
     /// solve → normalize Σw=1 → chisq. All on-device, native FP64.
@@ -1620,16 +1763,24 @@ public:
 private:
     /// Fail-fast if a qpAdm model exceeds the on-device small-LA scratch bounds
     /// (qpadm_fit_kernels.cu kQpMaxNl/kQpMaxNr/kQpMaxR). The golden is nl=2, nr=5,
-    /// r=1 — far inside; a larger model would index past the fixed local arrays in
-    /// the device LA kernels (silent corruption), so reject it here (architecture.md
-    /// §2 fail-fast). These bounds cover realistic qpAdm models; a future batched-
-    /// search milestone can widen them.
+    /// r=1 — far inside; a larger model would index past the fixed local arrays in the
+    /// device LA kernels (silent corruption), so reject it here (architecture.md §2
+    /// fail-fast). These bounds cover realistic qpAdm models; a future batched-search
+    /// milestone can widen them by moving the kernel scratch to VRAM. Used by
+    /// rank_test, rank_sweep (M(fit-2)), gls_weights, and the batched LOO. NOTE
+    /// (M(fit-2)): nr>32 CANNOT be served by these stacked-local kernels (CUDA reserves
+    /// per-thread local for the device max resident-thread count ⇒ a big nr trips OOM
+    /// at launch even single-threaded; measured on box5090). So nr>32 is the documented
+    /// cuSOLVER-routing PENDING seam — rank_sweep guards it and the host reports the
+    /// SKIP; the nr>32 SWEEP MATH is validated on the CpuBackend oracle.
     static void assert_qpadm_model_fits(int nl, int nr, int r) {
         constexpr int kMaxNl = 5, kMaxNr = 10, kMaxR = 4;
         if (nl > kMaxNl || nr > kMaxNr || r > kMaxR) {
             throw std::runtime_error(
                 "CudaBackend qpAdm fit: model exceeds the on-device small-LA scratch "
-                "bounds (nl<=5, nr<=10, r<=4); widen kQpMax* in qpadm_fit_kernels.cu");
+                "bounds (nl<=5, nr<=10, r<=4); the nr>32 path is the cuSOLVER-routing "
+                "PENDING seam (validated on the CpuBackend oracle) — widen kQpMax* in "
+                "qpadm_fit_kernels.cu (VRAM scratch) to serve it on the GPU");
         }
     }
 
