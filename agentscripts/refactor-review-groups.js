@@ -45,7 +45,7 @@ const GROUP_DEFS = {
 let A = args
 if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = null } }
 let RUN = (Array.isArray(A) ? A : (typeof A === 'number' ? [A] : [])).map(Number).filter(n => GROUP_DEFS[n])
-if (RUN.length === 0) RUN = [5, 6, 7, 8, 9, 10]   // BATCH 1b (2/3/4 done; resume 5-10); batch 2 = [11,12,13,14,15,16,17,18,19,20,21,22]
+if (RUN.length === 0) RUN = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]   // BATCH 2 (device/kernel-scoped); batch 1 (2-10) done
 
 phase('Scope')
 const UNIT_SCHEMA = {

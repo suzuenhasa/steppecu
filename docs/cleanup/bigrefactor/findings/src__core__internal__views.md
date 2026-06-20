@@ -14,3 +14,27 @@ No Group 2 issues found.
 
 No Group 3 issues found.
 
+## Group 5 — Hardcoded values / magic numbers
+
+No Group 5 issues found.
+
+## Group 6 — Naming
+
+No Group 6 issues found.
+
+## Group 7 — Duplication
+
+- [7.3][LOW] views.hpp:67 — the flat-index expression casts both operands: `static_cast<long>(i) + static_cast<long>(P) * s`. Since `s` is already `long`, the `static_cast<long>(P)` is redundant for overflow safety (`P * s` already promotes to `long`); the doubled cast is mild duplication of the widening pattern. Suggested: keep one explicit cast for clarity (`static_cast<long>(i) + static_cast<long>(P) * s` is fine as documentation of intent), or drop the `P` cast as `static_cast<long>(i) + P * s`; not load-bearing either way.
+
+## Group 8 — Comments
+
+No Group 8 issues found.
+
+## Group 9 — Constants & configuration
+
+No Group 9 issues found.
+
+## Group 10 — Initialization
+
+No Group 10 issues found.
+
