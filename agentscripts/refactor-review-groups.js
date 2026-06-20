@@ -40,7 +40,12 @@ const GROUP_DEFS = {
   22: { name: 'Performance: compute & launch', scope: 'kernel', tasks: '22.1 Atomics where a proper reduction/scan would be far cheaper. 22.2 Integer div/mod in loops (expensive on GPU; precompute / shifts-masks for power-of-two strides). 22.3 Loop-invariant work / repeated index recomputation that should be hoisted. 22.4 Launch overhead: many small/repeated launches dominated by per-launch cost — fuse or capture into a CUDA graph (only where the profiler confirms it).' },
 }
 
-const RUN = (Array.isArray(args) ? args : [args]).map(Number).filter(n => GROUP_DEFS[n])
+// args plumbing proved unreliable for scriptPath launches, so use a hardcoded BATCH
+// (prefer args if it actually arrives as a list/number; else the BATCH default).
+let A = args
+if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = null } }
+let RUN = (Array.isArray(A) ? A : (typeof A === 'number' ? [A] : [])).map(Number).filter(n => GROUP_DEFS[n])
+if (RUN.length === 0) RUN = [2, 3, 5, 6, 7, 8, 9, 10]   // BATCH 1 (general/mechanical); edit to [11,12,13,14,15,16,17,18,19,20,21,22] for batch 2
 
 phase('Scope')
 const UNIT_SCHEMA = {
