@@ -14,7 +14,7 @@
 #include "device/backend.hpp"            // ComputeBackend, F4Blocks, JackknifeCov, GlsWeights
 #include "device/device_f2_blocks.hpp"   // device::DeviceF2Blocks (S3 device-resident input)
 #include "device/resources.hpp"          // device::Resources (the injected backend bundle)
-#include "steppe/config.hpp"             // Precision
+#include "steppe/config.hpp"             // Precision, kDefaultMantissaBits (the SAME default f2 uses)
 #include "steppe/error.hpp"              // Status
 #include "steppe/fstats.hpp"             // F2BlockTensor
 
@@ -77,7 +77,6 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
                      const QpAdmModel& model, const QpAdmOptions& opts) {
     QpAdmResult res;
     res.model_index = model.model_index;
-    res.precision_tag = Precision::Kind::Fp64;
 
     const int nl = X.nl;
     const int nr = X.nr;
@@ -85,7 +84,29 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     res.est_rank = r;
     res.dof = (nl - r) * (nr - r);
 
-    const Precision prec{Precision::Kind::Fp64};
+    // PRECISION POLICY (unified with the f2 precompute; fit-engine.md §1.4). The
+    // DEFAULT for all fit stages is now EmulatedFp64{kDefaultMantissaBits} — the
+    // SAME default the f2 GEMMs use (Ozaki fixed-slice, ~2.2e-11) — and the stages
+    // that cannot honor it fall back internally: the matmul-heavy covariance SYRK
+    // ENGAGES this via `emulation_honorable` (auto-native if the build/device cannot
+    // honor emulation); the catastrophic-cancellation ops (the f4 4-slab combine,
+    // the xtau centering) stay native ALWAYS (emulation faithfully forms a product
+    // but cannot recover bits a prior subtraction annihilated); and the ill-
+    // conditioned cuSOLVER SPD inverse stays native (the d6d3cbb promotion seam,
+    // gated on a future FP64-emulated cuSOLVER mode the toolkit does not yet expose).
+    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+
+    // HONEST precision_tag (architecture.md §9, §12; fit-engine.md §1.4). Report what
+    // ACTUALLY ran on the SYRK, not what was requested: EmulatedFp64 iff the request
+    // is emulated AND the backend can honor it (the SAME `emulated_fp64_honorable`
+    // capability the f2 path consults via `emulation_honorable`), else native Fp64.
+    // The CpuBackend (the native oracle) reports the all-false default ⇒ Fp64; a CUDA
+    // build without the fixed-slice tuning degrades to native ⇒ Fp64 — never tag a
+    // run EmulatedFp64 that silently ran native.
+    res.precision_tag = (prec.kind == Precision::Kind::EmulatedFp64 &&
+                         be.capabilities().emulated_fp64_honorable)
+                            ? Precision::Kind::EmulatedFp64
+                            : Precision::Kind::Fp64;
 
     // S4 — covariance (OQ-3: weight by block_sizes, NOT vpair).
     JackknifeCov cov = jackknife_cov(be, X, block_sizes, opts.fudge, prec);
@@ -136,7 +157,11 @@ QpAdmResult run_qpadm(const device::DeviceF2Blocks& f2, const QpAdmModel& model,
                       const QpAdmOptions& opts, device::Resources& resources) {
     ComputeBackend& be = *resources.gpus.at(0).backend;
     const std::vector<int> left_idx = core::qpadm::left_with_target(model);
-    const Precision prec{Precision::Kind::Fp64};
+    // Unified default precision (= the f2 default). assemble_f4 is the cancellation-
+    // sensitive 4-slab combine and stays native ALWAYS by carve-out (cuda_backend.cu
+    // OQ-5 `(void)precision`), exactly like the f2 numerator — passing the emulated
+    // default here is the one-policy consistency, not a behavior change for S3.
+    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
     // S3 — device-resident assemble (zero D2H on the CUDA path).
     F4Blocks X = core::qpadm::assemble_f4(be, f2, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);
@@ -148,7 +173,10 @@ QpAdmResult run_qpadm(const F2BlockTensor& f2_host, const QpAdmModel& model,
                       const QpAdmOptions& opts, device::Resources& resources) {
     ComputeBackend& be = *resources.gpus.at(0).backend;
     const std::vector<int> left_idx = core::qpadm::left_with_target(model);
-    const Precision prec{Precision::Kind::Fp64};
+    // Unified default precision (= the f2 default); see the DeviceF2Blocks overload.
+    // The CpuBackend (this host-oracle path) ignores precision ⇒ always native, so it
+    // is the native oracle the emulated GPU path is diffed against.
+    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
     // S3 — host-oracle assemble (the CpuBackend reads host memory directly).
     F4Blocks X = core::qpadm::assemble_f4(be, f2_host, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);

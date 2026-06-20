@@ -155,21 +155,43 @@ rotation against a **fake `ComputeBackend`** with no GPU, exactly as
 
 ### 1.4 The precision map (§12) — precision follows conditioning, not shape
 
-**[SPEC §12, §9]** Precision is assigned by the conditioning of the operation. The cancellation-prone
-elementwise math is always native FP64; the well-conditioned matmul-heavy stages may use
-`EmulatedFp64{40}`; the small ill-conditioned solves **default native** and are **promotable** to
-`EmulatedFp64` under a validated per-stage policy (see the seam note below); TF32 is screening-only.
+**[SPEC §12, §9]** Precision is assigned by the conditioning of the operation. The fit now follows the
+**SAME policy as the f2 precompute** (one policy, not two): the default for every fit stage is
+`EmulatedFp64{kDefaultMantissaBits}` (= `EmulatedFp64{40}`, the f2 default; Ozaki fixed-slice,
+~2.2e-11), and a stage that cannot honor it **falls back internally** to native FP64. Concretely:
+the well-conditioned matmul-heavy covariance SYRK **engages the default** (auto-native fallback via
+`emulation_honorable` when the build/device cannot honor it — the SAME predicate the f2 GEMMs use);
+the cancellation-prone elementwise math (the f4 four-slab combine, the `xtau` centering) is held
+**native FP64 ALWAYS** by a fixed carve-out (emulation faithfully forms a product but cannot recover
+bits a prior subtraction annihilated — exactly the f2-numerator carve-out); the small ill-conditioned
+cuSOLVER solves **default native** and are **promotable** to `EmulatedFp64` under the validated
+per-stage seam (they currently fall back because CUDA 13.0 / cuSOLVER 12.0 exposes no FP64-emulated
+cuSOLVER mode — see the seam note below); TF32 is screening-only. `qpadm_fit.cpp` passes the unified
+`EmulatedFp64{kDefaultMantissaBits}` default into the backend virtuals, and `QpAdmResult::precision_tag`
+reports what ACTUALLY ran on the SYRK (`EmulatedFp64` iff emulation was honorable, else `Fp64` — queried
+via `capabilities().emulated_fp64_honorable`, not hardcoded).
 
 | Stage | Operation | Precision | Primitive / note |
 |---|---|---|---|
-| S3 f4 assembly | `X = ½(f2+f2−f2−f2)` four-slab gather | **native Fp64** | gather + axpy; a *second* subtraction after f2 (mild cancellation), trivially cheap, no emulation benefit since it is not a true GEMM [SPEC §5:219; OQ-5] |
-| S4 covariance Q | `xtau` (centering = a difference) | **native Fp64** | difference of like-magnitude replicates |
-| S4 covariance Q | `Q = xtau·xtauᵀ/n_block` (SYRK) | **EmulatedFp64{40}** | well-conditioned accumulate-many; the canonical §12 covariance-SYRK case; `Dsyrk` |
+| S3 f4 assembly | `X = ½(f2+f2−f2−f2)` four-slab gather | **native Fp64 (cancellation carve-out, ALWAYS)** | gather + axpy; a *second* subtraction after f2 (catastrophic cancellation), held native regardless of the requested precision — the f2-numerator carve-out [SPEC §5:219; OQ-5] |
+| S4 covariance Q | `xtau` (centering = a difference) | **native Fp64 (cancellation carve-out, ALWAYS)** | difference of like-magnitude replicates; held native regardless of the requested precision |
+| S4 covariance Q | `Q = xtau·xtauᵀ/n_block` (SYRK) | **EmulatedFp64{40} by default (auto native fallback)** | well-conditioned accumulate-many; the canonical §12 covariance-SYRK case; legacy `cublasDsyrk` driven by the handle MATH MODE, engaged via `MathModeScope` + `engage_f2_precision` (capture/apply/restore — no leak to the SPD inverse), routed through the SAME `emulation_honorable` predicate the f2 GEMMs use. LANDED: the fit DEFAULTS this emulated like f2; falls back native when not honorable |
 | S5 rank SVD | `svd(X)` + `E'Q⁻¹E` | **native Fp64** (default; promotable) | small, near rank-deficiency, oracle-grade [SPEC §12]; deterministic cuSOLVER, single statistic stream |
 | S5 `Q` factor/inverse | factor/invert `Q` | **native Fp64** (default; promotable) | `potrf`/`potri`; explicit `Q⁻¹` if parity needs it (OQ-3, §6); the cuSOLVER math mode is engaged via `CusolverMathModeScope` (default native) |
 | S6 weights | `opt_A`/`opt_B` Kronecker GLS + constrained solve | **native Fp64** (default; promotable) | tiny + ill-conditioned; `potrf`/`potrs` on the ridge-regularized systems |
 | S7 SE | per-LOO-block weight re-solves; `cov(wmat)` | **native Fp64** solves (default; promotable); cov accumulation may be EmulatedFp64 | reuse S5/S6 primitives |
 | S8 screening | rank/feasibility ranking only | **Tf32 allowed**, recomputed in EmulatedFp64/Fp64 before any reported est/se/z/p [SPEC §9, §12] | never emits a reported number |
+
+**Covariance-SYRK precision (LANDED this change).** The S4 covariance SYRK is no longer hardcoded
+native — `qpadm_fit.cpp` now passes the unified `EmulatedFp64{40}` default and `jackknife_cov` engages
+it on the `cublasDsyrk` via a `MathModeScope` (capture the handle's current math mode) bracketing
+`engage_f2_precision` (apply the emulated/fixed-slice mode, or PEDANTIC-native when not honorable),
+restoring the captured mode at scope exit so the emulated mode never leaks into the subsequent native
+SPD inverse. At single-model scale this is a **policy/consistency change, not a speedup** (xtau is
+`n_block × m` = tiny, so emulation gives ~no single-model benefit); the payoff is (a) the fit policy
+now MATCHES f2, and (b) S8 inherits it — when the SYRK is batched across thousands of rotation models it
+is already on the tensor-core emulated path. The af6a8c2 golden re-passes within tier with the SYRK
+emulated (the SYRK is well-conditioned accumulate-many and emulated{40} is ~2.2e-11).
 
 **Determinism contract [SPEC §12, §9].** Statistic-bearing GEMM/SYRK/SVD/Cholesky run on the **single
 statistic stream** (`stream_count = 1`; cuBLAS reproducibility voids under concurrency).

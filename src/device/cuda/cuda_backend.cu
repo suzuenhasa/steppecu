@@ -1226,7 +1226,13 @@ public:
                                        std::span<const int> left_idx,
                                        std::span<const int> right_idx,
                                        const Precision& precision) override {
-        (void)precision;  // native FP64 (OQ-5; the cancellation-sensitive f-stat diff)
+        // CANCELLATION CARVE-OUT (unified precision policy; fit-engine.md §1.4, §OQ-5).
+        // The f4 4-slab combine is a catastrophic-cancellation f-stat difference, held
+        // native FP64 ALWAYS regardless of the requested `precision` — exactly the
+        // f2-numerator carve-out: Ozaki emulation faithfully forms a product but cannot
+        // recover bits annihilated by a prior subtraction. So even with the fit default
+        // now EmulatedFp64{40}, this stage stays native.
+        (void)precision;  // native FP64 (the cancellation-sensitive f-stat diff)
         guard_device();
 
         const int nl = static_cast<int>(left_idx.size()) - 1;
@@ -1312,26 +1318,30 @@ public:
     }
 
     /// S4 — weighted block-jackknife covariance Q + Qinv on the GPU (the FROZEN
-    /// CONTRACT §2b). xtau kernel → cublasDsyrk Q (well-conditioned; FP64 gate) →
-    /// fudge diag → cusolverDn Cholesky potrf/potri Qinv (ill-conditioned; native
-    /// FP64). devInfo>0 ⇒ NonSpdCovariance (value, not throw). Native FP64.
+    /// CONTRACT §2b). xtau kernel (native; cancellation carve-out) → cublasDsyrk Q
+    /// (well-conditioned matmul; ENGAGES `precision` — emulated{40} by default, auto-
+    /// native fallback) → fudge diag → cusolverDn Cholesky potrf/potri Qinv (ill-
+    /// conditioned; native FP64, the cuSOLVER fallback). devInfo>0 ⇒
+    /// NonSpdCovariance (value, not throw).
     [[nodiscard]] JackknifeCov jackknife_cov(const F4Blocks& x,
                                              std::span<const int> block_sizes,
                                              double fudge,
                                              const Precision& precision) override {
-        // PRECISION POLICY (the FROZEN CONTRACT §2b; fit-engine.md §1.4). The
-        // ill-conditioned SPD inverse (potrf/potri) is pinned native FP64 by the
-        // §12 conditioning rule, so the passed `precision` does NOT govern THIS
-        // solve's conditioning — it governs the matmul-heavy stages only. The
-        // qpAdm virtuals therefore pass native here and the af6a8c2 golden parity
-        // is byte-for-byte unchanged. What is NEW (ROADMAP §6 the promotion seam):
-        // `solve_precision_` is the per-stage solve-precision knob (DEFAULT native;
-        // see the member doc). It feeds `engage_solver_precision` below so the
-        // cuSOLVER math mode is engaged through the SAME `emulation_honorable`
-        // predicate the f2 path uses — the SEAM is live and a future per-stage
-        // policy can PROMOTE this solve to EmulatedFp64 without a code change, while
-        // the default keeps native. `precision` stays unused for the solve itself.
-        (void)precision;
+        // PRECISION POLICY (unified with the f2 precompute; fit-engine.md §1.4). The
+        // passed `precision` (default EmulatedFp64{40}) NOW governs the well-
+        // conditioned covariance SYRK below — it engages the SAME
+        // `engage_f2_precision` + `emulation_honorable` path the f2 GEMMs use, with
+        // automatic native fallback when the build/device cannot honor emulation. The
+        // two stages here that `precision` does NOT govern, by the §12 carve-outs:
+        //   * the xtau CENTERING kernel — catastrophic-cancellation (loo − est),
+        //     held native ALWAYS (emulation faithfully forms a product but cannot
+        //     recover bits a prior subtraction annihilated), exactly the f2-numerator
+        //     carve-out;
+        //   * the ill-conditioned SPD inverse (potrf/potri) — pinned native FP64 by
+        //     the §12 conditioning rule; the d6d3cbb cuSOLVER promotion seam
+        //     (`solve_precision_` → `engage_solver_precision`) is live but FALLS BACK
+        //     to native because CUDA 13.0 / cuSOLVER 12.0 exposes no FP64-emulated
+        //     cuSOLVER math mode. `precision` does not drive that solve.
         guard_device();
 
         const int m = x.nl * x.nr;
@@ -1368,14 +1378,27 @@ public:
                        m, nb, n, dXtau.data(), stream_.get());
 
         // Q = xtau·xtauᵀ / nb (UNFUDGED, symmetric m×m), cublasDsyrk LOWER, OP_N
-        // (n=m, k=nb, A=dXtau lda=m). The well-conditioned covariance SYRK; native
-        // FP64 for the gate. Then mirror lower→upper so Q is full (CpuBackend writes
-        // both triangles).
+        // (n=m, k=nb, A=dXtau lda=m). The well-conditioned covariance SYRK now ENGAGES
+        // the passed `precision` exactly like the f2 GEMMs: default EmulatedFp64{40}
+        // (Ozaki fixed-slice tensor-core path), automatic native fallback when not
+        // honorable. cublasDsyrk is the legacy API (no per-call compute-type arg), so
+        // emulation is driven by the handle's MATH MODE — set by `engage_f2_precision`
+        // (the single source of the f2 precision engagement). The MathModeScope
+        // brackets the change: it captures the handle's current math mode, lets
+        // engage_f2_precision apply the emulated (or PEDANTIC-native fallback) mode for
+        // the SYRK, then RESTORES the captured mode at scope exit — so this never leaks
+        // its mode into the next solve on the shared handle (the §12 determinism
+        // contract; mirrors the f2 scoped pattern). The handle's stream + emulated-FP64
+        // determinism workspace are bound ONCE in the ctor and are NOT touched here.
         DeviceBuffer<double> dQ(M * M);
         const double alpha = 1.0 / static_cast<double>(nb);
         const double beta = 0.0;
-        CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-                                 m, nb, &alpha, dXtau.data(), m, &beta, dQ.data(), m));
+        {
+            const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+                                     m, nb, &alpha, dXtau.data(), m, &beta, dQ.data(), m));
+        }  // syrk_mode_scope restores the prior math mode here (no leak to the SPD inverse)
         launch_symmetrize_lower_to_full(dQ.data(), m, stream_.get());
         out.Q.assign(M * M, 0.0);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.Q.data(), dQ.data(), M * M * sizeof(double),

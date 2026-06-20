@@ -321,7 +321,15 @@ int main(int argc, char** argv) {
                         static_cast<int>(gpu.status));
             ++g_failures;
         } else {
-            std::printf("\n-- GPU weights vs GOLDEN (TIGHT rtol 1e-6) --\n");
+            // The DEFAULT GPU path now runs the covariance SYRK EMULATED{40} by
+            // default (the unified fit precision policy; fit-engine.md §1.4). These
+            // GPU-vs-golden checks are therefore the FIRST informative emulated-SYRK
+            // measurement in the fit (the d6d3cbb cuSOLVER probe degraded to native and
+            // was uninformative). The precision_tag the run reports is logged below.
+            std::printf("\n-- GPU weights vs GOLDEN (TIGHT rtol 1e-6) [SYRK = emulated{40} by default] --\n");
+            std::printf("  [INFO] gpu precision_tag = %s (1=EmulatedFp64, 0=Fp64)\n",
+                        gpu.precision_tag == steppe::Precision::Kind::EmulatedFp64
+                            ? "EmulatedFp64" : "Fp64");
             check_close("gpu weight[CordedWare]", gpu.weight.at(0), g_w0, 1e-6, 1e-12);
             check_close("gpu weight[Turkey_N]",   gpu.weight.at(1), g_w1, 1e-6, 1e-12);
             std::printf("-- GPU chisq (TIGHT) / dof (EXACT) --\n");
@@ -335,11 +343,27 @@ int main(int argc, char** argv) {
             check_close("gpu p", gpu.p, g_p, 1e-3, 1e-9);
 
             // Diff ORACLE: GPU == CpuBackend to 1e-9 (localizes a GPU regression
-            // against the bit-exact reference, not only the golden constants).
-            std::printf("-- GPU vs CpuBackend oracle (diff localizer, 1e-9) --\n");
+            // against the bit-exact reference, not only the golden constants). The
+            // CpuBackend ignores `precision` ⇒ always native ⇒ it is the native oracle
+            // the emulated-SYRK GPU path is diffed against.
+            std::printf("-- GPU(emulated-SYRK) vs CpuBackend oracle (NATIVE) (diff localizer, 1e-9) --\n");
             check_close("gpu-vs-cpu weight[0]", gpu.weight.at(0), res.weight.at(0), 0.0, 1e-9);
             check_close("gpu-vs-cpu weight[1]", gpu.weight.at(1), res.weight.at(1), 0.0, 1e-9);
             check_close("gpu-vs-cpu chisq",     gpu.chisq,        res.chisq,        0.0, 1e-9);
+
+            // REAL per-quantity deltas of the (now emulated-by-default) SYRK path —
+            // (a) vs the af6a8c2 golden, (b) vs the CpuBackend native oracle. Reported
+            // (the gating is the check_close tiers above); this is the first
+            // informative emulated measurement in the fit.
+            std::printf("-- [INFO] emulated-SYRK per-quantity deltas (vs golden / vs native oracle) --\n");
+            report_delta("emuSYRK weight[CordedWare] vs golden", gpu.weight.at(0), g_w0);
+            report_delta("emuSYRK weight[Turkey_N]   vs golden", gpu.weight.at(1), g_w1);
+            report_delta("emuSYRK chisq              vs golden", gpu.chisq,        g_chisq);
+            report_delta("emuSYRK se[CordedWare]     vs golden", gpu.se.at(0),     g_se);
+            report_delta("emuSYRK p                  vs golden", gpu.p,            g_p);
+            report_delta("emuSYRK weight[0] vs native-oracle",   gpu.weight.at(0), res.weight.at(0));
+            report_delta("emuSYRK weight[1] vs native-oracle",   gpu.weight.at(1), res.weight.at(1));
+            report_delta("emuSYRK chisq     vs native-oracle",   gpu.chisq,        res.chisq);
 
             // =================================================================
             // EXPLORATORY (NON-GATING): the PROMOTED-emulated solve measurement
