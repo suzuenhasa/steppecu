@@ -60,6 +60,7 @@ void HostRamSink::begin(int P, int n_block, const std::vector<int>& block_sizes)
         s.block = -1;
     }
     stop_ = false;
+    writer_failed_ = false;
     writer_ = std::thread(&HostRamSink::writer_loop, this);
 }
 
@@ -86,16 +87,22 @@ void HostRamSink::writer_loop() {
             ready_.pop();
         }
         SinkSlot& s = slots_[static_cast<std::size_t>(idx)];
-        // Per-slot happens-before: the D2H into this slot must be fully drained before the
-        // host reads it. cudaEventSynchronize blocks ONLY on this slot's D2H.
-        const cudaError_t e = cudaEventSynchronize(s.done);
-        if (e != cudaSuccess) {
-            STEPPE_LOG_WARN("HostRamSink writer cudaEventSynchronize: %s", cudaGetErrorString(e));
+        try {
+            // Per-slot happens-before: the D2H into this slot must be fully drained before
+            // the host reads it (sink_wait_slot_drained blocks ONLY on this slot's D2H and
+            // FAIL-FASTS on a non-success sync — copying an undrained slot would silently
+            // corrupt f2/vpair, a §12 parity violation; see block_sink.cuh).
+            sink_wait_slot_drained(s.done, "HostRamSink writer");
+            const std::size_t dst = slab_ * static_cast<std::size_t>(s.block);
+            std::memcpy(host_.f2.data() + dst, s.f2.data(), slab_ * sizeof(double));
+            std::memcpy(host_.vpair.data() + dst, s.vpair.data(), slab_ * sizeof(double));
+        } catch (const std::exception& ex) {
+            // Record the first error; the compute thread re-throws it at finish(). Keep
+            // draining the queue so the compute thread is not deadlocked on a full ring.
+            // We deliberately do NOT memcpy this (possibly undrained) slot.
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (!writer_failed_) { writer_failed_ = true; writer_error_ = ex.what(); }
         }
-        std::memcpy(host_.f2.data() + slab_ * static_cast<std::size_t>(s.block),
-                    s.f2.data(), slab_ * sizeof(double));
-        std::memcpy(host_.vpair.data() + slab_ * static_cast<std::size_t>(s.block),
-                    s.vpair.data(), slab_ * sizeof(double));
         {
             std::lock_guard<std::mutex> lk(mtx_);
             free_[static_cast<std::size_t>(idx)] = true;
@@ -132,6 +139,8 @@ void HostRamSink::finish() {
     }
     cv_work_.notify_all();
     writer_.join();
+    if (writer_failed_)
+        throw std::runtime_error("HostRamSink: background writer failed: " + writer_error_);
 }
 
 HostRamSink::~HostRamSink() {
@@ -243,10 +252,9 @@ void DiskSink::writer_loop() {
         }
         SinkSlot& s = slots_[static_cast<std::size_t>(idx)];
         try {
-            const cudaError_t e = cudaEventSynchronize(s.done);
-            if (e != cudaSuccess)
-                throw std::runtime_error(std::string("DiskSink writer cudaEventSynchronize: ") +
-                                         cudaGetErrorString(e));
+            // Per-slot happens-before + FAIL-FAST event wait (shared with HostRamSink so the
+            // two tiers attribute the same failure identically; see block_sink.cuh).
+            sink_wait_slot_drained(s.done, "DiskSink writer");
             pwrite_all(fd_, s.f2.data(), slab_bytes_,
                        f2_region_ + slab_bytes_ * static_cast<std::uint64_t>(s.block), "f2");
             pwrite_all(fd_, s.vpair.data(), slab_bytes_,

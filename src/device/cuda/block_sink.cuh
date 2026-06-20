@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <mutex>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -73,10 +74,29 @@ struct SinkSlot {
     int block = -1;
 };
 
+/// Shared fail-fast event-wait for BOTH sinks' writer threads. Blocks on this slot's D2H
+/// completion event (the per-slot happens-before — the slab is fully drained before the
+/// host reads it). A non-cudaSuccess return means the wait failed OR a prior async launch
+/// on the stream (e.g. the D2H itself) failed, so the slot may hold stale/undrained bytes;
+/// per architecture.md §12 (parity) the ONLY safe action is to fail fast — NEVER copy an
+/// undrained slot (that would silently corrupt f2/vpair). `what` tags the throw site so the
+/// two tiers attribute identically. (CUDA 13 cudaEventSynchronize returns cudaSuccess /
+/// cudaErrorInvalidValue / cudaErrorInvalidResourceHandle / cudaErrorLaunchFailure, and may
+/// also surface error codes from previous asynchronous launches.)
+inline void sink_wait_slot_drained(cudaEvent_t done, const char* what) {
+    const cudaError_t e = cudaEventSynchronize(done);
+    if (e != cudaSuccess)
+        throw std::runtime_error(std::string(what) + " cudaEventSynchronize: " +
+                                 cudaGetErrorString(e));
+}
+
 /// TIER 1: stream blocks into a host F2BlockTensor via the pinned ring + background
-/// writer. The writer waits each slot's D2H event, then std::memcpy's the slot into
-/// host.f2[P²·b]/host.vpair[P²·b] while the GPU computes the next chunk. PARITY-NEUTRAL:
-/// the D2H is a raw byte copy, the host copy is memcpy — same bytes (§12).
+/// writer. The writer FAIL-FAST waits each slot's D2H event (a non-success sync means the
+/// slot may be undrained → records writer_failed_ and SKIPS the copy, re-thrown at
+/// finish() — identical to DiskSink, never a silently-corrupting WARN-and-continue per
+/// §12), then std::memcpy's the slot into host.f2[P²·b]/host.vpair[P²·b] while the GPU
+/// computes the next chunk. PARITY-NEUTRAL: the D2H is a raw byte copy, the host copy is
+/// memcpy — same bytes (§12).
 class HostRamSink final : public BlockSink {
 public:
     explicit HostRamSink(F2BlockTensor& dst) noexcept : host_(dst) {}
@@ -87,7 +107,7 @@ public:
     void finish() override;
 
 private:
-    void writer_loop();              ///< background: pop a slot, wait its event, memcpy.
+    void writer_loop();              ///< background: pop a slot, FAIL-FAST wait its event, memcpy.
     int acquire_slot();              ///< claim a free ring slot (blocks under backpressure).
 
     F2BlockTensor& host_;
@@ -103,6 +123,10 @@ private:
     std::queue<int> ready_;             ///< slot indices queued FOR the writer.
     std::vector<bool> free_;            ///< slot free for the compute thread to claim.
     bool stop_ = false;
+    // First error the writer thread hit (re-thrown on the compute thread at finish()) — a
+    // failed event sync means the slot's D2H may be undrained, so we MUST NOT memcpy it.
+    bool writer_failed_ = false;
+    std::string writer_error_;
 };
 
 class DiskF2Blocks;  // fwd (CUDA-free type from f2_blocks_out.hpp; populated in finish())
