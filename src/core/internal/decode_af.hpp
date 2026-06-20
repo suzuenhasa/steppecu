@@ -57,6 +57,18 @@ namespace steppe::core {
 /// 2-bit packing, identical on both sides by construction and pinned by the test).
 inline constexpr std::uint8_t kMissingGenotypeCode = 3;
 
+/// The 2-bit packing radix: kCodesPerByte genotype codes per byte, kBitsPerCode bits
+/// each (8 = kCodesPerByte·kBitsPerCode). The single home of the packing radix for
+/// the core decode primitive — the byte/position split `s/kCodesPerByte`,
+/// `s%kCodesPerByte` and the MSB-first shift below derive from these, so the kernel
+/// (decode_af_kernel.cu) and the CPU oracle (cpu_backend.cpp) cannot re-pick bare
+/// 4/2/3 literals. Mirrors io::kCodesPerByte / io::kBitsPerCode (eigenstrat_format.hpp)
+/// by construction, kept here so the core decoder does not depend on the `io` leaf
+/// (architecture.md §4 layering: core does not depend on io); the two are pinned equal
+/// by the cross-leaf equivalence test (tests/reference/test_decode_equivalence.cu).
+inline constexpr int kCodesPerByte = 4;
+inline constexpr int kBitsPerCode = 2;
+
 /// Extract the 2-bit code for SNP position `k` (0-based) within a packed byte,
 /// MSB-first: position 0 → bits 7-6, 1 → 5-4, 2 → 3-2, 3 → 1-0. This is the
 /// `(byte >> (6 - 2*(k mod 4))) & 3` rule. SAME bit order as
@@ -64,7 +76,7 @@ inline constexpr std::uint8_t kMissingGenotypeCode = 3;
 /// so the device/CPU decoders share ONE bit-extraction with no io dependency.
 [[nodiscard]] STEPPE_HD inline std::uint8_t genotype_code(std::uint8_t packed_byte,
                                                           int k) noexcept {
-    const int shift = (3 - (k & 3)) * 2;  // 6, 4, 2, 0 for k%4 = 0,1,2,3
+    const int shift = (kCodesPerByte - 1 - (k % kCodesPerByte)) * kBitsPerCode;  // 6,4,2,0
     return static_cast<std::uint8_t>((packed_byte >> shift) & 0x3u);
 }
 

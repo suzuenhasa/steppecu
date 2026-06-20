@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "core/qpadm/qpadm_bounds.hpp"  // qpadm_dof — the single-source (nl-r)*(nr-r) dof
 #include "steppe/error.hpp"  // Status
 
 namespace steppe::core::qpadm {
@@ -107,7 +108,7 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
     const RankSweep rs = run_rank_sweep(be, xr, cr, opts.rank_alpha, opts, precision);
     const std::size_t ri = static_cast<std::size_t>(r_fit < 0 ? 0 : r_fit);
     row.f4rank = r_fit;
-    row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : (xr.nl - r_fit) * (xr.nr - r_fit);
+    row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : qpadm_dof(xr.nl, xr.nr, r_fit);
     row.chisq = (ri < rs.chisq.size()) ? rs.chisq[ri] : 0.0;
     row.p = (ri < rs.p.size()) ? rs.p[ri] : 0.0;
     row.status = rs.status;

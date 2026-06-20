@@ -19,7 +19,7 @@
 //
 // COALESCING (architecture.md §11.3): threadIdx.x runs over the SNP axis, so
 // adjacent threads in a warp read adjacent bytes of the SAME individual record on
-// each step of the individual loop (byte index = s/4) — coalesced reads on the
+// each step of the individual loop (byte index = s/kCodesPerByte) — coalesced reads on the
 // within-record SNP axis, as the brief requires.
 //
 // This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It includes
@@ -49,7 +49,8 @@ namespace {
 
 /// Decode one (population, SNP) entry. One thread owns (i = population row, s =
 /// SNP). It reduces over population i's individual segment [seg_begin, seg_end),
-/// unpacking SNP s's 2-bit code from each record's byte (s/4) at position (s%4),
+/// unpacking SNP s's 2-bit code from each record's byte (s/kCodesPerByte) at
+/// position (s%kCodesPerByte),
 /// folding it into AC (ref-allele copies) / AN (non-missing individuals) via the
 /// SHARED accumulate_genotype, then writing Q/V/N via the SHARED finalize.
 /// Column-major [P × M]: element (i,s) at i + P·s.
@@ -66,8 +67,9 @@ __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
 
     const std::size_t seg_begin = pop_offsets[static_cast<std::size_t>(i)];
     const std::size_t seg_end = pop_offsets[static_cast<std::size_t>(i) + 1];
-    const std::size_t byte_in_rec = static_cast<std::size_t>(s) / 4u;
-    const int pos_in_byte = static_cast<int>(s & 3);
+    const std::size_t byte_in_rec =
+        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+    const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
 
     std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
     std::int64_t an = 0;  // count of non-missing individuals

@@ -52,6 +52,47 @@
 
 namespace steppe::core {
 
+namespace {
+
+// ============================ THE §4 COMBINE GATE =========================
+// SINGLE AUTHORITATIVE HOME of the device-resident-P2P gate predicate, now a
+// CUDA-free file-local helper so the four-term AND exists ONCE in code, not
+// copy-pasted into each entry (architecture.md §8 single-source; cleanup X6/X8/B4
+// + group-5 5.3). Every caller (the host entry, the device entry, and the genuine-
+// degrade WARN) derives from THIS function, so a term add/reorder is a single edit
+// that cannot drift the host/device entries apart. The four terms (see the per-term
+// rationale at the gate's only call site below):
+//
+//     prefer_p2p_combine            // WHICH-PATH intent  (config.hpp)
+//  && enable_peer_access            // MAY-WE permission   (config.hpp)
+//  && gpus[0].caps.can_access_peer  // DISCOVERED probe (build_resources)
+//  && G >= 2                        // STRUCTURAL (dead-true past the G==1 fast-path)
+//
+// "Requested" (prefer && enable && G>=2) is split out so the genuine-degrade
+// detection (P2P requested+permitted but peer access unavailable) is exactly
+// `requested && !use_p2p` — it cannot drift from the gate it describes. Both
+// transports are bit-identical (parity-NEUTRAL, §12): this only picks WHICH runs.
+
+/// True iff the user REQUESTED + PERMITTED the device-resident P2P combine for a
+/// real multi-GPU run (the gate MINUS the discovered can_access_peer probe). Split
+/// out so select_p2p_combine and the degrade WARN share the same intent terms.
+[[nodiscard]] bool requested_p2p_combine(const steppe::device::Resources& resources,
+                                         std::size_t G) noexcept {
+    return resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
+           G >= 2;
+}
+
+/// THE §4 COMBINE GATE predicate (the four-term AND). True ⇒ take the opt-in
+/// device-resident cudaMemcpyPeer combine; false ⇒ the host-staged fixed-order
+/// baseline. Reads gpus[0].caps.can_access_peer, so the caller must hold G >= 1
+/// (guaranteed past each entry's fail-fast).
+[[nodiscard]] bool select_p2p_combine(const steppe::device::Resources& resources,
+                                      std::size_t G) noexcept {
+    return requested_p2p_combine(resources, G) && resources.gpus[0].caps.can_access_peer;
+}
+
+}  // namespace
+
 F2BlockTensor compute_f2_blocks_multigpu(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
@@ -99,19 +140,19 @@ F2BlockTensor compute_f2_blocks_multigpu(
     //      config + caps + G, all known up front; doc CRITICAL ORCHESTRATION POINT) --
     //
     // ============================ THE §4 COMBINE GATE =========================
-    // SINGLE AUTHORITATIVE HOME of the device-resident-P2P gate predicate
-    // (architecture.md §8 single-source; cleanup X6/X8/B4). Every other site that
-    // names this gate (resources.hpp CombinePath / last_combine_path doc,
-    // p2p_combine.hpp "the gate is the caller's" doc, config.hpp enable_peer_access /
-    // prefer_p2p_combine docs, src/core/CMakeLists.txt module comment) CROSS-REFERENCES
-    // this comment rather than restating the predicate — so the predicate has ONE
-    // place to drift from. The §4 gate selects the OPT-IN device-resident
+    // The four-term gate predicate is single-homed in `select_p2p_combine` (the
+    // file-local helper above) so it exists ONCE in code — architecture.md §8
+    // single-source; cleanup X6/X8/B4 + group-5 5.3. Every other site that names this
+    // gate (resources.hpp CombinePath / last_combine_path doc, p2p_combine.hpp "the
+    // gate is the caller's" doc, config.hpp enable_peer_access / prefer_p2p_combine
+    // docs, src/core/CMakeLists.txt module comment) CROSS-REFERENCES it rather than
+    // restating the predicate. The §4 gate selects the OPT-IN device-resident
     // cudaMemcpyPeer combine when ALL FOUR terms hold:
     //
-    //     use_p2p == prefer_p2p_combine     // WHICH-PATH intent  (config.hpp)
-    //             && enable_peer_access     // MAY-WE permission   (config.hpp)
-    //             && gpus[0].caps.can_access_peer  // DISCOVERED probe (build_resources)
-    //             && G >= 2                 // STRUCTURAL (dead-true here; see below)
+    //     prefer_p2p_combine               // WHICH-PATH intent  (config.hpp)
+    //  && enable_peer_access               // MAY-WE permission   (config.hpp)
+    //  && gpus[0].caps.can_access_peer     // DISCOVERED probe (build_resources)
+    //  && G >= 2                           // STRUCTURAL (dead-true here; see below)
     //
     // (all four true on rtxbox: PRO 6000 stock-driver P2P, canAccessPeer==1 both
     // ways), else it DEGRADES to the host-staged fixed-order combine baseline. Both
@@ -122,7 +163,8 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // AllReduce. The chosen path is recorded OUT-OF-BAND on Resources (NEVER on the
     // numeric F2BlockTensor; cleanup §(2).2), and a genuine degrade (P2P requested +
     // permitted but peer access unavailable) emits the architecture-mandated tagged
-    // WARN via the non-throwing path.
+    // WARN via the non-throwing path (derived from `requested_p2p_combine && !use_p2p`,
+    // so it cannot drift from the gate).
     //
     // WHY THE GATE MOVED BEFORE THE FAN-OUT (M4.5 cure, doc §4 Item 1): the P2P arm now
     // needs a DIFFERENT fan-out — the DEVICE-RESIDENT compute that leaves each partial
@@ -132,7 +174,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // gate depends only on config + caps + G (all known up front), so it is decided
     // here, BEFORE either fan-out, and forks into the matching resident-vs-host pair.
     //
-    // THE FOUR TERMS:
+    // THE FOUR TERMS (spelled in select_p2p_combine / requested_p2p_combine):
     //   * prefer_p2p_combine — the WHICH-PATH knob: once peer access IS permitted and
     //     available, prefer the device-resident combine over the host-staged baseline.
     //   * enable_peer_access — the MAY-WE knob: "whether the backend is permitted to
@@ -158,9 +200,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // The gate is parity-NEUTRAL either way (both transports are bit-identical, §12),
     // so the four-term AND only changes WHICH transport runs, never a reported number.
     // =========================================================================
-    const bool use_p2p =
-        resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
-        resources.gpus[0].caps.can_access_peer && G >= 2;
+    const bool use_p2p = select_p2p_combine(resources, G);
 
     // BLOCK-ALIGNED shard plan — shared by both arms (the parity floor, design §0/§2):
     // block_ranges (the single-source partition inverse) → plan_block_shards (the
@@ -216,8 +256,10 @@ F2BlockTensor compute_f2_blocks_multigpu(
     // peer-access (architecture.md §11.4; config.hpp prefer_p2p_combine doc). A user
     // who set prefer_p2p_combine=false OR enable_peer_access=false took the baseline by
     // a DELIBERATE choice — no WARN. Both outcomes are bit-identical to single-GPU.
-    if (resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
-        !resources.gpus[0].caps.can_access_peer && G >= 2) {
+    // Derived from `requested && !use_p2p` (requested = prefer && enable && G>=2) so it
+    // CANNOT drift from the gate: requested but !use_p2p ⇒ the only missing term is the
+    // discovered can_access_peer probe (group-5 5.3).
+    if (requested_p2p_combine(resources, G) && !use_p2p) {
         STEPPE_LOG_WARN(
             "P2P combine unavailable (no peer access) -> host-staged fixed-order combine");
     }
@@ -265,11 +307,10 @@ steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
             Q, V, N, partition.block_id.data(), n_block, precision);
     }
 
-    // ---- THE §4 COMBINE GATE — copied VERBATIM from the host entry above (the
-    //      single authoritative four-term predicate; architecture.md §8 single-source).
-    const bool use_p2p =
-        resources.config.prefer_p2p_combine && resources.config.enable_peer_access &&
-        resources.gpus[0].caps.can_access_peer && G >= 2;
+    // ---- THE §4 COMBINE GATE — the SAME single-homed predicate the host entry uses
+    //      (select_p2p_combine, architecture.md §8 single-source). One function, no
+    //      copy-paste: the host/device entries cannot disagree on transport selection.
+    const bool use_p2p = select_p2p_combine(resources, G);
 
     // BLOCK-ALIGNED shard plan — shared by both arms (the parity floor; design §0/§2).
     const std::vector<steppe::device::DeviceShard> shards =

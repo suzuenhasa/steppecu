@@ -81,11 +81,47 @@ inline constexpr double kHetCorrDenomFloor = 1.0;
 /// V=0 ⇒ they contribute nothing to the masked GEMMs (architecture.md §5 S2).
 inline constexpr int kBlockGroupPadBase = 2;
 
+/// Per-dimension cap for routing a small dense SVD to cuSOLVER's one-sided Jacobi
+/// (gesvdj) instead of the QR-based gesvd: gesvdj is selected for a matrix when BOTH
+/// dims (nl, nr) are <= this cap, else gesvd. This is the cuSOLVER gesvdjBatched
+/// per-dimension limit (m, n <= 32 for the batched Jacobi), reused here as the
+/// single dense-Jacobi/gesvd crossover so the qpAdm LARGE-path SVD dispatch
+/// (cuda_backend.cu large_svd_V) and the svd_path observability report cannot drift
+/// to two different thresholds (architecture.md §8 single-source; group-5 5.3/5.5).
+/// It is the cuSOLVER routine-selection threshold, NOT a warp size. FROZEN by §12
+/// parity (the NRBIG golden asserts svd_path==2 ⇒ gesvd at nr=39 > 32; the 9-pop
+/// asserts ==1 ⇒ gesvdj at nl=2,nr=5 <= 32): name only, do NOT change the value.
+inline constexpr int kGesvdjMaxDim = 32;
+
 /// cuBLAS workspace bytes for the f2 GEMMs (architecture.md §12 — an explicit
 /// workspace is REQUIRED for run-to-run reproducibility of emulated FP64). Ample
 /// for the reduce-to-[P×P] GEMMs; promoted out of the spike's bare 64 MiB literal
 /// (f2_emu_spike.cu) into a named constant shared by the M0 and M4 device paths.
 inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
+
+/// Per-population buffer counts of the single-GPU f2 FEEDER phase — the named home
+/// for the feeder's VRAM footprint coefficients so the tier-select policy math
+/// (tier_select.hpp resident_working_set_bytes / streamed_working_set_bytes) can
+/// derive the footprint from a single source instead of re-spelling bare literals
+/// that silently drift from the real feeder malloc in cuda_backend.cu (ROADMAP §4).
+///   kFeederRawBufsPerPop  = 3·P·M : the raw decoded inputs dQ_raw/dV_raw/dN_raw.
+///   kFeederOutBufsPerPop  = 4·P·M : the persisted feeder outputs (dQt + dVt +
+///                                   dSt, where dSt is 2·P·M = 1+1+2 = 4 per pop).
+/// Their sum (7) is the Resident-tier feeder envelope coefficient (7·P·M doubles)
+/// and the per-tile feeder coefficient (3+4) of the streamed path. Plain counts —
+/// CUDA-free, parity-neutral (they change WHERE a slab lands, never its bits, §12).
+inline constexpr unsigned kFeederRawBufsPerPop = 3u;
+inline constexpr unsigned kFeederOutBufsPerPop = 4u;
+
+/// M5 STREAMED-path device ring depth: the number of per-chunk [P²·max_nb] f2/vpair
+/// device buffers the streamed (HostRam/Disk) backend cycles through so a chunk's D2H
+/// can drain while the next chunk computes (cuda_backend.cu stream_f2_blocks_impl).
+/// Two (not three) keeps the device ring's VRAM small — the device buffer only needs
+/// to survive its own D2H, the SINK's pinned ring absorbs the slow write. Single-homed
+/// here so the real ring alloc (cuda_backend.cu) and the tier-select working-set budget
+/// (tier_select.hpp streamed_working_set_bytes) cannot drift apart (ROADMAP §4; group-5
+/// 5.3). Plain count — CUDA-free, parity-neutral (it changes WHERE bytes land, §12).
+inline constexpr int kStreamDeviceChunks = 2;
 
 /// Target fraction of device VRAM the resident working set may occupy
 /// (architecture.md §11.1/§11.2 — the `build()`-validated budget fraction; ROADMAP

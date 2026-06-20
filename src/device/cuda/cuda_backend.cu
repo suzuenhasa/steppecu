@@ -931,8 +931,9 @@ public:
         // loop's next-chunk compute. Two device buffers (not three) keep the device ring's
         // VRAM small (the device buffer only needs to survive its own D2H, NOT the slow
         // write — the pinned ring absorbs that latency), so a chunk-tile fits alongside the
-        // feeder envelope even at large M.
-        constexpr int kStreamDeviceChunks = 2;
+        // feeder envelope even at large M. The ring depth is single-homed in config.hpp
+        // (kStreamDeviceChunks) so this real alloc and the tier-select budget term in
+        // tier_select.hpp cannot drift apart (group-5 5.3).
         struct Ring {
             DeviceBuffer<double> f2;
             DeviceBuffer<double> vpair;
@@ -1494,6 +1495,16 @@ public:
         return core::qpadm::model_fits_small_path(nl, nr, r);
     }
 
+    /// True iff the LARGE-path dense SVD routes to cuSOLVER's one-sided Jacobi
+    /// (gesvdj) rather than gesvd: BOTH dims <= kGesvdjMaxDim (32). The SINGLE source
+    /// of the dispatch predicate so large_svd_V's branch AND the svd_path
+    /// observability report (rank_sweep) cannot disagree on the executed routine — a
+    /// drift the NRBIG parity test (svd_path==2) would otherwise silently mask
+    /// (group-5 5.3/5.5). svd_path = gesvdj_applicable ? 1 : 2.
+    static bool gesvdj_applicable(int nl, int nr) {
+        return nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim;
+    }
+
     /// Compute the leading-r right singular vectors V[:,0:r] (nr×r, col-major) of the
     /// nl×nr col-major `dXmat` via cuSOLVER, native FP64, deterministic, on stream_.
     /// Writes dVout[nr*r] col-major (descending singular value order). The §1.3
@@ -1502,7 +1513,9 @@ public:
     ///     cuSOLVER; then U(Xt) == V(xmat) ⇒ read the leading r cols of U into dVout.
     ///   * rare nl>nr: hand xmat itself (nl×nr, rows>=cols); V(xmat) = VT's leading r
     ///     rows ⇒ transpose them into dVout.
-    /// Routine (§1.4): gesvdj (one-sided Jacobi) for both dims <=32; gesvd otherwise.
+    /// Routine (§1.4): gesvdj (one-sided Jacobi) when gesvdj_applicable (both dims
+    /// <= kGesvdjMaxDim); gesvd otherwise. The dispatch + the svd_path report share
+    /// that ONE predicate so they cannot drift.
     /// `dXt` is the nr×nl transpose scratch (only used in the nr>=nl branch). The
     /// math-mode is native (no CusolverMathModeScope for emulation — §1.5/§4).
     void large_svd_V(const double* dXmat, int nl, int nr, int r,
@@ -1516,7 +1529,7 @@ public:
             const int rows = nr, cols = nl;  // rows>=cols ✓
             DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
             DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));  // econ: rows×cols
-            if (nl <= 32 && nr <= 32) {
+            if (gesvdj_applicable(nl, nr)) {
                 // gesvdj (one-sided Jacobi, single matrix), economy U (rows×cols).
                 gesvdjInfo_t params = nullptr;
                 CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
@@ -1559,7 +1572,7 @@ public:
                 cudaMemcpyDeviceToDevice, stream));
             DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
             DeviceBuffer<double> dVt(static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols));
-            if (nl <= 32 && nr <= 32) {
+            if (gesvdj_applicable(nl, nr)) {
                 gesvdjInfo_t params = nullptr;
                 CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
                 DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
@@ -1726,9 +1739,11 @@ public:
     /// is ignored here, exactly like the oracle). DISPATCH (the FROZEN CONTRACT §3.2,
     /// now the TRUE EXECUTED path): a model inside the bit-parity envelope (nl<=5,
     /// nr<=10, r<=4) runs the on-device Jacobi small path UNCHANGED; a model outside it
-    /// (e.g. NRBIG nr=39) runs the cuSOLVER LARGE path (gesvdj for both dims<=32, gesvd
-    /// for >32) + VRAM scratch. svd_path REPORTS the executed routine: 1 = gesvdj /
-    /// Jacobi (both dims<=32); 2 = gesvd (>32). The test asserts svd_path==2 for NRBIG
+    /// (e.g. NRBIG nr=39) runs the cuSOLVER LARGE path (gesvdj when gesvdj_applicable,
+    /// i.e. both dims <= kGesvdjMaxDim; gesvd otherwise) + VRAM scratch. svd_path
+    /// REPORTS the executed routine via the SAME gesvdj_applicable predicate the
+    /// dispatch uses: 1 = gesvdj / Jacobi (both dims <= kGesvdjMaxDim); 2 = gesvd. The
+    /// test asserts svd_path==2 for NRBIG
     /// and ==1 for the 9-pop. NRBIG now GATES on the GPU (no longer a PENDING seam).
     [[nodiscard]] RankSweep rank_sweep(const F4Blocks& x,
                                        const JackknifeCov& cov,
@@ -1740,7 +1755,7 @@ public:
         RankSweep rs;
         const int nl = x.nl, nr = x.nr, m = nl * nr;
         const int rmax = (nl < nr ? nl : nr) - 1;
-        rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;  // dispatch report (always set)
+        rs.svd_path = gesvdj_applicable(nl, nr) ? 1 : 2;  // SAME predicate as large_svd_V's dispatch (always set)
         if (rmax < 0) {  // a degenerate (0-row/0-col) model — no candidate rank
             rs.status = Status::RankDeficient;
             return rs;
@@ -1808,7 +1823,7 @@ public:
             STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
             if (status_i != 0) degenerate = true;
             rs.chisq[static_cast<std::size_t>(r)] = chisq;
-            rs.dof[static_cast<std::size_t>(r)] = (nl - r) * (nr - r);
+            rs.dof[static_cast<std::size_t>(r)] = core::qpadm::qpadm_dof(nl, nr, r);
             rs.p[static_cast<std::size_t>(r)] =
                 core::internal::pchisq_upper(chisq, rs.dof[static_cast<std::size_t>(r)]);
         }
@@ -2336,7 +2351,7 @@ private:
         // matches today: failed models early-return with empty se in assemble_result).
         // Among the eligible: ALL ⇒ all; NONE ⇒ none; FEASIBLE-ONLY ⇒ feasible (the same
         // all-pop_wfull-in-[0,1] test assemble_result uses), optionally AND p>=threshold.
-        const int dof_full = (nl - r_fit) * (nr - r_fit);
+        const int dof_full = core::qpadm::qpadm_dof(nl, nr, r_fit);
         auto feasible_from_wfull = [nl](const double* w) {
             bool any = false;
             for (int i = 0; i < nl; ++i) {
@@ -2459,6 +2474,7 @@ private:
                             h_rankchisq.data() + j * (rmax + 1),
                             h_popchisq.data() + j * (nl + 1),
                             h_popwfull.data() + j * nl,
+                            opts.rank_alpha,          // f4rank threshold (= single-model path)
                             results[pos]);
         }
     }
@@ -2471,11 +2487,11 @@ private:
                          bool se_computed,
                          const double* weight, const double* se, double chisq,
                          const double* rank_chisq, const double* pop_chisq,
-                         const double* pop_wfull, QpAdmResult& res) {
+                         const double* pop_wfull, double rank_alpha, QpAdmResult& res) {
         res.model_index = mdl.model_index;
         res.precision_tag = tag;
         res.est_rank = r_fit;
-        res.dof = (nl - r_fit) * (nr - r_fit);
+        res.dof = core::qpadm::qpadm_dof(nl, nr, r_fit);
         if (nonspd) { res.status = Status::NonSpdCovariance; return; }
         if (fit_status != 0) { res.status = Status::RankDeficient; return; }
 
@@ -2504,15 +2520,18 @@ private:
         std::vector<double> rankp(nrk, 0.0);
         for (int rr = 0; rr <= rmax; ++rr) {
             res.rank_chisq[static_cast<std::size_t>(rr)] = rank_chisq[rr];
-            res.rank_dof[static_cast<std::size_t>(rr)] = (nl - rr) * (nr - rr);
+            res.rank_dof[static_cast<std::size_t>(rr)] = core::qpadm::qpadm_dof(nl, nr, rr);
             rankp[static_cast<std::size_t>(rr)] =
                 core::internal::pchisq_upper(rank_chisq[rr],
                                              res.rank_dof[static_cast<std::size_t>(rr)]);
         }
-        // f4rank = smallest non-rejected rank (p(r) > rank_alpha, ascending).
+        // f4rank = smallest non-rejected rank (p(r) > rank_alpha, ascending). The
+        // threshold is the caller's opts.rank_alpha (default 0.05) — the SAME value
+        // the single-model rank_sweep uses (line ~1844), so the batched rotation no
+        // longer diverges from the single-model path for any non-default rank_alpha.
         res.f4rank = rmax;
         for (int rr = 0; rr <= rmax; ++rr)
-            if (rankp[static_cast<std::size_t>(rr)] > 0.05) { res.f4rank = rr; break; }
+            if (rankp[static_cast<std::size_t>(rr)] > rank_alpha) { res.f4rank = rr; break; }
 
         // AT2 res$rankdrop nested table (rows rank rmax..0; the nested diff).
         res.rankdrop_f4rank.resize(nrk); res.rankdrop_dof.resize(nrk);
@@ -2548,7 +2567,7 @@ private:
         auto push_pop = [&](const std::string& pat, int wt, int nl_red, double cq,
                             const double* w_for_feas) {
             const int rr = nl_red - 1;
-            const int dof = (nl_red - rr) * (nr - rr);
+            const int dof = core::qpadm::qpadm_dof(nl_red, nr, rr);
             res.popdrop_pat.push_back(pat);
             res.popdrop_wt.push_back(wt);
             res.popdrop_dof.push_back(dof);

@@ -44,6 +44,30 @@ using core::qpadm::kQpMaxR;
 using core::qpadm::kQpMaxM;
 using core::qpadm::kQpMaxT;
 
+// --- File-local launch-geometry / numeric constants (group-5 5.1/5.3/5.5) ---------
+// Named here so the launch math is single-sourced WITHIN this TU and a block-dim
+// change moves its grid divisor with it. All parity-NEUTRAL (geometry / a frozen
+// convergence floor; §12): naming only, no value change.
+//
+/// Square thread-block edge for the symmetrize-lower-to-full kernel: a
+/// dim3(kSymTile, kSymTile) 2-D block over the [n×n] matrix, with the grid divisor
+/// derived from the SAME constant ((n + kSymTile-1)/kSymTile) so a block-dim change
+/// cannot under-launch and silently skip elements (5.3).
+constexpr int kSymTile = 16;
+/// CUDA warp size — the rounding granularity for the small models-batched fudge-diag
+/// block ((m*m + kWarpSize-1)/kWarpSize*kWarpSize, floored at one warp) (5.5).
+constexpr int kWarpSize = 32;
+/// Max gridDim.x for a 1-D launch on this arch (the CUDA hardware limit, 2^16-1).
+/// The kernels with a strided per-thread grid-stride loop clamp grid to this. NOTE:
+/// DISTINCT from launch_config.hpp's kMaxGridX (2^31-1) — that is the y/z-or-large
+/// limit / a different concept; this is the x-dim 65535 cap these kernels clamp to
+/// (5.3). Do not unify the two: they are different values for different axes.
+constexpr int kMaxGridDimX = 65535;
+/// Off-diagonal convergence floor for the on-device one-sided Jacobi SVD sweep: stop
+/// when the summed squared off-diagonal magnitude falls below this. FROZEN by §12
+/// parity (the value sets the oracle-matching iteration count) — name only (5.1).
+constexpr double kOffConvergence = 1e-30;
+
 // NOTE (the small-bound envelope): these stacked-LOCAL templated kernels serve ONLY
 // the bit-parity SMALL path (nl<=5, nr<=10, r<=4 — the 9-pop golden is far inside).
 // CUDA reserves a kernel's per-thread LOCAL memory for the device's MAX resident-
@@ -153,7 +177,7 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
                 }
             }
         }
-        if (off < 1e-30) break;
+        if (off < kOffConvergence) break;
     }
     for (int j = 0; j < n; ++j) {
         double nrm = 0.0;
@@ -1292,7 +1316,7 @@ void launch_assemble_f4_gather_models_batched(const double* f2, int P,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1306,7 +1330,7 @@ void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_siz
     if (total <= 0 || nb <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     f4_loo_total_models_kernel<<<grid, block, 0, stream>>>(
         dX, d_block_sizes, m, nb, n, n_models, dLoo, dTotal, dTotLine);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1320,7 +1344,7 @@ void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     f4_xtau_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dEst, dTotLine, d_block_sizes, m, nb, n, n_models, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1329,8 +1353,8 @@ void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
 void launch_add_fudge_diag_models_batched(const double* dQ, double* dQf, int m,
                                           double fudge, int n_models, cudaStream_t stream) {
     if (m <= 0 || n_models <= 0) return;
-    int block = (m * m < 256) ? ((m * m + 31) / 32 * 32) : 256;
-    if (block < 32) block = 32;
+    int block = (m * m < 256) ? ((m * m + kWarpSize - 1) / kWarpSize * kWarpSize) : 256;
+    if (block < kWarpSize) block = kWarpSize;
     add_fudge_diag_models_kernel<<<n_models, block, 0, stream>>>(
         dQ, dQf, m, fudge, n_models);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1341,7 +1365,7 @@ void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t 
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     fill_identity_batched_kernel<<<grid, block, 0, stream>>>(dI, m, n_models);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1372,7 +1396,7 @@ void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
     if (total <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     qpadm_loo_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, nl, nr, r_fit, fudge, als_iters, nb, n_models, s, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1384,7 +1408,7 @@ void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
     if (total <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1397,7 +1421,7 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     qpadm_gather_loo_qinv_kernel<<<grid, block, 0, stream>>>(
         dLooSrc, dQinvSrc, d_surv, m, nb, n_surv, dLooDst, dQinvDst);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1442,9 +1466,9 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
 
 void launch_symmetrize_lower_to_full(double* dM, int n, cudaStream_t stream) {
     if (n <= 0) return;
-    const dim3 block(16, 16);
-    const dim3 grid((static_cast<unsigned>(n) + 15) / 16,
-                    (static_cast<unsigned>(n) + 15) / 16);
+    const dim3 block(kSymTile, kSymTile);
+    const unsigned grid_dim = (static_cast<unsigned>(n) + kSymTile - 1) / kSymTile;
+    const dim3 grid(grid_dim, grid_dim);
     symmetrize_lower_to_full_kernel<<<grid, block, 0, stream>>>(dM, n);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1546,7 +1570,7 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
     if (total <= 0) return;
     const int block = 64;  // large per-thread VRAM-scratch refit ⇒ small block, grid-stride
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
     loo_large_batched_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, dAseed, dBseed, nl, nr, r, fudge, als_iters, nb, n_models,
         dbl_refit, int_refit, dScratch, dIntScratch, dWmat);

@@ -60,6 +60,7 @@
 #include "core/internal/pchisq.hpp"        // core::internal::pchisq_upper (M(fit-2) rank-test p-value)
 #include "core/internal/small_linalg.hpp"  // core::solve/inverse/jacobi_svd (the qpAdm reference solvers)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
+#include "core/qpadm/qpadm_bounds.hpp"     // core::qpadm::qpadm_dof — the single-source (nl-r)*(nr-r) dof
 #include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult, F4Blocks/...
 #include "device/backend_factory.hpp"      // steppe::device::make_cpu_backend (the single-source decl, X-9/B8)
 #include "device/device_f2_blocks.hpp"     // steppe::device::DeviceF2Blocks (the S3 device-resident input)
@@ -333,8 +334,9 @@ public:
             const std::size_t seg_end = tile.pop_offsets[static_cast<std::size_t>(i) + 1];
 
             for (long s = 0; s < M; ++s) {
-                const std::size_t byte_in_rec = static_cast<std::size_t>(s) / 4u;
-                const int pos_in_byte = static_cast<int>(s & 3);
+                const std::size_t byte_in_rec =
+                    static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+                const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
                 std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
                 std::int64_t an = 0;  // count of non-missing individuals
 
@@ -526,7 +528,7 @@ public:
         const int rmax = (nl < nr ? nl : nr) - 1;
         if (rmax < 0) {  // a degenerate (0-row/0-col) model — no candidate rank
             rs.status = Status::RankDeficient;
-            rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;
+            rs.svd_path = (nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim) ? 1 : 2;
             return rs;
         }
         std::vector<double> xmat = xmat_from_total(x);
@@ -540,7 +542,7 @@ public:
             const GlsWeights gw = als_weights(xmat, nl, nr, r, cov.Qinv, opts);
             if (gw.status != Status::Ok) degenerate = true;
             rs.chisq[static_cast<std::size_t>(r)] = gw.chisq;
-            rs.dof[static_cast<std::size_t>(r)] = (nl - r) * (nr - r);
+            rs.dof[static_cast<std::size_t>(r)] = core::qpadm::qpadm_dof(nl, nr, r);
             rs.p[static_cast<std::size_t>(r)] =
                 core::internal::pchisq_upper(gw.chisq, rs.dof[static_cast<std::size_t>(r)]);
         }
@@ -593,9 +595,10 @@ public:
         }
 
         // ---- dispatch report (SPEC §5:231): which SVD path WOULD be selected ----
-        // 1 = gesvdjBatched (nl,nr<=32); 2 = per-model gesvd (else). The EXECUTED
-        // SVD is the deterministic Jacobi seed at all sizes (M(fit-2) decision).
-        rs.svd_path = (nl <= 32 && nr <= 32) ? 1 : 2;
+        // 1 = gesvdjBatched (both dims <= kGesvdjMaxDim); 2 = per-model gesvd (else).
+        // The EXECUTED SVD here is the deterministic Jacobi seed at all sizes (M(fit-2)
+        // decision); the report uses the SAME kGesvdjMaxDim crossover as the CudaBackend.
+        rs.svd_path = (nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim) ? 1 : 2;
 
         rs.status = degenerate ? Status::RankDeficient
                                : (cov.status != Status::Ok ? cov.status : Status::Ok);

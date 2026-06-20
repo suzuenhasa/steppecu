@@ -19,13 +19,14 @@
 namespace steppe::device {
 
 inline constexpr char     kF2DiskMagic[8]   = {'S','T','P','F','2','B','K','1'};  // "STPF2BK1"
+inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // on-disk format version (the writer stamps this; a future M7 reader checks it — single home so the two cannot drift, group-5 5.3)
 inline constexpr std::uint32_t kF2DiskDtypeFp64 = 1u;  // FP64 little-endian (storage is FP64 in every precision mode, fstats.hpp:18)
 
 /// 64-byte fixed header at file offset 0 (little-endian, packed). The remainder:
 ///   header[64] | f2[P²·n_block doubles] | vpair[P²·n_block doubles] | block_sizes[n_block int32]
 struct F2DiskHeader {                       // sizeof == 64 (padded)
     char          magic[8];                 // kF2DiskMagic
-    std::uint32_t version;                  // 1
+    std::uint32_t version;                  // kF2DiskVersion
     std::uint32_t dtype;                    // kF2DiskDtypeFp64
     std::int32_t  P;
     std::int32_t  n_block;

@@ -30,10 +30,15 @@
 
 #include "device/cuda/check.cuh"        // STEPPE_CUDA_CHECK, CudaError
 #include "device/f2_blocks_out.hpp"     // DiskF2Blocks (the finalized Disk descriptor)
-#include "device/f2_disk_format.hpp"    // F2DiskHeader, kF2DiskMagic, kF2DiskDtypeFp64, offsets
+#include "device/f2_disk_format.hpp"    // F2DiskHeader, kF2DiskMagic, kF2DiskVersion, kF2DiskDtypeFp64, offsets
 #include "core/internal/log.hpp"        // STEPPE_LOG_WARN (teardown warnings)
 
 namespace steppe::device {
+
+/// POSIX file mode for the Disk-tier on-disk f2_blocks cache: rw-r--r-- (owner
+/// read/write, group/other read). Named so the magic permission bits are not a bare
+/// octal literal at the open() call (group-5 5.1).
+namespace { constexpr int kCacheFileMode = 0644; }
 
 // ===========================================================================
 // HostRamSink (TIER 1)
@@ -195,17 +200,17 @@ void DiskSink::begin(int P, int n_block, const std::vector<int>& block_sizes) {
     slab_bytes_ = slab_ * sizeof(double);
     const std::uint64_t region_bytes =
         slab_bytes_ * static_cast<std::uint64_t>(n_block < 0 ? 0 : n_block);
-    f2_region_ = sizeof(F2DiskHeader);                  // == 64
+    f2_region_ = sizeof(F2DiskHeader);
     vpair_region_ = f2_region_ + region_bytes;
 
-    fd_ = ::open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    fd_ = ::open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, kCacheFileMode);
     if (fd_ < 0)
         throw std::runtime_error("DiskSink: cannot open '" + path_ + "' for write: " +
                                  std::strerror(errno));
 
     F2DiskHeader h{};
     std::memcpy(h.magic, kF2DiskMagic, sizeof(h.magic));
-    h.version = 1u;
+    h.version = kF2DiskVersion;
     h.dtype = kF2DiskDtypeFp64;
     h.P = P;
     h.n_block = (n_block < 0 ? 0 : n_block);

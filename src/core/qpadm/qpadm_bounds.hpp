@@ -58,6 +58,17 @@ constexpr bool model_fits_small_path(int nl, int nr, int r) {
     return nl <= kQpMaxNl && nr <= kQpMaxNr && r <= kQpMaxR;
 }
 
+/// The qpAdm chi-square DEGREES OF FREEDOM for a rank-r fit of an nl×nr f4 matrix:
+/// dof(r) = (nl-r)·(nr-r). The SINGLE SOURCE of this formula so the per-rank sweep,
+/// the popdrop dof fallback, and the result/rank-drop tables cannot drift from one
+/// another (architecture.md §8 single-source; group-5 5.3). Called by the CpuBackend
+/// oracle (cpu_backend.cpp), the CudaBackend (cuda_backend.cu rank_sweep /
+/// assemble_result / popdrop), and the host ranktest fallback (ranktest.cpp). Plain
+/// `constexpr int`, CUDA-free, so the device TUs and the host core share one copy.
+constexpr int qpadm_dof(int nl, int nr, int r) {
+    return (nl - r) * (nr - r);
+}
+
 }  // namespace steppe::core::qpadm
 
 #endif  // STEPPE_CORE_QPADM_QPADM_BOUNDS_HPP
