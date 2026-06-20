@@ -223,3 +223,158 @@ Verification notes (not findings):
   declarations only — their bodies live in host_ram.cpp / the .cpp (out of this unit's scope).
 -->
 
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+<!--
+Verification notes (not findings): host-pure, CUDA-FREE header (only #include <cstddef>,
+device/vram_budget.hpp, steppe/config.hpp per lines 22-25; no CUDA header per lines 12, 22).
+- 13.1 (unchecked cuda* API return): there is NO cuda* runtime/driver call in this file. The
+  free-VRAM / free-RAM inputs are passed in as plain std::size_t params (select_output_tier
+  118-120, resolve_output_tier 139-140); the runtime probe free_host_ram_bytes (100) is a
+  DECLARATION only (body in host_ram.cpp, out of scope) and its documented contract already
+  handles failure by returning 0 -> the safe Disk direction (lines 95-99). N/A here.
+- 13.2 (unchecked launches need cudaGetLastError + later sync): no kernel launch, no
+  cudaLaunch, no stream/sync in this host-pure policy header. N/A.
+- 13.3 (inconsistent checking): no CUDA call sites at all, so nothing to be consistent/
+  inconsistent about. The four free functions are pure size_t arithmetic + degenerate-input
+  guards (P<=0/M<=0/n_block<=0 at 57/84/121); no error-bearing operation. N/A.
+- 13.4 (error-swallowing homegrown macro): no macro defined or used in this file (no CHECK,
+  no #define wrapper); the only preprocessor directives are the include-guard (19-20, 144).
+  Nothing hides an error. N/A.
+-->
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+<!--
+Verification notes (not findings): host-pure, CUDA-FREE policy header (only #include
+<cstddef>, device/vram_budget.hpp, steppe/config.hpp per lines 22-25; no CUDA header per
+lines 12, 22). It allocates and owns NOTHING.
+- 14.1 (alloc/free mismatch): no cudaMalloc/cudaMallocManaged/new/new[]/malloc and no
+  cudaFree/delete/free anywhere in the file. The four entities are an enum (33-40), three
+  inline pure-arithmetic functions (resident_working_set_bytes 56, streamed_working_set_bytes
+  82, select_output_tier 118) computing std::size_t budgets, and two function DECLARATIONS
+  (free_host_ram_bytes 100, resolve_output_tier 137) whose bodies live in host_ram.cpp / the
+  .cpp (out of this unit's scope). No buffer is created here, so there is no allocator to
+  mispair. N/A.
+- 14.2 (stream-ordered alloc on hot path): no cudaMalloc/cudaMallocAsync, no stream, no pool,
+  no device call at all — this is the CUDA-free tier-SELECT policy that DECIDES where a slab
+  lands; the actual allocation happens in the device backend it returns a tier to (out of
+  scope). N/A.
+- 14.3 (async/sync free pairing): no cudaMallocAsync/cudaFreeAsync and no plain cudaFree in
+  this file; nothing to pair. N/A.
+- 14.4 (free before async work completes / use-after-free across streams): no device buffer,
+  no stream, no async work, no free is issued here. The only pointer in the file is the
+  borrowed `const char* env_value` param of resolve_output_tier (138) — a non-owning view of
+  the caller's getenv result (the §2 no-global rule keeps the getenv at the call site); this
+  header neither allocates nor frees it and never stores it past the call. No lifetime hazard.
+  N/A.
+- 14.5 (missing frees on error paths): the functions have early-return guards (P<=0/M<=0 ->
+  return 0 at 57/84; P<=0/n_block<=0 -> return OutputTier::Resident at 121) and the
+  free_host_ram failure -> Disk contract (prose 95-99), but every return path is a pure
+  value-return with NO owned resource to release on any branch — there is no allocation whose
+  free could be skipped on an error/early exit. N/A.
+-->
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+<!--
+Verification notes (not findings): host-pure, CUDA-FREE policy header (only #include
+<cstddef>, device/vram_budget.hpp, steppe/config.hpp per lines 22-25; no CUDA header per
+lines 12, 22). It issues NO transfer and owns NO host/device buffer. A grep over the file
+for cudaMemcpy/Memcpy/cudaMemcpyKind/cudaMemcpyAsync/cudaHostAlloc/cudaMallocHost returns
+nothing.
+- 15.1 (cudaMemcpy in a loop to hoist/batch/keep-resident): there is NO cudaMemcpy of any
+  kind here, and NO loop at all — the four entities are an enum (33-40) and pure std::size_t
+  budget arithmetic + two function declarations (free_host_ram_bytes 100, resolve_output_tier
+  137, bodies in host_ram.cpp / the .cpp, out of scope). Ironically this file IS the
+  keep-resident decision (select_output_tier 118 returns OutputTier::Resident when the slab
+  fits VRAM so the orchestrator avoids any H<->D streaming, lines 14-18), but it performs no
+  copy itself. N/A.
+- 15.2 (direction enum not matching the actual transfer): no cudaMemcpy and thus no
+  cudaMemcpyKind direction argument anywhere in the file. The only enum is OutputTier (33),
+  a tier-placement policy enum, not a transfer-direction enum. N/A.
+- 15.3 (pageable host memory for frequent transfers where pinned ~doubles bandwidth): no
+  host allocation (no malloc/new/cudaMallocHost/cudaHostAlloc) and no transfer here. The
+  three "pinned" tokens (lines 6, 31, 39) are doc-comment PROSE: lines 6/31 use "pinned" in
+  the sense of FIXING a tier choice via STEPPE_FORCE_TIER (not page-pinning), and line 39
+  merely documents that the downstream Disk-tier streamer (a different .cpp, out of scope)
+  uses a "persistent pinned staging buffer" — describing where the real transfer cost is
+  handled, not an allocation made in this header. N/A.
+-->
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+<!--
+Verification notes (not findings): host-pure, CUDA-FREE policy header (only #include
+<cstddef>, device/vram_budget.hpp, steppe/config.hpp per lines 22-25; no CUDA header per
+lines 12, 22). It OWNS and WRAPS no resource of any kind — the entities are one enum class
+(OutputTier 33-40), three inline pure-arithmetic functions (resident_working_set_bytes 56,
+streamed_working_set_bytes 82, select_output_tier 118), and two function declarations
+(free_host_ram_bytes 100, resolve_output_tier 137, bodies out of this unit's scope).
+- 16.1 (wrap EVERY resource): there is NO resource to wrap — no stream/event/graph/graph-exec,
+  no texture/surface object, no memory pool, no CUDA array, no pinned host memory, and no
+  library handle (no cuBLAS/cuSOLVER, no *Create/*Destroy) anywhere in the file. A grep over
+  the unit for Create/Destroy/cudaStream/cudaEvent/cudaGraph/cublas/cusolver/cudaMallocHost/
+  cudaArray/texture/surface returns nothing. The free-VRAM/free-RAM inputs arrive as plain
+  std::size_t value params (118-120, 139-140); no handle is acquired or held. N/A.
+- 16.2 (move-only + null-on-move): there is no class/struct and no resource-owning type here,
+  so there is no copy/move to delete or to null. The enum class OutputTier is a trivially
+  copyable value tag, correctly so — copying a tier ENUM is not a double-free hazard (it owns
+  nothing). N/A.
+- 16.3 (rule of five for a freeing destructor): no destructor exists in this header (no type
+  with a body), freeing or otherwise, so the rule of five is not engaged. N/A.
+- 16.4 (single clear ownership; raw kernel pointers are non-owning views, never freed; don't
+  pass owning wrappers by value): the ONLY pointer in the file is the borrowed
+  `const char* env_value` param of resolve_output_tier (138) — a non-owning view of the
+  caller's getenv() result, deliberately passed in to keep this helper pure (the §2 no-global
+  rule, documented lines 135-136). It is correctly treated as a view: this header never frees
+  it, never stores it past the call, and never takes ownership. No owning wrapper is passed by
+  value (no wrapper exists). Compliant by construction.
+- 16.5 (don't reinvent the wrapper): no hand-rolled RAII wrapper is defined here (no homegrown
+  unique_ptr/device_vector look-alike), so there is nothing reinvented that std/thrust already
+  provide. N/A.
+-->
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+No Group 17 issues found.
+
+<!--
+Verification notes (not findings): host-pure, CUDA-FREE policy header (only #include
+<cstddef>, device/vram_budget.hpp, steppe/config.hpp per lines 22-25; no CUDA header per
+lines 12, 22). It owns and frees NOTHING — entities are one enum class (OutputTier 33-40),
+three inline pure-arithmetic functions (resident_working_set_bytes 56, streamed_working_set_bytes
+82, select_output_tier 118), and two function declarations (free_host_ram_bytes 100,
+resolve_output_tier 137, bodies in host_ram.cpp / the .cpp, out of this unit's scope). A grep
+over the unit for ~/dtor, cudaFree/cudaFreeHost/cudaFreeAsync/cudaFreeArray, cudaStreamDestroy/
+cudaEventDestroy/cudaGraphDestroy, cudaMalloc*/cudaMallocHost/cudaHostAlloc/cudaMallocArray,
+unique_ptr/shared_ptr, and cudaSetDevice returns nothing.
+- 17.1 (non-throwing destructor / teardown-order vs dying context): there is NO destructor and
+  no type with a body in this file (four free functions + an enum + two extern decls), so no
+  teardown path exists that could throw a failed cudaFree/cudaStreamDestroy during unwinding or
+  touch a torn-down context at exit. N/A.
+- 17.2 (deleter matches allocator): no allocation and no free of any kind here — no cudaMalloc/
+  cudaMallocHost/cudaMallocAsync/cudaMallocArray and no corresponding cudaFree* — so there is no
+  allocator/deleter pair to mismatch. N/A.
+- 17.3 (unique_ptr<T[]> over cudaMalloc needs a custom deleter): no smart pointer at all (no
+  unique_ptr/shared_ptr, array or scalar) and no cudaMalloc here, so the default-delete[]-on-
+  device-memory UB cannot arise. N/A.
+- 17.4 (RAII vs async lifetime — free at scope exit before async work finishes): no device
+  buffer, no stream, no event, no async launch, and no free is issued in this CUDA-free policy
+  header (it merely DECIDES a tier and returns an enum). No scope-bound resource is tied to,
+  or freed ahead of, any stream's work. N/A.
+- 17.5 (multi-GPU device-correct free — deleter must cudaSetDevice to the alloc device): no
+  deleter, no per-device allocation, and no cudaSetDevice anywhere; the device-0 reference at
+  line 116 is doc-comment prose naming the caller's free_vram source (gpus[0]), not a free
+  bound to a device. The only pointer is the borrowed `const char* env_value` (line 138), a
+  non-owning host view this header never frees. N/A.
+-->
+

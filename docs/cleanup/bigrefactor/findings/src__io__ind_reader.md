@@ -34,3 +34,7 @@ No Group 9 issues found.
 ## Group 10 — Initialization
 
 No Group 10 issues found.
+
+## Group 8 — Comments
+
+No Group 8 issues found. The .hpp/.cpp comments are rationale-rich and current: they explain WHY (oracle-provenance of the selection modes, the auto-top first-appearance tie-break matching Python `Counter.most_common`, the ascending-label Q/V/N row ordering, the `io`-leaf layering), not what the code does. No code-restating comments, no stale comments (the documented selection semantics match the implementation), no orphan TODO/FIXME/HACK.

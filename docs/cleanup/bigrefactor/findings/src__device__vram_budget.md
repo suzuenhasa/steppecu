@@ -227,3 +227,154 @@ Notes (why clean), for the record:
   reads a value before it is set.
 -->
 
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+<!--
+Notes (why clean), for the record:
+- This header is host-pure / CUDA-FREE by design (lines 13-18, "No CUDA header here";
+  includes only <algorithm>, <cstddef>, launch_config.hpp, steppe/config.hpp). There
+  is literally NO CUDA runtime/driver surface to error-check.
+- 13.1 (unchecked cuda* API return): NONE — no cuda* API call exists in this TU
+  (no cudaMalloc/cudaMemcpy/cudaMemGetInfo/cudaFree/etc.). `free_vram` arrives as a
+  plain std::size_t PARAM (line 103); the cudaMemGetInfo that produces it lives at the
+  call site (cuda_backend.cu), not here, so its return is that TU's responsibility.
+- 13.2 (unchecked launches): NONE — no kernel launch (`<<<...>>>`), no
+  cudaLaunchKernel; therefore no missing cudaGetLastError()/sync pair. The grid-z
+  (kMaxGridZ) reasoning at lines 125-132 only SIZES a future launch's z-extent; the
+  launch itself is in f2_blocks_kernel.cu, not this header.
+- 13.3 (inconsistent checking): N/A — there is no CUDA call to be inconsistently
+  guarded. All four fns are noexcept pure arithmetic with total/well-defined behavior
+  on any input (negative-clamp + divide-by-zero guard at line 147), so there is no
+  error path to check at all.
+- 13.4 (error-swallowing homegrown macro): NONE — no CHECK/CUDA_CHECK-style macro is
+  defined or invoked here. The saturate-to-0 at line 106 and the clamp-to-1 floor
+  (line 155) are intentional fail-fast/well-defined budget semantics (documented
+  96-97, 153-154), NOT swallowed CUDA errors.
+-->
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+<!--
+Notes (why clean), for the record:
+- This header is host-pure / CUDA-FREE by design (lines 13-18, "No CUDA header here";
+  includes only <algorithm>, <cstddef>, launch_config.hpp, steppe/config.hpp). It
+  ALLOCATES NOTHING and OWNS NO RESOURCE: all four fns (resident_tensor_bytes 62,
+  per_block_chunk_bytes 80, chunk_budget_bytes 103, max_blocks_per_chunk 140) are
+  noexcept pure scalar arithmetic that compute byte-count / block-count quantities and
+  return by value. So every Group 14 task has nothing to attach to here.
+- 14.1 (alloc/free mismatch): NONE — no cudaMalloc / malloc / new / new[] and no
+  free / cudaFree / delete anywhere in the TU. The numbers produced (e.g. line 67
+  resident bytes, line 84 per-block bytes, line 107 chunk budget) are SIZES the
+  allocator at the call site (cuda_backend.cu) consumes; this header never allocates.
+- 14.2 (stream-ordered alloc on hot path): N/A — no cudaMalloc/cudaFree (or any CUDA
+  runtime call) exists here to be on a hot path; sizing the budget is the host-pure
+  precursor to whatever allocation strategy the backend uses. No stream is referenced.
+- 14.3 (async/sync free pairing): N/A — no cudaMallocAsync/cudaFreeAsync and no plain
+  cudaFree exist; there is no allocation primitive to mis-pair.
+- 14.4 (free before async work completes): N/A — there are NO pointers, buffers, or
+  streams in this header. Every parameter is a scalar std::size_t (free_vram) / int
+  (P, n_block, s_pad, nb_total); nothing is a device pointer whose lifetime could race
+  async work. free_vram is a plain numeric snapshot passed by value, not a buffer.
+- 14.5 (missing free on error path): N/A — no resource is acquired, so the guard/early
+  returns (return 0 at lines 63, 142; saturate-to-0 at line 106; clamp-to-1 at 155)
+  release nothing and leak nothing. They return a value on a pure-arithmetic path.
+-->
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+<!--
+Notes (why clean), for the record:
+- This header is host-pure / CUDA-FREE by design (lines 13-18, "No CUDA header here";
+  includes only <algorithm>, <cstddef>, launch_config.hpp, steppe/config.hpp). There
+  is NO host<->device transfer surface in this TU, so every Group 15 task has nothing
+  to attach to. All four fns (resident_tensor_bytes 62, per_block_chunk_bytes 80,
+  chunk_budget_bytes 103, max_blocks_per_chunk 140) are noexcept pure scalar arithmetic.
+- 15.1 (cudaMemcpy in a loop that should be hoisted/batched/kept-resident): NONE — no
+  cudaMemcpy / cudaMemcpyAsync (or any CUDA call) exists here, and there are NO loops in
+  this header at all (pure scalar budget arithmetic). The header's stated purpose
+  (lines 20-28) is in fact to SIZE the resident/chunked transfer strategy so the backend
+  keeps f2+vpair device-resident and bounds one transient chunk — it is the policy that
+  AVOIDS redundant transfers, not a transfer site itself.
+- 15.2 (direction enum mismatch): N/A — no cudaMemcpyHostToDevice / DeviceToHost /
+  DeviceToDevice enum and no cudaMemcpy call appears; there is no transfer whose
+  direction could be wrong. free_vram (line 103) is a plain std::size_t numeric snapshot
+  passed by value, not a buffer copied in any direction.
+- 15.3 (pageable host memory for frequent transfers / pinned-vs-pageable): N/A — no host
+  buffers, no cudaMallocHost / cudaHostAlloc / cudaHostRegister, and no transfers at all.
+  No allocation of any kind (pinned or pageable) occurs in this header; it computes byte
+  counts the call-site allocator (cuda_backend.cu) consumes.
+-->
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+<!--
+Notes (why clean), for the record:
+- This header is host-pure / CUDA-FREE by design (lines 13-18, "No CUDA header here";
+  includes only <algorithm>, <cstddef>, launch_config.hpp, steppe/config.hpp). It defines
+  NO type at all — only four free functions (resident_tensor_bytes 62, per_block_chunk_bytes
+  80, chunk_budget_bytes 103, max_blocks_per_chunk 140), each inline/inline-constexpr
+  noexcept pure scalar arithmetic returning std::size_t/int BY VALUE. There is no class,
+  struct, member, constructor, or destructor, so every Group 16 task has nothing to attach to.
+- 16.1 (wrap every resource): NONE acquired — no streams, events, graphs/graph-execs,
+  texture/surface objects, memory pools, CUDA arrays, pinned host memory, or library handles
+  (cuBLAS/cuSOLVER *Create) appear anywhere. kCublasWorkspaceBytes (line 105) is just a byte
+  COUNT pulled from config for the budget math, not a handle/allocation. Nothing to wrap.
+- 16.2 (move-only + null-on-move): N/A — no resource-owning type exists, so there is no
+  copy/move to delete/reset and no moved-from null-handle obligation.
+- 16.3 (rule of five for a freeing destructor): N/A — there is no destructor and nothing to
+  free; the four functions own no state.
+- 16.4 (single ownership / non-owning raw-pointer views): N/A — there are NO pointers in this
+  header. Every parameter is a scalar passed BY VALUE (free_vram std::size_t line 103; P,
+  n_block, s_pad, nb_total int). Nothing owns, nothing is a borrowed view, and no owning
+  wrapper is passed by value (there is no owning wrapper at all).
+- 16.5 (don't reinvent the wrapper): N/A — no ad-hoc RAII wrapper, no hand-rolled
+  device_vector/unique_ptr-with-deleter substitute. This TU manages no resource to wrap, so
+  there is nothing reinvented.
+-->
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+No Group 17 issues found.
+
+<!--
+Notes (why clean), for the record:
+- This header is host-pure / CUDA-FREE by design (lines 13-18, "No CUDA header here";
+  includes only <algorithm>, <cstddef>, launch_config.hpp, steppe/config.hpp). It defines
+  NO type and OWNS NO RESOURCE — only four free functions (resident_tensor_bytes 62,
+  per_block_chunk_bytes 80, chunk_budget_bytes 103, max_blocks_per_chunk 140), each
+  inline/inline-constexpr noexcept pure scalar arithmetic returning std::size_t/int BY VALUE.
+  There is no class, struct, constructor, or DESTRUCTOR, so every Group 17 task is N/A here.
+- 17.1 (non-throwing destructor / teardown-order): N/A — there is no destructor in this TU.
+  No cudaFree/cudaStreamDestroy/cudaEventDestroy (or any cuda* call) exists to fail during
+  unwinding; nothing runs at static-destruction / process-exit time. The only file-scope
+  entity is the compile-time static_assert (45-47), which has no runtime teardown.
+- 17.2 (deleter matches allocator): N/A — NO allocation primitive of any kind exists
+  (no cudaMalloc/cudaMallocHost/cudaHostAlloc/cudaMallocAsync/cudaMallocArray, no malloc/new),
+  and correspondingly NO free/deleter (no cudaFree*/cudaFreeHost/cudaFreeArray/free/delete).
+  There is no alloc<->free pairing to mismatch. kCublasWorkspaceBytes (line 105) is a byte
+  COUNT consumed by the budget math, not an allocation handle.
+- 17.3 (unique_ptr<T[]> on cudaMalloc / default delete[] is UB): N/A — there is no
+  std::unique_ptr, no smart pointer, and no array allocation at all. Every parameter is a
+  scalar passed BY VALUE (free_vram std::size_t line 103; P, n_block, s_pad, nb_total int);
+  no buffer/pointer is owned, so no default-vs-custom-deleter question arises.
+- 17.4 (RAII vs async lifetime / free-at-scope-exit before async work done): N/A — there are
+  NO device pointers, buffers, streams, or async work in this header. The functions never
+  launch a kernel, never enqueue async copies, and never reference a stream; they return a
+  value synchronously. The grid-z/kMaxGridZ reasoning (125-132) only SIZES a future launch's
+  z-extent — the launch and its lifetime management live in f2_blocks_kernel.cu, not here.
+- 17.5 (multi-GPU device-correct free / cudaSetDevice in deleter): N/A — no deleter and no
+  per-device allocation exist; this header never selects, queries, or frees on any device.
+  free_vram (line 103) is a plain numeric snapshot passed by value (the cudaMemGetInfo that
+  produces it, and any device selection, are the call site's responsibility in cuda_backend.cu).
+-->
+
+
+

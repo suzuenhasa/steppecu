@@ -41,3 +41,51 @@ No Group 9 issues found.
 
 No Group 10 issues found.
 
+## Group 11 — Qualifiers & const-correctness
+
+No Group 11 issues found.
+
+## Group 12 — Launch config & indexing
+
+No Group 12 issues found.
+
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+No Group 17 issues found.
+
+## Group 18 — Correctness traps (wrong numbers, not crashes)
+
+No Group 18 issues found.
+
+## Group 19 — Performance: debug leftovers
+
+No Group 19 issues found.
+
+## Group 20 — Performance: memory access
+
+No Group 20 issues found.
+
+## Group 21 — Performance: occupancy & registers
+
+No Group 21 issues found.
+
+## Group 22 — Performance: compute & launch
+
+No Group 22 issues found.
+

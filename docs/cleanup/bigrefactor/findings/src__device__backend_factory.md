@@ -38,3 +38,23 @@ No Group 9 issues found.
 
 No Group 10 issues found.
 
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+No Group 17 issues found.
+

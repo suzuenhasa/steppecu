@@ -38,3 +38,23 @@ No Group 3 issues found.
 ## Group 10 — Initialization
 
 No Group 10 issues found.
+
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+- [17.5][LOW] src/device/cuda/stream.hpp:84-95,156-167 — `Stream`/`Event` document (lines 49-51) that the handle is created on whatever device is current at construction, and the §11.4 SPMG fan-out has multiple per-device backends each owning one `Stream` on a distinct `device_id_` (cuda_backend.cu:2661); but `destroy()` calls `cudaStreamDestroy`/`cudaEventDestroy` without recording the creation device or `cudaSetDevice`-restoring to it, and the owning `CudaBackend` has no destructor that re-selects `device_id_` before teardown (no `~CudaBackend`; only the compute-entry `guard_device()` re-selects). In practice this is not a fault — unlike `cudaFree`, the runtime resolves a stream/event handle's own device association on destroy, so a wrong-current-device destroy does not leak or UAF — hence LOW, not a real bug. The wrapper simply carries no record of its creation device. Suggested: leave as-is given the runtime's handle-resolves-device semantics; if 17.5 hardening is ever wanted, store the create-time `cudaGetDevice` ordinal and set/restore it across the destroy (matching `CublasHandle::device_id()`).

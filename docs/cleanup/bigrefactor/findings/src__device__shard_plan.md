@@ -111,3 +111,66 @@ Verified clean against the 10.1-10.2 checklist (FP64/§12/scale context applied)
 - 10.2 Zero-init assumption that does not hold: the ONE place this unit relies on implicit value-init is `std::vector<DeviceShard> plan(G)` (cpp:37) — the count-ctor value-initializes each DeviceShard, and the trailing-empty-device guarantee (cpp:108-111: devices g+1..G-1 keep their EMPTY {0,0,0,0} shard for the n_block < G case) depends on that. This assumption HOLDS and is robust: DeviceShard carries default member initializers b0=0,b1=0,s0=0,s1=0 (hpp:39-42), so value-init produces {0,0,0,0} regardless of POD/aggregate value-init subtleties, and empty() == (b0>=b1) is then true (hpp:46). All other locals (total_snps=0, device_snps=0, g=0, b0=0 — cpp:52,74-76) are EXPLICITLY zero-initialized, not relying on implicit zero. No missing-init-relying-on-zero. N/A.
 -->
 
+## Group 13 — Error handling
+
+No Group 13 issues found.
+
+<!--
+Verified clean against the 13.1-13.4 checklist (host-pure, CUDA-FREE-by-contract unit; §12/FP64/scale context applied):
+- 13.1 Unchecked cuda* API return: there are NO cuda* runtime/driver/cuBLAS/cuSOLVER calls in either file. shard_plan.cpp includes only <cstddef>/<stdexcept>/<vector> + core/block_partition_rule.hpp + core/internal/launch_config.hpp (cpp:12-17); shard_plan.hpp includes only <cstddef>/<span>/<vector> + core/block_partition_rule.hpp (hpp:22-26). No <cuda_runtime.h>, no API to wrap in a CHECK. N/A.
+- 13.2 Unchecked launches: no kernel launch (<<<...>>>) anywhere — this is host-pure greedy planning (the single per-block loop cpp:78-97). No cudaGetLastError()/sync pair is owed. N/A.
+- 13.3 Inconsistent checking: there is no CUDA error checking because there is no CUDA. The host-side error handling that exists is appropriate and consistent — the sole precondition, G == 0, fail-fasts with a descriptive std::runtime_error (cpp:27-31, architecture §2); the n_block == 0 case is a documented clean degenerate early-return (cpp:42-44), not an error. No mixed guarded/unguarded API pattern. N/A.
+- 13.4 Error-swallowing homegrown macro: no macros at all in this unit (no CHECK/CUDA_CHECK/STEPPE_* macro defined or used). Nothing can hide or downgrade an error to a no-op. The throw is a hard fail, not a swallowed return. N/A.
+Note: the planner does not re-validate that each ranges[b].size() is >= 0 or that the partition is contiguous — but that is the documented block_ranges postcondition / input-contract (a Group 11/16 concern), not error handling of an API call, so it is out of Group 13 scope.
+-->
+
+## Group 14 — Memory: allocation & lifetime
+
+No Group 14 issues found.
+
+<!--
+Verified clean against the 14.1-14.5 checklist (host-pure, CUDA-FREE-by-contract unit; §12/FP64/scale context applied):
+- 14.1 Alloc/free mismatch: there is NO manual memory management in either file — no cudaMalloc, no new/new[], no malloc, no cudaFree/free/delete. The ONLY allocation is `std::vector<DeviceShard> plan(G)` (shard_plan.cpp:37), a fully RAII-managed std::vector whose storage is owned/freed by the container destructor (and moved out on the `return plan;` at cpp:112). No allocator is ever paired with the wrong deallocator. N/A.
+- 14.2 Stream-ordered alloc on hot paths: no cudaMalloc/cudaFree anywhere (CUDA-FREE by contract — includes only <cstddef>/<stdexcept>/<vector> + core headers, cpp:12-17, hpp:22-26). plan_block_shards is a pure host planning function reached ONCE per SPMG precompute to compute the block->device mapping (architecture.md §11.4); it is not a per-block hot loop and touches no GPU stream. No cudaMallocAsync/pool concern applies. N/A.
+- 14.3 Async/sync free pairing: no async-vs-plain allocation pair exists — there is no CUDA allocation of either flavor. N/A.
+- 14.4 Free before async work completes (use-after-free across streams): the only buffer (`plan`) is host memory consumed synchronously by the caller after the function returns by value; it is never handed to a stream/kernel, so no async-completion ordering can be violated. The returned vector outlives the call via move/RVO. N/A.
+- 14.5 Missing frees on error paths: the single error path is the G == 0 fail-fast throw (cpp:27-31), which occurs BEFORE the `plan` vector is constructed (cpp:37), so no allocation is in flight to leak. Even if any allocation were live, std::vector's destructor would release it during stack unwinding (no raw owning pointer to leak). No manual cleanup is owed on any path. N/A.
+-->
+
+## Group 15 — Memory: transfers
+
+No Group 15 issues found.
+
+<!--
+Verified clean against the 15.1-15.3 checklist (host-pure, CUDA-FREE-by-contract unit; §12/FP64/scale context applied):
+- 15.1 cudaMemcpy (H<->D) in a loop to hoist/batch/keep-resident: there are NO cudaMemcpy/cudaMemcpyAsync/cudaMemcpyPeer/cudaMemset calls anywhere. shard_plan.cpp includes only <cstddef>/<stdexcept>/<vector> + core/block_partition_rule.hpp + core/internal/launch_config.hpp (cpp:12-17); shard_plan.hpp includes only <cstddef>/<span>/<vector> + core/block_partition_rule.hpp (hpp:22-26). No <cuda_runtime.h> at all. The only loops are the host-pure SNP-sum accumulation (cpp:53-55) and the greedy single-pass block assignment (cpp:78-97) — pure integer arithmetic over the in-RAM `ranges` span, no transfer of any kind. This is the planning step that DECIDES the block->device mapping the transfers later use, not a step that performs transfers. N/A.
+- 15.2 Direction enum vs actual transfer: there is no transfer, hence no cudaMemcpyKind argument (no cudaMemcpyHostToDevice / DeviceToHost / DeviceToDevice) to mismatch. N/A.
+- 15.3 Pageable host memory for frequent transfers (pinned ~2x bandwidth): the unit allocates one ordinary pageable `std::vector<DeviceShard> plan(G)` (cpp:37) of G (device-count, O(1)) tiny POD shards, returned by value to the host caller. It is host metadata consumed on the host (the orchestrator reads plan[g] to build sub-views; the parity test reads it to shard identically) — it is NEVER the source/dest of an H<->D copy, so pinning is irrelevant. The frequent/large H<->D traffic in steppe (the f2_blocks tensor) lives in cuda_backend.cu / combine, not here; this is the mapping computed once per precompute (architecture.md §11.4). No pinned-memory opportunity exists in this unit. N/A.
+-->
+
+## Group 16 — RAII: ownership & wrapper hygiene
+
+No Group 16 issues found.
+
+<!--
+Verified clean against the 16.1-16.5 checklist (host-pure, CUDA-FREE-by-contract unit; §12/FP64/scale context applied):
+- 16.1 Wrap EVERY resource: this unit owns NO wrappable resource. CUDA-FREE by contract — shard_plan.cpp includes only <cstddef>/<stdexcept>/<vector> + core/block_partition_rule.hpp + core/internal/launch_config.hpp (cpp:12-17); shard_plan.hpp includes only <cstddef>/<span>/<vector> + core/block_partition_rule.hpp (hpp:22-26). There is no <cuda_runtime.h>, hence no stream/event/graph/graph-exec, no texture/surface object, no memory pool, no CUDA array, no pinned host allocation, and no cuBLAS/cuSOLVER handle (*Create/*Destroy) anywhere to wrap or leak. The sole owned resource is `std::vector<DeviceShard> plan(G)` (cpp:37), already RAII-managed by the std::vector destructor. N/A.
+- 16.2 Move-only + null-on-move: there is no hand-written freeing wrapper, so no copy/move semantics to author. DeviceShard (hpp:38-47) is a trivial POD aggregate (two `int`, two `long`, all with default member initializers, plus a `[[nodiscard]] bool empty() const noexcept`) — it owns no handle, so its implicit copy/move are correct and there is no moved-from-must-null obligation. std::vector<DeviceShard> already has correct move (resets moved-from to empty) and copy semantics. No double-free / un-nulled-moved-from risk. N/A.
+- 16.3 Rule of five for a freeing destructor: nothing in the unit declares a destructor that frees a resource. DeviceShard is implicitly-destructible POD (no user dtor); plan_block_shards is a free function. No class needs the rule of five. N/A.
+- 16.4 Single clear ownership / non-owning raw pointers: ownership is unambiguous — `plan` is the sole owner of the shard storage and is moved out on `return plan;` (cpp:112). The input `std::span<const core::BlockRange> ranges` (cpp:22) is a NON-OWNING view (correct: a span by definition does not own; the function only reads ranges[b].size()/.begin/.end and never frees it), and DeviceShard carries plain int/long bounds (b0/b1/s0/s1), not owning pointers. No owning wrapper is passed by value (the by-value `std::vector` return is the move-out result, not a copy of an owning handle). No raw kernel/device pointer is freed here (there are none). N/A.
+- 16.5 Don't reinvent the wrapper: the unit uses std::vector directly (cpp:37) — the standard container — rather than a hand-rolled owning buffer, and DeviceShard is a deliberately minimal value type (a documented 4-field POD), not a re-implemented smart pointer. No thrust::device_vector / unique_ptr+CUDA-deleter is even applicable (no device memory). Nothing is reinvented. N/A.
+-->
+
+## Group 17 — RAII: lifetime & deleter pitfalls (CUDA-specific)
+
+No Group 17 issues found.
+
+<!--
+Verified clean against the 17.1-17.5 checklist (host-pure, CUDA-FREE-by-contract unit; §12/FP64/scale context applied). Every Group 17 task is CUDA-specific and has NO applicable surface here:
+- 17.1 Non-throwing destructor (failed cudaFree/cudaStreamDestroy can't throw during unwinding; teardown-order guard): the unit declares NO destructor at all. DeviceShard (shard_plan.hpp:38-47) is a trivial POD aggregate (two int, two long with default member initializers, plus a noexcept empty() accessor) with the implicit destructor; plan_block_shards is a free function (cpp:21-113). No dtor performs any cuda* teardown, so there is nothing that could throw mid-unwind or touch a torn-down context. N/A.
+- 17.2 Deleter matches allocator: there is NO CUDA allocation in either file — no cudaMalloc/cudaMallocHost/cudaHostAlloc/cudaMallocAsync/cudaMallocArray, and correspondingly no cudaFree*/free pairing to mismatch. shard_plan.cpp includes only <cstddef>/<stdexcept>/<vector> + core/block_partition_rule.hpp + core/internal/launch_config.hpp (cpp:12-17); shard_plan.hpp includes only <cstddef>/<span>/<vector> + core/block_partition_rule.hpp (hpp:22-26). No <cuda_runtime.h>. The sole allocation is `std::vector<DeviceShard> plan(G)` (cpp:37), allocated AND freed by std::vector's own allocator/destructor — allocator and deallocator are paired by the container by construction. N/A.
+- 17.3 unique_ptr<T[]> on cudaMalloc (default delete[] is UB; needs custom deleter): no unique_ptr / shared_ptr / smart pointer of any kind, and no cudaMalloc buffer to wrap. The only owning container is std::vector (cpp:37). No array-form smart pointer over device memory exists. N/A.
+- 17.4 RAII vs async lifetime (scope-exit free != async work finished -> use-after-free; sync first or tie to stream): the only buffer (`plan`, cpp:37) is HOST memory, never handed to a CUDA stream or kernel — this unit reaches no GPU (CUDA-FREE by contract, hpp:13-18). It is returned by value (move/RVO, cpp:112) and consumed synchronously on the host by the orchestrator/parity test. There is no async work, no stream, and thus no scope-exit-vs-async-completion ordering to violate. N/A.
+- 17.5 Multi-GPU device-correct free (deleter must cudaSetDevice to the alloc device, record+restore): no per-device CUDA allocation and no custom deleter exist, so there is no free that must select the owning device. Although the unit's PURPOSE is multi-GPU shard PLANNING, it only computes the block->device index mapping (the DeviceShard {b0,b1,s0,s1} bounds, cpp:88-106) as plain integers — it never allocates device memory or calls cudaSetDevice (the actual per-device allocation/free lives in cuda_backend.cu / resources, not here). No device-correct-free obligation applies. N/A.
+-->
+
