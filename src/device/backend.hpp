@@ -459,10 +459,27 @@ public:
     // backend (M(fit-4)) never needs a per-model/per-block host-loop retrofit.
     // NON-PURE: the base throws (the established backend.hpp pattern); CpuBackend
     // overrides all four with the native-FP64 reference. Each takes a `Precision`
-    // that governs ONLY matmul sub-steps; the SVD/Cholesky/weight solves are
-    // pinned native FP64 internally regardless (§12 backend invariant). In
+    // that governs ONLY matmul sub-steps; the SVD/Cholesky/weight solves DEFAULT to
+    // native FP64 (the §12 backend invariant) and are PROMOTABLE to EmulatedFp64 via
+    // `set_solve_precision` under a validated per-stage policy (ROADMAP §6; the CUDA
+    // backend's CusolverMathModeScope) — native FP64 remains the oracle/fallback. In
     // M(fit-1) the CpuBackend ignores `Precision` and is unconditionally FP64.
     // -----------------------------------------------------------------------
+
+    /// SOLVE-PRECISION promotion knob (ROADMAP §6 the fit-solve promotion seam).
+    /// The §12 conditioning rule pins the small ill-conditioned solves
+    /// (SVD/Cholesky/GLS) native FP64 by DEFAULT — the matmul `Precision` passed to
+    /// the virtuals above does NOT govern them. This setter is the per-stage seam
+    /// that lets a caller PROMOTE a backend's solve stages to an emulated-FP64
+    /// tensor-core path for the S8 rotation throughput wall (millions of small
+    /// solves), validated per stage against the native oracle before any default
+    /// flip. DEFAULT is native, so a backend that never calls this is byte-for-byte
+    /// the M(fit-4) behavior (the af6a8c2 golden parity is unchanged). The base is a
+    /// NO-OP (the CpuBackend oracle is unconditionally FP64 and ignores it); the
+    /// CUDA backend overrides it to drive `CusolverMathModeScope` at the solve sites.
+    /// EXPLORATORY/measurement use today (the non-gating emulated-40 parity probe);
+    /// the S8 milestone wires the validated per-stage policy.
+    virtual void set_solve_precision(const Precision& precision) { (void)precision; }
 
     /// S3 — assemble the per-block f4 matrix X from device-resident f2 (zero D2H on
     /// the CUDA path). BATCHED over n_block (the whole [m × n_block] tensor in one

@@ -1206,6 +1206,18 @@ public:
     // af6a8c2 golden. Native FP64 end-to-end (the parity gate; §12).
     // =====================================================================
 
+    /// SOLVE-PRECISION promotion-seam setter (ROADMAP §6; base no-op overridden
+    /// here). Records the per-stage solve-precision request that drives the
+    /// cuSOLVER `CusolverMathModeScope` at the solve sites (currently the S4
+    /// jackknife SPD inverse potrf/potri). DEFAULT (unset) is native Fp64 ⇒ the
+    /// scope targets native and the af6a8c2 golden parity is unchanged; promoting
+    /// to EmulatedFp64{bits} routes the honorable solve through the emulated
+    /// tensor-core path (validated per stage against the native oracle). The matmul
+    /// `Precision` the qpAdm virtuals receive is a SEPARATE axis and is unaffected.
+    void set_solve_precision(const Precision& precision) override {
+        solve_precision_ = precision;
+    }
+
     /// S3 — assemble the per-block f4 matrix X from DEVICE-RESIDENT f2 (zero D2H of
     /// the big tensor; the FROZEN CONTRACT §2a). The gather kernel reads
     /// f2.f2_device() in VRAM; the est_to_loo/x_total/tot_line reduction runs
@@ -1307,7 +1319,19 @@ public:
                                              std::span<const int> block_sizes,
                                              double fudge,
                                              const Precision& precision) override {
-        (void)precision;  // native FP64
+        // PRECISION POLICY (the FROZEN CONTRACT §2b; fit-engine.md §1.4). The
+        // ill-conditioned SPD inverse (potrf/potri) is pinned native FP64 by the
+        // §12 conditioning rule, so the passed `precision` does NOT govern THIS
+        // solve's conditioning — it governs the matmul-heavy stages only. The
+        // qpAdm virtuals therefore pass native here and the af6a8c2 golden parity
+        // is byte-for-byte unchanged. What is NEW (ROADMAP §6 the promotion seam):
+        // `solve_precision_` is the per-stage solve-precision knob (DEFAULT native;
+        // see the member doc). It feeds `engage_solver_precision` below so the
+        // cuSOLVER math mode is engaged through the SAME `emulation_honorable`
+        // predicate the f2 path uses — the SEAM is live and a future per-stage
+        // policy can PROMOTE this solve to EmulatedFp64 without a code change, while
+        // the default keeps native. `precision` stays unused for the solve itself.
+        (void)precision;
         guard_device();
 
         const int m = x.nl * x.nr;
@@ -1366,9 +1390,23 @@ public:
                                           cudaMemcpyDeviceToDevice, stream_.get()));
         launch_add_fudge_diag(dQf.data(), m, fudge, tr, stream_.get());
 
-        // Qinv = inverse(Qf), native FP64, cusolverDn Cholesky potrf + potri (the
-        // §12 SPD path). potrf factors in place; potri overwrites with the inverse
-        // (filling LOWER); symmetrize to full. devInfo>0 ⇒ NonSpdCovariance.
+        // Qinv = inverse(Qf), cusolverDn Cholesky potrf + potri (the §12 SPD path).
+        // potrf factors in place; potri overwrites with the inverse (filling LOWER);
+        // symmetrize to full. devInfo>0 ⇒ NonSpdCovariance.
+        //
+        // PROMOTION SEAM (ROADMAP §6). Engage the cuSOLVER math mode for the SOLVE
+        // through `engage_solver_precision`, routed via the ONE `emulation_honorable`
+        // predicate (the f2 path's single source). DEFAULT `solve_precision_` is
+        // native Fp64 ⇒ honorable==false ⇒ the scope sets native CUSOLVER_DEFAULT_MATH
+        // and restores it at scope exit (a real, behavior-preserving cusolverDnSet/Get
+        // round-trip; the golden parity is unchanged). A future per-stage policy can
+        // set `solve_precision_` to EmulatedFp64{bits} to PROMOTE this ill-conditioned
+        // inverse to the emulated tensor-core path — validated per stage against the
+        // native oracle at S8 scale before being made the default. The scope is local
+        // so it never leaks the mode into the next (native, oracle) solve on the shared
+        // handle. The exploratory parity measurement (tests) flips `solve_precision_`.
+        const CusolverMathModeScope solve_scope =
+            engage_solver_precision(solver_.get(), solve_precision_, &emulation_honorable);
         DeviceBuffer<int> dInfo(1);
         int lwork_f = 0;
         CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
@@ -1657,6 +1695,17 @@ private:
     // milestone (the FROZEN CONTRACT §1b: the batched S7 runs on stream_).
     CusolverDnHandle solver_{};
     DeviceBuffer<std::byte> workspace_{steppe::kCublasWorkspaceBytes};
+
+    // SOLVE-PRECISION promotion knob (ROADMAP §6 the fit-solve promotion seam; set
+    // via set_solve_precision). DEFAULT native Fp64 ⇒ emulation_honorable()==false ⇒
+    // the CusolverMathModeScope at the cuSOLVER solve sites targets native
+    // CUSOLVER_DEFAULT_MATH, so the af6a8c2 golden parity is byte-for-byte the
+    // M(fit-4) behavior. A caller (the S8 per-stage policy, or the non-gating
+    // emulated-40 parity probe) promotes it to EmulatedFp64{bits} to route the
+    // ill-conditioned SPD inverse through the emulated tensor-core path. This is a
+    // SEPARATE axis from the matmul `Precision` the qpAdm virtuals receive (which
+    // governs the f2/SYRK stages); it governs the cuSOLVER solve math mode only.
+    Precision solve_precision_{Precision::Kind::Fp64};
 
     // tot_line_ caches the AT2 weighted.mean(loo, 1-bl/n) centering line (length m)
     // produced by assemble_f4 and consumed by jackknife_cov (the xtau term) — the

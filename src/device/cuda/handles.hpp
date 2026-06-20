@@ -49,12 +49,43 @@
 #include <cusolverDn.h>    // cusolverDnHandle_t (the qpAdm fit small-LA: potrf/getrf/gesvdj)
 #include <cuda_runtime.h>  // cudaGetDevice (debug device-ordinal record-and-assert)
 
+#include <atomic>
 #include <cstddef>
 #include <utility>
 
 #include "core/internal/host_device.hpp"  // STEPPE_DEBUG_ONLY, STEPPE_ASSERT (the one debug gate)
 #include "core/internal/log.hpp"          // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"          // STEPPE_CUDA_CHECK, CUBLAS_CHECK, CublasError
+#include "steppe/config.hpp"              // steppe::Precision (the cuSOLVER promotion seam input)
+
+// ---------------------------------------------------------------------------
+// cuSOLVER FP64-EMULATED math-mode capability probe (the promotion-seam guard).
+//
+// The cuBLAS f2 path engages `CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH` (cublas_api.h)
+// — that enum is present in CUDA 13.x cuBLAS. cuSOLVER's `cusolverMathMode_t`
+// (cusolver_common.h) is a SEPARATE, NARROWER enum: as of CUDA 13.0 / cuSOLVER
+// 12.0 on the box it carries only `CUSOLVER_DEFAULT_MATH` and
+// `CUSOLVER_FP32_EMULATED_BF16X9_MATH` — there is NO FP64-emulated cuSOLVER mode
+// yet (verified against /usr/local/cuda/include/cusolver_common.h on box5090).
+// So the seam cannot HARDCODE an FP64-emulated cuSOLVER enum that does not
+// compile. This macro names the FP64-emulated cuSOLVER mode IF the toolkit ever
+// exposes it (a forward-compatible single point of truth): when present, the
+// scope genuinely promotes an honorable EmulatedFp64 solve request to it; when
+// absent (today), the scope DEGRADES to native `CUSOLVER_DEFAULT_MATH` with a
+// one-shot capability tag — exactly the f2 path's downgrade discipline. Either
+// way the scope makes a REAL `cusolverDnSetMathMode` call and restores the prior
+// mode (the RAII seam is live today; only the *target* mode is gated).
+//
+// Detection precedence: an explicit `CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH`
+// enumerator (if a future header adds one), else leave it undefined. We do NOT
+// invent a numeric value — feeding `cusolverDnSetMathMode` an out-of-range int
+// would be undefined cuSOLVER behavior, the opposite of a behavior-preserving
+// seam.
+#if defined(CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH)
+#define STEPPE_HAVE_CUSOLVER_FP64_EMULATED 1
+#else
+#define STEPPE_HAVE_CUSOLVER_FP64_EMULATED 0
+#endif
 
 namespace steppe::device {
 
@@ -339,6 +370,168 @@ private:
     cusolverDnHandle_t h_ = nullptr;
     int device_id_ = -1;
 };
+
+// ---------------------------------------------------------------------------
+// One-shot capability tag for the cuSOLVER FP64-emulated DOWNGRADE — the
+// cuSOLVER analogue of f2_block_kernel.cu's `warn_emulated_fp64_downgraded_once`
+// (cleanup X-6/B2, T-CAP-1). Emitted AT MOST ONCE per process when an honorable
+// EmulatedFp64 SOLVE request is asked for but the toolkit exposes no FP64-emulated
+// cuSOLVER math mode (STEPPE_HAVE_CUSOLVER_FP64_EMULATED == 0, the box today), so
+// the promotion silently-but-OBSERVABLY degrades to native rather than spamming the
+// per-solve hot path. Compiled only on the no-mode lane (the only build where the
+// downgrade can fire); a build whose toolkit gains the mode carries no unused
+// helper (warnings-as-errors clean). Routes through the ONE warn sink
+// (STEPPE_LOG_WARN); the std::atomic_flag makes the one-shot guard thread-safe
+// (M4.5 multi-GPU may engage from more than one host thread).
+#if !STEPPE_HAVE_CUSOLVER_FP64_EMULATED
+namespace detail {
+inline void warn_cusolver_emulated_fp64_unavailable_once() {
+    static std::atomic_flag emitted = ATOMIC_FLAG_INIT;
+    if (!emitted.test_and_set(std::memory_order_relaxed)) {
+        STEPPE_LOG_WARN(
+            "[capability] EmulatedFp64 SOLVE promotion requested but this CUDA "
+            "toolkit's cusolverMathMode_t exposes no FP64-emulated mode "
+            "(CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH absent; CUDA 13.0/cuSOLVER "
+            "12.0) -> the cuSOLVER solve runs native FP64 [tag: "
+            "cusolver_emu_fp64_unavailable]. The reported precision is native FP64, "
+            "NOT emulated (architecture.md §9, §12; fit-engine.md §1.4). The "
+            "promotion SEAM is live — only the target math mode is gated on toolkit "
+            "support, so a newer cuSOLVER promotes with no code change.");
+    }
+}
+}  // namespace detail
+#endif  // !STEPPE_HAVE_CUSOLVER_FP64_EMULATED
+
+/// Scoped, RAII restore of a dense-cuSOLVER handle's math mode — the cuSOLVER
+/// analogue of `MathModeScope` (architecture.md §12; ROADMAP §6 the fit-solve
+/// promotion seam). This is the PROMOTION SEAM the M(fit-4) GPU qpAdm fit
+/// deliberately left for later: native FP64 is free for ONE model, but the S8
+/// model rotation runs MILLIONS of small Cholesky/SVD/GLS solves where native
+/// FP64 on Blackwell is a tensor-core-throughput wall. The seam lets a solve
+/// stage be PROMOTED to the emulated-FP64 (Ozaki) tensor-core path WITHOUT
+/// changing the default — the qpAdm virtuals still pass native, so the af6a8c2
+/// golden parity is unchanged. The deliverable is the CAPABILITY, not a default
+/// flip.
+///
+/// Like `cublasSetMathMode`, `cusolverDnSetMathMode` is STICKY handle state: it
+/// persists until changed again. The shared per-device solver handle is reused
+/// across stages and across models in the rotation, so an imperative promote
+/// would silently leak the emulated mode into the next native (oracle/ill-
+/// conditioned) solve. This guard makes the change OBSERVABLY SCOPED: the ctor
+/// captures the handle's current mode (`cusolverDnGetMathMode`) and applies the
+/// requested one; the dtor restores the captured mode. A native solve inside an
+/// emulated rotation, or the §12 oracle recompute, can therefore engage native
+/// for its scope and leave the handle exactly as it found it.
+///
+/// HONORABILITY (DRY with the f2 path). The ctor takes a pre-decided `honorable`
+/// flag — the caller computes it via the ONE `emulation_honorable` predicate
+/// (f2_block_kernel.cuh) so the cuSOLVER seam and the cuBLAS f2 path can never
+/// disagree on whether an EmulatedFp64 request is honored. `honorable == true`
+/// requests the FP64-emulated cuSOLVER mode; `false` (native Fp64, Tf32, or an
+/// unhonorable EmulatedFp64) requests native. The FP64-emulated cuSOLVER mode is
+/// itself further gated on toolkit support (STEPPE_HAVE_CUSOLVER_FP64_EMULATED):
+/// absent today, so an honorable request DEGRADES to native with a one-shot tag —
+/// the seam still makes a real `cusolverDnSetMathMode` call and restores, it just
+/// targets native until the toolkit grows the mode. This is NOT a no-op stub: the
+/// get/apply/restore round-trip exercises the real cuSOLVER API on every scope.
+///
+/// Move-only (so it can be returned/held); the dtor NEVER throws — a nonzero
+/// restore status routes to the §7 teardown-warning sink (`STEPPE_LOG_WARN`),
+/// mirroring `MathModeScope`. A moved-from scope is inert. Takes the raw
+/// `cusolverDnHandle_t` (not a `CusolverDnHandle&`) so it composes at the solve
+/// call sites that already hold `solver_.get()`.
+class CusolverMathModeScope {
+public:
+    /// Capture the handle's current math mode and apply the requested one
+    /// (FP64-emulated for an honorable EmulatedFp64 request where the toolkit
+    /// supports it; native `CUSOLVER_DEFAULT_MATH` otherwise). Throws
+    /// CusolverError via CUSOLVER_CHECK if the get/set fails (a ctor may throw;
+    /// the dtor may not). The captured mode is restored at scope exit.
+    CusolverMathModeScope(cusolverDnHandle_t handle, bool honorable) : h_(handle) {
+        CUSOLVER_CHECK(cusolverDnGetMathMode(h_, &prev_));
+        CUSOLVER_CHECK(cusolverDnSetMathMode(h_, requested_mode(honorable)));
+    }
+
+    CusolverMathModeScope(CusolverMathModeScope&& o) noexcept
+        : h_(std::exchange(o.h_, nullptr)), prev_(o.prev_) {}
+
+    CusolverMathModeScope& operator=(CusolverMathModeScope&& o) noexcept {
+        if (this != &o) {
+            restore();
+            h_ = std::exchange(o.h_, nullptr);
+            prev_ = o.prev_;
+        }
+        return *this;
+    }
+
+    CusolverMathModeScope(const CusolverMathModeScope&) = delete;
+    CusolverMathModeScope& operator=(const CusolverMathModeScope&) = delete;
+
+    ~CusolverMathModeScope() { restore(); }
+
+    /// True iff this scope ACTUALLY engaged the FP64-emulated cuSOLVER mode (an
+    /// honorable request AND a toolkit that exposes the mode). When false for an
+    /// honorable request, the solve ran native (the one-shot tag was emitted) —
+    /// the observable promotion state, for tests/logging.
+    [[nodiscard]] bool promoted() const noexcept { return promoted_; }
+
+private:
+    /// Decide the target cuSOLVER math mode from the honorability flag, gating the
+    /// FP64-emulated mode on toolkit support. Records `promoted_` and emits the
+    /// one-shot downgrade tag when an honorable request cannot be honored by the
+    /// toolkit. Never returns an out-of-range enum.
+    cusolverMathMode_t requested_mode(bool honorable) noexcept {
+        if (honorable) {
+#if STEPPE_HAVE_CUSOLVER_FP64_EMULATED
+            promoted_ = true;
+            return CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH;
+#else
+            // The seam is live but the toolkit has no FP64-emulated cuSOLVER mode:
+            // degrade to native, observably (one-shot tag), exactly like the f2
+            // path's STEPPE_HAVE_EMU_TUNING-off downgrade.
+            detail::warn_cusolver_emulated_fp64_unavailable_once();
+            promoted_ = false;
+            return CUSOLVER_DEFAULT_MATH;
+#endif
+        }
+        promoted_ = false;
+        return CUSOLVER_DEFAULT_MATH;  // native Fp64 oracle / fallback
+    }
+
+    void restore() noexcept {
+        // Destructor never throws (architecture.md §7); a nonzero restore status is
+        // reported to the debug-only warning sink, never thrown. A moved-from scope
+        // (`h_ == nullptr`) restores nothing.
+        if (h_) {
+            const cusolverStatus_t s = cusolverDnSetMathMode(h_, prev_);
+            if (s != CUSOLVER_STATUS_SUCCESS) {
+                STEPPE_LOG_WARN("cusolverDnSetMathMode restore at scope exit: %s",
+                                CusolverError::status_name(s));
+            }
+        }
+        h_ = nullptr;
+    }
+
+    cusolverDnHandle_t h_ = nullptr;  // non-owning: CusolverDnHandle owns the context
+    cusolverMathMode_t prev_ = CUSOLVER_DEFAULT_MATH;  // captured mode to restore
+    bool promoted_ = false;            // did we actually engage the emulated mode?
+};
+
+/// Build a `CusolverMathModeScope` from a typed `Precision`, routing the
+/// honorability decision through the SAME `emulation_honorable` predicate the f2
+/// path uses (declared in f2_block_kernel.cuh; defined in f2_block_kernel.cu).
+/// This is the one-line call the qpAdm solve sites use to engage the seam: the
+/// DEFAULT qpAdm virtuals pass native `Fp64` ⇒ `emulation_honorable == false` ⇒
+/// the scope targets native and the af6a8c2 golden parity is unchanged. A future
+/// per-stage policy can pass `EmulatedFp64{40}` to PROMOTE that one solve. Defined
+/// in handles.hpp inline; takes `emulation_honorable` as a function pointer so this
+/// header need not include the device-private kernel header (the caller passes
+/// `&emulation_honorable`).
+[[nodiscard]] inline CusolverMathModeScope engage_solver_precision(
+    cusolverDnHandle_t handle, const Precision& precision,
+    bool (*honorable_predicate)(const Precision&) noexcept) {
+    return CusolverMathModeScope(handle, honorable_predicate(precision));
+}
 
 }  // namespace steppe::device
 

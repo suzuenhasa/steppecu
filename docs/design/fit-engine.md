@@ -157,17 +157,18 @@ rotation against a **fake `ComputeBackend`** with no GPU, exactly as
 
 **[SPEC §12, §9]** Precision is assigned by the conditioning of the operation. The cancellation-prone
 elementwise math is always native FP64; the well-conditioned matmul-heavy stages may use
-`EmulatedFp64{40}`; the small ill-conditioned solves stay native; TF32 is screening-only.
+`EmulatedFp64{40}`; the small ill-conditioned solves **default native** and are **promotable** to
+`EmulatedFp64` under a validated per-stage policy (see the seam note below); TF32 is screening-only.
 
 | Stage | Operation | Precision | Primitive / note |
 |---|---|---|---|
 | S3 f4 assembly | `X = ½(f2+f2−f2−f2)` four-slab gather | **native Fp64** | gather + axpy; a *second* subtraction after f2 (mild cancellation), trivially cheap, no emulation benefit since it is not a true GEMM [SPEC §5:219; OQ-5] |
 | S4 covariance Q | `xtau` (centering = a difference) | **native Fp64** | difference of like-magnitude replicates |
 | S4 covariance Q | `Q = xtau·xtauᵀ/n_block` (SYRK) | **EmulatedFp64{40}** | well-conditioned accumulate-many; the canonical §12 covariance-SYRK case; `Dsyrk` |
-| S5 rank SVD | `svd(X)` + `E'Q⁻¹E` | **native Fp64** | small, near rank-deficiency, oracle-grade [SPEC §12]; deterministic cuSOLVER, single statistic stream |
-| S5 `Q` factor/inverse | factor/invert `Q` | **native Fp64** | `potrf`; explicit `Q⁻¹` if parity needs it (OQ-3, §6) |
-| S6 weights | `opt_A`/`opt_B` Kronecker GLS + constrained solve | **native Fp64** | tiny + ill-conditioned; `potrf`/`potrs` on the ridge-regularized systems |
-| S7 SE | per-LOO-block weight re-solves; `cov(wmat)` | **native Fp64** solves; cov accumulation may be EmulatedFp64 | reuse S5/S6 primitives |
+| S5 rank SVD | `svd(X)` + `E'Q⁻¹E` | **native Fp64** (default; promotable) | small, near rank-deficiency, oracle-grade [SPEC §12]; deterministic cuSOLVER, single statistic stream |
+| S5 `Q` factor/inverse | factor/invert `Q` | **native Fp64** (default; promotable) | `potrf`/`potri`; explicit `Q⁻¹` if parity needs it (OQ-3, §6); the cuSOLVER math mode is engaged via `CusolverMathModeScope` (default native) |
+| S6 weights | `opt_A`/`opt_B` Kronecker GLS + constrained solve | **native Fp64** (default; promotable) | tiny + ill-conditioned; `potrf`/`potrs` on the ridge-regularized systems |
+| S7 SE | per-LOO-block weight re-solves; `cov(wmat)` | **native Fp64** solves (default; promotable); cov accumulation may be EmulatedFp64 | reuse S5/S6 primitives |
 | S8 screening | rank/feasibility ranking only | **Tf32 allowed**, recomputed in EmulatedFp64/Fp64 before any reported est/se/z/p [SPEC §9, §12] | never emits a reported number |
 
 **Determinism contract [SPEC §12, §9].** Statistic-bearing GEMM/SYRK/SVD/Cholesky run on the **single
@@ -176,6 +177,24 @@ statistic stream** (`stream_count = 1`; cuBLAS reproducibility voids under concu
 `deterministic && EmulatedFp64` (§9:635, §12). `cusolverDnSetDeterministicMode` on the statistic
 solver handle; CI asserts the rank-test routine is in the covered set. The `search_streams = 4` lanes
 (§9:585) are throughput-only — any TF32-screened lane's survivors are recomputed before reporting.
+
+**Solve-precision promotion seam [ROADMAP §6; landed this commit].** Native FP64 is free for ONE
+model, but the S8 model rotation runs *millions* of small SVD/Cholesky/GLS solves where native FP64 on
+Blackwell is a tensor-core-throughput wall (native FP64 ≈ a small fraction of the emulated-FP64/Ozaki
+tensor-core rate). So the small solves are **default native but PROMOTABLE to `EmulatedFp64` under a
+validated per-stage policy**: the CUDA backend's `CusolverDnHandle` exposes `cusolverDnSetMathMode`
+through a scoped RAII (`CusolverMathModeScope` / `engage_solver_precision`, src/device/cuda/handles.hpp),
+mirroring the cuBLAS `MathModeScope`/`engage_f2_precision` f2 path and routing the promote/native
+decision through the SAME `emulation_honorable` predicate. The per-stage knob is
+`ComputeBackend::set_solve_precision` (default native ⇒ the scope targets native and the af6a8c2 golden
+parity is byte-for-byte unchanged). **Native FP64 remains the oracle/fallback**, and any promotion is
+validated against it per stage at S8 scale before becoming a default. As of this commit the SEAM
+exists (real `cusolverDnSetMathMode` engage+restore at the S4 SPD-inverse solve); the *default* is still
+native, so nothing in the parity tier changes. NOTE: CUDA 13.0 / cuSOLVER 12.0 `cusolverMathMode_t`
+exposes no FP64-emulated mode yet (only `CUSOLVER_DEFAULT_MATH` and `CUSOLVER_FP32_EMULATED_BF16X9_MATH`);
+the seam is forward-compatible — an honorable EmulatedFp64 solve request DEGRADES to native with a
+one-shot capability tag until a newer cuSOLVER adds the FP64-emulated mode (then the same code promotes
+with no change).
 
 ### 1.5 Public API (CUDA-free at the seam) — `include/steppe/qpadm.hpp` [PROPOSAL]
 
@@ -295,8 +314,10 @@ with cuSOLVER/cuBLAS. All consume `DeviceF2Blocks` device pointers (zero D2H):
 - `gls_weights(X, Qinv, r, opts) → {w, A, B}` — S6 (the ALS + constrained solve).
 
 Each takes a `Precision` that governs **only** the matmul sub-steps; the SVD/Cholesky/weight solves
-are pinned native FP64 internally **regardless** of the passed `Precision` (the §12 conditioning rule
-is a backend invariant, not a caller choice).
+**default native FP64** internally and are **promotable** to `EmulatedFp64` via the per-stage
+`set_solve_precision` seam (§1.4; ROADMAP §6) under a policy validated against the native oracle. The
+matmul `Precision` passed here does not govern the solve conditioning (the §12 conditioning rule is a
+backend invariant); native FP64 stays the default and the oracle/fallback.
 
 ---
 

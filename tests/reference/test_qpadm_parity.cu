@@ -74,6 +74,22 @@ void check_eq_int(const char* what, int got, int want) {
     if (!ok) ++g_failures;
 }
 
+// NON-GATING delta report for the exploratory promoted-emulated measurement
+// (ROADMAP §6 seam): print got/want and abs+rel delta WITHOUT touching g_failures.
+// This is forward evidence for S8, REPORTED not gated (per the fix-pass contract).
+void report_delta(const char* what, double got, double want) {
+    const double absd = std::fabs(got - want);
+    const double reld = std::fabs(want) > 0.0 ? absd / std::fabs(want) : absd;
+    std::printf("  [INFO] %-34s got=% .12e want=% .12e |d|=% .3e rel=% .3e\n",
+                what, got, want, absd, reld);
+}
+
+// True iff |got-want| <= atol + rtol*|want| — the same tier predicate check_close
+// uses, but returns a bool for the informational tier summary (no side effects).
+bool rel_within(double got, double want, double rtol, double atol) {
+    return std::fabs(got - want) <= atol + rtol * std::fabs(want);
+}
+
 // Minimal §12 metadata gate (design §5): refuse to run if any of the six required
 // keys is missing from the committed golden_fit0.json. A substring presence check
 // (the JSON is the committed authoritative source).
@@ -324,6 +340,57 @@ int main(int argc, char** argv) {
             check_close("gpu-vs-cpu weight[0]", gpu.weight.at(0), res.weight.at(0), 0.0, 1e-9);
             check_close("gpu-vs-cpu weight[1]", gpu.weight.at(1), res.weight.at(1), 0.0, 1e-9);
             check_close("gpu-vs-cpu chisq",     gpu.chisq,        res.chisq,        0.0, 1e-9);
+
+            // =================================================================
+            // EXPLORATORY (NON-GATING): the PROMOTED-emulated solve measurement
+            // (ROADMAP §6 the fit-solve promotion seam). Re-run the SAME GPU fit
+            // with the cuSOLVER SOLVE stage PROMOTED to EmulatedFp64{40} via
+            // ComputeBackend::set_solve_precision — forward evidence on whether
+            // the emulated tensor-core solve holds parity at THIS Q/X conditioning
+            // (the S8 question). This does NOT touch g_failures: it is REPORTED,
+            // not a pass condition. The default path above remains the gate. After
+            // measuring we RESTORE the solve precision to native so any later use
+            // of this backend is the default (the seam is local, but be explicit).
+            //
+            // NOTE: on CUDA 13.0 / cuSOLVER 12.0 there is no FP64-emulated cuSOLVER
+            // math mode (cusolverMathMode_t lacks it; verified on box5090), so the
+            // promotion DEGRADES to native with a one-shot capability tag — the
+            // engage+restore round-trip still runs (the seam is live), and the
+            // numbers are therefore expected to equal the native path. When a newer
+            // cuSOLVER adds the mode the same path will actually promote and this
+            // measurement becomes the real emulated-vs-golden delta.
+            std::printf("\n-- [EXPLORATORY, NON-GATING] solves PROMOTED to "
+                        "EmulatedFp64{40} vs GOLDEN (ROADMAP §6 seam) --\n");
+            steppe::ComputeBackend& seam_be = *gpu_res.gpus.at(0).backend;
+            const steppe::Precision emu40{steppe::Precision::Kind::EmulatedFp64, 40};
+            seam_be.set_solve_precision(emu40);
+            const steppe::QpAdmResult gpu_emu =
+                steppe::run_qpadm(dev_f2, model, opts, gpu_res);
+            seam_be.set_solve_precision(steppe::Precision{steppe::Precision::Kind::Fp64});
+            if (gpu_emu.status != steppe::Status::Ok) {
+                std::printf("  [INFO] promoted-emulated run status != Ok (%d) — "
+                            "reported only, not a gate\n",
+                            static_cast<int>(gpu_emu.status));
+            } else {
+                report_delta("emu40 weight[CordedWare] vs golden", gpu_emu.weight.at(0), g_w0);
+                report_delta("emu40 weight[Turkey_N]   vs golden", gpu_emu.weight.at(1), g_w1);
+                report_delta("emu40 chisq               vs golden", gpu_emu.chisq,        g_chisq);
+                report_delta("emu40 se[CordedWare]      vs golden", gpu_emu.se.at(0),     g_se);
+                report_delta("emu40 se[Turkey_N]        vs golden", gpu_emu.se.at(1),     g_se);
+                report_delta("emu40 z[CordedWare]       vs golden", gpu_emu.z.at(0),      g_z0);
+                report_delta("emu40 z[Turkey_N]         vs golden", gpu_emu.z.at(1),      g_z1);
+                report_delta("emu40 p                   vs golden", gpu_emu.p,            g_p);
+                // and against the native GPU path (does promotion perturb the solve?)
+                report_delta("emu40 weight[0] vs native-GPU", gpu_emu.weight.at(0), gpu.weight.at(0));
+                report_delta("emu40 chisq     vs native-GPU", gpu_emu.chisq,        gpu.chisq);
+                std::printf("  [INFO] tier check (informational): weights/chisq within "
+                            "1e-6 of golden? %s ; se/z/p within 1e-3? %s\n",
+                            (rel_within(gpu_emu.weight.at(0), g_w0, 1e-6, 1e-12) &&
+                             rel_within(gpu_emu.weight.at(1), g_w1, 1e-6, 1e-12) &&
+                             rel_within(gpu_emu.chisq, g_chisq, 1e-6, 1e-12)) ? "YES" : "NO",
+                            (rel_within(gpu_emu.se.at(0), g_se, 1e-3, 1e-9) &&
+                             rel_within(gpu_emu.p, g_p, 1e-3, 1e-9)) ? "YES" : "NO");
+            }
         }
 
         // GPU X/Q localizers: call the CUDA backend's assemble_f4(DeviceF2Blocks) +
