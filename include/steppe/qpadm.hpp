@@ -39,6 +39,17 @@ struct Resources;      // CUDA-free fwd-decl (real decl: src/device/resources.hp
 }  // namespace device
 
 // ---- AT2 PARITY CONSTANTS (named; OQ-1/OQ-4 — not magic numbers) -------------
+/// SE (jackknife standard-error) policy for the S8 rotation. The int values are the
+/// user-facing --jackknife=0/1/2 mapping (frozen). The point estimate
+/// (weights/chisq/p/f4rank/feasible/popdrop/rankdrop) is IDENTICAL across all three
+/// modes; the policy governs ONLY which models pay the expensive LOO jackknife SE.
+/// The single-model run_qpadm / run_qpwave ignore this — only run_qpadm_search reads it.
+enum class JackknifePolicy : int {
+    None         = 0,  ///< no SE for any model (fastest pure screen); se/z empty-marked.
+    FeasibleOnly = 1,  ///< SE only for SURVIVORS passing the criterion; the rest empty-marked.
+    All          = 2,  ///< SE for every model = the CURRENT behavior. THE DEFAULT.
+};
+
 /// Per-call qpAdm config. The AT2 parity constants (fudge, als_iterations) are
 /// NAMED here and recorded in the golden metadata, never bare literals (design
 /// §3.3, OQ-1/OQ-4).
@@ -68,6 +79,24 @@ struct QpAdmOptions {
     /// the smallest candidate rank r whose model is NOT rejected at this alpha
     /// (p(r) > alpha). Named (not a magic literal), recorded in the golden meta.
     double rank_alpha = 0.05;
+
+    /// S8 ROTATION SE policy (default All = the current behavior; the feature is purely
+    /// additive/opt-in). IGNORED by the single-model run_qpadm / run_qpwave (they always
+    /// compute the SE — only the rotation search consults it). All ⇒ every model gets the
+    /// LOO jackknife SE (today's behavior, the goldens); FeasibleOnly ⇒ only survivors of
+    /// the feasibility criterion; None ⇒ no SE for any model.
+    JackknifePolicy jackknife = JackknifePolicy::All;
+
+    /// FEASIBLE-ONLY survivor p-gate (consulted only when jackknife==FeasibleOnly AND
+    /// se_require_p below). pchisq tail-p threshold; a survivor must have p >= this.
+    double p_se_threshold = 0.05;
+
+    /// FEASIBLE-ONLY criterion selector: false (default) ⇒ feasibility ALONE is the
+    /// survivor test; true ⇒ feasible AND p >= p_se_threshold. Default false: feasibility
+    /// is the canonical, hard qpAdm screen; the p-boundary is statistically noisy, so a
+    /// default p-gate would drop the SE on exactly the feasible-but-marginal models a
+    /// researcher most needs the SE for. Opt-in for an aggressive first-pass survey.
+    bool se_require_p = false;
 };
 
 // ---- The model + the result (CUDA-free value shapes) ------------------------
@@ -94,8 +123,11 @@ struct QpAdmModel {
 /// search of thousands of models must record-and-continue.
 struct QpAdmResult {
     std::vector<double> weight;  ///< admixture weights w, len == left.size(), Σw = 1.
-    std::vector<double> se;      ///< jackknife SE per weight (len == weight).
-    std::vector<double> z;       ///< weight / se.
+    /// jackknife SE per weight (len == weight when computed). EMPTY ⇒ SE not computed
+    /// (NONE / a non-survivor under FEASIBLE-ONLY, or a domain-failed model). NEVER a
+    /// fake 0/NaN — `se.empty()` is the unambiguous "not computed" sentinel.
+    std::vector<double> se;
+    std::vector<double> z;       ///< weight / se (EMPTY iff se is empty; same sentinel).
     double p = 0.0;              ///< tail p of the fitted rank.
     double chisq = 0.0;          ///< vec(E)'Qinv vec(E) at the fitted rank.
     int dof = 0;                 ///< (nl - r)*(nr - r).

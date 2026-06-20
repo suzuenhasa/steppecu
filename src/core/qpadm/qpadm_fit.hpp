@@ -28,6 +28,13 @@ namespace steppe::core::qpadm {
 /// The shared S4→S6→S7 body over an already-assembled S3 F4Blocks (assembled by
 /// the caller from a device or host f2). block_sizes is the AT2 block_lengths
 /// jackknife weight (OQ-3). Domain outcomes are returned as result.status values.
+///
+/// `se_policy` gates the S7 jackknife SE (the host-oracle mirror of the GPU two-pass):
+/// All ⇒ always compute (the default / today's behavior, the goldens); FeasibleOnly ⇒
+/// compute only when the cheap point estimate is a survivor (feasible weights, optionally
+/// AND p>=opts.p_se_threshold); None ⇒ never. A non-survivor leaves res.se/z EMPTY
+/// (the sentinel). The point estimate (weights/p/f4rank/feasible/rankdrop/popdrop) is
+/// identical regardless of policy — only WHICH models get the SE changes.
 [[nodiscard]] QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X,
                                    std::span<const int> block_sizes,
                                    const QpAdmModel& model, const QpAdmOptions& opts);

@@ -278,6 +278,16 @@ void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
 void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
                                        int n_models, double* d_se, cudaStream_t stream);
 
+/// SE-policy survivor GATHER (the two-pass §M(fit-3) seam). Compact the per-model
+/// dLoo (m*nb) + dQinv (m*m) slices of the n_surv survivor positions `d_surv` (chunk
+/// positions, ASCENDING) into dense output arenas dLooDst/dQinvDst — ONE launch vs a
+/// per-survivor cudaMemcpyAsync D2D loop. Pure data movement (parity-NEUTRAL: a
+/// survivor's compacted slice is BIT-IDENTICAL to its full-arena slice), so the SE
+/// kernels run UNCHANGED over n_models=n_surv. Native FP64 (it only copies doubles).
+void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
+                                  const int* d_surv, int m, int nb, int n_surv,
+                                  double* dLooDst, double* dQinvDst, cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_QPADM_FIT_KERNELS_CUH

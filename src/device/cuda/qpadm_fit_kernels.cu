@@ -1134,6 +1134,40 @@ __global__ void qpadm_se_from_wmat_kernel(const double* __restrict__ dWmat,
     }
 }
 
+// --- SE-policy gather (model-batched): compact survivor per-model slices ----------
+// Pure data movement (parity-NEUTRAL: it moves bits, it does not compute) for the
+// two-pass SE. For each compacted output model k, copy the slice of the source model
+// d_surv[k] (the chunk position of the k-th survivor) into the dense output slot k.
+// One launch gathers ALL survivor dLoo (m*nb each) + dQinv (m*m each) slices, replacing
+// the per-survivor cudaMemcpyAsync D2D loop (its launch overhead dominated at large
+// survivor counts). Ascending-survivor order ⇒ a survivor's compacted slice is bit-
+// identical to its full-arena slice (the SE kernels then see identical inputs).
+__global__ void qpadm_gather_loo_qinv_kernel(const double* __restrict__ dLooSrc,
+                                             const double* __restrict__ dQinvSrc,
+                                             const int* __restrict__ d_surv,
+                                             int m, int nb, int n_surv,
+                                             double* __restrict__ dLooDst,
+                                             double* __restrict__ dQinvDst) {
+    const long loo_per = static_cast<long>(m) * nb;   // dLoo slice size per model
+    const long qinv_per = static_cast<long>(m) * m;   // dQinv slice size per model
+    const long total = (loo_per + qinv_per) * n_surv; // all elements, both arenas
+    for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
+        const long per = loo_per + qinv_per;
+        const int k = static_cast<int>(gid / per);    // compacted output model
+        const long e = gid % per;                     // element within the pair of slices
+        const int j = d_surv[k];                      // source chunk position
+        if (e < loo_per) {
+            dLooDst[static_cast<long>(k) * loo_per + e] =
+                dLooSrc[static_cast<long>(j) * loo_per + e];
+        } else {
+            const long q = e - loo_per;
+            dQinvDst[static_cast<long>(k) * qinv_per + q] =
+                dQinvSrc[static_cast<long>(j) * qinv_per + q];
+        }
+    }
+}
+
 }  // namespace
 
 void launch_assemble_f4_gather_models_batched(const double* f2, int P,
@@ -1239,6 +1273,20 @@ void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
     const long grid_l = (total + block - 1) / block;
     const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
     qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
+                                  const int* d_surv, int m, int nb, int n_surv,
+                                  double* dLooDst, double* dQinvDst, cudaStream_t stream) {
+    const long per = static_cast<long>(m) * nb + static_cast<long>(m) * m;
+    const long total = per * n_surv;
+    if (total <= 0) return;
+    const int block = 256;
+    const long grid_l = (total + block - 1) / block;
+    const int grid = static_cast<int>(grid_l > 65535 ? 65535 : grid_l);
+    qpadm_gather_loo_qinv_kernel<<<grid, block, 0, stream>>>(
+        dLooSrc, dQinvSrc, d_surv, m, nb, n_surv, dLooDst, dQinvDst);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

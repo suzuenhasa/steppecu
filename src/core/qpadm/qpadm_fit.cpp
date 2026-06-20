@@ -82,13 +82,49 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     res.weight = gw.w;
     res.chisq = gw.chisq;
 
-    // S7 — SE from the n_block LOO weight re-fits (reuse cov.Qinv; AT2 parity pin).
-    const SeResult se = se_from_loo(be, X, cov, r, opts, gw.w, prec);
-    res.se = se.se;
-    res.z = se.z;
-
-    // p of the fitted rank (loose tier, OQ-13).
+    // p of the fitted rank (loose tier, OQ-13). Computed BEFORE the SE so the
+    // FeasibleOnly p-gate can consult it (a cheap-pass output).
     res.p = pchisq_upper(res.chisq, res.dof);
+
+    // ---- S7 SE policy (the host-oracle mirror of the GPU two-pass; fit-engine.md §M(fit-3))
+    // The cheap point estimate (weights/chisq/p) is now complete; decide whether THIS
+    // model is a survivor that pays the expensive LOO jackknife SE. The criterion is
+    // computable from the cheap pass ALONE: feasibility = all fitted weights in [0,1]
+    // (at least one) — the same all-in-[0,1] test assemble_result uses on pop_wfull
+    // (which == gw.w at the full rank nl-1, the default) — optionally AND p>=threshold.
+    // A non-survivor leaves res.se/res.z EMPTY (the sentinel), never a fake 0.
+    auto weights_feasible = [](const std::vector<double>& w) {
+        bool any = false;
+        for (const double v : w) {
+            if (std::isnan(v)) continue;
+            any = true;
+            if (v < 0.0 || v > 1.0) return false;
+        }
+        return any;
+    };
+    bool compute_se;
+    switch (opts.jackknife) {
+        case JackknifePolicy::None:
+            compute_se = false;
+            break;
+        case JackknifePolicy::FeasibleOnly:
+            compute_se = weights_feasible(gw.w) &&
+                         (!opts.se_require_p || res.p >= opts.p_se_threshold);
+            break;
+        case JackknifePolicy::All:
+        default:
+            compute_se = true;
+            break;
+    }
+
+    // S7 — SE from the n_block LOO weight re-fits (reuse cov.Qinv; AT2 parity pin).
+    // Survivors get the IDENTICAL full FP64 SE; non-survivors leave se/z empty.
+    if (compute_se) {
+        const SeResult se = se_from_loo(be, X, cov, r, opts, gw.w, prec);
+        res.se = se.se;
+        res.z = se.z;
+    }
+
     res.rank_p.assign(static_cast<std::size_t>(r) + 1, 0.0);
     if (r >= 0 && static_cast<std::size_t>(r) < res.rank_p.size())
         res.rank_p[static_cast<std::size_t>(r)] = res.p;

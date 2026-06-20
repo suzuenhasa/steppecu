@@ -2268,23 +2268,19 @@ private:
             dWeight.data(), dSe.data(), dChisq.data(), dStatus.data(),
             dRankChisq.data(), dPopChisq.data(), dPopWfull.data(), stream_.get());
 
-        // ---- S7 SE: the LOO re-fits across (model, block) + a deterministic variance
-        // reduction (the throughput-scaled path: B·nb parallel threads, NOT a per-model
-        // serial nb-loop). dWmat is the scaled replicate matrix [B·nb·nl]. -----------
-        if (nb >= 2) {
-            const double s = static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));
-            DeviceBuffer<double> dWmat(B * static_cast<std::size_t>(nb) *
-                                       static_cast<std::size_t>(nl));
-            launch_qpadm_loo_models_batched(dLoo.data(), dQinv.data(), nl, nr, r_fit,
-                                            opts.fudge, opts.als_iterations, nb,
-                                            static_cast<int>(B), s, dWmat.data(),
-                                            stream_.get());
-            launch_qpadm_se_from_wmat_batched(dWmat.data(), nl, nb, static_cast<int>(B),
-                                              dSe.data(), stream_.get());
-        }
+        // ============================ THE TWO-PASS SE POLICY ============================
+        // Pass 1 (the CHEAP point estimate: gather → Q → Qinv → rank-sweep → weights →
+        // chisq → popdrop → feasibility) is COMPLETE for ALL B models above. Now D2H the
+        // cheap fields, decide the SURVIVOR set from those host outputs (zero extra D2H —
+        // the bytes the filter reads are already on the host), and run Pass 2 (the
+        // expensive LOO jackknife SE) ONLY over the survivors. The SE math/kernels are
+        // UNCHANGED — only WHICH models reach them changes (fit-engine.md §M(fit-3)).
+        // ALL mode runs the SE block VERBATIM over every valid model ⇒ bit-identical to
+        // the pre-policy code path (the parity gate). NONE skips it for all; FEASIBLE-ONLY
+        // skips it for the infeasible majority. (design: host filter, per-chunk.)
 
-        // ---- D2H the per-model fit outputs ---------------------------------------
-        std::vector<double> h_weight(B * nl), h_se(B * nl), h_chisq(B),
+        // ---- D2H the CHEAP fields (NOT se yet) -----------------------------------
+        std::vector<double> h_weight(B * nl), h_se(B * nl, 0.0), h_chisq(B),
             h_rankchisq(B * (rmax + 1)), h_popchisq(B * (nl + 1)), h_popwfull(B * nl);
         std::vector<int> h_status(B);
         auto d2h = [&](double* dst, const DeviceBuffer<double>& src, std::size_t cnt) {
@@ -2292,7 +2288,6 @@ private:
                                               cudaMemcpyDeviceToHost, stream_.get()));
         };
         d2h(h_weight.data(), dWeight, B * nl);
-        d2h(h_se.data(), dSe, B * nl);
         d2h(h_chisq.data(), dChisq, B);
         d2h(h_rankchisq.data(), dRankChisq, B * (rmax + 1));
         d2h(h_popchisq.data(), dPopChisq, B * (nl + 1));
@@ -2300,6 +2295,117 @@ private:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_status.data(), dStatus.data(), B * sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // ---- the host survivor filter (per-chunk) --------------------------------
+        // A model is SE-ELIGIBLE only if it produced a valid Ok fit (potrf ok AND rank
+        // ok) — a domain-failed model has no weights, so no SE regardless of mode (this
+        // matches today: failed models early-return with empty se in assemble_result).
+        // Among the eligible: ALL ⇒ all; NONE ⇒ none; FEASIBLE-ONLY ⇒ feasible (the same
+        // all-pop_wfull-in-[0,1] test assemble_result uses), optionally AND p>=threshold.
+        const int dof_full = (nl - r_fit) * (nr - r_fit);
+        auto feasible_from_wfull = [nl](const double* w) {
+            bool any = false;
+            for (int i = 0; i < nl; ++i) {
+                const double v = w[i];
+                if (std::isnan(v)) continue;
+                any = true;
+                if (v < 0.0 || v > 1.0) return false;
+            }
+            return any;
+        };
+        std::vector<char> se_computed(B, 0);   // per-model: did this model get the SE?
+        std::vector<std::size_t> surv;         // SE-survivor positions within the chunk
+        surv.reserve(B);
+        std::size_t n_eligible = 0;            // valid-Ok models (the ALL-mode SE set)
+        for (std::size_t j = 0; j < B; ++j) {
+            const bool ok_fit = (h_info[j] == 0) && (h_status[j] == 0);
+            if (!ok_fit) continue;
+            ++n_eligible;
+            bool survivor;
+            switch (opts.jackknife) {
+                case JackknifePolicy::None:
+                    survivor = false;
+                    break;
+                case JackknifePolicy::FeasibleOnly: {
+                    const bool feas = feasible_from_wfull(h_popwfull.data() + j * nl);
+                    const double p = core::internal::pchisq_upper(h_chisq[j], dof_full);
+                    survivor = feas && (!opts.se_require_p || p >= opts.p_se_threshold);
+                    break;
+                }
+                case JackknifePolicy::All:
+                default:
+                    survivor = true;
+                    break;
+            }
+            if (survivor) { surv.push_back(j); se_computed[j] = 1; }
+        }
+
+        // ---- Pass 2: the SE ONLY over the survivor set ---------------------------
+        // ALL-mode FAST PATH (every eligible model is a survivor): run the SE block
+        // VERBATIM over the full chunk into dSe — provably the pre-policy code path, so
+        // ALL mode is byte-for-byte identical to today (the parity pin). Otherwise gather
+        // the survivor dLoo/dQinv slices into compact arenas (pure D2D copies, parity-
+        // neutral) and run the UNCHANGED SE kernels with n_models=surv.size(), then
+        // scatter the compact dSe back into h_se at the survivor positions.
+        if (nb >= 2 && !surv.empty()) {
+            const double s =
+                static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));
+            const bool all_survive = (surv.size() == n_eligible) &&
+                                     (n_eligible == B);
+            if (all_survive) {
+                // VERBATIM full-chunk SE (the ALL-mode bit-identical path).
+                DeviceBuffer<double> dWmat(B * static_cast<std::size_t>(nb) *
+                                           static_cast<std::size_t>(nl));
+                launch_qpadm_loo_models_batched(dLoo.data(), dQinv.data(), nl, nr, r_fit,
+                                                opts.fudge, opts.als_iterations, nb,
+                                                static_cast<int>(B), s, dWmat.data(),
+                                                stream_.get());
+                launch_qpadm_se_from_wmat_batched(dWmat.data(), nl, nb,
+                                                  static_cast<int>(B), dSe.data(),
+                                                  stream_.get());
+                d2h(h_se.data(), dSe, B * nl);
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            } else {
+                // COMPACTED survivor SE: gather per-survivor dLoo (m*nb) + dQinv (m*m)
+                // slices into dense arenas (ascending survivor order ⇒ a survivor's
+                // slice is bit-identical to its full-arena slice), run the SAME kernels
+                // over n_models=Sn, D2H the compact dSe, scatter into h_se. The gather is
+                // ONE kernel (parity-neutral data movement), not a per-survivor D2D loop.
+                const std::size_t Sn = surv.size();
+                std::vector<int> h_surv(Sn);
+                for (std::size_t k = 0; k < Sn; ++k)
+                    h_surv[k] = static_cast<int>(surv[k]);
+                DeviceBuffer<int> dSurv(Sn);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), h_surv.data(),
+                                                  Sn * sizeof(int), cudaMemcpyHostToDevice,
+                                                  stream_.get()));
+                DeviceBuffer<double> dLooS(Sn * M * static_cast<std::size_t>(nb));
+                DeviceBuffer<double> dQinvS(Sn * Mm);
+                launch_qpadm_gather_loo_qinv(dLoo.data(), dQinv.data(), dSurv.data(),
+                                             m, nb, static_cast<int>(Sn), dLooS.data(),
+                                             dQinvS.data(), stream_.get());
+                DeviceBuffer<double> dWmatS(Sn * static_cast<std::size_t>(nb) *
+                                            static_cast<std::size_t>(nl));
+                DeviceBuffer<double> dSeS(Sn * static_cast<std::size_t>(nl));
+                launch_qpadm_loo_models_batched(dLooS.data(), dQinvS.data(), nl, nr, r_fit,
+                                                opts.fudge, opts.als_iterations, nb,
+                                                static_cast<int>(Sn), s, dWmatS.data(),
+                                                stream_.get());
+                launch_qpadm_se_from_wmat_batched(dWmatS.data(), nl, nb,
+                                                  static_cast<int>(Sn), dSeS.data(),
+                                                  stream_.get());
+                std::vector<double> h_seS(Sn * nl);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_seS.data(), dSeS.data(),
+                                                  Sn * nl * sizeof(double),
+                                                  cudaMemcpyDeviceToHost, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+                for (std::size_t k = 0; k < Sn; ++k) {
+                    const std::size_t j = surv[k];
+                    for (int i = 0; i < nl; ++i)
+                        h_se[j * nl + i] = h_seS[k * nl + i];
+                }
+            }
+        }
 
         // ---- assemble QpAdmResult per model (host post-process; EXACTLY run_impl) --
         // Write POSITIONALLY into results[pos] where pos = the model's position in the
@@ -2314,6 +2420,7 @@ private:
             assemble_result(mdl, nl, nr, r_fit, rmax, tag,
                             h_info[j] != 0,           // potrf failed ⇒ NonSpd
                             h_status[j],
+                            se_computed[j] != 0,      // SE computed for this model?
                             h_weight.data() + j * nl, h_se.data() + j * nl, h_chisq[j],
                             h_rankchisq.data() + j * (rmax + 1),
                             h_popchisq.data() + j * (nl + 1),
@@ -2327,6 +2434,7 @@ private:
     /// popdrop pattern strings + feasibility). Same math the single-model path does.
     void assemble_result(const QpAdmModel& mdl, int nl, int nr, int r_fit, int rmax,
                          Precision::Kind tag, bool nonspd, int fit_status,
+                         bool se_computed,
                          const double* weight, const double* se, double chisq,
                          const double* rank_chisq, const double* pop_chisq,
                          const double* pop_wfull, QpAdmResult& res) {
@@ -2338,11 +2446,17 @@ private:
         if (fit_status != 0) { res.status = Status::RankDeficient; return; }
 
         res.weight.assign(weight, weight + nl);
-        res.se.assign(se, se + nl);
-        res.z.assign(static_cast<std::size_t>(nl), 0.0);
-        for (int i = 0; i < nl; ++i)
-            res.z[static_cast<std::size_t>(i)] =
-                (se[i] > 0.0) ? weight[i] / se[i] : 0.0;
+        // SE POLICY: fill se/z ONLY when the SE was computed for this model (the
+        // survivor set under the chosen JackknifePolicy). A non-survivor leaves se/z
+        // EMPTY — the sentinel for "not computed" (NEVER a fake 0/NaN). A survivor's
+        // se/z is bit-identical to ALL mode (the SE math/kernels are unchanged).
+        if (se_computed) {
+            res.se.assign(se, se + nl);
+            res.z.assign(static_cast<std::size_t>(nl), 0.0);
+            for (int i = 0; i < nl; ++i)
+                res.z[static_cast<std::size_t>(i)] =
+                    (se[i] > 0.0) ? weight[i] / se[i] : 0.0;
+        }
         res.chisq = chisq;
         res.p = core::internal::pchisq_upper(chisq, res.dof);
         res.rank_p.assign(static_cast<std::size_t>(r_fit) + 1, 0.0);

@@ -620,6 +620,218 @@ int main(int argc, char** argv) {
                     ok, G.models.size());
     }
 
+    // =====================================================================
+    // (F) THE OPT-IN JACKKNIFE-SE POLICY (the two-pass: point-estimate ALL → SE
+    // survivors only). REAL data only (the 84 real-AADR golden models over the real
+    // resident f2). Asserts: (1) ALL == golden_rot (the parity gate); (2) FEASIBLE-ONLY
+    // / NONE produce the IDENTICAL computed-SE (memcmp) on the models they DO compute,
+    // and correctly EMPTY-mark the rest; (3) the cheap point estimate (weights/p/f4rank
+    // /feasible) is memcmp-identical across all three modes; (4) the survivor count ==
+    // the feasible count. Then measures the REAL wall-time + feasible fraction + the
+    // SE-vs-point cost split (the speedup scales with the infeasible majority).
+    // =====================================================================
+    if (gpu_count >= 1) {
+        std::printf("\n-- (F) OPT-IN JACKKNIFE-SE POLICY (two-pass, REAL 84-model rotation) --\n");
+        steppe::F2BlockTensor up = f2; up.vpair.assign(f2.f2.size(), 0.0);
+
+        auto run_mode = [&](steppe::JackknifePolicy pol, double& ms_out) {
+            steppe::DeviceConfig cfg; cfg.devices = {0};
+            steppe::device::Resources res = steppe::device::build_resources(cfg);
+            steppe::device::DeviceF2Blocks dev =
+                steppe::device::upload_f2_blocks_to_device(up, 0);
+            steppe::QpAdmOptions o = opts; o.jackknife = pol;
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<steppe::QpAdmResult> r =
+                steppe::run_qpadm_search(dev, std::span<const steppe::QpAdmModel>(models),
+                                         o, res);
+            const auto t1 = std::chrono::steady_clock::now();
+            ms_out = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            return r;
+        };
+
+        double ms_all = 0.0, ms_feas = 0.0, ms_none = 0.0;
+        const std::vector<steppe::QpAdmResult> R_all  = run_mode(steppe::JackknifePolicy::All, ms_all);
+        const std::vector<steppe::QpAdmResult> R_feas = run_mode(steppe::JackknifePolicy::FeasibleOnly, ms_feas);
+        const std::vector<steppe::QpAdmResult> R_none = run_mode(steppe::JackknifePolicy::None, ms_none);
+
+        check_eq_int("policy: All result count",  static_cast<int>(R_all.size()),  static_cast<int>(models.size()));
+        check_eq_int("policy: Feas result count", static_cast<int>(R_feas.size()), static_cast<int>(models.size()));
+        check_eq_int("policy: None result count", static_cast<int>(R_none.size()), static_cast<int>(models.size()));
+
+        // (F.1) ALL == golden_rot weights (the parity gate; explicit All policy).
+        int all_w_fail = 0;
+        for (std::size_t i = 0; i < models.size() && i < R_all.size(); ++i) {
+            if (R_all[i].status != steppe::Status::Ok) continue;
+            for (std::size_t k = 0; k < G.models[i].weight.size() && k < R_all[i].weight.size(); ++k) {
+                const double want = G.models[i].weight[k], got = R_all[i].weight[k];
+                if (std::fabs(got - want) > 1e-5 * std::fabs(want) + 1e-5) ++all_w_fail;
+            }
+        }
+        check_eq_int("policy: ALL mode weights == golden_rot", all_w_fail, 0);
+
+        // (F.2) the cheap point estimate is BIT-IDENTICAL across all three modes
+        // (weights/p/chisq/f4rank/feasible) — only se/z differ. memcmp the doubles.
+        int point_diff = 0, computed_se_diff = 0, none_has_se = 0, feas_nonsurv_has_se = 0;
+        std::size_t feas_survivors = 0, golden_feasible = 0;
+        for (std::size_t i = 0; i < models.size(); ++i) {
+            const auto& a = R_all[i]; const auto& fe = R_feas[i]; const auto& no = R_none[i];
+            // point estimate identical (All vs Feas vs None).
+            auto same_point = [](const steppe::QpAdmResult& x, const steppe::QpAdmResult& y) {
+                if (x.status != y.status || x.f4rank != y.f4rank ||
+                    x.weight.size() != y.weight.size() ||
+                    x.popdrop_feasible.size() != y.popdrop_feasible.size()) return false;
+                if (std::memcmp(&x.p, &y.p, sizeof(double)) != 0) return false;
+                if (std::memcmp(&x.chisq, &y.chisq, sizeof(double)) != 0) return false;
+                for (std::size_t k = 0; k < x.weight.size(); ++k)
+                    if (std::memcmp(&x.weight[k], &y.weight[k], sizeof(double)) != 0) return false;
+                for (std::size_t k = 0; k < x.popdrop_feasible.size(); ++k)
+                    if (x.popdrop_feasible[k] != y.popdrop_feasible[k]) return false;
+                return true;
+            };
+            if (!same_point(a, fe)) ++point_diff;
+            if (!same_point(a, no)) ++point_diff;
+
+            // NONE: se/z MUST be empty for every model.
+            if (!no.se.empty() || !no.z.empty()) ++none_has_se;
+
+            // the golden's feasible decision == the steppe popdrop[0] feasibility (the
+            // criterion source); count both for the survivor==feasible assertion.
+            const bool feas = !a.popdrop_feasible.empty() && a.popdrop_feasible.at(0) != 0;
+            if (feas) ++golden_feasible;
+
+            // FEASIBLE-ONLY: a feasible Ok model is a survivor (has se); an infeasible
+            // Ok model has empty se. Survivors' se MUST be bit-identical to ALL mode.
+            const bool ok = a.status == steppe::Status::Ok;
+            if (!fe.se.empty()) {
+                ++feas_survivors;
+                if (!feas) ++feas_nonsurv_has_se;  // infeasible should NOT have se
+                // computed-SE bit-identical to ALL mode.
+                if (a.se.size() != fe.se.size()) ++computed_se_diff;
+                for (std::size_t k = 0; k < fe.se.size() && k < a.se.size(); ++k) {
+                    if (std::memcmp(&a.se[k], &fe.se[k], sizeof(double)) != 0) ++computed_se_diff;
+                    if (std::memcmp(&a.z[k],  &fe.z[k],  sizeof(double)) != 0) ++computed_se_diff;
+                }
+            } else if (ok && feas) {
+                ++feas_nonsurv_has_se;  // a feasible Ok model MUST be a survivor
+            }
+        }
+        check_eq_int("policy: point estimate identical across modes", point_diff, 0);
+        check_eq_int("policy: NONE has no se/z (all empty)", none_has_se, 0);
+        check_eq_int("policy: FEASIBLE-ONLY survivors' se/z == ALL (bit-identical)", computed_se_diff, 0);
+        check_eq_int("policy: FEASIBLE-ONLY survivor==feasible (no mismatch)", feas_nonsurv_has_se, 0);
+        check_true("policy: FEASIBLE-ONLY survivor count == feasible count",
+                   feas_survivors == golden_feasible);
+
+        // also: ALL mode has se on every Ok model (the today-behavior pin).
+        int all_missing_se = 0;
+        for (std::size_t i = 0; i < models.size(); ++i)
+            if (R_all[i].status == steppe::Status::Ok && R_all[i].se.empty()) ++all_missing_se;
+        check_eq_int("policy: ALL mode computes se for every Ok model", all_missing_se, 0);
+
+        // (F.3) THE REAL SPEEDUP + the feasible fraction + the SE/point cost split.
+        const double feas_frac = models.empty() ? 0.0
+            : static_cast<double>(feas_survivors) / static_cast<double>(models.size());
+        std::printf("  [REAL] 84-model rotation wall-time (single-GPU, batched two-pass):\n");
+        std::printf("         ALL          = %7.1f ms  (%.0f models/sec)\n",
+                    ms_all,  models.size() / (ms_all  / 1000.0));
+        std::printf("         FEASIBLE-ONLY= %7.1f ms  (%.0f models/sec)  speedup vs ALL = %.2fx\n",
+                    ms_feas, models.size() / (ms_feas / 1000.0), ms_all / ms_feas);
+        std::printf("         NONE         = %7.1f ms  (%.0f models/sec)  speedup vs ALL = %.2fx\n",
+                    ms_none, models.size() / (ms_none / 1000.0), ms_all / ms_none);
+        std::printf("  [REAL] feasible fraction (SE survivors) = %zu/%zu = %.3f\n",
+                    feas_survivors, models.size(), feas_frac);
+        const double se_cost = ms_all - ms_none;   // total SE wall (ALL minus point-only)
+        const double se_frac = (ms_all > 0.0) ? (se_cost / ms_all) : 0.0;
+        std::printf("  [REAL] cost split: point-estimate floor = %.1f ms (NONE); "
+                    "SE adds %.1f ms = %.1f%% of the ALL wall\n",
+                    ms_none, se_cost, 100.0 * se_frac);
+
+        // (F.4) THE LEVER AT SCALE — REAL models over the REAL resident f2. The 84-model
+        // set is too small for the gather/compaction to amortize (SE is only a fraction of
+        // its wall); the win scales with the model count (the LOO SE grows linearly with N
+        // while the per-chunk filter overhead is fixed). Enumerate MANY k-subsets of the
+        // REAL 8-pop source pool (indices 1..8 in pop_order) over the SAME real f2 — these
+        // are REAL models over REAL f2 (NO synthetic f2, NO synthetic models), repeated to
+        // reach a production-scale N. The feasible fraction is REAL (data-determined).
+        {
+            std::vector<int> pool; for (int i = 1; i <= 8; ++i) pool.push_back(i);
+            std::vector<steppe::QpAdmModel> big;
+            auto add_subsets = [&](int ksz) {
+                const int nP = static_cast<int>(pool.size());
+                std::vector<int> idx(static_cast<std::size_t>(ksz));
+                for (int i = 0; i < ksz; ++i) idx[static_cast<std::size_t>(i)] = i;
+                while (true) {
+                    steppe::QpAdmModel mm; mm.target = target_idx; mm.right = right_idx;
+                    for (int i = 0; i < ksz; ++i)
+                        mm.left.push_back(pool[static_cast<std::size_t>(idx[static_cast<std::size_t>(i)])]);
+                    mm.model_index = static_cast<int>(big.size());
+                    big.push_back(std::move(mm));
+                    int i = ksz - 1;
+                    while (i >= 0 && idx[static_cast<std::size_t>(i)] == nP - ksz + i) --i;
+                    if (i < 0) break;
+                    ++idx[static_cast<std::size_t>(i)];
+                    for (int j = i + 1; j < ksz; ++j)
+                        idx[static_cast<std::size_t>(j)] = idx[static_cast<std::size_t>(j - 1)] + 1;
+                }
+            };
+            const int kRepeat = 30;  // (28+56)*30 = 2520 REAL models over the real f2
+            for (int rep = 0; rep < kRepeat; ++rep) { add_subsets(2); add_subsets(3); }
+
+            auto run_big = [&](steppe::JackknifePolicy pol, double& ms_out, std::size_t& surv_out) {
+                steppe::DeviceConfig cfg; cfg.devices = {0};
+                steppe::device::Resources res = steppe::device::build_resources(cfg);
+                steppe::device::DeviceF2Blocks dev =
+                    steppe::device::upload_f2_blocks_to_device(up, 0);
+                steppe::QpAdmOptions o = opts; o.jackknife = pol;
+                const auto t0 = std::chrono::steady_clock::now();
+                std::vector<steppe::QpAdmResult> r =
+                    steppe::run_qpadm_search(dev, std::span<const steppe::QpAdmModel>(big), o, res);
+                const auto t1 = std::chrono::steady_clock::now();
+                ms_out = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                surv_out = 0;
+                for (const auto& x : r) if (!x.se.empty()) ++surv_out;
+                return r;
+            };
+            double bms_all = 0, bms_feas = 0, bms_none = 0;
+            std::size_t bsa = 0, bsf = 0, bsn = 0;
+            const auto BR_all  = run_big(steppe::JackknifePolicy::All, bms_all, bsa);
+            const auto BR_feas = run_big(steppe::JackknifePolicy::FeasibleOnly, bms_feas, bsf);
+            (void)run_big(steppe::JackknifePolicy::None, bms_none, bsn);
+
+            // re-assert parity at scale: FEASIBLE-ONLY survivors' se bit-identical to ALL.
+            int scale_se_diff = 0;
+            for (std::size_t i = 0; i < BR_all.size(); ++i) {
+                if (BR_feas[i].se.empty()) continue;
+                if (BR_all[i].se.size() != BR_feas[i].se.size()) { ++scale_se_diff; continue; }
+                for (std::size_t k = 0; k < BR_feas[i].se.size(); ++k)
+                    if (std::memcmp(&BR_all[i].se[k], &BR_feas[i].se[k], sizeof(double)) != 0)
+                        ++scale_se_diff;
+            }
+            check_eq_int("policy@scale: FEASIBLE-ONLY survivors' se == ALL (bit-identical)",
+                         scale_se_diff, 0);
+            check_eq_int("policy@scale: NONE has no survivors", static_cast<int>(bsn), 0);
+
+            const double bfrac = big.empty() ? 0.0
+                : static_cast<double>(bsf) / static_cast<double>(big.size());
+            std::printf("  [REAL@scale] %zu REAL models over the REAL resident f2 "
+                        "(k-subsets of the 8-pop pool):\n", big.size());
+            std::printf("         ALL          = %7.1f ms  (%.0f models/sec)\n",
+                        bms_all,  big.size() / (bms_all  / 1000.0));
+            std::printf("         FEASIBLE-ONLY= %7.1f ms  (%.0f models/sec)  speedup vs ALL = %.2fx\n",
+                        bms_feas, big.size() / (bms_feas / 1000.0), bms_all / bms_feas);
+            std::printf("         NONE         = %7.1f ms  (%.0f models/sec)  speedup vs ALL = %.2fx\n",
+                        bms_none, big.size() / (bms_none / 1000.0), bms_all / bms_none);
+            std::printf("  [REAL@scale] feasible fraction (SE survivors) = %zu/%zu = %.3f; "
+                        "SE = %.1f%% of the ALL wall\n",
+                        bsf, big.size(), bfrac,
+                        bms_all > 0 ? 100.0 * (bms_all - bms_none) / bms_all : 0.0);
+        }
+
+        if (g_failures == 0)
+            std::printf("  [PASS] opt-in SE policy: ALL==golden, Feasible-only/None parity-correct, "
+                        "real speedup measured\n");
+    }
+
     std::printf("\n=== RESULT: %s (%d failures) ===\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
