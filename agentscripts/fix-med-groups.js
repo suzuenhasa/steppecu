@@ -107,6 +107,14 @@ for (const G of GROUPS) {
     taskReports.push(t.task + ': ' + (tr ? String(tr).slice(0, 400) : 'fixer died'))
   }
 
+  // 2b) BUILD-REPAIR: reach a CLEAN Release build BEFORE the verdict, so a trivial
+  // -Werror (unused param/var from a helper extraction — the class that twice nuked
+  // group 7) gets patched in place instead of reverting the whole group's good diff.
+  await tryAgent([
+    'You are the BUILD-REPAIR step for GROUP ' + G.g + ' of steppe. The per-task fixers accumulated edits on the working tree (do NOT clean, do NOT revert). Your ONLY job: reach a CLEAN Release build (warnings-as-errors), patching TRIVIAL warnings in place.', STD, '',
+    'DO: rsync (' + RSYNC + ') then build (' + BUILD + '). If the build FAILS on a TRIVIAL warning-as-error — especially `-Werror=unused-parameter` / `-Werror=unused-variable` from a NEWLY EXTRACTED helper/template whose param is only used inside a STEPPE_ASSERT (compiled out on NDEBUG) or is captured-by-lambda-elsewhere/forwarded-only — FIX IT MINIMALLY: mark the dead param `[[maybe_unused]]`, or drop it if it is genuinely unneeded (e.g. a forwarded `resources` the worker lambdas already capture). Re-rsync + rebuild. LOOP up to 4 times until the Release build is clean. Do NOT change any fix LOGIC, do NOT revert the group, do NOT touch out-of-scope code — ONLY silence trivial unused warnings the extraction introduced. If the build fails for a NON-trivial reason (a real type/logic error), STOP and report it (do not paper over it). Report: the final build status + every trivial patch you applied.',
+  ].join('\n'), { label: 'repair:g' + G.g, phase: title })
+
   // 3) group verdict: build + both gates + commit/revert
   const verdict = await tryAgent([
     'You are the INDEPENDENT VERDICT for GROUP ' + G.g + ' (' + G.name + ') MED fixes of steppe (you did NOT write them — be adversarial). The per-task fixers reported:\n<<<\n' + taskReports.join('\n---\n') + '\n>>>', STD, '',
