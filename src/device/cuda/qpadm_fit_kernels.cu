@@ -254,25 +254,28 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
-    // B2(a,k): a=i*r+p, k=ii*nr+j ; (i==ii)?B[p,j]:0.
-    auto B2 = [&](int a, int k) -> double {
-        const int i = a / r, p = a % r;
+    // B2(a,k): a=i*r+p, k=ii*nr+j ; (i==ii)?B[p,j]:0. The outer-index split (i=a/r,p=a%r)
+    // is loop-invariant across the inner kc/k loops, so the caller hoists it once per `a`
+    // and passes (i,p); only the genuinely per-element inner decode (ii=k/nr,j=k%nr) stays.
+    auto B2 = [&](int i, int p, int k) -> double {
         const int ii = k / nr, j = k % nr;
         return (i == ii) ? B[p + r * j] : 0.0;
     };
     double Wm[MAXM * MAXT];  // m×t
     for (int kr = 0; kr < m; ++kr)
         for (int a = 0; a < t; ++a) {
+            const int i = a / r, p = a % r;
             double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(a, kc);
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(i, p, kc);
             Wm[kr + m * a] = acc;
         }
     double coeffs[MAXT * MAXT];
     double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
+        const int i = a / r, p = a % r;
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += B2(a, k) * Wm[k + m * c];
+            for (int k = 0; k < m; ++k) acc += B2(i, p, k) * Wm[k + m * c];
             coeffs[a + t * c] = acc;
         }
         double rr = 0.0;
@@ -305,25 +308,29 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
-    // A2(k,c): k=i*nr+j, c=p*nr+jc ; (j==jc)?A[i,p]:0.
-    auto A2f = [&](int k, int c) -> double {
+    // A2(k,c): k=i*nr+j, c=p*nr+jc ; (j==jc)?A[i,p]:0. The COLUMN-index split (p=c/nr,jc=c%nr)
+    // is loop-invariant across the inner kc/k loops, so the caller hoists it once per outer
+    // iteration and passes (p,jc); the first-arg decode (i=k/nr,j=k%nr) is genuinely
+    // per-element and stays.
+    auto A2f = [&](int k, int p, int jc) -> double {
         const int i = k / nr, j = k % nr;
-        const int p = c / nr, jc = c % nr;
         return (j == jc) ? A[i + nl * p] : 0.0;
     };
     double Wm[MAXM * MAXT];
     for (int kr = 0; kr < m; ++kr)
         for (int c = 0; c < t; ++c) {
+            const int p = c / nr, jc = c % nr;
             double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, c);
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, p, jc);
             Wm[kr + m * c] = acc;
         }
     double coeffs[MAXT * MAXT];
     double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
+        const int pa = a / nr, jca = a % nr;
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += A2f(k, a) * Wm[k + m * c];
+            for (int k = 0; k < m; ++k) acc += A2f(k, pa, jca) * Wm[k + m * c];
             coeffs[a + t * c] = acc;
         }
         double rr = 0.0;
@@ -649,21 +656,24 @@ __device__ inline void dev_opt_A_large(const double* B, const double* xmat,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
-    auto B2 = [&](int a, int k) -> double {
-        const int i = a / r, p = a % r;
+    // B2(a,k): outer-index split (i=a/r,p=a%r) hoisted once per `a` (loop-invariant across
+    // the inner kc/k loops); inner decode (ii=k/nr,j=k%nr) is per-element. See dev_opt_A.
+    auto B2 = [&](int i, int p, int k) -> double {
         const int ii = k / nr, j = k % nr;
         return (i == ii) ? B[p + r * j] : 0.0;
     };
     for (int kr = 0; kr < m; ++kr)
         for (int a = 0; a < t; ++a) {
+            const int i = a / r, p = a % r;
             double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(a, kc);
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(i, p, kc);
             Wm[kr + m * a] = acc;
         }
     for (int a = 0; a < t; ++a) {
+        const int i = a / r, p = a % r;
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += B2(a, k) * Wm[k + m * c];
+            for (int k = 0; k < m; ++k) acc += B2(i, p, k) * Wm[k + m * c];
             coeffs[a + t * c] = acc;
         }
         double rr = 0.0;
@@ -694,21 +704,25 @@ __device__ inline void dev_opt_B_large(const double* A, const double* xmat,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
-    auto A2f = [&](int k, int c) -> double {
+    // A2(k,c): column-index split (p=c/nr,jc=c%nr) hoisted once per outer iteration
+    // (loop-invariant across the inner kc/k loops); first-arg decode (i=k/nr,j=k%nr) is
+    // per-element. See dev_opt_B.
+    auto A2f = [&](int k, int p, int jc) -> double {
         const int i = k / nr, j = k % nr;
-        const int p = c / nr, jc = c % nr;
         return (j == jc) ? A[i + nl * p] : 0.0;
     };
     for (int kr = 0; kr < m; ++kr)
         for (int c = 0; c < t; ++c) {
+            const int p = c / nr, jc = c % nr;
             double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, c);
+            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, p, jc);
             Wm[kr + m * c] = acc;
         }
     for (int a = 0; a < t; ++a) {
+        const int pa = a / nr, jca = a % nr;
         for (int c = 0; c < t; ++c) {
             double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += A2f(k, a) * Wm[k + m * c];
+            for (int k = 0; k < m; ++k) acc += A2f(k, pa, jca) * Wm[k + m * c];
             coeffs[a + t * c] = acc;
         }
         double rr = 0.0;

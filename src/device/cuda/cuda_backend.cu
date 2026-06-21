@@ -1876,8 +1876,13 @@ public:
         DeviceBuffer<double> dA(cap > 0 ? cap : 1);
         DeviceBuffer<double> dB(cap > 0 ? cap : 1);
         DeviceBuffer<double> dW(static_cast<std::size_t>(nl > 0 ? nl : 1));
-        DeviceBuffer<double> dchisq(1);
-        DeviceBuffer<int> dStatus(1);
+        // One chisq/status slot PER rank (slot r ← the rank-r fit). Lets the rmax+1
+        // fits enqueue back-to-back on stream_ and the host pay ONE D2H after the
+        // loop, instead of a per-rank D2H+sync ladder (each launch→sync→launch
+        // stall blocked rank r+1's seed on rank r's tiny D2H draining). dW stays
+        // size nl — it is overwritten and never read back in the sweep.
+        DeviceBuffer<double> dchisq(static_cast<std::size_t>(rmax) + 1);
+        DeviceBuffer<int> dStatus(static_cast<std::size_t>(rmax) + 1);
         // LARGE-path VRAM scratch (sized for the widest rank rmax; reused every r).
         // Allocated even on the small path (size 1) — trivial and keeps the code one
         // shape; the large branch is the only consumer.
@@ -1909,26 +1914,35 @@ public:
                                      opts.als_iterations, dA.data(), dB.data(), stream_.get());
                 }
                 launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                           nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
+                                           nl, nr, r, dW.data(),
+                                           dchisq.data() + r, dStatus.data() + r,
                                            stream_.get());
             } else {  // LARGE path (cuSOLVER SVD seed + VRAM-scratch ALS + weight/chisq).
                 large_fit_one(dXmat.data(), dQinv.data(), nl, nr, r, opts.fudge,
                               opts.als_iterations, dA.data(), dB.data(), dW.data(),
-                              dchisq.data(), dStatus.data(), dVout.data(), dXt.data(),
+                              dchisq.data() + r, dStatus.data() + r, dVout.data(), dXt.data(),
                               dScratch.data(), dIntScratch.data(), stream_.get());
             }
-            int status_i = 0;
-            double chisq = 0.0;
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&status_i, dStatus.data(), sizeof(int),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-            if (status_i != 0) degenerate = true;
-            rs.chisq[static_cast<std::size_t>(r)] = chisq;
-            rs.dof[static_cast<std::size_t>(r)] = core::qpadm::qpadm_dof(nl, nr, r);
-            rs.p[static_cast<std::size_t>(r)] =
-                core::internal::pchisq_upper(chisq, rs.dof[static_cast<std::size_t>(r)]);
+            // NO per-rank D2H/sync — slot r is written; the host reads all slots once
+            // after the loop (below), so the fits stay back-to-back on stream_.
+        }
+        // ---- ONE D2H of both [rmax+1] arrays + one sync (same-stream issue order
+        //      guarantees every per-rank chisq/status write has completed) ----
+        std::vector<double> chisq_h(n);
+        std::vector<int> status_h(n);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(status_h.data(), dStatus.data(),
+                                          n * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(chisq_h.data(), dchisq.data(),
+                                          n * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        for (int r = 0; r <= rmax; ++r) {
+            const std::size_t rr = static_cast<std::size_t>(r);
+            if (status_h[rr] != 0) degenerate = true;
+            rs.chisq[rr] = chisq_h[rr];
+            rs.dof[rr] = core::qpadm::qpadm_dof(nl, nr, r);
+            rs.p[rr] = core::internal::pchisq_upper(chisq_h[rr], rs.dof[rr]);
         }
 
         // ---- AT2 res$rankdrop nested table (rows: rank rmax, rmax-1, ..., 0) ----
