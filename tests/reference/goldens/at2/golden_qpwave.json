@@ -1,0 +1,62 @@
+{
+  "schema": "steppe.golden.at2.qpwave/1",
+  "purpose": "F4 (fit-engine-finish-punchlist): acceptance oracle for the first-class run_qpwave entry — the standalone qpWave rank-sufficiency sweep with NO target argument (left[0] is the reference row). Validates run_qpwave's no-target-prepend / left[0]-is-reference semantic on BOTH backends (CpuBackend ORACLE + production CudaBackend, f2 RESIDENT) vs admixtools::qpwave(boot=FALSE). REAL AADR; REUSES the golden_fit0 9-pop f2 (fixtures/f2_fit0_9pop.bin) arranged as qpWave left/right splits — NO synthetic data, NO new fixture.",
+  "reproduction": {
+    "canonical_invocation": "qpwave(f2_dir, left=left, right=right, boot=FALSE, fudge=1e-4, cpp=TRUE) with set.seed(42); the f2 DIRECTORY-PATH form (the canonical bit-exact read, same caveat as golden_fit0.json). qpwave() takes NO target argument (admixtools qpwave reference): left[0] is the reference row.",
+    "script": "scripts/golden_qpwave_generate.R",
+    "f2_dir_on_box": "/workspace/data/aadr/f2_fit0_FINAL",
+    "fixture_reuse": "fixtures/f2_fit0_9pop.bin (the SAME REAL 9-pop f2 tensor golden_fit0/test_qpadm_domain use; pop index 0=England_BellBeaker 1=Czechia_EBA_CordedWare 2=Turkey_N 3=Mbuti 4=Israel_Natufian 5=Iran_GanjDareh_N 6=Han 7=Papuan 8=Karitiana)."
+  },
+  "metadata": {
+    "R": "R version 4.3.3 (2024-02-29)",
+    "admixtools": "2.0.10",
+    "right": ["Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"],
+    "blgsize": 0.05,
+    "maxmiss": 0,
+    "fudge": 0.0001,
+    "boot": false,
+    "seed": 42,
+    "alpha": 0.05,
+    "allsnps": true,
+    "dataset": "v66.p1_HO.aadr.patch.PUB",
+    "geno_sha256": "7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3",
+    "snp_sha256": "c0d565ee9e6a6edf30c2063430ee4f828e5db45f26d4747fd76f19eee650a5de",
+    "ind_sha256": "51f99bee3667b5c3a97b663cc12fd3e25486cf64049782657d99db347b65509e"
+  },
+  "models": {
+    "M1_3left_rank1": {
+      "description": "3-left qpWave: left[0]=England_BellBeaker is the reference, then CordedWare, Turkey_N (the qpadm target + 2 sources, now ALL left rows). Validates that run_qpwave's no-target path produces the SAME f4 matrix as qpadm's internal left=c(target,sources). est_rank=1 (the 3 left pops need 1 admixture wave; rank-1 model NOT rejected at alpha=0.05).",
+      "left": ["England_BellBeaker", "Czechia_EBA_CordedWare", "Turkey_N"],
+      "left_idx": [0, 1, 2],
+      "right_idx": [3, 4, 5, 6, 7, 8],
+      "est_rank": 1,
+      "f4rank": 1,
+      "rankdrop": {
+        "f4rank": [1, 0],
+        "dof": [4, 10],
+        "chisq": [4.63516296859645, 31.96976287960685],
+        "p": [0.326820092470997414, 0.000405109973855609],
+        "dofdiff": [6, "NA"],
+        "chisqdiff": [27.3345999110104, "NA"],
+        "p_nested": [0.000125328972063141, "NA"]
+      }
+    },
+    "M2_2left_clade_rank0": {
+      "description": "2-left qpWave CLADE test: left[0]=Czechia_EBA_CordedWare is the reference, then Turkey_N — the canonical qpWave question (are CordedWare and Turkey_N a clade vs the 6 rights?). The clade is REJECTED (p=7.24e-5 < 0.05) ⇒ est_rank=0 (all candidate ranks rejected ⇒ f4rank = rmax = 0). The ONLY candidate rank is r=0 ⇒ a single-row rankdrop (qpWave's distinguishing single-difference-row sweep).",
+      "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
+      "left_idx": [1, 2],
+      "right_idx": [3, 4, 5, 6, 7, 8],
+      "est_rank": 0,
+      "f4rank": 0,
+      "rankdrop": {
+        "f4rank": [0],
+        "dof": [5],
+        "chisq": [26.4681711115159],
+        "p": [7.23859084369902e-05],
+        "dofdiff": ["NA"],
+        "chisqdiff": ["NA"],
+        "p_nested": ["NA"]
+      }
+    }
+  }
+}

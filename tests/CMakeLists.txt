@@ -476,6 +476,29 @@ set_target_properties(test_qpadm_domain PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_domain
          COMMAND test_qpadm_domain "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# CUDA TU: the F4 standalone qpWave acceptance gate (fit-engine-finish-punchlist F4). The
+# first-class PUBLIC run_qpwave entry (include/steppe/qpadm.hpp; impl qpadm_fit.cpp
+# run_qpwave_impl) had ZERO direct test coverage — its distinguishing no-target-prepend /
+# left[0]-is-reference semantic was unvalidated. This calls run_qpwave DIRECTLY on BOTH the
+# CpuBackend ORACLE and the production CudaBackend (f2 RESIDENT in VRAM) and gates est_rank
+# / f4rank / the rankdrop table / chisq vs a pinned REAL AT2 qpwave() golden
+# (golden_qpwave.json, admixtools 2.0.10 / R 4.3.3, boot=FALSE).
+#
+# NO SYNTHETIC DATA: both qpWave models REUSE the committed REAL-AADR 9-pop f2 fixture
+# (fixtures/f2_fit0_9pop.bin) arranged as qpWave left/right splits over REAL pops (M1
+# 3-left est_rank=1; M2 2-left clade est_rank=0) — NO new fixture, NO made-up matrix. The
+# CpuBackend oracle block runs under STEPPE_THOROUGH=1 OR when no GPU is visible (the
+# CI-without-GPU gate); the CudaBackend deliverable block runs whenever a CUDA device is
+# visible (default FAST). Self-checking main() (exits non-zero on failure), so it does NOT
+# link gtest_main. Named .cu so it device-links steppe_device's RDC kernels and can
+# construct a real CudaBackend. fit-engine.md §4.1 (qpWave tier); fit-engine-finish-punchlist F4.
+add_executable(test_qpwave_parity reference/test_qpwave_parity.cu)
+target_link_libraries(test_qpwave_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpwave_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpwave_parity
+         COMMAND test_qpwave_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- M(fit-6) S8 model-search shard planner unit test (GPU-free) -----------------
 # Pure C++ TU (no CUDA, no GPU, no io, no data): drives
 # steppe::core::qpadm::plan_model_shards (the model->device shard plan) + the
