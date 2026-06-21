@@ -1,13 +1,38 @@
 # qpAdm FIT ENGINE — design + milestone build-order + first-milestone frozen contract
 
-**Status:** DESIGN (Phase 2, S3–S8). Nothing here is built. The S0–S2 precompute is BUILT through
-M5 on `main` and produces a device-resident `steppe::device::DeviceF2Blocks`
-(`src/device/device_f2_blocks.hpp`); this document designs the engine that consumes it.
+**Status:** BUILT (Phase 2, S3–S8 implemented + golden-gated ON THE GPU). The S0–S2 precompute is
+BUILT through M5 on `main` and produces a device-resident `steppe::device::DeviceF2Blocks`
+(`src/device/device_f2_blocks.hpp`); this document designs **and now describes** the engine that
+consumes it. The design body below is preserved as the architecture-of-record; the per-milestone
+**BUILT** annotations in the §2 milestone table and the `[AT2]`/`[SPEC]`/`[PROPOSAL]` provenance tags
+are the source of truth for what shipped versus what was a proposal.
+
+> **STATUS (as of `25c882a`, branch `phase2-fit-engine`).** The qpAdm/qpWave fit engine is **BUILT** —
+> **M(fit-0..6) complete**: AT2-golden scaffold, f4 + GLS weight fit, rank test / qpWave (`rankdrop` +
+> `popdrop`, both the `nr≤32` 9-pop path and the `nr=39` NRBIG large path via cuSOLVER `gesvd`),
+> block-jackknife SE + the opt-in `JackknifePolicy{None,FeasibleOnly,All}`, the CUDA backend, the
+> per-model domain `status` outcomes (`RankDeficient`/`NonSpdCovariance`), and the S8 model-space
+> **rotation** (`run_qpadm_search`, the device-batched `fit_models_batched`, multi-GPU shard). The GPU
+> path matches the REAL-AADR AT2 goldens (`tests/reference/goldens/at2/golden_fit0.json` 9-pop,
+> `golden_fit1_NRBIG.json` nr=39, `golden_rot.json` 84-model rotation; admixtools 2.0.10 / R 4.3.3 /
+> v66.p1_HO); the `CpuBackend` is the native oracle (run under `STEPPE_THOROUGH`). The big-refactor is
+> **complete** (`docs/cleanup/bigrefactor/`): bit-identical, wallclock unchanged, one consistent
+> precision policy (emulated-FP64 default + native fallback via the single `emulation_honorable`
+> predicate). **Multi-GPU rotation is DEFERRED** (`TODO(multigpu-host-bounce)`): on the consumer 5090s
+> the one-time `f2` replication is a ~8.72 GB / ~3.8 s HOST BOUNCE (no GeForce P2P) ⇒ only ~1.21× at
+> 9086 real models ⇒ **run the rotation single-GPU**; the payoff needs P2P hardware (RTX PRO 6000) or
+> per-device precompute. **NOT yet built** (the honest "what is left"): no CLI, no Python bindings, no
+> standalone f4/f3/D-stat/f4-ratio/qpDstat entry points (the f4 math is internal to the fit), no
+> qpfstats/DATES/qpGraph, and precompute M6 (multi-dataset merge) / M7 (on-disk cache) are pending —
+> see `docs/research/desirable-features-survey.md`. The verified build/test commands are in the
+> RUN-GUIDE (`ctest --test-dir build-rel -R qpadm`: `qpadm_parity` 0.86 s, `qpadm_rotation` 3.42 s;
+> `STEPPE_THOROUGH=1` adds the CpuBackend oracle + NRBIG full SE, ~56 s).
 
 **Scope.** The qpAdm/qpWave fit engine: stages S3 (f4 from f2) → S8 (model-space search), per
-`docs/architecture.md` §5. This is a contracts/architecture deliverable so the milestone build
-(Contracts → per-file Implement → Build → Verify) can start from a frozen first-milestone contract.
-No production code is written here.
+`docs/architecture.md` §5. This began as a contracts/architecture deliverable so the milestone build
+(Contracts → per-file Implement → Build → Verify) could start from a frozen first-milestone contract;
+that contract was frozen and **the production code has since been built** (see the STATUS banner above
+and the §2 milestone table). The design body is retained as the architecture-of-record.
 
 **Provenance tags used throughout.**
 - **[SPEC]** — mandated by `docs/architecture.md` (section cited).
@@ -381,7 +406,20 @@ backend invariant); native FP64 stays the default and the oracle/fallback.
 
 Each milestone is buildable as Contracts → per-file Implement → Build → Verify. Correctness before
 speed [SPEC §2]: the native-FP64 CPU oracle is built first and is the seam every GPU path is diffed
-against [SPEC §13, §18]. **Nothing below is built.**
+against [SPEC §13, §18].
+
+**ALL of M(fit-0..6) are BUILT as of `25c882a`** (branch `phase2-fit-engine`). The table rows below
+carry per-milestone annotations; the inline **BUILT** notes on M(fit-2), M(fit-3 SE-policy) and
+M(fit-6) record the GPU deliverable detail, but M(fit-0) (frozen contract + oracle scaffold), M(fit-1)
+(f4 + single GLS fit), M(fit-3) (jackknife SE), M(fit-4) (CUDA backend), and M(fit-5) (domain `status`
+outcomes) are likewise complete and golden-gated. The shipped code lives in `include/steppe/qpadm.hpp`
+and `src/core/qpadm/*` (`f4_matrix`, `jackknife`, `ranktest`, `gls_solve`, `nested_models`,
+`qpadm_fit`, `model_search`, `model_search_core`) with the device overrides in
+`src/device/cuda/cuda_backend.cu`; the GPU path is validated against the REAL-AADR AT2 goldens
+(`golden_fit0` / `golden_fit1_NRBIG` / `golden_rot`) by `tests/reference/test_qpadm_parity.cu` and
+`test_qpadm_rotation.cu`, with the `CpuBackend` native oracle as the under-`STEPPE_THOROUGH` diff
+localizer. **Multi-GPU rotation is the one deferral** (`TODO(multigpu-host-bounce)`, M(fit-6) row): run
+single-GPU on the consumer 5090s (no P2P → host-bounce-capped; no multi-GPU speedup claimed).
 
 | Milestone | Builds | Depends on | Acceptance gate |
 |---|---|---|---|

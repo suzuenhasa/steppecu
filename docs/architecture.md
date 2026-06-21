@@ -104,8 +104,10 @@ Pin everything; `third_party/CMakeLists.txt` is the single place `FetchContent_D
 ## 4. Repository layout
 
 ```text
-# Legend:  [BUILT] = exists as of M0 (the f2 vertical slice);  (planned, Mn/Pn) = future milestone/phase.
-steppe/                                  # repo root.  git: main = docs; branch m0-f2-scaffold = this slice.
+# Legend:  [BUILT] = exists at HEAD (the milestone tag in [] records when);  (planned, Mn/Pn) = future milestone/phase.
+# STATE: Phase-1 precompute (S0-S2) BUILT through M5; Phase-2 qpAdm FIT ENGINE (S3-S8) BUILT + golden-gated on the GPU
+#        through M(fit-6). Still planned: app/ CLI, Python bindings, standalone f3/f4/D-stat entry points, precompute M6/M7.
+steppe/                                  # repo root.  git: HEAD on branch phase2-fit-engine == main; fit engine BUILT.
 ├── CMakeLists.txt                       # [BUILT] top-level: options + add_subdirectory(include, src, tests)
 ├── CMakePresets.json                    # [BUILT] named configs (dev/release/ci); CMake >= 3.28 + Ninja
 ├── build_m0.sh                          # [BUILT] fallback direct-nvcc build of the equivalence test (sm_120)
@@ -123,9 +125,11 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │       ├── config.hpp                   # [BUILT] Precision{kind, mantissa_bits=40}, DeviceConfig, FilterConfig +
 │       │                                #   named constants (kCdivBlock, kRelFloor, kDefaultBlockSizeCm...) -- no magic numbers
 │       ├── error.hpp                    # [BUILT] Status enum (Ok/DeviceOom/RankDeficient/NonSpdCovariance/InvalidConfig)
-│       ├── fstats.hpp                   # [BUILT] public host F2BlockTensor (the opt-in .to_host() materialization);
-│       │                                #   f3/f4 entry points still planned (P2). Device-resident handle + tiering BUILT in src/device/.
-│       └── qpadm.hpp                    # (planned, P2) qpWave/qpAdm public API
+│       ├── fstats.hpp                   # [BUILT] public host F2BlockTensor (the opt-in .to_host() materialization).
+│       │                                #   Device-resident handle + tiering BUILT in src/device/. Standalone f3/f4/D-stat
+│       │                                #   entry points still planned (P2); the f4 math is currently INTERNAL to the fit (qpadm.hpp).
+│       └── qpadm.hpp                    # [BUILT, M(fit-0..6)] PUBLIC CUDA-free qpWave/qpAdm API: run_qpadm / run_qpwave /
+│                                        #   run_qpadm_search (+ QpAdmModel by-INDEX, QpAdmResult, JackknifePolicy). The fit-engine seam.
 │
 ├── src/
 │   ├── core/                            # steppe_core -- pure host C++ (NO CUDA, NO I/O)
@@ -140,10 +144,24 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │   │   └── block_partition_rule.hpp # [BUILT, M3/M4] host-pure SNP->block rule (+ .cpp): block_of + assign_blocks (per-chrom
 │   │   │                                #   reset, dense-renumber occupied bins, cM<->Morgan) + the inverse block_ranges
 │   │   │                                #   (per-block [begin,end), validated once; both backends call it); single source
-│   │   └── fstats/
-│   │       ├── f2_from_blocks.hpp/.cpp  # [BUILT] host orchestration: drives the f2 compute via the ComputeBackend seam
-│   │       ├── f4_matrix.cpp            # (planned, P2) f3/f4 contraction
-│   │       └── jackknife.cpp            # (planned, P2) block jackknife -> covariance/SEs
+│   │   ├── fstats/
+│   │   │   ├── f2_from_blocks.hpp/.cpp  # [BUILT] host orchestration: drives the f2 compute via the ComputeBackend seam
+│   │   │   ├── f2_combine.{hpp,cpp}     # [BUILT, M4.5] host-side fixed-order combine of per-device f2 partials (parity reduce)
+│   │   │   ├── f2_blocks_multigpu{,_core}.{hpp,cpp} # [BUILT, M4.5] multi-GPU precompute orchestration (tile sharding)
+│   │   │   └── f2_partials_validate.hpp # [BUILT, M4.5] per-device partial validation
+│   │   │       # NOTE: standalone f3/f4/D-stat contractions are still planned (P2); the qpAdm fit's
+│   │   │       #       f4 assembly is BUILT but lives under core/qpadm/ (f4_matrix.hpp), not here.
+│   │   └── qpadm/                       # [BUILT, M(fit-0..6)] the qpAdm FIT ENGINE (S3-S8), host-pure orchestration
+│   │       ├── qpadm_fit.{hpp,cpp}      # [BUILT, M(fit-1)] run_impl: drives S3 assemble_f4 -> S4 jackknife_cov -> S6 GLS
+│   │       │                            #   -> S7 chisq/p -> result assembly, all via the ComputeBackend seam
+│   │       ├── f4_matrix.hpp            # [BUILT, M(fit-1)] S3 f4-contraction driver (cancellation-sensitive, native FP64)
+│   │       ├── jackknife.hpp           # [BUILT, M(fit-1)/M(fit-3)] S4 block-jackknife -> covariance Q + LOO SE driver
+│   │       ├── gls_solve.hpp            # [BUILT, M(fit-1)] S6 constrained GLS (opt_A/opt_B ALS) weight-solve driver
+│   │       ├── ranktest.cpp            # [BUILT, M(fit-2)] S5 rank sweep / qpWave (rankdrop/popdrop), backend-agnostic
+│   │       ├── nested_models.cpp        # [BUILT, M(fit-2)] S7 nested chisq/dof/p + rank-decision f4rank
+│   │       ├── qpadm_bounds.hpp         # [BUILT, M(fit-2)] feasibility/bounds predicates on the fitted weights
+│   │       └── model_search{,_core}.{hpp,cpp} # [BUILT, M(fit-6)] S8 rotation: run_qpadm_search orchestrator +
+│   │                                    #   host-pure plan_model_shards (model->device tiling; G==1 fast path, G>=2 deferred)
 │   │
 │   ├── device/                          # steppe_device -- the backend layer (CUDA isolated here)
 │   │   ├── CMakeLists.txt               # [BUILT] steppe_device; CUDA PRIVATE; links CUDA::cublas
@@ -158,7 +176,11 @@ steppe/                                  # repo root.  git: main = docs; branch 
 │   │       ├── f2_block_kernel.cuh/.cu  # [BUILT] fused pre-pass (Q,V,Qsq,Hc) + 3-GEMM (fixed-slice Ozaki / native FP64)
 │   │       │                            #   + assemble_f2 kernel; all constants from config (no magic numbers)
 │   │       ├── decode_af_kernel.cuh/.cu # [BUILT, M1] 2-bit unpack + segmented reduction over individuals -> Q/V/N
-│   │       ├── cuda_backend.cu          # [BUILT] implements ComputeBackend on the GPU (decode_af + f2; DeviceBuffer + handle)
+│   │       ├── cuda_backend.cu          # [BUILT] implements ComputeBackend on the GPU (decode_af + f2; DeviceBuffer + handle).
+│   │       │                            #   [M(fit-4)/M(fit-6)] ALSO the fit overrides: assemble_f4 / jackknife_cov / rank_sweep
+│   │       │                            #   / gls_weights / fit_models_batched (the genuinely-batched S8 rotation path)
+│   │       ├── qpadm_fit_kernels.{cu,cuh} # [BUILT, M(fit-4)/M(fit-6)] the fit-engine device kernels: f4 gather, LOO/Q/Qinv,
+│   │       │                            #   model-batched rank-sweep+weights+chisq+popdrop, LOO-SE + deterministic variance reduce
 │   │       ├── device_f2_blocks.{cu,cuh/_impl} # [BUILT, M5] DeviceF2Blocks impl: resident f2/Vpair compute, opt-in to_host D2H,
 │   │       │                            #   no-peer upload_f2_blocks_to_device assembly transport (1f80c0c)
 │   │       └── block_sink.{cu,cuh}      # [BUILT, M5] streamed-tier sink: persistent pinned ring + background writer (176a07d)
@@ -216,12 +238,12 @@ The numerics define the layers. Each stage names its **owner** (where the orches
 | **S0 Format decode** | `io` (read, tiled) → `device` kernel | `ComputeBackend::decode` | packed `.bed` tile → dosage `[SNP_tile × sample]` | data-parallel over SNP rows; 2-bit unpack per warp (00→0,10→1,11→2,01→NA) | disk I/O / mem bandwidth |
 | **S1 Allele-freq reduction** | `device` (`decode_af_kernel.cu`) | in-kernel | dosages → `afmat`,`countmat` `[SNP_tile × pop]` | segmented reduction over samples within pop partition | mem bandwidth |
 | **S2 f2 + block accumulate** | `device/cuda/f2_block_kernel.cu`; assembled by `core/fstats/f2_from_blocks.cpp` | `ComputeBackend::accumulate_f2` | afs → device-resident `f2_blocks [n_pop × n_pop × n_block]` + per-block pairwise valid-SNP count `Vpair`, bias-corrected, via the **3-GEMM reformulation** below, batched over blocks | three batched **native-FP64** GEMMs + a fused elementwise pre-pass and a tiny native-FP64 cancellation step, reduction into block bins via the shared `block_partition_rule` | compute + bandwidth, **streamed, runs once**; returns a device-resident `DeviceF2Blocks` (output adaptively tiered when it exceeds VRAM, §11.1/§11.2) |
-| **S3 f3/f4 contraction** | `core/fstats/f4_matrix.cpp` (**orchestrates**; GEMM dispatched via `ComputeBackend::gemm`) | `ComputeBackend::gemm` | `f2_blocks` → f4 matrix `X [(n_L−1)·(n_R−1) × n_block]` | element-wise linear combos, batched over block axis | trivial / compute |
-| **S4 Block jackknife → Q** | `core/fstats/jackknife.cpp` (**orchestrates**) + `device/cuda/jackknife_kernel.cu` | `ComputeBackend::jackknife_cov` | per-block f4 → covariance `Q [m×m]`, SEs | fused kernel: total−block_b, center, then `Dsyrk` over centered replicates | compute |
-| **S5 Rank test (SVD)** | `core/qpadm/ranktest.cpp` (**orchestrates**) | `ComputeBackend::svd` | `X` → `U,S,V`, rank | batched small SVD when dims permit; per-model fallback otherwise (see note) | batched/per-model linalg |
-| **S6 qpAdm GLS fit** | `core/qpadm/gls_solve.cpp` (**orchestrates**) | `ComputeBackend::{potrf,trsm,gemm}` | `X,Q,A,B` → weights `w`, χ² | one weighted GLS solve per model (see note) | batched dense LA |
-| **S7 p-value / nested test** | `core/qpadm/nested_models.cpp` | host-only | χ², dof → p | embarrassingly parallel over models | trivial |
-| **S8 Model-space search** | `core/qpadm/` orchestration + `app` | reuses backend | resident `f2_blocks` across many models | massive task-parallel; feeds the fit engine | throughput / scheduling |
+| **S3 f3/f4 contraction** — **BUILT** (M(fit-1)) | `core/qpadm/f4_matrix.hpp` driver, orchestrated by `core/qpadm/qpadm_fit.cpp`; `CudaBackend::assemble_f4` override (`device/cuda/cuda_backend.cu` + `qpadm_fit_kernels.cu` gather kernels) | `ComputeBackend::assemble_f4` | `f2_blocks` → f4 matrix `X [(n_L−1)·(n_R−1) × n_block]` | element-wise linear combos, batched over block axis; the GPU path gathers from the **resident** f2 (zero D2H) | trivial / compute |
+| **S4 Block jackknife → Q** — **BUILT** (M(fit-1)/M(fit-3)) | `core/qpadm/jackknife.hpp` driver, orchestrated by `qpadm_fit.cpp`; `CudaBackend::jackknife_cov` override (`cuda_backend.cu` + `qpadm_fit_kernels.cu`) | `ComputeBackend::jackknife_cov` | per-block f4 → covariance `Q [m×m]`, SEs | LOO replicate refits batched over the block axis; covariance SYRK in `EmulatedFp64{40}` (S4 only) | compute |
+| **S5 Rank test (SVD)** — **BUILT** (M(fit-2)) | `core/qpadm/ranktest.cpp` (**orchestrates**, backend-agnostic); `CudaBackend::rank_sweep` override (`cuda_backend.cu`) | `ComputeBackend::rank_sweep` | `X` → rank sweep (`χ²`,`dof`,`p`) + AT2 `rankdrop`/`popdrop` tables | small-path on-device Jacobi (nl,nr≤32); cuSOLVER `gesvdj`/`gesvd` LARGE path for the `nr>32` tail (see note); `svd_path` reports the executed routine | batched/per-model linalg |
+| **S6 qpAdm GLS fit** — **BUILT** (M(fit-1)) | `core/qpadm/gls_solve.hpp` driver, orchestrated by `qpadm_fit.cpp`; `CudaBackend::gls_weights` override (`cuda_backend.cu` + `qpadm_fit_kernels.cu`) | `ComputeBackend::gls_weights` | `X,Q` → weights `w`, χ² | one constrained GLS (`opt_A`/`opt_B` ALS) solve per model (see note) | batched dense LA |
+| **S7 p-value / nested test** — **BUILT** (M(fit-2)) | `core/qpadm/nested_models.cpp` + `qpadm_fit.cpp` result assembly | host-only | χ², dof → p; rank-decision `f4rank` | embarrassingly parallel over models | trivial |
+| **S8 Model-space search** — **BUILT** (M(fit-6)) | `core/qpadm/model_search.{hpp,cpp}` + host-pure `model_search_core.{hpp,cpp}` (`run_qpadm_search`, `include/steppe/qpadm.hpp`); `CudaBackend::fit_models_batched` override (`cuda_backend.cu` + `qpadm_fit_kernels.cu`) | reuses backend (genuinely batched, NOT a per-model loop) | resident `f2_blocks` across many models | massive task-parallel; same-shape buckets dispatched batched (`batched_dispatch_count ≪ #models`); G≥2 shard deferred (run single-GPU, see note + §11.4) | throughput / scheduling |
 
 **Note on S2's 3-GEMM reformulation (the production hot path).** Per SNP block (`s` SNPs, `P = n_pop`), the fused pre-pass emits four dense `P×s` column-major matrices, where `p` is the per-pop *allele frequency* (not a dosage sum) and `N` is the per-pop *non-missing allele count* at that SNP (`2·#non-missing diploids` — alleles, not individuals; the AT2 bias-correction convention, pinned to a golden): `Q` (zero-filled allele frequencies — the zero is what makes the masked GEMM correct), `V` (validity mask, 1 valid / 0 missing), `Qsq = Q⊙Q`, and `Hc = Q⊙(1−Q)/max(N−1,1)⊙V` (per-SNP het bias correction). Stack `S = [Qsq ; Hc]` (`2P×s`). Three GEMMs then yield the reduced statistics — replacing the old "outer product over pop axis per SNP" with library dense LA:
 
@@ -240,7 +262,9 @@ Per SNP valid in both pops this is `(p_i−p_j)² − p_i(1−p_i)/(N_i−1) −
 
 **Note on S5 batched-SVD limits.** `gesvdjBatched` is practical only for small matrices (per NVIDIA's batched-Jacobi guidance, roughly `m,n ≤ 32`). qpAdm's rank-test matrix is `(n_L−1)×(n_R−1)`; with the "thousands of right configurations" this tool targets, **`n_R−1 > 32` is common**, which drops the model off the batched path. The contract is explicit: when either dimension exceeds the batched limit, S5 falls back to a **per-model `gesvd`** (or a QR-based rank estimate) issued in a loop over a small number of streams. This fallback is launch-bound (§11) — exactly the regime to watch on Nsight Systems — and the model-space scheduler (S8) must keep enough independent solves in flight to hide the per-launch latency. Tooling reports which path each run took.
 
-**Note on S6 GLS.** qpAdm's fit is a **single generalized-least-squares solve** given `Q`: Cholesky-factor `Q` (`potrf`), then solve the weighted normal equations for the admixture weights `w` and the residual χ². It is **not** an iterative sweep; any earlier "~20 sweeps" language was wrong and is removed. The only iteration in the vicinity is the *outer model-space search* (S8), which re-runs this one-shot solve per candidate model.
+**Note on S6 GLS.** qpAdm's fit is a **single generalized-least-squares solve** given `Q`: Cholesky-factor `Q` (`potrf`), then solve the weighted normal equations for the admixture weights `w` and the residual χ². It is **not** an iterative sweep; any earlier "~20 sweeps" language was wrong and is removed. The only iteration in the vicinity is the *outer model-space search* (S8), which re-runs this one-shot solve per candidate model. (Parity note: the as-built weight solve matches AT2's constrained `opt_A`/`opt_B` ALS, validated against the `qpadm()` golden.)
+
+**Note on the fit engine (S3–S8): BUILT and golden-gated on the GPU.** As of the M(fit-0..6) milestones (design `docs/design/fit-engine.md` milestone table; HEAD on `phase2-fit-engine` == `main`), the entire fit chain exists and the production CUDA-backend path is validated against **real-AADR AT2 goldens**: `tests/reference/goldens/at2/golden_fit0.json` (9-pop, `nr≤32` small path), `golden_fit1_NRBIG.json` (`nr=39` cuSOLVER `gesvd` LARGE path), and `golden_rot.json` (84-model rotation), all from admixtools 2.0.10 / R 4.3.3 / v66.p1_HO. The `CpuBackend` is the native-FP64 oracle the GPU is diffed against (run under `STEPPE_THOROUGH`). The orchestration lives in `core/qpadm/` (host-pure, layering-legal); the device overrides (`assemble_f4`/`jackknife_cov`/`rank_sweep`/`gls_weights`/`fit_models_batched`) live in `src/device/cuda/cuda_backend.cu` with kernels in `src/device/cuda/qpadm_fit_kernels.cu`. The public C++ entry points are `steppe::run_qpadm` / `steppe::run_qpwave` / `steppe::run_qpadm_search` in `include/steppe/qpadm.hpp` (a model references populations by **index** into the resident `f2_blocks` P axis — the GPU-first compute seam, no strings). Per-model domain failures (`RankDeficient`, `NonSpdCovariance`) are returned as `status` values, not crashes (M(fit-5)). The opt-in jackknife-SE policy (`JackknifePolicy{None,FeasibleOnly,All}`, default `All`) lets the rotation pay the expensive LOO SE only for the survivors worth reporting (M(fit-3 SE-policy)). **Multi-GPU caveat:** the S8 rotation is genuinely batched and shards across GPUs, but on the no-P2P consumer 5090s the one-time `f2` replication is a ~8.72 GB / ~3.8 s host bounce — only ~1.21× at 9086 real models — so **run the rotation single-GPU**; G≥2 is deferred (`TODO(multigpu-host-bounce)`, §11.4).
 
 The decisive consequences: keep `f2_blocks` and `Q` GPU-resident; stream and fuse S0–S2 so the full `[SNP × pop × pop]` array is never materialized; exploit `n_block` + model index as batch dimensions; and route every device primitive through `ComputeBackend` so the same orchestration code runs against `CpuBackend` for the reference seam. **BUILT (M5):** the S2 precompute now satisfies the "keep `f2_blocks` GPU-resident" corollary directly — it returns a device-resident `DeviceF2Blocks` handle (the result stays in VRAM for the downstream fit; host materialization is opt-in `.to_host()`), rather than the old forced host round-trip (~4.3× at `P=512`). When the output is itself larger than VRAM (thousands of pops) it falls back to the fastest tier it fits — host RAM, then disk — selected at runtime (§11.1, §11.2); at AT2-typical scale it stays resident.
 
