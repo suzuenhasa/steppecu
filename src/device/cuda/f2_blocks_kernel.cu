@@ -125,6 +125,24 @@ __global__ void gather_group_kernel(const double* __restrict__ Q_all,
 //   Rg slab is [2P × P] column-major (lda = 2P): top P rows Σp², bottom P Σhc:
 //     sumsq_i = Rg(i,   j)   sumsq_j = Rg(j,   i)
 //     hsum_i  = Rg(P+i, j)   hsum_j  = Rg(P+j, i)
+//
+// COALESCING (cleanup 20.1/MED — assemble-transpose, ACCEPTED COST): consecutive
+// warp lanes vary si (= row i, threadIdx.x), so the column-major reads `sumsq_i` /
+// `hsum_i` (column factor sj) are unit-stride / coalesced, while the TRANSPOSED
+// `sumsq_j` = Rg(j,i) / `hsum_j` = Rg(P+j,i) (column factor si) stride by twoP (=2P,
+// up to ~5000 doubles at P=2500) ⇒ uncoalesced. This transpose is MATHEMATICALLY
+// REQUIRED — symmetric f2 needs BOTH the i-row and the j-row column sums of the
+// [2P×P] Rg — so it is not a layout choice, and the per-element math/precision is
+// unchanged. It is accepted as a bandwidth cost rather than staged through shared
+// memory because: (1) it touches only the SMALL per-slab [2P×P] Rg (P ≤ ~2500), not
+// the SNP-scale [P×M] arenas the feeder/decode fixes target; (2) the M4 grouped path
+// is dominated by the three batched GEMMs (the spike cost center), not this
+// catastrophic-cancellation NATIVE-FP64 assemble; (3) the symmetric (i-row + j-row)
+// access would need TWO off-diagonal shared tiles plus block-diagonal bounds — real
+// complexity and a new bank-conflict surface for a bounded win off the critical path.
+// If the assemble ever profiles hot, stage the slab's needed Rg rows in a padded
+// shared tile (finding's other option). The feeder/decode 20.1 fixes are applied;
+// this one is the finding's documented-accepted-cost branch.
 // =============================================================================
 __global__ void assemble_blocks_group_kernel(const double* __restrict__ Gg,
                                             const double* __restrict__ Vpairg,
@@ -145,9 +163,10 @@ __global__ void assemble_blocks_group_kernel(const double* __restrict__ Gg,
 
     const size_t gSlab = Pp * Pp * static_cast<size_t>(k);          // [P×P] slab base
     const size_t rSlab = twoP * Pp * static_cast<size_t>(k);        // [2P×P] slab base
+    const size_t ppOff = si + sj * Pp;                             // (i,j) in the [P×P] slab (20.3/LOW hoist)
 
-    const double Gij = Gg[gSlab + si + sj * Pp];
-    const double vp = Vpairg[gSlab + si + sj * Pp];
+    const double Gij = Gg[gSlab + ppOff];
+    const double vp = Vpairg[gSlab + ppOff];
     const double sumsq_i = Rg[rSlab + si + sj * twoP];          // Rg(i,   j)
     const double sumsq_j = Rg[rSlab + sj + si * twoP];          // Rg(j,   i)
     const double hsum_i = Rg[rSlab + (Pp + si) + sj * twoP];    // Rg(P+i, j)
@@ -158,8 +177,8 @@ __global__ void assemble_blocks_group_kernel(const double* __restrict__ Gg,
 
     const int id = block_ids_in_group[k];
     const size_t dstSlab = Pp * Pp * static_cast<size_t>(id);   // resident [P×P×n_block] slab
-    f2_all[dstSlab + si + sj * Pp] = finalize_f2(num, vp);
-    vpair_all[dstSlab + si + sj * Pp] = vp;
+    f2_all[dstSlab + ppOff] = finalize_f2(num, vp);
+    vpair_all[dstSlab + ppOff] = vp;
 }
 
 }  // namespace

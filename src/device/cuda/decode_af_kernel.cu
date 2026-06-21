@@ -17,10 +17,27 @@
 // — reduced precision buys nothing and would break the bit-for-bit oracle match.
 // Q is exact because AC/AN are integer-accumulated and divided ONCE.
 //
-// COALESCING (architecture.md §11.3): threadIdx.x runs over the SNP axis, so
-// adjacent threads in a warp read adjacent bytes of the SAME individual record on
-// each step of the individual loop (byte index = s/kCodesPerByte) — coalesced reads on the
-// within-record SNP axis, as the brief requires.
+// COALESCING (architecture.md §11.3; cleanup 20.1/MED): threadIdx.x runs over the
+// SNP axis, so adjacent threads in a warp read adjacent bytes of the SAME individual
+// record on each step of the individual loop (byte index = s/kCodesPerByte) —
+// coalesced reads on the within-record SNP axis, as the brief requires. The OUTPUT
+// arena, however, is column-major [P×M] (unit-stride in the population i, NOT s), so
+// the naive per-thread store would be P-strided / uncoalesced. The kernel therefore
+// stages the finalized Q/V/N into a padded shared tile and re-emits them through a
+// thread remap whose consecutive lanes vary the population axis, turning the three
+// stores into coalesced population-contiguous bursts (see the kernel comment) — the
+// coalesced input reads are untouched.
+//
+// WITHIN-WARP READ REUSE (cleanup 20.3/MED — DEFERRED, profile-gated): with the SNP
+// axis on threadIdx.x, byte_in_record = s/kCodesPerByte takes only 8 distinct values
+// across a warp's 32 lanes ({0,0,0,0,1,1,1,1,…}), so each record byte is fetched by 4
+// consecutive lanes, and that 8-byte window is re-fetched every individual-loop step.
+// The reads are CONTIGUOUS so L1/L2 serves the duplicates — not a correctness or
+// coalescing bug, and this is the documented bandwidth-bound design (above). A warp
+// could instead cooperatively load the 8-byte window once and broadcast the 2-bit
+// extraction (shuffle/shared), but that adds a barrier/shuffle hazard surface and is
+// ONLY worth it if a profiler shows L1 is not already absorbing the duplicate fetch.
+// No such profile exists, so this is left as-is by design (cleanup task 20.3).
 //
 // This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It includes
 // the SHARED host/device decode primitive so the CPU oracle and this path cannot
@@ -54,6 +71,26 @@ namespace {
 /// folding it into AC (ref-allele copies) / AN (non-missing individuals) via the
 /// SHARED accumulate_genotype, then writing Q/V/N via the SHARED finalize.
 /// Column-major [P × M]: element (i,s) at i + P·s.
+///
+/// COALESCING (cleanup 20.1/MED — uncoalesced output stores):
+///   * INPUT reads: threadIdx.x rides the SNP axis s, so a warp's lanes read
+///     ADJACENT packed bytes of the same individual record (byte = s/kCodesPerByte)
+///     — coalesced, and load-bearing: the 32-wide x edge (kDecodeBlockX) is FORCED
+///     to stay on the SNP axis to keep these reads contiguous, so we cannot swap the
+///     thread→element map the way the (square-block) f2 feeder does. This is the
+///     dominant traffic (per-individual loop), kept exactly as before.
+///   * OUTPUT stores: the [P×M] arena is column-major ⇒ the unit-stride dimension is
+///     the population i, NOT s. With s on threadIdx.x the three Q/V/N stores were
+///     P-strided across a warp (a 32-way one-sector-per-lane scatter). FIX: stage
+///     each thread's finalized (q,v,n) into a shared tile keyed by (pop-local,
+///     snp-local), __syncthreads, then re-emit through a thread→element remap whose
+///     consecutive lanes vary the POPULATION (unit-stride) axis ⇒ coalesced
+///     population-contiguous bursts. The tile inner dim is padded +1 to break the
+///     32-bank stride on the transposed shared read (NVIDIA, "An Efficient Matrix
+///     Transpose in CUDA C/C++": pad the tile width so a column of data no longer
+///     maps to a single bank, eliminating the worst-case 32-way conflict). The
+///     finalized per-element math and the written global addresses are IDENTICAL —
+///     only the store ACCESS PATTERN changes (§12 parity unchanged).
 __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
                                  std::size_t bytes_per_record,
                                  const std::size_t* __restrict__ pop_offsets,
@@ -61,30 +98,61 @@ __global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
                                  double* __restrict__ Q,
                                  double* __restrict__ V,
                                  double* __restrict__ N) {
-    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;  // SNP
-    const int i = static_cast<int>(blockIdx.y) * blockDim.y + threadIdx.y;    // population
-    if (s >= M || i >= P) return;
+    // Shared staging tiles, one per output, padded +1 on the snp-local (inner) dim
+    // so the transposed store-phase read (consecutive lanes vary pop-local, the
+    // outer index) does not 32-bank-conflict (NVIDIA efficient-transpose recipe).
+    // [kDecodeBlockY = 8 pops] × [kDecodeBlockX = 32 SNPs] + pad.
+    __shared__ double tQ[kDecodeBlockY][kDecodeBlockX + 1];
+    __shared__ double tV[kDecodeBlockY][kDecodeBlockX + 1];
+    __shared__ double tN[kDecodeBlockY][kDecodeBlockX + 1];
 
-    const std::size_t seg_begin = pop_offsets[static_cast<std::size_t>(i)];
-    const std::size_t seg_end = pop_offsets[static_cast<std::size_t>(i) + 1];
-    const std::size_t byte_in_rec =
-        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
-    const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+    // Tile origin (column-major [P×M]): pops [pop0, pop0+8), SNPs [snp0, snp0+32).
+    const int pop0 = static_cast<int>(blockIdx.y) * blockDim.y;
+    const long snp0 = static_cast<long>(blockIdx.x) * blockDim.x;
 
-    std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
-    std::int64_t an = 0;  // count of non-missing individuals
-    for (std::size_t g = seg_begin; g < seg_end; ++g) {
-        const std::uint8_t byte = packed[g * bytes_per_record + byte_in_rec];
-        const std::uint8_t code = genotype_code(byte, pos_in_byte);
-        accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
+    // --- compute phase: SNP on threadIdx.x (coalesced packed-byte reads kept) -----
+    const long s = snp0 + threadIdx.x;        // SNP
+    const int i = pop0 + static_cast<int>(threadIdx.y);  // population
+    if (s < M && i < P) {
+        const std::size_t seg_begin = pop_offsets[static_cast<std::size_t>(i)];
+        const std::size_t seg_end = pop_offsets[static_cast<std::size_t>(i) + 1];
+        const std::size_t byte_in_rec =
+            static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+        const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+
+        std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
+        std::int64_t an = 0;  // count of non-missing individuals
+        for (std::size_t g = seg_begin; g < seg_end; ++g) {
+            const std::uint8_t byte = packed[g * bytes_per_record + byte_in_rec];
+            const std::uint8_t code = genotype_code(byte, pos_in_byte);
+            accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
+        }
+        const AfResult r = finalize_af(ac, an, ploidy);
+        tQ[threadIdx.y][threadIdx.x] = r.q;
+        tV[threadIdx.y][threadIdx.x] = r.v;
+        tN[threadIdx.y][threadIdx.x] = r.n;
     }
 
-    const AfResult r = finalize_af(ac, an, ploidy);
-    const std::size_t off =
-        static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-    Q[off] = r.q;
-    V[off] = r.v;
-    N[off] = r.n;
+    __syncthreads();
+
+    // --- store phase: remap so consecutive lanes vary the POPULATION axis ---------
+    // Flat thread id; (pop-local p, snp-local q) with p = tid % blockDim.y so
+    // consecutive lanes increment p (the column-major unit-stride dim) ⇒ the global
+    // stores hit consecutive addresses i + P·s (coalesced pop-contiguous bursts).
+    const int bdx = static_cast<int>(blockDim.x);
+    const int bdy = static_cast<int>(blockDim.y);
+    const int tid = static_cast<int>(threadIdx.y) * bdx + static_cast<int>(threadIdx.x);
+    const int p = tid % bdy;                              // pop-local  (0..7)
+    const int q = tid / bdy;                              // snp-local  (0..31)
+    const int io = pop0 + p;                              // global population
+    const long so = snp0 + static_cast<long>(q);          // global SNP
+    if (io < P && so < M) {
+        const std::size_t off = static_cast<std::size_t>(io) +
+                                static_cast<std::size_t>(P) * static_cast<std::size_t>(so);
+        Q[off] = tQ[p][q];
+        V[off] = tV[p][q];
+        N[off] = tN[p][q];
+    }
 }
 
 }  // namespace

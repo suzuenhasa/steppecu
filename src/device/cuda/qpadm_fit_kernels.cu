@@ -451,6 +451,22 @@ __global__ void assemble_f4_gather_kernel(const double* __restrict__ f2, int P,
 // compute_loo_and_total (src/device/cpu/cpu_backend.cpp) in FP64 (the long-double accumulators
 // become FP64). The CpuBackend term1 = mean(tot_line - loo)*nb = (Σ (tot_line-loo)/nb)*nb
 // = Σ (tot_line - loo) exactly; reproduced as the bare sum.
+//
+// MEMORY ACCESS (cleanup 20.3/MED — re-reading just-written global cells):
+//   The loo cell dLoo[k+m*b] is a REQUIRED global output and nb (≤757) is far too
+//   large to cache the whole loo row in registers, so we cannot fully fuse. But the
+//   weighted-mean numerator/denominator (wln/wld) and the loo*bl term (wbn) do NOT
+//   depend on tot_line, so they are accumulated INCREMENTALLY in the loo loop from
+//   the freshly-computed loo value (no re-read) — collapsing the former separate
+//   tot_line pass into the loo pass. Only the diffsum term Σ(tot_line−loo) needs
+//   tot_line, so it alone stays a second pass that re-reads loo. Net: the three
+//   global touches of every loo cell drop to two (write + one re-read).
+//   §12 BIT-PARITY: the fused accumulators run the IDENTICAL ascending-b order and
+//   operand order as the old separate passes — wln += loo*w, wld += w, wbn += loo*bl
+//   with w = 1−bl/n = 1−rel (rel and 1−rel are the exact same FP64 values as before),
+//   and the deferred diffsum += tot_line−loo loop is byte-for-byte the old est pass —
+//   so the result is bit-identical (verified against the real-AADR goldens + the
+//   CpuBackend oracle under STEPPE_THOROUGH=1).
 __global__ void f4_loo_total_kernel(const double* __restrict__ dX,
                                     const int* __restrict__ d_block_sizes,
                                     int m, int nb, double n,
@@ -465,28 +481,28 @@ __global__ void f4_loo_total_kernel(const double* __restrict__ dX,
         num += dX[k + static_cast<long>(m) * b] *
                static_cast<double>(d_block_sizes[b]);
     const double tot_ij = num / n;
-    // loo[k,b] = (tot_ij - X*rel_b)/(1-rel_b).
+    // loo[k,b] = (tot_ij - X*rel_b)/(1-rel_b); fold in the tot_line weighted-mean
+    // (wln/wld) and the loo*bl term (wbn) from the just-computed loo (no re-read).
+    double wln = 0.0, wld = 0.0, wbn = 0.0;
     for (int b = 0; b < nb; ++b) {
         const double bl = static_cast<double>(d_block_sizes[b]);
         const double rel = bl / n;
         const double xv = dX[k + static_cast<long>(m) * b];
-        dLoo[k + static_cast<long>(m) * b] = (tot_ij - xv * rel) / (1.0 - rel);
-    }
-    // tot_line[k] = weighted.mean(loo[k,:], 1 - bl/n).
-    double wln = 0.0, wld = 0.0;
-    for (int b = 0; b < nb; ++b) {
-        const double w = 1.0 - static_cast<double>(d_block_sizes[b]) / n;
-        wln += dLoo[k + static_cast<long>(m) * b] * w;
+        const double loo = (tot_ij - xv * rel) / (1.0 - rel);
+        dLoo[k + static_cast<long>(m) * b] = loo;
+        const double w = 1.0 - rel;  // == 1 - bl/n (identical FP64), the tot_line weight
+        wln += loo * w;
         wld += w;
+        wbn += loo * bl;
     }
     const double tot_line = wln / wld;
     dTotLine[k] = tot_line;
-    // est[k] = Σ_b (tot_line - loo) + (Σ_b loo*bl)/n.
-    double diffsum = 0.0, wbn = 0.0;
+    // est[k] = Σ_b (tot_line - loo) + (Σ_b loo*bl)/n. The diffsum term needs tot_line
+    // (only now known), so it alone re-reads loo in this deferred pass.
+    double diffsum = 0.0;
     for (int b = 0; b < nb; ++b) {
         const double loo = dLoo[k + static_cast<long>(m) * b];
         diffsum += tot_line - loo;
-        wbn += loo * static_cast<double>(d_block_sizes[b]);
     }
     dTotal[k] = diffsum + wbn / n;
 }
@@ -1015,6 +1031,10 @@ __global__ void assemble_f4_gather_models_kernel(const double* __restrict__ f2, 
 }
 
 // --- S3 est_to_loo + x_total + tot_line (model-batched): one thread per (k, model) -
+// Same loo-pass fold as the single-model f4_loo_total_kernel (cleanup 20.3/MED):
+// wln/wld/wbn are accumulated from the just-computed loo so only diffsum re-reads loo
+// — three global touches per loo cell drop to two, IDENTICAL ascending-b/operand order
+// (§12 bit-parity, verified against the real-AADR goldens + STEPPE_THOROUGH oracle).
 __global__ void f4_loo_total_models_kernel(const double* __restrict__ dX,
                                            const int* __restrict__ d_block_sizes,
                                            int m, int nb, double n, int n_models,
@@ -1032,25 +1052,24 @@ __global__ void f4_loo_total_models_kernel(const double* __restrict__ dX,
             num += dX[base + k + static_cast<long>(m) * b] *
                    static_cast<double>(d_block_sizes[b]);
         const double tot_ij = num / n;
+        double wln = 0.0, wld = 0.0, wbn = 0.0;
         for (int b = 0; b < nb; ++b) {
             const double bl = static_cast<double>(d_block_sizes[b]);
             const double rel = bl / n;
             const double xv = dX[base + k + static_cast<long>(m) * b];
-            dLoo[base + k + static_cast<long>(m) * b] = (tot_ij - xv * rel) / (1.0 - rel);
-        }
-        double wln = 0.0, wld = 0.0;
-        for (int b = 0; b < nb; ++b) {
-            const double w = 1.0 - static_cast<double>(d_block_sizes[b]) / n;
-            wln += dLoo[base + k + static_cast<long>(m) * b] * w;
+            const double loo = (tot_ij - xv * rel) / (1.0 - rel);
+            dLoo[base + k + static_cast<long>(m) * b] = loo;
+            const double w = 1.0 - rel;  // == 1 - bl/n (identical FP64)
+            wln += loo * w;
             wld += w;
+            wbn += loo * bl;
         }
         const double tot_line = wln / wld;
         dTotLine[static_cast<long>(model) * m + k] = tot_line;
-        double diffsum = 0.0, wbn = 0.0;
+        double diffsum = 0.0;  // the only tot_line-dependent term ⇒ the lone re-read pass
         for (int b = 0; b < nb; ++b) {
             const double loo = dLoo[base + k + static_cast<long>(m) * b];
             diffsum += tot_line - loo;
-            wbn += loo * static_cast<double>(d_block_sizes[b]);
         }
         dTotal[static_cast<long>(model) * m + k] = diffsum + wbn / n;
     }
@@ -1123,6 +1142,27 @@ __global__ void fill_identity_batched_kernel(double* __restrict__ dI, int m,
 // Combined with dev_als_weights' SMALL-bound scratch this stays inside the per-thread
 // frame the loo_batched_kernel already proved launchable. The host bucketer enforces
 // the envelope.
+//
+// COALESCING (cleanup 20.1/MED — model-major strided access, ACCEPTED BY DESIGN):
+// `model = blockIdx.x*blockDim.x + threadIdx.x`, so adjacent lanes own adjacent
+// MODELS, but every per-model arena is model-CONTIGUOUS (`total = dTotal + model*m`,
+// `qinv = dQinv + model*m*m`, outputs `d_weight[model*nl+i]`, `d_chisq[model]`,
+// `d_rank_chisq[model*(rmax+1)+rr]`, `d_pop_*[model*...]`), so consecutive lanes
+// stride by a full per-model slice (m / m·m / nl / (rmax+1) / (nl+1)) — strided, not
+// the consecutive-address coalesced pattern. This is the deliberate "one thread owns
+// one independent small problem, slices are model-contiguous" layout — the SAME shape
+// the proven loo_batched_kernel uses — and it is NOT a correctness bug (the per-model
+// math, op order, and single statistic stream are unchanged, §12). It is accepted as
+// a by-design cost rather than transposed because the only coalescing remedies are
+// STRUCTURAL, not local: a struct-of-arrays / element-major-across-models arena
+// (lane k reads dTotal[k*n_models+model]) would have to be matched in EVERY producer
+// (the model-batched feeder kernels above) AND consumer (the batched cuBLAS solves'
+// strides), and a cooperative block-per-model mapping is a full rewrite of this fit
+// kernel — both are cross-cutting layout/algorithm changes well beyond a local access
+// fix, and the finding tags them "optional perf". The SNP-scale feeder/decode 20.1
+// fixes (the dominant bandwidth) are applied; this large-arena-but-structural case is
+// the finding's documented-accepted-cost branch. If the S8 rotation ever profiles
+// this kernel as the wall, the SoA arena transpose is the indicated follow-up.
 __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
                                         const double* __restrict__ dQinv,
                                         const double* __restrict__ dLoo,
@@ -1230,6 +1270,15 @@ __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
 // SCALED weight vector (s = (nb-1)/sqrt(nb)) into dWmat[model*nb*nl + b*nl + i]. This
 // replaces the per-model serial nb-loop (the throughput wall) with B*nb parallel
 // threads. dQinv/dLoo are per-model slices. Native FP64. (st!=0 ⇒ zeros for that row.)
+//
+// COALESCING (cleanup 20.1/LOW — same accepted-by-design branch as
+// qpadm_fit_models_kernel): adjacent lanes own adjacent BLOCKS within a model
+// (`b = gid % nb`), so the xmat-from-loo read `loo[(j+nr*i) + m*b]` strides by m
+// between lanes and the `row[i]` store strides by nl — model/block-major, not
+// coalesced. Lower stakes than qpadm_fit_models_kernel (bounded by the SMALL bucket
+// m<=50) and the only remedy is the same STRUCTURAL block-minor arena relayout that
+// would ripple through every loo producer/consumer — out of scope for a local access
+// fix and tagged "optional" by the finding. Math/op-order unchanged (§12).
 __global__ void qpadm_loo_models_kernel(const double* __restrict__ dLoo,
                                         const double* __restrict__ dQinv,
                                         int nl, int nr, int r_fit, double fudge,

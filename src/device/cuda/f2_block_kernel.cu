@@ -98,6 +98,20 @@ namespace {
 // primitive so the per-element formula is identical to the CPU oracle.
 // All native FP64 (the feeder is bandwidth-bound; reduced precision buys nothing,
 // architecture.md §12).
+//
+// COALESCING (cleanup 20.1/MED — uncoalesced global access): the [P×M] arenas are
+// column-major, so the UNIT-STRIDE dimension is the population i, NOT the SNP s.
+// The grid keeps M on the only 2^31 axis (gridDim.x) per the X-7/B6 cap fix, so we
+// MUST NOT swap the grid. Instead we map threadIdx.x onto the population axis and
+// threadIdx.y onto the SNP axis within the (square, 16×16) block: the block tile
+// covers SNPs [bx·16, bx·16+16) × pops [by·16, by·16+16) exactly as before, but a
+// warp's consecutive lanes (threadIdx.x) now vary i, so the loads Q/V/N_raw[idx]
+// and the stores Q_masked/V_out/S[idx] land at CONSECUTIVE addresses i + P·s ⇒
+// coalesced 16-double bursts instead of the previous P-strided 32-way scatter.
+// This is per-element work (no inter-thread sharing), so the swap needs no shared
+// tile / __syncthreads — it is exactly the square-block degenerate of the
+// finding's tile-and-transpose, with identical per-element math, identical written
+// addresses, and the grid orientation (M on x) preserved (§12 parity unchanged).
 // =============================================================================
 __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
                                  const double* __restrict__ V_raw,
@@ -106,11 +120,13 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
                                  double* __restrict__ V_out,
                                  double* __restrict__ S,
                                  int P, long M) {
-    // SNP count M rides gridDim.x (the only 2^31 axis); P rides gridDim.y (≤ 65 535
-    // cap, P ≤ ~4266 ≪ that). This matches the safe decode-kernel orientation and
-    // fixes the latent grid.y launch failure at M > ~1.05M SNPs (cleanup X-7/B6).
-    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;  // SNP
-    const long i = static_cast<long>(blockIdx.y) * blockDim.y + threadIdx.y;  // population
+    // Population i on threadIdx.x (the [P×M] column-major UNIT-STRIDE axis ⇒
+    // coalesced); SNP s on threadIdx.y. The block tiles are still 16-wide on each
+    // axis, so gridDim.x (= cdiv(M,16)) keeps covering M and gridDim.y (= cdiv(P,16))
+    // covers P — the grid orientation (M on the only 2^31 axis) is unchanged
+    // (X-7/B6), only the in-block thread→element map is transposed (20.1/MED).
+    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.y;  // SNP
+    const long i = static_cast<long>(blockIdx.y) * blockDim.y + threadIdx.x;  // population
     if (i >= P || s >= M) return;
 
     const long Pl = static_cast<long>(P);
@@ -118,14 +134,19 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
     const long sidx = i + (2 * Pl) * s;     // (i,s) in the [2P × M] stacked S
 
     const bool valid = (V_raw[idx] != 0.0);
+    // Hoist the single raw-Q load (20.3/LOW): Q_raw[idx] feeds BOTH the masked q
+    // and the het correction below. With __restrict__ the compiler already CSEs to
+    // one LDG; this makes the single fetch explicit. Masking semantics are intact —
+    // het_correction re-derives its own validity from `valid`.
+    const double qraw = Q_raw[idx];
     // Zero-fill where invalid: Q²=0 and the cross term G(i,j) vanish there, which
     // is what makes the masked GEMM reproduce the pairwise-complete reference
     // (architecture.md §5 S2; views.hpp Q/V/N contract).
-    const double q = valid ? Q_raw[idx] : 0.0;
+    const double q = valid ? qraw : 0.0;
     // Shared per-element het correction (carries its own validity ⇒ 0 when
     // invalid). N is the non-missing HAPLOID count (Q/V/N contract); sample size
     // is per-SNP `N`, NEVER hardcoded (ROADMAP §4 — fixes the spike's /198.0).
-    const double hc = het_correction(Q_raw[idx], N_raw[idx], valid);
+    const double hc = het_correction(qraw, N_raw[idx], valid);
 
     Q_masked[idx] = q;
     V_out[idx] = valid ? 1.0 : 0.0;
@@ -147,6 +168,15 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
 //     hsum_i  = R(P+i, j)   hsum_j  = R(P+j, i)
 //   G, Vpair are [P × P]. `size_t` indexing is mandatory above P≈32k (ROADMAP §4)
 //   and free below it.
+//
+// COALESCING (cleanup 20.1/LOW — single-block analog of the f2_blocks assemble, same
+// ACCEPTED COST): lanes vary si (row i), so the own-orientation reads (column factor
+// sj) coalesce, while the MATHEMATICALLY-REQUIRED transposed sumsq_j=R(j,i) /
+// hsum_j=R(P+j,i) (column factor si) stride by twoP ⇒ uncoalesced. Same rationale as
+// assemble_blocks_group_kernel (f2_blocks_kernel.cu): the SMALL [2P×P] R buffer off
+// the GEMM-dominated critical path, native-FP64 catastrophic-cancellation assemble,
+// per-element math unchanged — accepted, not shared-tiled (the symmetric access would
+// need two off-diagonal tiles for a bounded off-critical-path win).
 // =============================================================================
 __global__ void assemble_f2_kernel(const double* __restrict__ G,
                                    const double* __restrict__ Vpair,
@@ -307,15 +337,18 @@ void engage_f2_precision(cublasHandle_t handle, const Precision& precision) {
 void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* dN_raw,
                       double* dQ_masked, double* dV_out, double* dS,
                       int P, long M, cudaStream_t stream) {
-    // 2-D block over (SNP, population); grid math from the one launch-config home
-    // (core/internal/launch_config.hpp cdiv / grid_for / kCdivBlock — replaces the
-    // spike's open-coded (n+b-1)/b, ROADMAP §4). ORIENTATION (cleanup X-7/B6): the
-    // SNP count M rides gridDim.x via the `cdiv(long,long)` overload — x is the only
-    // axis that reaches 2^31−1, so M (which `MatView::M`'s `long` type permits past
-    // 2^31, and which exceeds the 65 535 y/z cap already at M > ~1.05M SNPs) MUST
-    // ride it. P rides gridDim.y through `grid_for`, whose y/z-cap assert applies
-    // (P ≤ ~4266 ≪ 65 535, so it is always satisfied). This matches the safe decode
-    // launcher; the previous orientation put M on the capped y axis.
+    // 2-D block over (SNP-tile on gridDim.x, population-tile on gridDim.y); grid
+    // math from the one launch-config home (core/internal/launch_config.hpp cdiv /
+    // grid_for / kCdivBlock — replaces the spike's open-coded (n+b-1)/b, ROADMAP §4).
+    // ORIENTATION (cleanup X-7/B6): the SNP count M rides gridDim.x via the
+    // `cdiv(long,long)` overload — x is the only axis that reaches 2^31−1, so M
+    // (which `MatView::M`'s `long` type permits past 2^31, and which exceeds the
+    // 65 535 y/z cap already at M > ~1.05M SNPs) MUST ride it. P rides gridDim.y
+    // through `grid_for`, whose y/z-cap assert applies (P ≤ ~4266 ≪ 65 535, so it is
+    // always satisfied). The block is SQUARE (16×16), so the in-block thread→element
+    // map is transposed INSIDE the kernel (threadIdx.x→pop, threadIdx.y→SNP) for
+    // coalesced column-major access (cleanup 20.1/MED) WITHOUT moving M off gridDim.x
+    // — the grid orientation here is unchanged.
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::cdiv(M, static_cast<long>(steppe::kCdivBlock))),
                     static_cast<unsigned>(core::grid_for(P)));
