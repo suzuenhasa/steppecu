@@ -449,17 +449,21 @@ int main(int argc, char** argv) {
     fit0.target = "England_BellBeaker";
     fit0.left = {"Czechia_EBA_CordedWare", "Turkey_N"};
     fit0.right = {"Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"};
-    fit0.weight = {0.558906248861195, 0.441093751138805};
-    fit0.se = {0.225911861836373, 0.225911861836373};
-    fit0.z = {2.47400133980574, 1.95250372226266};
-    fit0.chisq = 4.63516296859645; fit0.dof = 4; fit0.p = 0.326820092470997;
+    // CORRECTED golden_fit0 fixture_f2_object_path (convertf-PA source; the prior
+    // 0.559/0.441 was AT2 2.0.10's silent misread of the raw v66 TGENO). steppe writes
+    // the fixture to an STPF2BK1 dir then reads it back as a directory ⇒ reproduces the
+    // f2-object-path values (golden_fit0.json fixture_f2_object_path). 391333 SNPs / 710 blocks.
+    fit0.weight = {0.868755109981416, 0.131244890018584};
+    fit0.se = {0.0248167157892669, 0.0248167157892669};
+    fit0.z = {35.006852532725, 5.2885680415193};
+    fit0.chisq = 3.95682062790988; fit0.dof = 4; fit0.p = 0.411881081897742;
     fit0.rd_f4rank = {1, 0}; fit0.rd_dof = {4, 10};
-    fit0.rd_chisq = {4.63516296859645, 31.9697628796068};
-    fit0.rd_p = {0.326820092470997, 0.000405109973855609};
-    fit0.rd0_dofdiff = 6; fit0.rd0_chisqdiff = 27.3345999110104; fit0.rd0_p_nested = 0.000125328972063141;
+    fit0.rd_chisq = {3.95682062790988, 1474.03320584515};
+    fit0.rd_p = {0.411881081897742, 1.02285567525252e-310};
+    fit0.rd0_dofdiff = 6; fit0.rd0_chisqdiff = 1470.07638521724; fit0.rd0_p_nested = 1.62084120329381e-314;
     fit0.f4rank = 1;
     fit0.pd_pat = {"00", "01", "10"}; fit0.pd_dof = {4, 5, 5};
-    fit0.pd_chisq = {4.63516296859645, 13.1352334823443, 17.1406935861748};
+    fit0.pd_chisq = {3.95682062790988, 43.5911692259, 1215.21839405374};
     fit0.pd_f4rank = {1, 0, 0};
 
     // ---- golden_fit1_NRBIG (P=43, nr=39, gesvd large path) -----------------------

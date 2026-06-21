@@ -136,6 +136,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.target,      args.target);
     take(merged_.out_file,    args.out_file);
     take(merged_.format,      args.format);
+    take(merged_.prefix,      args.prefix);
     take(merged_.geno,        args.geno);
     take(merged_.snp,         args.snp);
     take(merged_.ind,         args.ind);
@@ -322,6 +323,10 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
         }
         flt.mind_max_missing = *merged_.mind_max_missing;
     }
+    // autosomes_only: extract-f2 defaults this ON (AT2 extract_f2 restricts to autosomes
+    // 1..22 by default; cli_args.hpp "extract-f2 default ON, AT2 parity"). An explicit
+    // --auto-only/--no-auto-only overrides. Other commands keep the struct default (off).
+    if (merged_.command == Command::ExtractF2) flt.autosomes_only = true;
     if (merged_.autosomes_only.has_value())    flt.autosomes_only = *merged_.autosomes_only;
     if (merged_.drop_monomorphic.has_value())  flt.drop_monomorphic = *merged_.drop_monomorphic;
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
@@ -381,10 +386,20 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     cfg.right_ = merged_.right;
     cfg.pool_  = merged_.pool;
     if (merged_.out_file) cfg.out_file_ = *merged_.out_file;
+    // --prefix P expands to the genotype triple P.{geno,snp,ind} (cli-bindings.md §4.2;
+    // EIGENSTRAT/PACKEDANCESTRYMAP convention). An explicit --geno/--snp/--ind OVERRIDES
+    // the corresponding prefix-derived path (cli_parse documents --geno overrides --prefix).
+    if (merged_.prefix && !merged_.prefix->empty()) {
+        const std::string& p = *merged_.prefix;
+        if (!merged_.geno) cfg.geno_ = p + ".geno";
+        if (!merged_.snp)  cfg.snp_  = p + ".snp";
+        if (!merged_.ind)  cfg.ind_  = p + ".ind";
+    }
     if (merged_.geno)     cfg.geno_ = *merged_.geno;
     if (merged_.snp)      cfg.snp_ = *merged_.snp;
     if (merged_.ind)      cfg.ind_ = *merged_.ind;
     if (merged_.out_dir)  cfg.out_dir_ = *merged_.out_dir;
+    if (merged_.dry_run)  cfg.dry_run_ = *merged_.dry_run;
 
     return cfg;
 }

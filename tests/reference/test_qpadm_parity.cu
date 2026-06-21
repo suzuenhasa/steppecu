@@ -214,14 +214,19 @@ int main(int argc, char** argv) {
     // HOISTED above the THOROUGH gate: the default GPU block re-asserts these SAME
     // golden constants, so they must be in scope in FAST mode (the CpuBackend re-
     // derivation below is the THOROUGH-only oracle).
-    const double g_w0 = 0.558906248861195;   // CordedWare
-    const double g_w1 = 0.441093751138805;   // Turkey_N
-    const double g_se = 0.225911861836373;   // both (R-path se ~1.6e-4 off ⇒ loose)
-    const double g_z0 = 2.47400133980574;
-    const double g_z1 = 1.95250372226266;
-    const double g_chisq = 4.63516296859645;
+    // CORRECTED golden_fit0 (convertf-PA source; the prior values were AT2 2.0.10's
+    // silent misread of the raw v66 TGENO — 500848 SNPs / weights [0.559,0.441]). The
+    // fixture is read_f2(dir)'s f2-OBJECT tensor, so this test reproduces the golden's
+    // fixture_f2_object_path block (golden_fit0.json), NOT the directory-path headline
+    // (they differ by the documented ~1e-5 read-arg caveat). 391333 SNPs / 710 blocks.
+    const double g_w0 = 0.868755109981416;   // CordedWare (fixture_f2_object_path)
+    const double g_w1 = 0.131244890018584;   // Turkey_N
+    const double g_se = 0.0248167157892669;  // both (R-path se ~1.7e-5 off ⇒ loose 1e-3)
+    const double g_z0 = 35.006852532725;
+    const double g_z1 = 5.2885680415193;
+    const double g_chisq = 3.95682062790988;
     const int    g_dof = 4;
-    const double g_p = 0.326820092470997;
+    const double g_p = 0.411881081897742;
     // The CpuBackend oracle rank_Q (full m=10 model); the GPU localizer reads it.
     // Stays 0 in FAST mode (the gpu-vs-cpu rank_Q localizer is THOROUGH-only).
     int rsw_rank_Q_ref = 0;
@@ -280,17 +285,18 @@ int main(int argc, char** argv) {
     // =====================================================================
     std::printf("\n========== M(fit-2) RANK TEST / qpWave (CpuBackend ORACLE) ==========\n");
     {
-        // ---- golden_fit0.json res$rankdrop (rows: f4rank DESCENDING = rank1, rank0) ----
-        // row0 = rank1: dof=4, chisq=4.63516..., p=0.32682..., dofdiff=6,
-        //               chisqdiff=27.3346..., p_nested=1.2533e-4
-        // row1 = rank0: dof=10, chisq=31.9698..., p=4.0511e-4, NA, NA, NA
+        // ---- golden_fit0.json fixture_f2_object_path res$rankdrop (rows: f4rank
+        //      DESCENDING = rank1, rank0). CORRECTED (convertf-PA; the fixture is the
+        //      read_f2 f2-object tensor). row0 = rank1: dof=4, chisq=3.9568..., p=0.4119;
+        //      row1 = rank0: dof=10, chisq=1474.033..., p~1.0e-310 (model strongly
+        //      rejected at rank0 — the corrected data is far more decisive). ----------
         const int    grd_f4rank[2]   = {1, 0};
         const int    grd_dof[2]      = {4, 10};
-        const double grd_chisq[2]    = {4.63516296859645, 31.9697628796068};
-        const double grd_p[2]        = {0.326820092470997, 0.000405109973855609};
+        const double grd_chisq[2]    = {3.95682062790988, 1474.03320584515};
+        const double grd_p[2]        = {0.411881081897742, 1.02285567525252e-310};
         const int    grd_dofdiff     = 6;                    // row0 only (row1 = NA)
-        const double grd_chisqdiff   = 27.3345999110104;     // row0 only
-        const double grd_p_nested    = 0.000125328972063141; // row0 only
+        const double grd_chisqdiff   = 1470.07638521724;     // row0 only
+        const double grd_p_nested    = 1.62084120329381e-314; // row0 only
         const int    g_f4rank        = 1;                    // AT2 res$f4rank
 
         // The full QpAdmResult already carries the M(fit-2) surface (run_impl filled it).
@@ -328,15 +334,15 @@ int main(int argc, char** argv) {
         check_eq_int("dof[r=0]", res.rank_dof.at(0), grd_dof[1]);
         check_eq_int("dof[r=1]", res.rank_dof.at(1), grd_dof[0]);
 
-        // ---- res$popdrop (rows "00","01","10"): leave-one-LEFT-SOURCE-out ----
-        // "00" full: dof=4, chisq=4.63516..., p=0.32682..., f4rank=1, feasible=TRUE
-        // "01" drop Turkey_N: dof=5, chisq=13.1352..., p=0.0221..., f4rank=0, TRUE
-        // "10" drop CordedWare: dof=5, chisq=17.1407..., p=0.00424..., f4rank=0, TRUE
+        // ---- fixture_f2_object_path res$popdrop (rows "00","01","10"): leave-one-
+        //      LEFT-SOURCE-out. CORRECTED (convertf-PA). "00" full: dof=4, chisq=3.9568,
+        //      p=0.4119, f4rank=1; "01" drop Turkey_N: dof=5, chisq=43.591, p=2.80e-08;
+        //      "10" drop CordedWare: dof=5, chisq=1215.218, p~1.5e-260; all feasible. ---
         const char*  gpd_pat[3]    = {"00", "01", "10"};
         const int    gpd_wt[3]     = {0, 1, 1};
         const int    gpd_dof[3]    = {4, 5, 5};
-        const double gpd_chisq[3]  = {4.63516296859645, 13.1352334823443, 17.1406935861748};
-        const double gpd_p[3]      = {0.326820092470997, 0.0221439104360255, 0.00424055405322031};
+        const double gpd_chisq[3]  = {3.95682062790988, 43.5911692259, 1215.21839405374};
+        const double gpd_p[3]      = {0.411881081897742, 2.80379850883969e-08, 1.48439876266533e-260};
         const int    gpd_f4rank[3] = {1, 0, 0};
         const bool   gpd_feas[3]   = {true, true, true};
         std::printf("-- popdrop table (from run_qpadm result) --\n");
@@ -644,13 +650,16 @@ int main(int argc, char** argv) {
         std::printf("\n-- S3/S4 slice cross-check (LOCALIZER, loose rtol 1e-3) --\n");
         std::printf("  slice status=%d est_rank=%d (rank-0 single-source f4 slice)\n",
                     static_cast<int>(sres.status), sres.est_rank);
-        // Golden committed X (golden_fit0_X.csv) and Q diag (golden_fit0_Q.csv).
-        const double gX[5] = {0.000204208644854152, 0.000158461166756911,
-                              -2.44579443823133e-05, -2.42885897838109e-05,
-                              -3.27534454121373e-05};
-        const double gQdiag[5] = {4.83261400481559e-09, 4.38937359295631e-09,
-                                  2.43374449452477e-09, 3.18630101668274e-09,
-                                  4.5704478312779e-09};
+        // CORRECTED golden X (golden_fit0.json X_f4_estimate_vector) and Q diag
+        // (Q_jackknife_covariance matrix diagonal) — the directory-path slice values
+        // (convertf-PA source). The steppe fit reproduces these to ~1e-6 (the read-arg
+        // caveat is on the m=10 internal X, not this single-leftref slice).
+        const double gX[5] = {0.00362619866462659, -0.00124206979395638,
+                              -0.00191622501527577, -0.00158336156336976,
+                              -0.00403296857500433};
+        const double gQdiag[5] = {3.21777968355993e-08, 2.18613885872559e-08,
+                                  2.02104009961407e-08, 2.69523306005569e-08,
+                                  3.04583757986008e-08};
         // We need the intermediate X/Q for the slice. Expose them via a direct
         // backend call (the same the orchestrator uses). Build the slice f4 and Q.
         const double fudged_tr_factor = 1e-4;
@@ -849,11 +858,11 @@ int main(int argc, char** argv) {
             std::printf("\n-- GPU RANK TEST vs GOLDEN (rankdrop, TIGHT chisq rtol 1e-6) [ran ON THE GPU] --\n");
             const int    grd_f4rank[2] = {1, 0};
             const int    grd_dof[2]    = {4, 10};
-            const double grd_chisq[2]  = {4.63516296859645, 31.9697628796068};
-            const double grd_p[2]      = {0.326820092470997, 0.000405109973855609};
+            const double grd_chisq[2]  = {3.95682062790988, 1474.03320584515};
+            const double grd_p[2]      = {0.411881081897742, 1.02285567525252e-310};
             const int    grd_dofdiff   = 6;
-            const double grd_chisqdiff = 27.3345999110104;
-            const double grd_p_nested  = 0.000125328972063141;
+            const double grd_chisqdiff = 1470.07638521724;
+            const double grd_p_nested  = 1.62084120329381e-314;
             const int    g_f4rank      = 1;
             check_eq_int("gpu rankdrop rows", static_cast<int>(gpu.rankdrop_f4rank.size()), 2);
             check_eq_int("gpu f4rank (res$f4rank)", gpu.f4rank, g_f4rank);
@@ -889,8 +898,8 @@ int main(int argc, char** argv) {
             const char*  gpd_pat[3]    = {"00", "01", "10"};
             const int    gpd_wt[3]     = {0, 1, 1};
             const int    gpd_dof[3]    = {4, 5, 5};
-            const double gpd_chisq[3]  = {4.63516296859645, 13.1352334823443, 17.1406935861748};
-            const double gpd_p[3]      = {0.326820092470997, 0.0221439104360255, 0.00424055405322031};
+            const double gpd_chisq[3]  = {3.95682062790988, 43.5911692259, 1215.21839405374};
+            const double gpd_p[3]      = {0.411881081897742, 2.80379850883969e-08, 1.48439876266533e-260};
             const int    gpd_f4rank[3] = {1, 0, 0};
             const bool   gpd_feas[3]   = {true, true, true};
             check_eq_int("gpu popdrop rows", static_cast<int>(gpu.popdrop_pat.size()), 3);
@@ -959,12 +968,12 @@ int main(int argc, char** argv) {
         // GPU X/Q localizers: call the CUDA backend's assemble_f4(DeviceF2Blocks) +
         // jackknife_cov directly (proving S3/S4 ran on the GPU over resident f2).
         std::printf("\n-- GPU S3/S4 slice cross-check (LOCALIZER, loose rtol 1e-3) --\n");
-        const double gX[5] = {0.000204208644854152, 0.000158461166756911,
-                              -2.44579443823133e-05, -2.42885897838109e-05,
-                              -3.27534454121373e-05};
-        const double gQdiag[5] = {4.83261400481559e-09, 4.38937359295631e-09,
-                                  2.43374449452477e-09, 3.18630101668274e-09,
-                                  4.5704478312779e-09};
+        const double gX[5] = {0.00362619866462659, -0.00124206979395638,
+                              -0.00191622501527577, -0.00158336156336976,
+                              -0.00403296857500433};
+        const double gQdiag[5] = {3.21777968355993e-08, 2.18613885872559e-08,
+                                  2.02104009961407e-08, 2.69523306005569e-08,
+                                  3.04583757986008e-08};
         steppe::ComputeBackend& gbe = *gpu_res.gpus.at(0).backend;
         const std::vector<int> lidx = {1, 2};
         const std::vector<int> ridx = {3, 4, 5, 6, 7, 8};

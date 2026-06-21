@@ -560,9 +560,11 @@ int main(int argc, char** argv) {
                 steppe::run_qpadm_search(dev, std::span<const steppe::QpAdmModel>(one), opts, res);
             check_eq_int("9-pop search result count", static_cast<int>(rs.size()), 1);
             if (rs.size() == 1) {
-                check_close("9-pop w[CordedWare]", rs[0].weight.at(0), 0.558906248861195, 1e-6, 1e-9);
-                check_close("9-pop w[Turkey_N]",   rs[0].weight.at(1), 0.441093751138805, 1e-6, 1e-9);
-                check_close("9-pop chisq", rs[0].chisq, 4.63516296859645, 1e-6, 1e-9);
+                // CORRECTED golden_fit0 fixture_f2_object_path (convertf-PA; the prior
+                // 0.559/0.441/4.635 was AT2 2.0.10's silent misread of the raw v66 TGENO).
+                check_close("9-pop w[CordedWare]", rs[0].weight.at(0), 0.868755109981416, 1e-6, 1e-9);
+                check_close("9-pop w[Turkey_N]",   rs[0].weight.at(1), 0.131244890018584, 1e-6, 1e-9);
+                check_close("9-pop chisq", rs[0].chisq, 3.95682062790988, 1e-6, 1e-9);
                 check_eq_int("9-pop dof", rs[0].dof, 4);
                 check_eq_int("9-pop f4rank", rs[0].f4rank, 1);
                 // match the existing run_qpadm exactly (the single-model production entry).

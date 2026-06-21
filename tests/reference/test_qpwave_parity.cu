@@ -131,13 +131,15 @@ std::vector<QpWaveGolden> goldens() {
         m.right = {3, 4, 5, 6, 7, 8};
         m.est_rank = 1;
         m.f4rank   = 1;
+        // CORRECTED (convertf-PA; rankdrop == golden_fit0 fixture_f2_object_path's, same
+        // internal f4). The prior 4.635/31.97 was AT2 2.0.10's TGENO misread.
         m.rd_f4rank = {1, 0};
         m.rd_dof    = {4, 10};
-        m.rd_chisq  = {4.63516296859645, 31.96976287960685};
-        m.rd_p      = {0.326820092470997414, 0.000405109973855609};
+        m.rd_chisq  = {3.95682062790988, 1474.03320584515};
+        m.rd_p      = {0.411881081897742, 1.02285567525252e-310};
         m.rd0_dofdiff   = 6;
-        m.rd0_chisqdiff = 27.3345999110104;
-        m.rd0_p_nested  = 0.000125328972063141;
+        m.rd0_chisqdiff = 1470.07638521724;
+        m.rd0_p_nested  = 1.62084120329381e-314;
         m.has_nested    = true;
         g.push_back(m);
     }
@@ -153,8 +155,12 @@ std::vector<QpWaveGolden> goldens() {
         m.f4rank   = 0;
         m.rd_f4rank = {0};
         m.rd_dof    = {5};
-        m.rd_chisq  = {26.4681711115159};
-        m.rd_p      = {7.23859084369902e-05};
+        // CORRECTED (convertf-PA): the clade is REJECTED far more decisively than the
+        // corrupt TGENO golden (was chisq 26.47). chisq is the committed binary-fixture
+        // f2-object value (read-arg caveat vs AT2's afprod directory object chisq
+        // 1395.716; the clade is rejected at p<<0.05 either way ⇒ est_rank=0 is robust).
+        m.rd_chisq  = {1401.571655111};
+        m.rd_p      = {6.284245136077e-301};
         m.rd0_dofdiff   = INT_MIN;   // unused (single row ⇒ no nested diff)
         m.rd0_chisqdiff = 0.0;
         m.rd0_p_nested  = 0.0;

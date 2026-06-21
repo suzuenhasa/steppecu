@@ -4,7 +4,8 @@
   "reproduction": {
     "canonical_invocation": "qpwave(f2_dir, left=left, right=right, boot=FALSE, fudge=1e-4, cpp=TRUE) with set.seed(42); the f2 DIRECTORY-PATH form (the canonical bit-exact read, same caveat as golden_fit0.json). qpwave() takes NO target argument (admixtools qpwave reference): left[0] is the reference row.",
     "script": "scripts/golden_qpwave_generate.R",
-    "f2_dir_on_box": "/workspace/data/aadr/f2_fit0_FINAL",
+    "f2_dir_on_box": "/workspace/data/aadr/f2_fit0_corrected",
+    "source_correction": "REGENERATED from the convertf-converted PACKEDANCESTRYMAP (v66 TGENO -> PA). admixtools 2.0.10 does NOT support the raw v66 TGENO and silently misread it, producing the prior CORRUPT values (M1 chisq [4.635,31.97], M2 chisq 26.47). AT2 qpwave on the convertf-PA gives the values below. NOTE: the directory-path rankdrop here is what AT2 qpwave reports on the f2 dir; the committed binary fixture f2_fit0_9pop.bin is a read_f2 f2-OBJECT tensor that yields slightly different chisq (M1 rank0 1474.03, M2 1401.57) by the documented read-arg caveat — those f2-object-path values are what test_qpwave_parity.cu reproduces (TIGHT 1e-6) and are recorded in its constants.",
     "fixture_reuse": "fixtures/f2_fit0_9pop.bin (the SAME REAL 9-pop f2 tensor golden_fit0/test_qpadm_domain use; pop index 0=England_BellBeaker 1=Czechia_EBA_CordedWare 2=Turkey_N 3=Mbuti 4=Israel_Natufian 5=Iran_GanjDareh_N 6=Han 7=Papuan 8=Karitiana)."
   },
   "metadata": {
@@ -34,15 +35,15 @@
       "rankdrop": {
         "f4rank": [1, 0],
         "dof": [4, 10],
-        "chisq": [4.63516296859645, 31.96976287960685],
-        "p": [0.326820092470997414, 0.000405109973855609],
+        "chisq": [3.99093955602736, 1470.13869210885],
+        "p": [0.407233436195749, 7.09426971325683e-310],
         "dofdiff": [6, "NA"],
-        "chisqdiff": [27.3345999110104, "NA"],
-        "p_nested": [0.000125328972063141, "NA"]
+        "chisqdiff": [1466.14775255282, "NA"],
+        "p_nested": [1.14950550099235e-313, "NA"]
       }
     },
     "M2_2left_clade_rank0": {
-      "description": "2-left qpWave CLADE test: left[0]=Czechia_EBA_CordedWare is the reference, then Turkey_N — the canonical qpWave question (are CordedWare and Turkey_N a clade vs the 6 rights?). The clade is REJECTED (p=7.24e-5 < 0.05) ⇒ est_rank=0 (all candidate ranks rejected ⇒ f4rank = rmax = 0). The ONLY candidate rank is r=0 ⇒ a single-row rankdrop (qpWave's distinguishing single-difference-row sweep).",
+      "description": "2-left qpWave CLADE test: left[0]=Czechia_EBA_CordedWare is the reference, then Turkey_N — the canonical qpWave question (are CordedWare and Turkey_N a clade vs the 6 rights?). The clade is REJECTED (p<<0.05) ⇒ est_rank=0 (all candidate ranks rejected ⇒ f4rank = rmax = 0). The ONLY candidate rank is r=0 ⇒ a single-row rankdrop (qpWave's distinguishing single-difference-row sweep). CORRECTED (convertf-PA; the corrupt TGENO golden was chisq 26.47). Directory-path chisq below; the f2-object fixture yields chisq 1401.57 (read-arg caveat) = test_qpwave_parity.cu's gated value.",
       "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
       "left_idx": [1, 2],
       "right_idx": [3, 4, 5, 6, 7, 8],
@@ -51,8 +52,8 @@
       "rankdrop": {
         "f4rank": [0],
         "dof": [5],
-        "chisq": [26.4681711115159],
-        "p": [7.23859084369902e-05],
+        "chisq": [1395.71564198772],
+        "p": [1.16720346339102e-299],
         "dofdiff": ["NA"],
         "chisqdiff": ["NA"],
         "p_nested": ["NA"]

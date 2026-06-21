@@ -3,9 +3,10 @@
   "purpose": ["M(fit-1) acceptance oracle: first qpAdm GLS fit (CpuBackend, FP64, one model) must match these to bit/tolerance parity per architecture.md S12 PARITY LAW + S13."],
   "reproduction": {
     "canonical_invocation": ["qpadm(f2_dir, left=left, right=right, target=target, boot=FALSE, getcov=TRUE, return_f4=TRUE, fudge=1e-4, cpp=TRUE)  with set.seed(42)"],
-    "note": ["Values reproduce BIT-EXACT (all 15 digits) when qpadm is given the f2 DIRECTORY PATH directly. Calling read_f2(dir) then qpadm(f2_blocks,...) with non-default read args yields a ~1e-5 difference (different internal f2-read arg set); the directory-path form is canonical."],
-    "f2_dir_on_box": ["/workspace/data/aadr/f2_fit0_FINAL"],
-    "f2_cache_id": ["sha256:076b802156973971ca1ca2b3db3cfbe180651833e45f09a33c455cd3db0eff87"]
+    "note": ["Values reproduce BIT-EXACT (all 15 digits) when qpadm is given the f2 DIRECTORY PATH directly. Calling read_f2(dir) then qpadm(f2_blocks,...) with non-default read args yields a ~1e-5 difference (different internal f2-read arg set); the directory-path form is canonical. The committed binary fixture fixtures/f2_fit0_9pop.bin is the read_f2(dir) f2-OBJECT tensor; the fixture-path values (what test_qpadm_parity reproduces) are recorded under fixture_f2_object_path."],
+    "source_correction": ["REGENERATED from the convertf-converted PACKEDANCESTRYMAP (convertf v8621: v66 TGENO -> PA at /workspace/data/aadr/converted_pa/v66_HO_pa). admixtools 2.0.10 does NOT support the raw v66 .geno TGENO format and silently misread it, producing the prior CORRUPT golden (500848 SNPs, weights [0.559,0.441]). AT2 reads the convertf-PA correctly: 391333 SNPs after filtering / 351539 polymorphic / 710 jackknife blocks, weights [CordedWare 0.8688, Turkey_N 0.1312] -- matching steppe's own decode (391333 SNPs, weights ~[0.866,0.134])."],
+    "f2_dir_on_box": ["/workspace/data/aadr/f2_fit0_corrected"],
+    "f2_cache_id": ["sha256:85c2ca832c89f95de260c345b53e84360a80f2d12c40090c76b272029414c450"]
   },
   "metadata": {
     "R": ["R version 4.3.3 (2024-02-29)"],
@@ -19,64 +20,89 @@
     "boot": [false],
     "seed": [42],
     "allsnps": [true],
-    "dataset": ["v66.p1_HO.aadr.patch.PUB"],
-    "geno_sha256": ["7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3"],
-    "snp_sha256": ["c0d565ee9e6a6edf30c2063430ee4f828e5db45f26d4747fd76f19eee650a5de"],
-    "ind_sha256": ["51f99bee3667b5c3a97b663cc12fd3e25486cf64049782657d99db347b65509e"]
+    "dataset": ["v66_HO_pa (convertf PACKEDANCESTRYMAP of v66.p1_HO.aadr.patch.PUB TGENO)"],
+    "source_geno_format": ["PACKEDANCESTRYMAP (convertf v8621 from the raw v66 TGENO)"],
+    "n_snps_after_filtering": [391333],
+    "n_snps_polymorphic": [351539]
   },
   "model_well_determined": {
     "feasible": true,
     "both_weights_in_unit_interval": true,
     "both_abs_z_gt_1p9": true,
-    "model_p": 0.326820092470997,
+    "model_p": 0.407233436195749,
     "model_not_rejected": true,
-    "f4_var_rcond": 0.00618636488534423,
+    "f4_var_rcond": 0.0106011862282708,
     "rank_Q": 5,
-    "n_snps_polymorphic": 500848,
-    "n_blocks": 708,
-    "f4dim": [1, 5, 708]
+    "n_snps_after_filtering": 391333,
+    "n_snps_polymorphic": 351539,
+    "n_blocks": 710,
+    "f4dim": [1, 5, 710]
   },
   "weights": {
     "target": ["England_BellBeaker", "England_BellBeaker"],
     "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
-    "weight": [0.558906248861195, 0.441093751138805],
-    "se": [0.225911861836373, 0.225911861836373],
-    "z": [2.47400133980574, 1.95250372226266]
+    "weight": [0.868750707709335, 0.131249292290665],
+    "se": [0.0247769675460962, 0.0247769675460961],
+    "z": [35.0628343074298, 5.29722985859683]
   },
   "rankdrop": {
     "f4rank": [1, 0],
     "dof": [4, 10],
-    "chisq": [4.63516296859645, 31.9697628796068],
-    "p": [0.326820092470997, 0.000405109973855609],
+    "chisq": [3.99093955602736, 1470.13869210885],
+    "p": [0.407233436195749, 7.09426971325683e-310],
     "dofdiff": [6, "NA"],
-    "chisqdiff": [27.3345999110104, "NA"],
-    "p_nested": [0.000125328972063141, "NA"]
+    "chisqdiff": [1466.14775255282, "NA"],
+    "p_nested": [1.14950550099235e-313, "NA"]
   },
   "popdrop": {
     "pat": ["00", "01", "10"],
     "wt": [0, 1, 1],
     "dof": [4, 5, 5],
-    "chisq": [4.63516296859645, 13.1352334823443, 17.1406935861748],
-    "p": [0.326820092470997, 0.0221439104360255, 0.00424055405322031],
+    "chisq": [3.99093955602736, 43.5255787988088, 1213.72343644466],
+    "p": [0.407233436195749, 2.89102990716943e-08, 3.12878649605466e-260],
     "f4rank": [1, 0, 0],
     "feasible": [true, true, true]
   },
   "X_f4_estimate_vector": {
-    "description": ["qpadm internal f4 matrix flattened: row left[-1]=Turkey_N over the 5 non-ref rights (rightref=Mbuti). OQ-1/OQ-3 seam golden."],
+    "description": ["qpadm internal f4 matrix flattened: row left[-1]=Turkey_N over the 5 non-ref rights (rightref=Mbuti). OQ-1/OQ-3 seam golden. (directory-path / read_f2(dir) values.)"],
     "leftref": ["Turkey_N"],
     "rightref": ["Mbuti"],
     "rightpair": ["Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"],
-    "f4_est": [0.000204208644854152, 0.000158461166756911, -2.44579443823133e-05, -2.42885897838109e-05, -3.27534454121373e-05]
+    "f4_est": [0.00362619866462659, -0.00124206979395638, -0.00191622501527577, -0.00158336156336976, -0.00403296857500433]
   },
   "Q_jackknife_covariance": {
-    "description": ["5x5 jackknife covariance, UNfudged (qpadm fudges diag by += fudge*tr(Q) before inverting)."],
+    "description": ["5x5 jackknife covariance, UNfudged (qpadm fudges diag by += fudge*tr(Q) before inverting). (directory-path / read_f2(dir) values.)"],
     "matrix": [
-      [4.83261400481559e-09, 2.33658629797894e-09, 2.14254842654568e-09, 1.9301917318397e-09, 2.44496689120141e-09],
-      [2.33658629797894e-09, 4.38937359295631e-09, 2.08199573756359e-09, 1.79087827569103e-09, 2.03417976444829e-09],
-      [2.14254842654568e-09, 2.08199573756359e-09, 2.43374449452477e-09, 2.01288892096343e-09, 2.23742010650564e-09],
-      [1.9301917318397e-09, 1.79087827569103e-09, 2.01288892096343e-09, 3.18630101668274e-09, 2.12894642579008e-09],
-      [2.44496689120141e-09, 2.03417976444829e-09, 2.23742010650564e-09, 2.12894642579008e-09, 4.5704478312779e-09]
+      [3.21777968355993e-08, 1.10071226401615e-08, 1.06621901011316e-08, 9.93811340915683e-09, 8.54496856237126e-09],
+      [1.10071226401615e-08, 2.18613885872559e-08, 1.09214428739679e-08, 1.04416550517152e-08, 1.04844065865486e-08],
+      [1.06621901011316e-08, 1.09214428739679e-08, 2.02104009961407e-08, 1.4695295428407e-08, 1.64620298271311e-08],
+      [9.93811340915683e-09, 1.04416550517152e-08, 1.4695295428407e-08, 2.69523306005569e-08, 1.3022954991825e-08],
+      [8.54496856237126e-09, 1.04844065865486e-08, 1.64620298271311e-08, 1.3022954991825e-08, 3.04583757986008e-08]
     ],
-    "fudged_diag": [4.83455525290962e-09, 4.39131484105034e-09, 2.43568574261879e-09, 3.18824226477677e-09, 4.57238907937193e-09]
+    "fudged_diag": [3.21909628648812e-08, 2.18745546165377e-08, 2.02235670254225e-08, 2.69654966298388e-08, 3.04715418278826e-08]
+  },
+  "fixture_f2_object_path": {
+    "description": ["The f2-OBJECT-path qpadm result on the committed binary fixture fixtures/f2_fit0_9pop.bin (read_f2(dir) tensor, P=9, nb=710). These are the values test_qpadm_parity.cu reproduces (it loads the fixture, NOT the directory). They differ from the directory-path golden above by the documented ~1e-5 read-arg caveat."],
+    "weight": [0.868755109981416, 0.131244890018584],
+    "se": [0.0248167157892669, 0.0248167157892669],
+    "z": [35.006852532725, 5.2885680415193],
+    "rankdrop": {
+      "f4rank": [1, 0],
+      "dof": [4, 10],
+      "chisq": [3.95682062790988, 1474.03320584515],
+      "p": [0.411881081897742, 1.02285567525252e-310],
+      "dofdiff": [6, "NA"],
+      "chisqdiff": [1470.07638521724, "NA"],
+      "p_nested": [1.62084120329381e-314, "NA"]
+    },
+    "popdrop": {
+      "pat": ["00", "01", "10"],
+      "wt": [0, 1, 1],
+      "dof": [4, 5, 5],
+      "chisq": [3.95682062790988, 43.5911692259, 1215.21839405374],
+      "p": [0.411881081897742, 2.80379850883969e-08, 1.48439876266533e-260],
+      "f4rank": [1, 0, 0],
+      "feasible": [true, true, true]
+    }
   }
 }

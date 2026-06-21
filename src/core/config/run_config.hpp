@@ -78,6 +78,10 @@ public:
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
     [[nodiscard]] int max_sources()             const noexcept { return max_sources_; }
 
+    /// --dry-run (extract-f2): report tiers/sizes/precision and exit without compute
+    /// (cli-bindings.md §4.5 planning aid). Defaults to false (a real run).
+    [[nodiscard]] bool dry_run()                const noexcept { return dry_run_; }
+
 private:
     // ConfigBuilder is the ONLY constructor of a validated RunConfig (it sets these
     // fields after build()-validation). Friendship keeps the fields const-after-build
@@ -104,6 +108,7 @@ private:
     double blgsize_cm_ = kDefaultBlockSizeCm;  // cli-bindings.md §4.1 default (5 cM)
     int min_sources_ = 1;
     int max_sources_ = -1;          // -1 ⇒ "up to the whole pool" (app default)
+    bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)
 };
 
 }  // namespace steppe::config

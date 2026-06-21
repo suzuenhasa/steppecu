@@ -7,22 +7,33 @@
 // extract-f2` on the raw v66 AADR triple for the golden pop sets, then `steppe qpadm
 // --f2-dir <extracted>` over the produced dir.
 //
-// TWO ASSERTION LAYERS:
-//   (A) THE MECHANICAL END-TO-END CONTRACT (the M(cli-4) deliverable — HARD-GATED):
+// TWO ASSERTION LAYERS (BOTH HARD-GATED):
+//   (A) THE MECHANICAL END-TO-END CONTRACT (the M(cli-4) deliverable):
 //       extract-f2 writes a valid STPF2BK1 dir (f2.bin + pops.txt + meta.json) with a
 //       NON-ZERO vpair region (the REAL-vpair rule — the writer is not stubbing zeros),
 //       pops.txt is the P labels, qpadm CONSUMES the extracted dir and resolves the model
 //       names against the written pops.txt, exits 0, and emits a well-formed weights +
 //       summary table that sums to ~1.0. This proves the io->decode->filter->assign_blocks
 //       ->precompute chain + the dir WRITER work end-to-end through the CLI.
-//   (B) THE AT2 NUMERIC PARITY (golden_fit0 weights/chisq, golden_fitNA drop weights) —
-//       REPORTED as a DIAGNOSTIC, NOT counted toward the gate, because steppe's decode of
-//       the real AADR TGENO file does NOT reproduce AT2's PER-POP COVERAGE on the ancient
-//       pseudohaploid pops (e.g. Israel_Natufian: raw-byte / steppe zero-coverage 0.326 vs
-//       AT2 0.083), so the extracted f2 SNP set differs from AT2's and the weights diverge.
-//       This is a PRE-EXISTING steppe-vs-AT2 decode-layer discrepancy (steppe's decode was
-//       validated only against its OWN numpy oracle, never AT2's reader), independent of
-//       M(cli-4)'s wiring. The diagnostic prints the steppe-vs-AT2 diff for the record.
+//   (B) THE AT2 NUMERIC PARITY vs the CORRECTED golden_fit0 — now a HARD GATE.
+//       CORRECTION (memory aadr-tgeno-goldens-corrupt): admixtools 2.0.10 does NOT support
+//       the raw v66 .geno TGENO format and SILENTLY MISREAD it, producing the prior corrupt
+//       golden (500848 SNPs / weights [0.559,0.441]). steppe's decode is CORRECT — PROVEN
+//       via convertf v8621 (TGENO -> PACKEDANCESTRYMAP): AT2 extract_f2 on the convertf-PA
+//       gives 391333 SNPs / weights ~[CordedWare 0.869, Turkey_N 0.131], MATCHING steppe.
+//       So this layer now HARD-asserts that steppe extract-f2 on the raw v66 TGENO -> qpadm
+//       REPRODUCES the corrected golden within a JUSTIFIED tier:
+//         * SNP count EXACT (391333 == AT2-on-PA; steppe's decode is bit-correct);
+//         * weights within rtol 5e-3 of the corrected golden [0.868751, 0.131249];
+//         * feasibility + f4rank + dof match; model NOT rejected (p > 0.05);
+//         * AND decisively NOT the corrupt 500848-SNP / [0.5589,0.4411] result.
+//       THE 5e-3 WEIGHT TIER covers ONE known residual: steppe's block partition yields
+//       719 jackknife blocks vs AT2-on-PA's 710 (the assign_blocks rule), nudging the
+//       weights to [0.86610, 0.13390] and p to 0.4848 (both within tier; model still NOT
+//       rejected). The DECODE + 391333-SNP set are EXACT — this ~0.3% block-partition
+//       diff is a TRACKED FOLLOW-UP (reconcile the partition rule), NOT a decode bug, and
+//       the tier is NOT widened past it. chisq is REPORTED (block-partition-sensitive),
+//       not gated; dof/f4rank/feasibility/SNP-count/not-corrupt ARE gated.
 //
 // PLAIN C++ host TU (NO CUDA header): it spawns the steppe binary; the GPU work happens
 // inside the child. SKIPs cleanly (exit 0) when no CUDA device is visible OR the raw AADR
@@ -56,6 +67,14 @@ void check_true(const char* what, bool ok) {
 void check_eq_int(const char* what, long long got, long long want) {
     const bool ok = (got == want);
     std::printf("  [%s] %-30s got=%lld want=%lld\n", ok ? "PASS" : "FAIL", what, got, want);
+    if (!ok) ++g_failures;
+}
+// HARD GATE close check (counts in g_failures — fails ctest on mismatch).
+void check_close(const char* what, double got, double want, double rtol, double atol) {
+    const double tol = atol + rtol * std::fabs(want);
+    const bool ok = std::fabs(got - want) <= tol;
+    std::printf("  [%s] %-30s got=% .10e want=% .10e |d|=% .3e tol=% .3e\n",
+                ok ? "PASS" : "FAIL", what, got, want, std::fabs(got - want), tol);
     if (!ok) ++g_failures;
 }
 // AT2 numeric DIAGNOSTIC: reported, counted in g_at2_diag, NOT in g_failures.
@@ -179,7 +198,28 @@ struct Golden {
     std::vector<double> weight;
     double chisq = 0; int dof = 0; double p = 0; int f4rank = 0;
     bool assert_summary = true;  // golden_fitNA's f2-object summary shape differs; weights-only.
+    // ---- corrected-golden HARD GATE knobs (golden_fit0 only) -------------------
+    bool   hard_gate = false;     // when true, layer (B) is a HARD gate, not a diagnostic.
+    int    n_snp_exact = 0;       // EXACT SNP count steppe must reproduce (== AT2-on-PA).
+    double weight_rtol = 5e-3;    // weight tier: ABSOLUTE per-weight (covers the ~0.3%
+                                  // block-partition residual, a shared abs shift ~2.6e-3).
+    int    corrupt_n_snp = 0;     // the corrupt TGENO-misread SNP count (must NOT equal this).
+    double corrupt_w0 = 0.0;      // the corrupt weight[0] (must be FAR from this).
 };
+
+// Read meta.json's "n_snp_kept" (the kept SNP count the extract-f2 dir writer records).
+// Returns -1 if the file/field is absent or unparsable.
+long meta_n_snp_kept(const std::filesystem::path& dir) {
+    std::ifstream f(dir / "meta.json", std::ios::binary);
+    if (!f) return -1;
+    std::ostringstream ss; ss << f.rdbuf();
+    const std::string js = ss.str();
+    const auto pos = js.find("\"n_snp_kept\"");
+    if (pos == std::string::npos) return -1;
+    const auto colon = js.find(':', pos);
+    if (colon == std::string::npos) return -1;
+    return std::strtol(js.c_str() + colon + 1, nullptr, 10);
+}
 
 // Run extract-f2 then qpadm. (A) HARD-gate the mechanical contract; (B) REPORT the AT2
 // numeric parity as a diagnostic. Returns true if it RAN (false ⇒ clean SKIP).
@@ -212,6 +252,18 @@ bool run_case(const std::string& bin, const std::string& prefix,
     check_true("meta.json written", std::filesystem::exists(out_dir / "meta.json"));
     check_true("f2.bin vpair region is REAL (non-zero)", f2bin_vpair_nonzero(out_dir / "f2.bin"));
 
+    // (B) HARD GATE — SNP count EXACT (steppe's decode reproduces AT2-on-PA's 391333) AND
+    //     decisively NOT the corrupt TGENO-misread count (500848). This is the headline
+    //     proof that steppe's decode of the raw v66 TGENO is CORRECT.
+    if (g.hard_gate) {
+        const long n_kept = meta_n_snp_kept(out_dir);
+        std::printf("  extracted n_snp_kept (meta.json) = %ld (AT2-on-PA = %d)\n",
+                    n_kept, g.n_snp_exact);
+        check_eq_int("SNP count EXACT (== AT2-on-PA decode)", n_kept, g.n_snp_exact);
+        check_true("SNP count NOT the corrupt TGENO-misread (500848)",
+                   n_kept != g.corrupt_n_snp);
+    }
+
     // ---- qpadm over the EXTRACTED dir (names resolved via the written pops.txt) ----
     const RunResult fit = run_steppe(bin,
         {"qpadm", "--f2-dir", out_dir.string(), "--target", g.target,
@@ -225,6 +277,7 @@ bool run_case(const std::string& bin, const std::string& prefix,
     const auto wit = cs.sec.find("weights");
     check_true("qpadm emits weights section", wit != cs.sec.end());
     double wsum = 0.0;
+    double w0_got = std::nan("");
     if (wit != cs.sec.end()) {
         const auto& rows = wit->second;
         check_eq_int("weight rows == #left", static_cast<int>(rows.size()) - 1,
@@ -233,10 +286,25 @@ bool run_case(const std::string& bin, const std::string& prefix,
             const auto& r = rows[i + 1];  // target,left,weight,se,z
             if (r.size() >= 3) {
                 check_true("name->index resolved (left label)", r[1] == g.left[i]);
-                wsum += cell_d(r[2]);
-                // (B) AT2 numeric DIAGNOSTIC.
-                char nm[48]; std::snprintf(nm, sizeof(nm), "weight[%zu] vs AT2", i);
-                diag_close(nm, cell_d(r[2]), g.weight[i], 1e-5, 1e-6);
+                const double w = cell_d(r[2]);
+                wsum += w;
+                if (i == 0) w0_got = w;
+                char nm[48]; std::snprintf(nm, sizeof(nm), "weight[%zu]", i);
+                if (g.hard_gate) {
+                    // (B) HARD GATE: reproduce the corrected golden within the justified
+                    // tier. The block-partition residual (719 vs 710 jackknife blocks) is
+                    // an ABSOLUTE shift of ~2.6e-3 shared by BOTH (sum-to-one) weights, so
+                    // the tier is an absolute 5e-3 per weight (a faithful encoding of the
+                    // ~0.3% residual on the dominant weight; the minor weight carries the
+                    // SAME absolute error). The DECODE + 391333-SNP set are EXACT — this is
+                    // a TRACKED FOLLOW-UP, not widened past the measured residual.
+                    char nmg[96]; std::snprintf(nmg, sizeof(nmg), "%.40s vs CORRECTED golden", nm);
+                    check_close(nmg, w, g.weight[i], 0.0, g.weight_rtol);
+                } else {
+                    // golden_fitNA: still a non-gating diagnostic (f2-object NA shape).
+                    char nmd[96]; std::snprintf(nmd, sizeof(nmd), "%.40s vs AT2", nm);
+                    diag_close(nmd, w, g.weight[i], 1e-5, 1e-6);
+                }
             }
         }
     }
@@ -244,22 +312,46 @@ bool run_case(const std::string& bin, const std::string& prefix,
     // fit ran a real solve over the extracted f2, regardless of the SNP-set difference).
     check_true("weights sum to ~1.0", std::fabs(wsum - 1.0) < 1e-6);
 
-    // (B) AT2 numeric DIAGNOSTIC: summary chisq / p / dof.
+    // (B) HARD GATE: decisively NOT the corrupt TGENO-misread fit ([0.5589,0.4411]). The
+    // corrupt weight[0]=0.559 is ~0.31 away from the correct 0.869; require a large gap.
+    if (g.hard_gate && !std::isnan(w0_got)) {
+        const double gap = std::fabs(w0_got - g.corrupt_w0);
+        std::printf("  [%s] weight[0] is NOT the corrupt [%.4f] (got=%.6f, |gap|=%.4f >= 0.1)\n",
+                    gap >= 0.1 ? "PASS" : "FAIL", g.corrupt_w0, w0_got, gap);
+        if (gap < 0.1) ++g_failures;
+    }
+
     const auto sit = cs.sec.find("summary");
     if (g.assert_summary && sit != cs.sec.end() && sit->second.size() >= 2) {
         const auto& h = sit->second[0];
         const auto& r = sit->second[1];
         std::map<std::string, std::string> kv;
         for (std::size_t c = 0; c < h.size() && c < r.size(); ++c) kv[h[c]] = r[c];
-        diag_close("summary chisq vs AT2", cell_d(kv["chisq"]), g.chisq, 1e-5, 1e-6);
-        diag_close("summary p vs AT2", cell_d(kv["p"]), g.p, 1e-3, 1e-9);
-        // dof is structural (a function of #right - #left), so it SHOULD match AT2 even
-        // when the SNP set differs — gate it.
-        check_eq_int("summary dof == AT2 (structural)",
-                     static_cast<long long>(cell_d(kv["dof"])), g.dof);
-        check_eq_int("summary f4rank == AT2 (structural)",
-                     static_cast<long long>(cell_d(kv["f4rank"])), g.f4rank);
-        check_true("summary status == ok", kv["status"] == "ok");
+        if (g.hard_gate) {
+            // (B) HARD GATE: dof/f4rank/feasibility/status structural + model-not-rejected.
+            // chisq is block-partition-sensitive ⇒ REPORTED, not gated (the weight tier +
+            // p>0.05 + SNP-exact + not-corrupt are the numeric gate). p must clear alpha
+            // (the model is NOT rejected — the corrected golden p=0.407, steppe e2e=0.485).
+            const double chisq_got = cell_d(kv["chisq"]);
+            const double p_got = cell_d(kv["p"]);
+            std::printf("  [INFO] e2e chisq = %.6f (golden %.6f; block-partition-sensitive, "
+                        "REPORTED not gated)\n", chisq_got, g.chisq);
+            check_eq_int("summary dof == AT2 (structural)",
+                         static_cast<long long>(cell_d(kv["dof"])), g.dof);
+            check_eq_int("summary f4rank == AT2 (structural)",
+                         static_cast<long long>(cell_d(kv["f4rank"])), g.f4rank);
+            check_true("summary feasible == TRUE", kv["feasible"] == "TRUE");
+            check_true("model NOT rejected (p > 0.05)", p_got > 0.05);
+            check_true("summary status == ok", kv["status"] == "ok");
+        } else {
+            diag_close("summary chisq vs AT2", cell_d(kv["chisq"]), g.chisq, 1e-5, 1e-6);
+            diag_close("summary p vs AT2", cell_d(kv["p"]), g.p, 1e-3, 1e-9);
+            check_eq_int("summary dof == AT2 (structural)",
+                         static_cast<long long>(cell_d(kv["dof"])), g.dof);
+            check_eq_int("summary f4rank == AT2 (structural)",
+                         static_cast<long long>(cell_d(kv["f4rank"])), g.f4rank);
+            check_true("summary status == ok", kv["status"] == "ok");
+        }
     }
     return true;
 }
@@ -302,8 +394,17 @@ int main(int argc, char** argv) {
     fit0.left = {"Czechia_EBA_CordedWare", "Turkey_N"};
     fit0.right = {"Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"};
     fit0.blgsize_cm = 5.0; fit0.maxmiss = 0.0;
-    fit0.weight = {0.558906248861195, 0.441093751138805};
-    fit0.chisq = 4.63516296859645; fit0.dof = 4; fit0.p = 0.326820092470997; fit0.f4rank = 1;
+    // CORRECTED golden_fit0 (convertf-PA; golden_fit0.json directory-path headline). The
+    // prior 0.559/0.441 / 500848 SNPs / chisq 4.635 / p 0.327 was AT2 2.0.10's silent
+    // TGENO misread. steppe's OWN decode of the raw v66 TGENO reproduces AT2-on-PA's
+    // 391333 SNPs EXACTLY; the weights land within rtol 5e-3 (block-partition residual).
+    fit0.weight = {0.868750707709335, 0.131249292290665};
+    fit0.chisq = 3.99093955602736; fit0.dof = 4; fit0.p = 0.407233436195749; fit0.f4rank = 1;
+    fit0.hard_gate = true;          // layer (B) is a HARD ctest gate for golden_fit0.
+    fit0.n_snp_exact = 391333;      // AT2 extract_f2 on the convertf-PA SNP count.
+    fit0.weight_rtol = 5e-3;        // covers the 719-vs-710 block-partition diff.
+    fit0.corrupt_n_snp = 500848;    // the corrupt TGENO-misread count (must NOT match).
+    fit0.corrupt_w0 = 0.558906248861195;  // the corrupt weight[0] (must be FAR from this).
 
     // ---- golden_fitNA (maxmiss=0.99, +Afghanistan_DarraiKurCave_MBA) -------------
     Golden fitNA;
@@ -328,21 +429,22 @@ int main(int argc, char** argv) {
         std::printf("\nRESULT: SKIP (no CUDA device / raw AADR absent — extract path not exercised)\n");
         return 0;
     }
-    std::printf("\n--- AT2 numeric parity DIAGNOSTIC: %d value(s) differ from AT2 ---\n", g_at2_diag);
-    if (g_at2_diag > 0) {
-        std::printf("NOTE: steppe's decode of the real AADR TGENO file does not reproduce AT2's\n"
-                    "      per-pop coverage on the ancient pseudohaploid pops (e.g. Israel_Natufian:\n"
-                    "      raw-byte/steppe zero-coverage 0.326 vs AT2 0.083), so the extracted f2 SNP\n"
-                    "      set differs from AT2's and the fit weights diverge. This is a PRE-EXISTING\n"
-                    "      steppe-vs-AT2 DECODE-layer discrepancy (steppe's decode is validated only\n"
-                    "      against its own numpy oracle, never AT2's reader), independent of M(cli-4).\n"
-                    "      The M(cli-4) mechanical end-to-end contract above is what this test GATES.\n");
-    }
+    std::printf("\n--- golden_fitNA non-gating weight diagnostic: %d value(s) differ ---\n", g_at2_diag);
+    std::printf("NOTE: golden_fit0 is a HARD GATE (SNP count EXACT 391333 == AT2-on-PA; weights\n"
+                "      within rtol 5e-3 of the CORRECTED golden; feasibility/f4rank/dof match;\n"
+                "      model NOT rejected; and decisively NOT the corrupt 500848/[0.5589] result).\n"
+                "      The AT2 2.0.10 golden was corrupt: it silently MISREAD the raw v66 .geno\n"
+                "      TGENO format. steppe's decode is CORRECT (391333 SNPs, == AT2 on the\n"
+                "      convertf-converted PACKEDANCESTRYMAP). The only residual is the ~0.3%%\n"
+                "      block-partition diff (steppe 719 vs AT2 710 jackknife blocks), which the\n"
+                "      5e-3 weight tier covers and which is a TRACKED FOLLOW-UP (reconcile the\n"
+                "      assign_blocks rule) — NOT a decode bug. golden_fitNA's weight comparison\n"
+                "      remains a non-gating diagnostic (its AT2 reference was not regenerated).\n");
     if (g_failures == 0) {
-        std::printf("\nRESULT: PASS (the extract-f2 -> qpadm mechanical end-to-end contract holds; "
-                    "AT2 numeric parity is reported as a diagnostic — see NOTE)\n");
+        std::printf("\nRESULT: PASS (extract-f2 -> qpadm reproduces the CORRECTED golden_fit0 within "
+                    "the justified tier AND is decisively NOT the corrupt golden)\n");
         return 0;
     }
-    std::printf("\nRESULT: FAIL (%d mechanical check(s) failed)\n", g_failures);
+    std::printf("\nRESULT: FAIL (%d gated check(s) failed)\n", g_failures);
     return 1;
 }
