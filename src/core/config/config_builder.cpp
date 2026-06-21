@@ -326,7 +326,19 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     // autosomes_only: extract-f2 defaults this ON (AT2 extract_f2 restricts to autosomes
     // 1..22 by default; cli_args.hpp "extract-f2 default ON, AT2 parity"). An explicit
     // --auto-only/--no-auto-only overrides. Other commands keep the struct default (off).
-    if (merged_.command == Command::ExtractF2) flt.autosomes_only = true;
+    //
+    // drop_monomorphic: extract-f2 ALSO defaults this ON (AT2 extract_f2 builds f2 on the
+    // POLYMORPHIC subset only — its `poly_only` default — dropping every SNP monomorphic
+    // across the analysis pop set before the block partition). steppe matches that by
+    // dropping monomorphic SNPs by default in extract-f2, which changes the kept-SNP count
+    // and the per-block SNP counts (hence the jackknife SEs) to AT2 parity. A monomorphic
+    // SNP contributes 0 to every f2 difference, so this never moves the f2 point estimates;
+    // it only aligns the SNP set / block partition with AT2. An explicit
+    // --drop-mono / --no-drop-mono overrides; other commands keep the struct default (off).
+    if (merged_.command == Command::ExtractF2) {
+        flt.autosomes_only = true;
+        flt.drop_monomorphic = true;
+    }
     if (merged_.autosomes_only.has_value())    flt.autosomes_only = *merged_.autosomes_only;
     if (merged_.drop_monomorphic.has_value())  flt.drop_monomorphic = *merged_.drop_monomorphic;
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
@@ -357,10 +369,17 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
         }
     }
 
-    // ---- blgsize (cM) -----------------------------------------------------------
+    // ---- blgsize (MORGANS on the CLI, AT2 convention) ---------------------------
+    // ADMIXTOOLS 2's `blgsize` is in MORGANS (its default 0.05 == 5 cM), so the
+    // steppe `--blgsize` flag speaks Morgans too — a bare `--blgsize 0.05` reproduces
+    // AT2's block partition (same physical 5 cM block width). The RunConfig stores cM
+    // (the kDefaultBlockSizeCm convention; the block math converts cM->Morgans at the
+    // single block_size_cm_to_morgans site), so the Morgans->cM conversion lives HERE,
+    // at the CLI/config seam, via the single kCentimorgansPerMorgan constant. Do not
+    // reinterpret the stored field as Morgans — only the flag's input unit changed.
     if (merged_.blgsize.has_value()) {
-        if (!(*merged_.blgsize > 0.0)) return fail("--blgsize must be > 0 (centimorgans)");
-        cfg.blgsize_cm_ = *merged_.blgsize;
+        if (!(*merged_.blgsize > 0.0)) return fail("--blgsize must be > 0 (Morgans)");
+        cfg.blgsize_cm_ = *merged_.blgsize * kCentimorgansPerMorgan;
     }
 
     // ---- rotate pool-enumeration bounds ----------------------------------------

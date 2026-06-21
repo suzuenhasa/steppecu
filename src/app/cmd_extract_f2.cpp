@@ -197,7 +197,8 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         std::printf("  ind:        %s (%zu records present)\n", config.ind().c_str(), n_present);
         std::printf("  selection:  %s -> P = %d populations\n", pop_selection_str(sel).c_str(), P);
         std::printf("  precision:  %s (mantissa_bits=%d)\n", precision_label(precision), precision.mantissa_bits);
-        std::printf("  blgsize:    %.4g cM\n", config.blgsize_cm());
+        std::printf("  blgsize:    %.4g Morgans (%.4g cM)\n",
+                    config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());
         std::printf("  filters:    maf>=%.4g maxmiss<=%.4g autosomes_only=%d drop_mono=%d transversions_only=%d\n",
                     filter.maf_min, filter.geno_max_missing,
                     filter.autosomes_only ? 1 : 0, filter.drop_monomorphic ? 1 : 0,
@@ -421,8 +422,9 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     std::printf("steppe extract-f2: wrote %s\n", config.out_dir().c_str());
     std::printf("  P = %d populations, %d blocks, %ld of %ld SNPs kept\n",
                 host_f2.P, host_f2.n_block, M_kept, M);
-    std::printf("  precision = %s, blgsize = %.4g cM\n",
-                precision_label(engaged), config.blgsize_cm());
+    std::printf("  precision = %s, blgsize = %.4g Morgans (%.4g cM)\n",
+                precision_label(engaged),
+                config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());
     if (!wr.f2_cache_id.empty()) {
         std::printf("  f2_cache_id = %s\n", wr.f2_cache_id.c_str());
     }

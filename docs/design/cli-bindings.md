@@ -259,9 +259,9 @@ Single binary `steppe`, CLI11 subcommands matching AT2/admixr `extract_f2` / `qp
 steppe extract-f2  --geno/--snp/--ind PREFIX   (or --geno F --snp F --ind F)
                    --out DIR
                    [--pops a,b,… | --auto-top-k K | --min-n N]    # PopSelection
-                   [--blgsize 5.0]                                # cM; kDefaultBlockSizeCm
+                   [--blgsize 0.05]                               # MORGANS (AT2 convention; 0.05 = 5 cM)
                    [--maf 0 --geno-max-miss 1 --mind-max-miss 1]  # FilterConfig
-                   [--auto-only --drop-mono --transversions]      # FilterConfig flags
+                   [--auto-only --drop-mono --transversions]      # FilterConfig flags (auto-only/drop-mono default ON for extract-f2)
                    [--extract F --exclude F --prune-in F]         # FilterConfig id sets
                    [--precision emu40|emu32|fp64|tf32]            # Precision
                    [--device auto|0,1]                            # DeviceConfig.devices (GPU only)
@@ -378,8 +378,9 @@ in pure-Python `bindings/steppe/__init__.py` (so the compiled module has no pand
 import steppe   # GPU product: import is light, but the ops require a CUDA device
 
 f2 = steppe.extract_f2(prefix="v66.1_HO", pops=None, out="my_f2/",
-                       blgsize=5.0, maf=0.0, maxmiss=0.0, auto_only=True,
-                       precision="emu40", devices=None)   # -> F2Blocks handle (resident) + pops + meta
+                       blgsize=0.05, maf=0.0, maxmiss=0.0, auto_only=True, drop_mono=True,
+                       precision="emu40", devices=None)   # blgsize in MORGANS (AT2 convention);
+                                                          # -> F2Blocks handle (resident) + pops + meta
 f2 = steppe.read_f2("my_f2/")                              # reload the AT2-style dir
 
 res  = steppe.qpadm(f2, target="Mbuti", left=["French","Han"], right=[...],

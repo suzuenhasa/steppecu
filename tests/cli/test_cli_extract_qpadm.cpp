@@ -20,20 +20,25 @@
 //       the raw v66 .geno TGENO format and SILENTLY MISREAD it, producing the prior corrupt
 //       golden (500848 SNPs / weights [0.559,0.441]). steppe's decode is CORRECT — PROVEN
 //       via convertf v8621 (TGENO -> PACKEDANCESTRYMAP): AT2 extract_f2 on the convertf-PA
-//       gives 391333 SNPs / weights ~[CordedWare 0.869, Turkey_N 0.131], MATCHING steppe.
+//       gives 391333 SNPs after filtering / 351539 POLYMORPHIC (the f2 set) / weights
+//       ~[CordedWare 0.869, Turkey_N 0.131], MATCHING steppe (which drops monomorphic SNPs
+//       by default for AT2 poly_only parity, so it builds f2 on the same 351539).
 //       So this layer now HARD-asserts that steppe extract-f2 on the raw v66 TGENO -> qpadm
 //       REPRODUCES the corrected golden within a JUSTIFIED tier:
-//         * SNP count EXACT (391333 == AT2-on-PA; steppe's decode is bit-correct);
+//         * SNP count EXACT (351539 == AT2-on-PA POLYMORPHIC; steppe drops monomorphic
+//           SNPs by default to match AT2's `poly_only` extract_f2 — the parity fix);
 //         * weights within rtol 5e-3 of the corrected golden [0.868751, 0.131249];
 //         * feasibility + f4rank + dof match; model NOT rejected (p > 0.05);
 //         * AND decisively NOT the corrupt 500848-SNP / [0.5589,0.4411] result.
-//       THE 5e-3 WEIGHT TIER covers ONE known residual: steppe's block partition yields
-//       719 jackknife blocks vs AT2-on-PA's 710 (the assign_blocks rule), nudging the
-//       weights to [0.86610, 0.13390] and p to 0.4848 (both within tier; model still NOT
-//       rejected). The DECODE + 391333-SNP set are EXACT — this ~0.3% block-partition
-//       diff is a TRACKED FOLLOW-UP (reconcile the partition rule), NOT a decode bug, and
-//       the tier is NOT widened past it. chisq is REPORTED (block-partition-sensitive),
-//       not gated; dof/f4rank/feasibility/SNP-count/not-corrupt ARE gated.
+//       THE 5e-3 WEIGHT TIER covers the residual block-partition difference: steppe and
+//       AT2 both build f2 on the SAME 351539 polymorphic SNPs and at the SAME blgsize 0.05
+//       Morgans, so the partitions agree closely (the prior 719-vs-710 residual, when steppe
+//       still kept the monomorphic SNPs, shrinks once both engines partition the identical
+//       poly subset). chisq is REPORTED (block-partition-sensitive), not gated;
+//       dof/f4rank/feasibility/SNP-count/not-corrupt ARE gated.
+//
+// UNITS: --blgsize is MORGANS (AT2 convention; 0.05 == 5 cM). The cases pass 0.05 Morgans,
+// reproducing AT2's extract_f2(blgsize=0.05) block partition exactly.
 //
 // PLAIN C++ host TU (NO CUDA header): it spawns the steppe binary; the GPU work happens
 // inside the child. SKIPs cleanly (exit 0) when no CUDA device is visible OR the raw AADR
@@ -193,7 +198,7 @@ struct Golden {
     std::vector<std::string> pops;
     std::string target;
     std::vector<std::string> left, right;
-    double blgsize_cm = 5.0;
+    double blgsize_morgans = 0.05;  // --blgsize is MORGANS (AT2 convention; 0.05 == 5 cM)
     double maxmiss = 0.0;
     std::vector<double> weight;
     double chisq = 0; int dof = 0; double p = 0; int f4rank = 0;
@@ -231,7 +236,7 @@ bool run_case(const std::string& bin, const std::string& prefix,
     // ---- extract-f2 (the full genotype -> f2-dir precompute on the GPU) -----------
     const RunResult ex = run_steppe(bin,
         {"extract-f2", "--prefix", prefix, "--pops", join(g.pops),
-         "--blgsize", std::to_string(g.blgsize_cm), "--maxmiss", std::to_string(g.maxmiss),
+         "--blgsize", std::to_string(g.blgsize_morgans), "--maxmiss", std::to_string(g.maxmiss),
          "--out", out_dir.string()},
         tmp, "extract_" + g.name);
     if (looks_like_no_gpu(ex.text)) {
@@ -252,9 +257,10 @@ bool run_case(const std::string& bin, const std::string& prefix,
     check_true("meta.json written", std::filesystem::exists(out_dir / "meta.json"));
     check_true("f2.bin vpair region is REAL (non-zero)", f2bin_vpair_nonzero(out_dir / "f2.bin"));
 
-    // (B) HARD GATE — SNP count EXACT (steppe's decode reproduces AT2-on-PA's 391333) AND
-    //     decisively NOT the corrupt TGENO-misread count (500848). This is the headline
-    //     proof that steppe's decode of the raw v66 TGENO is CORRECT.
+    // (B) HARD GATE — SNP count EXACT (steppe's decode + monomorphic drop reproduces
+    //     AT2-on-PA's POLYMORPHIC 351539) AND decisively NOT the corrupt TGENO-misread
+    //     count (500848). This is the headline proof that steppe's decode of the raw v66
+    //     TGENO is CORRECT and that its `poly_only` SNP set matches AT2's.
     if (g.hard_gate) {
         const long n_kept = meta_n_snp_kept(out_dir);
         std::printf("  extracted n_snp_kept (meta.json) = %ld (AT2-on-PA = %d)\n",
@@ -292,12 +298,11 @@ bool run_case(const std::string& bin, const std::string& prefix,
                 char nm[48]; std::snprintf(nm, sizeof(nm), "weight[%zu]", i);
                 if (g.hard_gate) {
                     // (B) HARD GATE: reproduce the corrected golden within the justified
-                    // tier. The block-partition residual (719 vs 710 jackknife blocks) is
-                    // an ABSOLUTE shift of ~2.6e-3 shared by BOTH (sum-to-one) weights, so
-                    // the tier is an absolute 5e-3 per weight (a faithful encoding of the
-                    // ~0.3% residual on the dominant weight; the minor weight carries the
-                    // SAME absolute error). The DECODE + 391333-SNP set are EXACT — this is
-                    // a TRACKED FOLLOW-UP, not widened past the measured residual.
+                    // tier. With steppe now dropping monomorphic SNPs (AT2 poly_only parity)
+                    // and partitioning at the SAME blgsize 0.05 Morgans over the SAME 351539
+                    // polymorphic SNPs, the residual block-partition difference is an absolute
+                    // shift shared by BOTH (sum-to-one) weights, so the tier is an absolute
+                    // 5e-3 per weight. The DECODE + 351539 polymorphic-SNP set are EXACT.
                     char nmg[96]; std::snprintf(nmg, sizeof(nmg), "%.40s vs CORRECTED golden", nm);
                     check_close(nmg, w, g.weight[i], 0.0, g.weight_rtol);
                 } else {
@@ -393,16 +398,18 @@ int main(int argc, char** argv) {
     fit0.target = "England_BellBeaker";
     fit0.left = {"Czechia_EBA_CordedWare", "Turkey_N"};
     fit0.right = {"Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"};
-    fit0.blgsize_cm = 5.0; fit0.maxmiss = 0.0;
+    fit0.blgsize_morgans = 0.05; fit0.maxmiss = 0.0;  // 0.05 Morgans == 5 cM (AT2 default)
     // CORRECTED golden_fit0 (convertf-PA; golden_fit0.json directory-path headline). The
     // prior 0.559/0.441 / 500848 SNPs / chisq 4.635 / p 0.327 was AT2 2.0.10's silent
-    // TGENO misread. steppe's OWN decode of the raw v66 TGENO reproduces AT2-on-PA's
-    // 391333 SNPs EXACTLY; the weights land within rtol 5e-3 (block-partition residual).
+    // TGENO misread. steppe's OWN decode of the raw v66 TGENO reproduces AT2-on-PA's SNP
+    // set EXACTLY; with the monomorphic drop (AT2 poly_only parity) steppe builds f2 on the
+    // 351539 POLYMORPHIC SNPs AT2 uses; the weights land within rtol 5e-3.
     fit0.weight = {0.868750707709335, 0.131249292290665};
     fit0.chisq = 3.99093955602736; fit0.dof = 4; fit0.p = 0.407233436195749; fit0.f4rank = 1;
     fit0.hard_gate = true;          // layer (B) is a HARD ctest gate for golden_fit0.
-    fit0.n_snp_exact = 391333;      // AT2 extract_f2 on the convertf-PA SNP count.
-    fit0.weight_rtol = 5e-3;        // covers the 719-vs-710 block-partition diff.
+    fit0.n_snp_exact = 351539;      // AT2 extract_f2 on the convertf-PA POLYMORPHIC count
+                                    // (steppe drops monomorphic SNPs by default to match).
+    fit0.weight_rtol = 5e-3;        // covers the residual block-partition diff.
     fit0.corrupt_n_snp = 500848;    // the corrupt TGENO-misread count (must NOT match).
     fit0.corrupt_w0 = 0.558906248861195;  // the corrupt weight[0] (must be FAR from this).
 
@@ -416,7 +423,7 @@ int main(int argc, char** argv) {
     fitNA.left = {"Czechia_EBA_CordedWare", "Turkey_N"};
     fitNA.right = {"Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan",
                    "Karitiana", "Afghanistan_DarraiKurCave_MBA"};
-    fitNA.blgsize_cm = 5.0; fitNA.maxmiss = 0.99;
+    fitNA.blgsize_morgans = 0.05; fitNA.maxmiss = 0.99;  // 0.05 Morgans == 5 cM
     fitNA.weight = {21.9095007306, -20.9095007306};
     fitNA.assert_summary = false;  // f2-object NA golden's summary shape differs; weights diag only.
 
@@ -430,16 +437,17 @@ int main(int argc, char** argv) {
         return 0;
     }
     std::printf("\n--- golden_fitNA non-gating weight diagnostic: %d value(s) differ ---\n", g_at2_diag);
-    std::printf("NOTE: golden_fit0 is a HARD GATE (SNP count EXACT 391333 == AT2-on-PA; weights\n"
-                "      within rtol 5e-3 of the CORRECTED golden; feasibility/f4rank/dof match;\n"
+    std::printf("NOTE: golden_fit0 is a HARD GATE (SNP count EXACT 351539 == AT2-on-PA POLYMORPHIC;\n"
+                "      weights within rtol 5e-3 of the CORRECTED golden; feasibility/f4rank/dof match;\n"
                 "      model NOT rejected; and decisively NOT the corrupt 500848/[0.5589] result).\n"
                 "      The AT2 2.0.10 golden was corrupt: it silently MISREAD the raw v66 .geno\n"
-                "      TGENO format. steppe's decode is CORRECT (391333 SNPs, == AT2 on the\n"
-                "      convertf-converted PACKEDANCESTRYMAP). The only residual is the ~0.3%%\n"
-                "      block-partition diff (steppe 719 vs AT2 710 jackknife blocks), which the\n"
-                "      5e-3 weight tier covers and which is a TRACKED FOLLOW-UP (reconcile the\n"
-                "      assign_blocks rule) — NOT a decode bug. golden_fitNA's weight comparison\n"
-                "      remains a non-gating diagnostic (its AT2 reference was not regenerated).\n");
+                "      TGENO format. steppe's decode is CORRECT; with the monomorphic drop (AT2\n"
+                "      poly_only parity) steppe builds f2 on AT2's 351539 polymorphic SNPs, and\n"
+                "      --blgsize is in Morgans (0.05 == 5 cM), so the partitions agree closely.\n"
+                "      The small residual block-partition diff (an assign_blocks tie convention)\n"
+                "      is covered by the 5e-3 weight tier and is a TRACKED FOLLOW-UP — NOT a decode\n"
+                "      bug. golden_fitNA's weight comparison remains a non-gating diagnostic (its\n"
+                "      AT2 reference was not regenerated).\n");
     if (g_failures == 0) {
         std::printf("\nRESULT: PASS (extract-f2 -> qpadm reproduces the CORRECTED golden_fit0 within "
                     "the justified tier AND is decisively NOT the corrupt golden)\n");

@@ -232,7 +232,7 @@ int run_cli(int argc, char** argv) {
             "Explicit population list")->delimiter(',');
         sub->add_option_function<int>("--auto-top-k", [&](int v) { extract_args.auto_top_k = v; }, "Keep the K largest pops");
         sub->add_option_function<int>("--min-n", [&](int v) { extract_args.min_n = v; }, "Keep pops with >= N individuals");
-        sub->add_option_function<double>("--blgsize", [&](double v) { extract_args.blgsize = v; }, "Jackknife block size (cM, default 5)");
+        sub->add_option_function<double>("--blgsize", [&](double v) { extract_args.blgsize = v; }, "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
         sub->add_option_function<double>("--maf", [&](double v) { extract_args.maf = v; }, "Minimum MAF");
         sub->add_option_function<double>("--geno-max-miss", [&](double v) { extract_args.geno_max_missing = v; }, "Max per-SNP missing fraction");
         // --maxmiss: the AT2-ergonomic alias for --geno-max-miss (AT2 maxmiss == keep
@@ -244,7 +244,12 @@ int run_cli(int argc, char** argv) {
         sub->add_flag_function("--auto-only,!--no-auto-only",
                                [&](std::int64_t v) { extract_args.autosomes_only = (v >= 0); },
                                "Keep only autosomes chr 1-22 (default on; --no-auto-only to disable)");
-        sub->add_flag_function("--drop-mono", [&](std::int64_t) { extract_args.drop_monomorphic = true; }, "Drop monomorphic SNPs");
+        // --drop-mono / --no-drop-mono: extract-f2 defaults drop_monomorphic ON (AT2
+        // extract_f2 builds f2 on the polymorphic subset — its `poly_only` default);
+        // --no-drop-mono keeps monomorphic SNPs.
+        sub->add_flag_function("--drop-mono,!--no-drop-mono",
+                               [&](std::int64_t v) { extract_args.drop_monomorphic = (v >= 0); },
+                               "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
         sub->add_flag_function("--transversions", [&](std::int64_t) { extract_args.transversions_only = true; }, "Keep only transversions");
         sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
         add_common_flags(sub, extract_args);

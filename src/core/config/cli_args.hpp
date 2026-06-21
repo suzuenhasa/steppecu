@@ -107,14 +107,14 @@ struct CliArgs {
     std::vector<std::string>   pops;        ///< --pops (PopSelection::Explicit)
     std::optional<int>         auto_top_k;  ///< --auto-top-k (PopSelection::AutoTopK)
     std::optional<int>         min_n;       ///< --min-n (PopSelection::MinN)
-    std::optional<double>      blgsize;     ///< --blgsize (cM; kDefaultBlockSizeCm)
+    std::optional<double>      blgsize;     ///< --blgsize (MORGANS, AT2 convention; default 0.05 = 5 cM). ConfigBuilder converts Morgans->cM (×kCentimorgansPerMorgan) into the cM-stored RunConfig::blgsize_cm_.
 
     // ---- FilterConfig overrides (cli-bindings.md §4.1; M(cli-4)) ---------------
     std::optional<double> maf;              ///< --maf
     std::optional<double> geno_max_missing; ///< --geno-max-miss
     std::optional<double> mind_max_missing; ///< --mind-max-miss
     std::optional<bool>   autosomes_only;   ///< --auto-only / --no-auto-only (extract-f2 default ON, AT2 parity)
-    std::optional<bool>   drop_monomorphic; ///< --drop-mono
+    std::optional<bool>   drop_monomorphic; ///< --drop-mono / --no-drop-mono (extract-f2 default ON, AT2 poly_only parity)
     std::optional<bool>   transversions_only; ///< --transversions
 
     // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
