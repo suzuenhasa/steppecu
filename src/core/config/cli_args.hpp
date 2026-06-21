@@ -99,6 +99,7 @@ struct CliArgs {
     std::optional<int> max_sources;         ///< --max-sources
 
     // ---- extract-f2 inputs (cli-bindings.md §4.1; consumed in M(cli-4)) --------
+    std::optional<std::string> prefix;      ///< --prefix (sets geno/snp/ind = PREFIX.{geno,snp,ind})
     std::optional<std::string> geno;        ///< --geno
     std::optional<std::string> snp;         ///< --snp
     std::optional<std::string> ind;         ///< --ind
@@ -112,9 +113,12 @@ struct CliArgs {
     std::optional<double> maf;              ///< --maf
     std::optional<double> geno_max_missing; ///< --geno-max-miss
     std::optional<double> mind_max_missing; ///< --mind-max-miss
-    std::optional<bool>   autosomes_only;   ///< --auto-only
+    std::optional<bool>   autosomes_only;   ///< --auto-only / --no-auto-only (extract-f2 default ON, AT2 parity)
     std::optional<bool>   drop_monomorphic; ///< --drop-mono
     std::optional<bool>   transversions_only; ///< --transversions
+
+    // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
+    std::optional<bool>   dry_run;          ///< --dry-run (report tiers/sizes, no compute)
 
     // ---- Output (cli-bindings.md §4.4) ----------------------------------------
     std::optional<std::string> out_file;    ///< --out FILE (stdout if unset)

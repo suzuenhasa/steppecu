@@ -1137,4 +1137,26 @@ if(STEPPE_BUILD_CLI)
            COMMAND test_cli_qpadm
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
+  # triple (STEPPE_AADR_ROOT/raw/<prefix>.{geno,snp,ind}) for the golden pop sets, then
+  # `steppe qpadm --f2-dir <extracted>` and asserts the result reproduces the committed
+  # AT2 goldens (golden_fit0 maxmiss=0 + golden_fitNA maxmiss=0.99) within the established
+  # tiers — RUNNING ON THE GPU. It proves the NEW M(cli-4) pieces end-to-end: the
+  # io->decode->filter->assign_blocks->precompute chain AND the STPF2BK1 dir WRITER (with
+  # REAL vpair — golden_fitNA's dropped block is reproduced ONLY because vpair is real,
+  # not zeros). SKIPs cleanly (exit 0) when no CUDA device is visible OR the raw AADR is
+  # absent, like f2_blocks_equivalence (the STEPPE_AADR_ROOT raw/ convention). Links ONLY
+  # the standard host warnings (it spawns the binary; no library symbols needed). Depends
+  # on steppe_app so the binary exists; the binary path + the AADR root + the golden dir
+  # are argv. NO SYNTHETIC DATA (memory real-data-only-all-results). cli-bindings.md §4, §7.
+  add_executable(test_cli_extract_qpadm cli/test_cli_extract_qpadm.cpp)
+  target_link_libraries(test_cli_extract_qpadm PRIVATE steppe::warnings)
+  add_dependencies(test_cli_extract_qpadm steppe_app)
+  add_test(NAME cli_extract_qpadm
+           COMMAND test_cli_extract_qpadm
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 endif()

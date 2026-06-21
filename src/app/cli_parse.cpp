@@ -20,6 +20,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "app/cmd_extract_f2.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "core/config/cli_args.hpp"
 #include "core/config/config_builder.hpp"
@@ -220,9 +221,11 @@ int run_cli(int argc, char** argv) {
     {
         CLI::App* sub = app.add_subcommand("extract-f2", "Precompute the f2_blocks dir from genotypes");
         extract_args.command = Command::ExtractF2;
-        sub->add_option_function<std::string>("--geno", [&](const std::string& v) { extract_args.geno = v; }, "Genotype file");
-        sub->add_option_function<std::string>("--snp",  [&](const std::string& v) { extract_args.snp = v; },  "SNP file");
-        sub->add_option_function<std::string>("--ind",  [&](const std::string& v) { extract_args.ind = v; },  "Individual file");
+        sub->add_option_function<std::string>("--prefix", [&](const std::string& v) { extract_args.prefix = v; },
+                                              "Genotype triple prefix (sets --geno/--snp/--ind = PREFIX.{geno,snp,ind})");
+        sub->add_option_function<std::string>("--geno", [&](const std::string& v) { extract_args.geno = v; }, "Genotype file (overrides --prefix)");
+        sub->add_option_function<std::string>("--snp",  [&](const std::string& v) { extract_args.snp = v; },  "SNP file (overrides --prefix)");
+        sub->add_option_function<std::string>("--ind",  [&](const std::string& v) { extract_args.ind = v; },  "Individual file (overrides --prefix)");
         sub->add_option_function<std::string>("--out",  [&](const std::string& v) { extract_args.out_dir = v; }, "Output f2_blocks dir");
         sub->add_option_function<std::vector<std::string>>(
             "--pops", [&](const std::vector<std::string>& v) { extract_args.pops = v; },
@@ -232,15 +235,23 @@ int run_cli(int argc, char** argv) {
         sub->add_option_function<double>("--blgsize", [&](double v) { extract_args.blgsize = v; }, "Jackknife block size (cM, default 5)");
         sub->add_option_function<double>("--maf", [&](double v) { extract_args.maf = v; }, "Minimum MAF");
         sub->add_option_function<double>("--geno-max-miss", [&](double v) { extract_args.geno_max_missing = v; }, "Max per-SNP missing fraction");
+        // --maxmiss: the AT2-ergonomic alias for --geno-max-miss (AT2 maxmiss == keep
+        // iff per-SNP missing frac across selected pops <= maxmiss == geno_max_missing).
+        sub->add_option_function<double>("--maxmiss", [&](double v) { extract_args.geno_max_missing = v; }, "AT2 alias for --geno-max-miss");
         sub->add_option_function<double>("--mind-max-miss", [&](double v) { extract_args.mind_max_missing = v; }, "Max per-sample missing fraction");
-        sub->add_flag_function("--auto-only", [&](std::int64_t) { extract_args.autosomes_only = true; }, "Keep only autosomes (chr 1-22)");
+        // --auto-only / --no-auto-only: extract-f2 defaults autosomes_only ON (AT2
+        // extract_f2 default auto_only=TRUE = chr 1-22); --no-auto-only turns it off.
+        sub->add_flag_function("--auto-only,!--no-auto-only",
+                               [&](std::int64_t v) { extract_args.autosomes_only = (v >= 0); },
+                               "Keep only autosomes chr 1-22 (default on; --no-auto-only to disable)");
         sub->add_flag_function("--drop-mono", [&](std::int64_t) { extract_args.drop_monomorphic = true; }, "Drop monomorphic SNPs");
         sub->add_flag_function("--transversions", [&](std::int64_t) { extract_args.transversions_only = true; }, "Keep only transversions");
+        sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
         add_common_flags(sub, extract_args);
         sub->callback([&]() {
             auto config = build_config(extract_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            std::exit(run_not_yet_implemented("extract-f2", *config));
+            std::exit(run_extract_f2_command(*config));
         });
     }
 

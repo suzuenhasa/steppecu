@@ -26,10 +26,12 @@ endif()
 add_executable(steppe_app
     main.cpp
     cli_parse.cpp
-    cmd_qpadm.cpp     # M(cli-1): the qpAdm GPU fit command
-    f2_dir_io.cpp     # M(cli-1): the f2_blocks dir READER (f2.bin + pops.txt)
-    pop_resolver.cpp  # M(cli-1): name -> P-axis-index resolution against pops.txt
-    result_emit.cpp)  # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
+    cmd_qpadm.cpp      # M(cli-1): the qpAdm GPU fit command
+    cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command
+    f2_dir_io.cpp      # M(cli-1): the f2_blocks dir READER (f2.bin + pops.txt)
+    f2_dir_writer.cpp  # M(cli-4): the f2_blocks dir WRITER (STPF2BK1 REAL vpair + sidecars)
+    pop_resolver.cpp   # M(cli-1): name -> P-axis-index resolution against pops.txt
+    result_emit.cpp)   # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
 
