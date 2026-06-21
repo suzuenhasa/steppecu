@@ -162,7 +162,19 @@ F2BlockTensor combine_f2_partials_resident(
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev_device));
     struct DeviceGuard {
         int dev;
+        explicit DeviceGuard(int d) noexcept : dev(d) {}
         ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); }
+        // Side-effecting dtor (cudaSetDevice restore) ⇒ non-copyable AND non-movable
+        // (standard §2.12): a copy/move would re-fire the restore (a redundant rebind).
+        // Scope-restore guard, never relocated, so all four are deleted — not move-only.
+        // The explicit int ctor is REQUIRED: a user-declared (deleted) copy/move ctor
+        // makes the class a non-aggregate under C++20 (P1008R1 — "no user-declared ...
+        // constructors"), so the `restore{prev_device}` init can no longer rely on
+        // aggregate init and must reach a real ctor. Behavior-neutral. [16.3]
+        DeviceGuard(const DeviceGuard&) = delete;
+        DeviceGuard& operator=(const DeviceGuard&) = delete;
+        DeviceGuard(DeviceGuard&&) = delete;
+        DeviceGuard& operator=(DeviceGuard&&) = delete;
     } restore{prev_device};  // restore on scope exit (teardown WARN, never throw)
     STEPPE_CUDA_CHECK(cudaSetDevice(root_device_id));
 
@@ -249,7 +261,19 @@ DeviceF2Blocks combine_f2_partials_resident_device(
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev_device));
     struct DeviceGuard {
         int dev;
+        explicit DeviceGuard(int d) noexcept : dev(d) {}
         ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); }
+        // Side-effecting dtor (cudaSetDevice restore) ⇒ non-copyable AND non-movable
+        // (standard §2.12): a copy/move would re-fire the restore (a redundant rebind).
+        // Scope-restore guard, never relocated, so all four are deleted — not move-only.
+        // The explicit int ctor is REQUIRED: a user-declared (deleted) copy/move ctor
+        // makes the class a non-aggregate under C++20 (P1008R1 — "no user-declared ...
+        // constructors"), so the `restore{prev_device}` init can no longer rely on
+        // aggregate init and must reach a real ctor. Behavior-neutral. [16.3]
+        DeviceGuard(const DeviceGuard&) = delete;
+        DeviceGuard& operator=(const DeviceGuard&) = delete;
+        DeviceGuard(DeviceGuard&&) = delete;
+        DeviceGuard& operator=(DeviceGuard&&) = delete;
     } restore{prev_device};
     STEPPE_CUDA_CHECK(cudaSetDevice(root_device_id));
 

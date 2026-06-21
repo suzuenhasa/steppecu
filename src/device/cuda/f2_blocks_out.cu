@@ -13,8 +13,8 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
-#include <utility>
 
+#include "core/internal/log.hpp"           // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_WARN (device-restore guard)
 #include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers; pulls device_buffer.cuh)
 #include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
@@ -22,25 +22,21 @@
 
 namespace steppe::device {
 
-// ---- DiskF2Blocks special members (owns the read FILE*) -------------------
-DiskF2Blocks::DiskF2Blocks() = default;
-DiskF2Blocks::~DiskF2Blocks() {
-    if (read_handle) { std::fclose(read_handle); read_handle = nullptr; }
-}
-DiskF2Blocks::DiskF2Blocks(DiskF2Blocks&& o) noexcept
-    : path(std::move(o.path)), P(o.P), n_block(o.n_block),
-      block_sizes(std::move(o.block_sizes)),
-      read_handle(std::exchange(o.read_handle, nullptr)) {}
-DiskF2Blocks& DiskF2Blocks::operator=(DiskF2Blocks&& o) noexcept {
-    if (this != &o) {
-        if (read_handle) std::fclose(read_handle);
-        path = std::move(o.path);
-        P = o.P;
-        n_block = o.n_block;
-        block_sizes = std::move(o.block_sizes);
-        read_handle = std::exchange(o.read_handle, nullptr);
-    }
-    return *this;
+// ---- FileCloser — the ONE close site for the disk read handle -------------
+// The descriptor's std::unique_ptr<std::FILE, FileCloser> now supplies move-only +
+// null-on-move + the freeing dtor for DiskF2Blocks (all special members =default in the
+// header; ~18 lines of hand-rolled rule-of-five deleted, group-16 16.5). Folding both
+// former close sites (the old dtor + the move-assign close-old) into this one deleter
+// also lets the previously-discarded std::fclose status emit ONE teardown warn here
+// (16.1). NDEBUG: STEPPE_LOG_WARN compiles to (void)0 AND does not evaluate its args, so
+// the std::fclose call MUST stay outside the macro (its close is the load-bearing side
+// effect); the `status` local is consumed only by the (release-stripped) warn, so it is
+// marked [[maybe_unused]] to stay -Werror=unused-variable clean under NDEBUG.
+void FileCloser::operator()(std::FILE* f) const noexcept {
+    if (!f) return;  // defensive (unique_ptr only invokes the deleter on a non-null get())
+    [[maybe_unused]] const int status = std::fclose(f);  // 0 on success, EOF on failure
+    if (status != 0)
+        STEPPE_LOG_WARN("std::fclose (F2BlocksOut(Disk) read handle teardown) failed");
 }
 
 namespace {
@@ -128,8 +124,8 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
                 throw std::runtime_error("F2BlocksOut::read_block_to_host: Disk tier has no "
                                          "open read handle");
             const F2DiskHeader h = disk_header(disk);
-            pread_all(disk.read_handle, f2_slab_out, bytes, f2_block_offset(h, b), "f2");
-            pread_all(disk.read_handle, vpair_slab_out, bytes, vpair_block_offset(h, b), "vpair");
+            pread_all(disk.read_handle.get(), f2_slab_out, bytes, f2_block_offset(h, b), "f2");
+            pread_all(disk.read_handle.get(), vpair_slab_out, bytes, vpair_block_offset(h, b), "vpair");
             break;
         }
     }
@@ -170,9 +166,9 @@ F2BlockTensor F2BlocksOut::to_host() const {
             if (!disk.read_handle)
                 throw std::runtime_error("F2BlocksOut::to_host: Disk tier has no open read handle");
             const F2DiskHeader h = disk_header(disk);
-            pread_all(disk.read_handle, out.f2.data(), total * sizeof(double),
+            pread_all(disk.read_handle.get(), out.f2.data(), total * sizeof(double),
                       h.f2_offset, "f2-region");
-            pread_all(disk.read_handle, out.vpair.data(), total * sizeof(double),
+            pread_all(disk.read_handle.get(), out.vpair.data(), total * sizeof(double),
                       h.vpair_offset, "vpair-region");
             return out;
         }

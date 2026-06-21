@@ -362,8 +362,10 @@ void DiskSink::take_descriptor(DiskF2Blocks& out) {
     out.P = P_;
     out.n_block = (n_block_ < 0 ? 0 : n_block_);
     out.block_sizes = block_sizes_;
-    if (out.read_handle) std::fclose(out.read_handle);
-    out.read_handle = read_handle_;
+    // Hand the reopened read handle to the descriptor's owning unique_ptr; reset()
+    // closes any handle it already held (via FileCloser, the single warn-on-fail close
+    // site) before taking ownership — folds the old explicit close-old (group-16 16.5).
+    out.read_handle.reset(read_handle_);
     read_handle_ = nullptr;
 }
 

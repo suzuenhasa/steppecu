@@ -53,8 +53,11 @@ public:
     [[nodiscard]] bool empty() const noexcept { return n_block <= 0 || P <= 0; }
 
     /// Borrowed device pointers to the resident f2 / vpair (column-major
-    /// [P × P × n_block], i + P·j + P·P·b). null iff empty(). The fit engine reads
-    /// these in VRAM. Defined in cuda/device_f2_blocks.cu (it dereferences Impl).
+    /// [P × P × n_block], i + P·j + P·P·b). null when impl is null (no resident
+    /// buffers) — note a moved-from husk has null impl yet may report stale
+    /// P/n_block/device_id, so prefer this null check over empty()/size() on a husk.
+    /// The fit engine reads these in VRAM. Defined in cuda/device_f2_blocks.cu (it
+    /// dereferences Impl).
     [[nodiscard]] const double* f2_device() const noexcept;
     [[nodiscard]] const double* vpair_device() const noexcept;
 
@@ -72,7 +75,10 @@ public:
 
     // ---- Opaque CUDA payload (the DeviceBuffer<double> f2/vpair owners) ----
     struct Impl;                  // defined in cuda/device_f2_blocks_impl.cuh
-    std::unique_ptr<Impl> impl;   // null iff empty()
+    std::unique_ptr<Impl> impl;   // null => no resident buffers; a moved-from husk
+                                  // may still report stale P/n_block/device_id (the
+                                  // =default move nulls impl but copies the scalars).
+
 };
 
 /// H2D inverse of DeviceF2Blocks::to_host (M4.5 no-peer assembly transport): allocate

@@ -35,7 +35,7 @@
 //   * DEVICE-AGNOSTIC FREE (the M4.5 escape invariant; cleanup [17.5]). Every
 //     compute entry runs `guard_device()` so allocations land on `device_id_`, but
 //     teardown — `~CudaBackend`'s member RAII (there is NO explicit `~CudaBackend`),
-//     the per-call DeviceBuffer/RingGuard scope-exit frees, and CRITICALLY the
+//     the per-call DeviceBuffer/Event scope-exit frees, and CRITICALLY the
 //     resident `rb.f2`/`rb.vpair` that MOVE OUT into a DeviceF2Blocks/DevicePartial
 //     and are freed LATER by the host-side combine under a possibly-device-0 ambient
 //     — runs under whatever device is current, and NONE of these free sites
@@ -1032,23 +1032,21 @@ public:
         struct Ring {
             DeviceBuffer<double> f2;
             DeviceBuffer<double> vpair;
-            cudaEvent_t reuse = nullptr;  // recorded after this buffer's chunk D2Hs issued
+            Event reuse;  // RAII disable-timing event, recorded after this buffer's chunk D2Hs issued
             bool used = false;
         };
+        // Event (stream.hpp) is the owning, move-only disable-timing event wrapper:
+        // its default ctor creates the cudaEventDisableTiming event on construction of
+        // each Ring slot and its warn-not-throw dtor tears every slot down on unwind, so
+        // no bespoke create loop or teardown guard is needed (standard §2.12 RAII
+        // template, §5 non-goal #9 keep behavior). This also closes the [14.5] partial-
+        // construction leak window structurally: a throw mid-array still unwinds the
+        // already-constructed slots' events (the DeviceBuffer members free via their own
+        // RAII regardless).
         Ring ring[kStreamDeviceChunks];
-        // The guard is constructed BEFORE the creation loop (group-14 [14.5] fold-in):
-        // each `r.reuse` starts nullptr (Ring's in-class init) and the dtor null-checks
-        // every slot, so if a LATER iteration's cudaEventCreateWithFlags throws, the
-        // events already created in earlier iterations are torn down on unwind (the
-        // DeviceBuffer members free themselves via their own RAII regardless).
-        struct RingGuard {
-            Ring* r; int n;
-            ~RingGuard() { for (int i = 0; i < n; ++i) if (r[i].reuse) (void)cudaEventDestroy(r[i].reuse); }
-        } ring_guard{ring, kStreamDeviceChunks};
         for (Ring& r : ring) {
             r.f2 = DeviceBuffer<double>(max_pp_nb);
             r.vpair = DeviceBuffer<double>(max_pp_nb);
-            STEPPE_CUDA_CHECK(cudaEventCreateWithFlags(&r.reuse, cudaEventDisableTiming));
         }
 
         int chunk_idx = 0;
@@ -1069,7 +1067,7 @@ public:
                 // buffer has had its D2Hs issued+drained (its event), so chunk c's
                 // assemble cannot overwrite slabs chunk c-slots is still D2H-ing.
                 if (r.used)
-                    STEPPE_CUDA_CHECK(cudaEventSynchronize(r.reuse));
+                    STEPPE_CUDA_CHECK(cudaEventSynchronize(r.reuse.get()));
 
                 // ---- PER-CHUNK SNP-TILE DECODE (the new mechanism) -----------------
                 // Upload ONLY this chunk's column union Q/V/N[:, s_lo:s_hi] from the
@@ -1137,8 +1135,9 @@ public:
                                      slab, stream_.get());
                 }
                 // Record the reuse event AFTER this chunk's spill D2Hs are enqueued, so a
-                // later chunk that reuses this device buffer waits for them.
-                STEPPE_CUDA_CHECK(cudaEventRecord(r.reuse, stream_.get()));
+                // later chunk that reuses this device buffer waits for them. Event::record
+                // (stream.hpp) wraps cudaEventRecord(e_, stream.get()) + its own CHECK.
+                r.reuse.record(stream_);
                 r.used = true;
                 ++chunk_idx;
                 start += (nb > 0 ? nb : 1);  // advance by the split-determined nb

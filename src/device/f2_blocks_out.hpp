@@ -38,16 +38,30 @@ namespace steppe::device {
     return static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
 }
 
+/// Move-only deleter for the on-disk read handle: closes the FILE* and, on a nonzero
+/// std::fclose status, routes ONE teardown-warning line through the §7 sink instead of
+/// silently discarding it (the // STEPPE_LOG_WARN teardown promise this unit always
+/// carried; group-16 16.1). Stateless/empty -> EBO makes the owning unique_ptr the size
+/// of a raw FILE* (no overhead). The std::FILE-pointer null check is defensive (a
+/// unique_ptr only invokes the deleter on a non-null managed pointer). Verified vs CUDA
+/// 13.x toolchain C++ stdlib: std::fclose (<cstdio>) returns 0 on success / EOF (nonzero)
+/// on failure, so `!= 0` is the failure test. The body is in cuda/f2_blocks_out.cu (the
+/// debug-arm STEPPE_LOG_WARN pulls <cstdio>; compiles out under NDEBUG, no unused param).
+struct FileCloser {
+    void operator()(std::FILE* f) const noexcept;
+};
+
 /// Binary on-disk f2_blocks cache descriptor (TIER 2). Holds the path + parsed header
 /// shape + an open read handle for slab read-back. The fit + parity test pread a block
-/// by offset (f2_disk_format.hpp byte layout). Move-only (it owns a FILE*); the read
-/// goes through F2BlocksOut::read_block_to_host / to_host, never raw here. The special
-/// members are defined out-of-line in cuda/f2_blocks_out.cu (where <cstdio> fclose is).
+/// by offset (f2_disk_format.hpp byte layout). Move-only (it owns a FILE* via the
+/// move-only unique_ptr below — the deleter supplies the freeing dtor + null-on-move, so
+/// all special members are =default; NAMING-STYLE-STANDARD §2.12 RAII / §5 non-goal #9).
+/// The read goes through F2BlocksOut::read_block_to_host / to_host, never raw here.
 struct DiskF2Blocks {
-    DiskF2Blocks();
-    ~DiskF2Blocks();
-    DiskF2Blocks(DiskF2Blocks&&) noexcept;
-    DiskF2Blocks& operator=(DiskF2Blocks&&) noexcept;
+    DiskF2Blocks() = default;
+    ~DiskF2Blocks() = default;
+    DiskF2Blocks(DiskF2Blocks&&) noexcept = default;
+    DiskF2Blocks& operator=(DiskF2Blocks&&) noexcept = default;
     DiskF2Blocks(const DiskF2Blocks&) = delete;
     DiskF2Blocks& operator=(const DiskF2Blocks&) = delete;
 
@@ -55,7 +69,9 @@ struct DiskF2Blocks {
     int P = 0;
     int n_block = 0;
     std::vector<int> block_sizes;          ///< length n_block (from header trailer).
-    std::FILE* read_handle = nullptr;      ///< open read-only handle (DiskSink::finish reopens).
+    /// open read-only handle (DiskSink::finish reopens). PUBLIC POD field — no trailing
+    /// underscore (§2.4a); read raw via `read_handle.get()`, truthiness via `if (handle)`.
+    std::unique_ptr<std::FILE, FileCloser> read_handle;
 };
 
 /// THE unified precompute result — the result lives in EXACTLY ONE tier. Move-only
