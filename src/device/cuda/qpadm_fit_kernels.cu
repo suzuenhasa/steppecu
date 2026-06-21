@@ -19,6 +19,7 @@
 // qpadm_fit_kernels.cuh; the kernel bodies + <<<>>> are confined here (§7).
 #include <cuda_runtime.h>
 
+#include "core/internal/launch_config.hpp"  // core::kMaxGridX — the SINGLE-SOURCE grid-dim limit
 #include "core/qpadm/qpadm_bounds.hpp"      // kQpMaxNl/Nr/R/M/T — the SINGLE-SOURCE small-path envelope
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_CHECK_KERNEL
 #include "device/cuda/qpadm_fit_kernels.cuh"
@@ -57,12 +58,17 @@ constexpr int kSymTile = 16;
 /// CUDA warp size — the rounding granularity for the small models-batched fudge-diag
 /// block ((m*m + kWarpSize-1)/kWarpSize*kWarpSize, floored at one warp) (5.5).
 constexpr int kWarpSize = 32;
-/// Max gridDim.x for a 1-D launch on this arch (the CUDA hardware limit, 2^16-1).
+/// Max gridDim.x for a 1-D launch — the CUDA hardware limit 2^31-1, single-sourced
+/// from core::kMaxGridX (launch_config.hpp), the canonical home shared with the
+/// sibling CUDA TUs (decode_af_kernel.cu, f2_block_kernel.cu, f2_blocks_kernel.cu).
 /// The kernels with a strided per-thread grid-stride loop clamp grid to this. NOTE:
-/// DISTINCT from launch_config.hpp's kMaxGridX (2^31-1) — that is the y/z-or-large
-/// limit / a different concept; this is the x-dim 65535 cap these kernels clamp to
-/// (5.3). Do not unify the two: they are different values for different axes.
-constexpr int kMaxGridDimX = 65535;
+/// gridDim.x reaches 2^31-1 on every compute capability (incl. Blackwell sm_120);
+/// it is gridDim.y/z that are capped at 65535 (core::kMaxGridY/Z). DOC-VERIFIED:
+/// CUDA C++ Programming Guide, "Technical Specifications per Compute Capability"
+/// (max gridDim.x = 2^31-1; max gridDim.y/z = 65535, uniform across all CCs).
+/// kMaxGridX == INT_MAX, so the post-clamp static_cast<int>(grid) stays in range
+/// (12.5). The grid-stride loop in each kernel remains the safety net beyond this.
+constexpr int kMaxGridDimX = static_cast<int>(core::kMaxGridX);  // 2^31-1 == INT_MAX
 /// Off-diagonal convergence floor for the on-device one-sided Jacobi SVD sweep: stop
 /// when the summed squared off-diagonal magnitude falls below this. FROZEN by §12
 /// parity (the value sets the oracle-matching iteration count) — name only (5.1).
@@ -1321,7 +1327,8 @@ void launch_assemble_f4_gather_models_batched(const double* f2, int P,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1335,7 +1342,8 @@ void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_siz
     if (total <= 0 || nb <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     f4_loo_total_models_kernel<<<grid, block, 0, stream>>>(
         dX, d_block_sizes, m, nb, n, n_models, dLoo, dTotal, dTotLine);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1349,7 +1357,8 @@ void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     f4_xtau_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dEst, dTotLine, d_block_sizes, m, nb, n, n_models, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1370,7 +1379,8 @@ void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t 
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     fill_identity_batched_kernel<<<grid, block, 0, stream>>>(dI, m, n_models);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1401,7 +1411,8 @@ void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
     if (total <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     qpadm_loo_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, nl, nr, r_fit, fudge, als_iters, nb, n_models, s, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1413,7 +1424,8 @@ void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
     if (total <= 0) return;
     const int block = 128;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1426,7 +1438,8 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
     if (total <= 0) return;
     const int block = 256;
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     qpadm_gather_loo_qinv_kernel<<<grid, block, 0, stream>>>(
         dLooSrc, dQinvSrc, d_surv, m, nb, n_surv, dLooDst, dQinvDst);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1575,7 +1588,8 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
     if (total <= 0) return;
     const int block = 64;  // large per-thread VRAM-scratch refit ⇒ small block, grid-stride
     const long grid_l = (total + block - 1) / block;
-    const int grid = static_cast<int>(grid_l > kMaxGridDimX ? kMaxGridDimX : grid_l);
+    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
+    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
     loo_large_batched_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, dAseed, dBseed, nl, nr, r, fudge, als_iters, nb, n_models,
         dbl_refit, int_refit, dScratch, dIntScratch, dWmat);
