@@ -179,7 +179,17 @@ void launch_decode_af(const std::uint8_t* d_packed,
     // grid_for's square default; the SNP/x axis keeps the long cdiv overload grid_for
     // (int-only) cannot provide.
     const dim3 block(kDecodeBlockX, kDecodeBlockY);
-    const dim3 grid(static_cast<unsigned>(core::cdiv(M, static_cast<long>(kDecodeBlockX))),
+    // x (SNP/M) extent: long cdiv (M may exceed 2^31). grid_for (int-only) cannot
+    // take the long axis, so the sibling fail-fast that y gets from grid_for's
+    // kMaxGridY assert is applied here explicitly against kMaxGridX — closing the
+    // x-axis cap-assert asymmetry (cleanup 12.3/X-7/B6; architecture.md §7). Compiles
+    // out under NDEBUG, so Release is unchanged.
+    const long grid_x = core::cdiv(M, static_cast<long>(kDecodeBlockX));
+    STEPPE_ASSERT(grid_x >= 0 &&
+                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
+                  "decode gridDim.x (SNP/M axis) exceeds kMaxGridX "
+                  "(architecture.md §7; cleanup X-7/B6) — tile the SNP axis");
+    const dim3 grid(static_cast<unsigned>(grid_x),
                     static_cast<unsigned>(core::grid_for(P, kDecodeBlockY)));
     decode_af_kernel<<<grid, block, 0, stream>>>(d_packed, bytes_per_record,
                                                  d_pop_offsets, P, M, ploidy,
