@@ -18,7 +18,7 @@
 #include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers)
 #include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
 #include "device/f2_disk_format.hpp"        // F2DiskHeader, offsets
-#include "core/internal/log.hpp"            // STEPPE_LOG_WARN (teardown)
+#include "core/internal/log.hpp"            // STEPPE_LOG_WARN (the device-restore guard's STEPPE_CUDA_WARN)
 
 namespace steppe::device {
 
@@ -87,7 +87,13 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             if (!f2_dev || !vp_dev) return;
             int prev = 0;
             STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-            struct G { int d; ~G() { (void)cudaSetDevice(d); } } restore{prev};
+            // Dtor-must-not-throw, so the restore can't go through the throwing
+            // STEPPE_CUDA_CHECK; route it through the non-throwing STEPPE_CUDA_WARN
+            // so a failed restore logs one diagnostic line (debug) and yields its
+            // status instead of vanishing — cudaSetDevice can surface a prior async
+            // launch error (CUDA-13 Device-Management). The [[nodiscard]] return is
+            // (void)-discarded for the -Werror build; happy path is byte-identical.
+            struct G { int d; ~G() { (void)STEPPE_CUDA_WARN(cudaSetDevice(d)); } } restore{prev};
             STEPPE_CUDA_CHECK(cudaSetDevice(resident.device_id));
             const std::size_t off = slab * static_cast<std::size_t>(b);
             STEPPE_CUDA_CHECK(cudaMemcpy(f2_slab_out, f2_dev + off, bytes,
