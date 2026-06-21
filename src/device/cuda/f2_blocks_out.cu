@@ -2,8 +2,10 @@
 // the DiskF2Blocks special members (it owns a FILE* read handle). PRIVATE to
 // steppe_device (a CUDA TU: the Resident arm needs a D2H; HostRam/Disk are plain
 // host/file I/O). PARITY (architecture.md §12): to_host() / read_block_to_host() are
-// BIT-IDENTICAL across all tiers — the D2H is a raw byte copy, the host copy is memcpy,
-// the disk read is raw bytes; no recompute, no reorder, no precision change.
+// BIT-IDENTICAL across all tiers — the D2H is a raw byte copy (the Resident arm pins
+// its caller destinations via RegisteredHostRegion, a parity-neutral §11.4/§12
+// data-movement lever, then byte-copies), the host copy is memcpy, the disk read is
+// raw bytes; no recompute, no reorder, no precision change.
 #include "device/f2_blocks_out.hpp"
 
 #include <cuda_runtime.h>
@@ -96,6 +98,18 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             struct G { int d; ~G() { (void)STEPPE_CUDA_WARN(cudaSetDevice(d)); } } restore{prev};
             STEPPE_CUDA_CHECK(cudaSetDevice(resident.device_id));
             const std::size_t off = slab * static_cast<std::size_t>(b);
+            // PIN the caller's pageable D2H destinations for the copy window
+            // (RegisteredHostRegion, graceful pageable degrade — never throws,
+            // pinned_buffer.cuh:159-176), EXACTLY like to_host's D2H at
+            // device_f2_blocks.cu:55-56. cudaHostRegister page-locks the range in
+            // place (CUDA 13.x Runtime API: "Page-locks the memory range ... and
+            // maps it for the device(s) ... to automatically accelerate calls to
+            // functions such as cudaMemcpy()"); it changes only the page state, not
+            // the bytes, so this is PARITY-NEUTRAL (§12 — a data-movement lever
+            // only). The registrations stay alive through both synchronous memcpys
+            // and RAII-unregister at scope exit.
+            RegisteredHostRegion pin_f2(f2_slab_out, bytes);
+            RegisteredHostRegion pin_vp(vpair_slab_out, bytes);
             STEPPE_CUDA_CHECK(cudaMemcpy(f2_slab_out, f2_dev + off, bytes,
                                          cudaMemcpyDeviceToHost));
             STEPPE_CUDA_CHECK(cudaMemcpy(vpair_slab_out, vp_dev + off, bytes,

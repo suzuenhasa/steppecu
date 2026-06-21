@@ -2382,20 +2382,27 @@ private:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_info.data(), dInfo.data(), B * sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-        // One B-pointer array per column c (precompute all m, H2D once each lazily).
-        DeviceBuffer<double*> dBptr(B);
-        std::vector<double*> h_Bptr(B);
+        // All m B-pointer arrays (m blocks of B device pointers each, column-major over
+        // c) built once and uploaded in ONE H2D — mirroring the single dAptr upload above.
+        // The pointers are fully deterministic (dQinv.data() + j*Mm + c*M), so the per-
+        // column loop below only issues the B-batched solve, slicing dBptrAll at c*B.
+        DeviceBuffer<double*> dBptrAll(static_cast<std::size_t>(m) * B);
+        std::vector<double*> h_BptrAll(static_cast<std::size_t>(m) * B);
         for (int c = 0; c < m; ++c) {
             for (std::size_t j = 0; j < B; ++j)
-                h_Bptr[j] = dQinv.data() + j * Mm + static_cast<std::size_t>(c) * M;
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBptr.data(), h_Bptr.data(),
-                                              B * sizeof(double*), cudaMemcpyHostToDevice,
-                                              stream_.get()));
+                h_BptrAll[static_cast<std::size_t>(c) * B + j] =
+                    dQinv.data() + j * Mm + static_cast<std::size_t>(c) * M;
+        }
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+            dBptrAll.data(), h_BptrAll.data(),
+            static_cast<std::size_t>(m) * B * sizeof(double*), cudaMemcpyHostToDevice,
+            stream_.get()));
+        for (int c = 0; c < m; ++c) {
             int solve_info = 0;
-            CUSOLVER_CHECK(cusolverDnDpotrsBatched(solver_.get(), CUBLAS_FILL_MODE_LOWER,
-                                                   m, 1 /*nrhs*/, dAptr.data(), m,
-                                                   dBptr.data(), m, &solve_info,
-                                                   static_cast<int>(B)));
+            CUSOLVER_CHECK(cusolverDnDpotrsBatched(
+                solver_.get(), CUBLAS_FILL_MODE_LOWER, m, 1 /*nrhs*/, dAptr.data(), m,
+                dBptrAll.data() + static_cast<std::size_t>(c) * B, m, &solve_info,
+                static_cast<int>(B)));
         }
         // The batched cuSOLVER solve writes its host `info` arg and the stream must be
         // drained before the next stream op (an undrained batched-potrs lane returns
