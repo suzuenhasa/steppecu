@@ -21,8 +21,11 @@
 //   3. No-regression: the 9-pop (golden_fit0) + NRBIG (golden_fit1) single-model
 //      goldens still pass on the GPU via run_qpadm_search with a 1-element span.
 //   4. Determinism: run_qpadm_search G=1 (devices={0}) and G=2 (devices={0,1})
-//      produce BIT-IDENTICAL, identically-ordered result vectors (memcmp of each
-//      weight/se/z/p/chisq/f4rank/status). SKIP G=2 cleanly if <2 devices.
+//      produce BIT-IDENTICAL, identically-ordered result vectors — memcmp of EVERY
+//      reported QpAdmResult field (F6): the model_index/status/precision_tag/f4rank/
+//      est_rank/dof/p/chisq scalars, the weight/se/z vectors, the rank_p/rank_chisq/
+//      rank_dof arrays, AND the full rankdrop_* + popdrop_* nested tables. Doubles via
+//      std::memcmp (NaN-bit-safe), not ==. SKIP G=2 cleanly if <2 devices.
 //   5. Throughput: time the rotation at the validated N and at a synthetically-
 //      enumerated larger N (k-subsets of a bigger index pool over the SAME resident
 //      f2 — NO per-model golden), reporting models/sec for G=1 and G=2.
@@ -72,6 +75,73 @@ void check_eq_int(const char* what, int got, int want) {
 }
 void check_true(const char* what, bool cond) {
     if (!cond) { std::printf("  [FAIL] %s\n", what); ++g_failures; }
+}
+
+// ---- FULL-FIELD bit-identical compare of two QpAdmResult (F6) -------------------
+// The G=1 vs G=2 determinism contract (fit-engine.md §6 "G1==G2 bit-identical",
+// architecture.md §18) requires EVERY reported QpAdmResult field to be byte-for-byte
+// identical, not just a subset. Doubles are compared with std::memcmp (NOT ==) so a
+// nondeterministic NaN bit-pattern or a -0.0/+0.0 split is caught, never normalised
+// away by IEEE equality. Integers / enums / chars are exact-value comparisons. If any
+// field differs, `*why` is set to the first differing field name for an honest report
+// (the gate must NOT be loosened to pass — a difference here is a real nondeterminism).
+bool bit_identical_double(double x, double y) {
+    return std::memcmp(&x, &y, sizeof(double)) == 0;
+}
+template <typename T>
+bool bit_identical_vec(const std::vector<T>& a, const std::vector<T>& b) {
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+    return std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0;
+}
+// vector<double> with the memcmp-per-element NaN-safe rule.
+bool bit_identical_vec_double(const std::vector<double>& a, const std::vector<double>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t k = 0; k < a.size(); ++k)
+        if (!bit_identical_double(a[k], b[k])) return false;
+    return true;
+}
+bool bit_identical_vec_string(const std::vector<std::string>& a,
+                              const std::vector<std::string>& b) {
+    return a == b;  // std::string == is exact byte compare; no float/NaN concern.
+}
+bool result_bit_identical(const steppe::QpAdmResult& a, const steppe::QpAdmResult& b,
+                          const char** why) {
+    auto fail = [&](const char* field) { if (why) *why = field; return false; };
+    // ---- scalars (the model identity + the reported fit) --------------------------
+    if (a.model_index != b.model_index)            return fail("model_index");
+    if (a.status != b.status)                       return fail("status");
+    if (a.precision_tag != b.precision_tag)         return fail("precision_tag");
+    if (a.f4rank != b.f4rank)                       return fail("f4rank");
+    if (a.est_rank != b.est_rank)                   return fail("est_rank");
+    if (a.dof != b.dof)                             return fail("dof");
+    if (!bit_identical_double(a.p, b.p))            return fail("p");
+    if (!bit_identical_double(a.chisq, b.chisq))    return fail("chisq");
+    // ---- the per-weight vectors --------------------------------------------------
+    if (!bit_identical_vec_double(a.weight, b.weight)) return fail("weight");
+    if (!bit_identical_vec_double(a.se, b.se))         return fail("se");
+    if (!bit_identical_vec_double(a.z, b.z))           return fail("z");
+    // ---- the rank-test arrays ----------------------------------------------------
+    if (!bit_identical_vec_double(a.rank_p, b.rank_p))         return fail("rank_p");
+    if (!bit_identical_vec_double(a.rank_chisq, b.rank_chisq)) return fail("rank_chisq");
+    if (!bit_identical_vec(a.rank_dof, b.rank_dof))            return fail("rank_dof");
+    // ---- the rankdrop nested table ----------------------------------------------
+    if (!bit_identical_vec(a.rankdrop_f4rank, b.rankdrop_f4rank))   return fail("rankdrop_f4rank");
+    if (!bit_identical_vec(a.rankdrop_dof, b.rankdrop_dof))         return fail("rankdrop_dof");
+    if (!bit_identical_vec(a.rankdrop_dofdiff, b.rankdrop_dofdiff)) return fail("rankdrop_dofdiff");
+    if (!bit_identical_vec_double(a.rankdrop_chisq, b.rankdrop_chisq))           return fail("rankdrop_chisq");
+    if (!bit_identical_vec_double(a.rankdrop_p, b.rankdrop_p))                   return fail("rankdrop_p");
+    if (!bit_identical_vec_double(a.rankdrop_chisqdiff, b.rankdrop_chisqdiff))   return fail("rankdrop_chisqdiff");
+    if (!bit_identical_vec_double(a.rankdrop_p_nested, b.rankdrop_p_nested))     return fail("rankdrop_p_nested");
+    // ---- the popdrop table ------------------------------------------------------
+    if (!bit_identical_vec_string(a.popdrop_pat, b.popdrop_pat)) return fail("popdrop_pat");
+    if (!bit_identical_vec(a.popdrop_wt, b.popdrop_wt))          return fail("popdrop_wt");
+    if (!bit_identical_vec(a.popdrop_dof, b.popdrop_dof))        return fail("popdrop_dof");
+    if (!bit_identical_vec(a.popdrop_f4rank, b.popdrop_f4rank))  return fail("popdrop_f4rank");
+    if (!bit_identical_vec_double(a.popdrop_chisq, b.popdrop_chisq)) return fail("popdrop_chisq");
+    if (!bit_identical_vec_double(a.popdrop_p, b.popdrop_p))         return fail("popdrop_p");
+    if (!bit_identical_vec(a.popdrop_feasible, b.popdrop_feasible))  return fail("popdrop_feasible");
+    return true;
 }
 
 // ---- the committed binary f2 fixture reader (same layout as test_qpadm_parity) --
@@ -449,24 +519,24 @@ int main(int argc, char** argv) {
 
         check_eq_int("G=2 result count", static_cast<int>(gpu2.size()),
                      static_cast<int>(gpu1.size()));
+        // F6: compare EVERY reported QpAdmResult field bit-identical (not just the
+        // model_index/status/f4rank/weight/p/chisq/se subset) — z, dof, est_rank,
+        // rank_p/rank_chisq/rank_dof, the full rankdrop_* nested table, and the
+        // popdrop_* table are all reported and must be deterministic across G.
         int diffs = 0;
         for (std::size_t i = 0; i < gpu1.size() && i < gpu2.size(); ++i) {
-            const steppe::QpAdmResult& a = gpu1[i];
-            const steppe::QpAdmResult& b = gpu2[i];
-            bool same = (a.model_index == b.model_index) &&
-                        (a.status == b.status) && (a.f4rank == b.f4rank) &&
-                        (a.weight.size() == b.weight.size());
-            for (std::size_t k = 0; same && k < a.weight.size(); ++k)
-                same = same && (std::memcmp(&a.weight[k], &b.weight[k], sizeof(double)) == 0);
-            same = same && (std::memcmp(&a.p, &b.p, sizeof(double)) == 0) &&
-                   (std::memcmp(&a.chisq, &b.chisq, sizeof(double)) == 0);
-            for (std::size_t k = 0; same && k < a.se.size() && k < b.se.size(); ++k)
-                same = same && (std::memcmp(&a.se[k], &b.se[k], sizeof(double)) == 0);
-            if (!same) ++diffs;
+            const char* why = nullptr;
+            if (!result_bit_identical(gpu1[i], gpu2[i], &why)) {
+                ++diffs;
+                std::printf("  [FAIL] model_index=%d G=1 vs G=2 differs in field '%s' "
+                            "(REAL nondeterminism — do NOT loosen the gate)\n",
+                            gpu1[i].model_index, why ? why : "?");
+            }
         }
-        check_eq_int("G=1 vs G=2 bit-identical (0 differing models)", diffs, 0);
+        check_eq_int("G=1 vs G=2 bit-identical (0 differing models, FULL QpAdmResult)", diffs, 0);
         if (diffs == 0)
-            std::printf("  [PASS] G=1 and G=2 result vectors bit-identical AND identically ordered\n");
+            std::printf("  [PASS] G=1 and G=2 result vectors bit-identical (ALL reported "
+                        "fields) AND identically ordered\n");
     } else if (gpu_count == 1) {
         std::printf("\n  [SKIP] determinism G=2: only 1 CUDA device visible\n");
     }
