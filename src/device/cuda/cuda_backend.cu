@@ -76,7 +76,7 @@
 #include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
-#include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction
+#include "steppe/config.hpp"                // Precision, kDefaultMantissaBits, kBlockGroupPadBase, kMaxVramUtilizationFraction, kStreamTileBudgetFraction, kFitBudget*
 #include "steppe/fstats.hpp"                // F2BlockTensor
 
 namespace steppe::device {
@@ -804,10 +804,11 @@ public:
         const std::size_t envelope_b = static_cast<std::size_t>(
             kMaxVramUtilizationFraction * static_cast<double>(net_free_b));
         // The tile feeder is a SMALL contributor (one chunk's column union); reserve a
-        // quarter of the envelope for it (bounding max_tile_cols) and leave the rest for
-        // the slabs+ring. At P=512/M=584k both are vast vs the need, so the chunking is
-        // unconstrained and the split is a NO-OP (parity §5.4).
-        const std::size_t tile_budget_b = envelope_b / 4u;
+        // kStreamTileBudgetFraction slice of the envelope for it (bounding max_tile_cols)
+        // and leave the rest for the slabs+ring. At P=512/M=584k both are vast vs the
+        // need, so the chunking is unconstrained and the split is a NO-OP (parity §5.4).
+        const std::size_t tile_budget_b = static_cast<std::size_t>(
+            kStreamTileBudgetFraction * static_cast<double>(envelope_b));
         const std::size_t slab_budget_b = envelope_b - tile_budget_b;
         const std::size_t per_col_feeder_b =
             7u * static_cast<std::size_t>(P) * sizeof(double);  // 7·P doubles per tile col
@@ -2167,8 +2168,8 @@ private:
             static_cast<std::size_t>((nl + 1) + (nr + 1)) * sizeof(int) +
             sizeof(int) /*status*/ + 3 * sizeof(double*) /*ptr arrays*/;
         std::size_t free_b = capabilities().free_vram_bytes;
-        if (free_b == 0) free_b = static_cast<std::size_t>(4) << 30;  // 4 GB fallback
-        const std::size_t headroom = static_cast<std::size_t>(512) << 20;  // 512 MB
+        if (free_b == 0) free_b = kFitBudgetFreeVramFallbackBytes;  // 4 GB free-VRAM fallback
+        const std::size_t headroom = kFitBudgetHeadroomBytes;       // 512 MB headroom
         std::size_t budget = (free_b > headroom) ? (free_b - headroom) : free_b / 2;
         std::size_t B_max = (per_model_bytes > 0) ? (budget / per_model_bytes) : mem.size();
         if (B_max < 1) B_max = 1;
@@ -2468,9 +2469,9 @@ private:
             const std::size_t pos = mem[off + j];
             const QpAdmModel& mdl = models[pos];
             assemble_result(mdl, nl, nr, r_fit, rmax, tag,
-                            h_info[j] != 0,           // potrf failed ⇒ NonSpd
+                            AssembleFlags{ .nonspd = h_info[j] != 0,        // potrf failed ⇒ NonSpd
+                                           .se_computed = se_computed[j] != 0 },  // SE computed?
                             h_status[j],
-                            se_computed[j] != 0,      // SE computed for this model?
                             h_weight.data() + j * nl, h_se.data() + j * nl, h_chisq[j],
                             h_rankchisq.data() + j * (rmax + 1),
                             h_popchisq.data() + j * (nl + 1),
@@ -2480,12 +2481,20 @@ private:
         }
     }
 
+    /// Per-model outcome sentinels for assemble_result, named so the two booleans can
+    /// never transpose at the call site (designated initializers, see :2470). nonspd =
+    /// potrf failed ⇒ NonSpdCovariance; se_computed = the SE was computed for this model
+    /// (survivor under the JackknifePolicy) ⇒ fill se/z, else leave them EMPTY.
+    struct AssembleFlags {
+        bool nonspd;
+        bool se_computed;
+    };
+
     /// Host post-process of one model's batched outputs into a QpAdmResult — the exact
     /// run_impl + ranktest assembly (pchisq tail-p, the AT2 rankdrop nested table, the
     /// popdrop pattern strings + feasibility). Same math the single-model path does.
     void assemble_result(const QpAdmModel& mdl, int nl, int nr, int r_fit, int rmax,
-                         Precision::Kind tag, bool nonspd, int fit_status,
-                         bool se_computed,
+                         Precision::Kind tag, AssembleFlags flags, int fit_status,
                          const double* weight, const double* se, double chisq,
                          const double* rank_chisq, const double* pop_chisq,
                          const double* pop_wfull, double rank_alpha, QpAdmResult& res) {
@@ -2493,7 +2502,7 @@ private:
         res.precision_tag = tag;
         res.est_rank = r_fit;
         res.dof = core::qpadm::qpadm_dof(nl, nr, r_fit);
-        if (nonspd) { res.status = Status::NonSpdCovariance; return; }
+        if (flags.nonspd) { res.status = Status::NonSpdCovariance; return; }
         if (fit_status != 0) { res.status = Status::RankDeficient; return; }
 
         res.weight.assign(weight, weight + nl);
@@ -2501,7 +2510,7 @@ private:
         // survivor set under the chosen JackknifePolicy). A non-survivor leaves se/z
         // EMPTY — the sentinel for "not computed" (NEVER a fake 0/NaN). A survivor's
         // se/z is bit-identical to ALL mode (the SE math/kernels are unchanged).
-        if (se_computed) {
+        if (flags.se_computed) {
             res.se.assign(se, se + nl);
             res.z.assign(static_cast<std::size_t>(nl), 0.0);
             for (int i = 0; i < nl; ++i)

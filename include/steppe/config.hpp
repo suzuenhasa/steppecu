@@ -99,6 +99,19 @@ inline constexpr int kGesvdjMaxDim = 32;
 /// (f2_emu_spike.cu) into a named constant shared by the M0 and M4 device paths.
 inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
 
+/// Phase-2 FIT-path chunk-budget knobs (cuda_backend.cu fit_one_bucket): the
+/// per-bucket batched fit sizes its model-chunk against free VRAM. When the
+/// runtime free-VRAM probe returns 0 (unknown) the fit assumes this much free
+/// VRAM as a conservative fallback, and it subtracts this fixed headroom before
+/// dividing by the per-model footprint so the chunk never commits all of free
+/// VRAM. Named here (not bare `4<<30` / `512<<20` literals mid-function) so the
+/// fit path's VRAM levers live beside the f2 path's centralized VRAM policy
+/// (kCublasWorkspaceBytes / the kMaxVramUtilizationFraction block) rather than
+/// drifting separately. Tunable policy numbers, parity-neutral — they change the
+/// model-chunk size, never a reported number (§12).
+inline constexpr std::size_t kFitBudgetFreeVramFallbackBytes = static_cast<std::size_t>(4) << 30;
+inline constexpr std::size_t kFitBudgetHeadroomBytes = static_cast<std::size_t>(512) << 20;
+
 /// Per-population buffer counts of the single-GPU f2 FEEDER phase — the named home
 /// for the feeder's VRAM footprint coefficients so the tier-select policy math
 /// (tier_select.hpp resident_working_set_bytes / streamed_working_set_bytes) can
@@ -164,6 +177,10 @@ static_assert(kResidentTierVramFraction > 0.0 && kResidentTierVramFraction <= kM
               "kResidentTierVramFraction must be in (0, kMaxVramUtilizationFraction].");
 static_assert(kHostTierRamFraction > 0.0 && kHostTierRamFraction <= 1.0,
               "kHostTierRamFraction must lie in (0, 1].");
+
+/// M5 streamed-path: fraction of the VRAM envelope reserved for the tile feeder;
+/// the slabs+ring take the rest. Tunable policy number, parity-neutral §12.
+inline constexpr double kStreamTileBudgetFraction = 0.25;
 
 /// Default jackknife block size in centimorgans. ADMIXTOOLS 2's `blgsize`
 /// default is 0.05 Morgans = 5 cM (architecture.md §9; ROADMAP §4). The accessor
