@@ -388,7 +388,9 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     // Free VRAM is the per-device probe captured ONCE at build_resources
     // (backend.hpp:166-167); free host RAM is sysinfo(2) read NOW. The override
     // precedence (config.force_tier wins, then STEPPE_FORCE_TIER, then automatic) is
-    // resolved by the frozen helper.
+    // resolved by the frozen helper. The tier is gated on gpus[0].caps.free_vram_bytes
+    // (the ROOT device only) because this tiered path is single-GPU — it always drives
+    // gpus[0] regardless of G (multi-GPU tiered sharding is the follow-on).
     const std::size_t free_vram = resources.gpus[0].caps.free_vram_bytes;
     const std::size_t free_host = steppe::device::free_host_ram_bytes();
     const steppe::device::OutputTier tier = steppe::device::resolve_output_tier(

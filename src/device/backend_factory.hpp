@@ -46,9 +46,10 @@ namespace steppe::device {
 /// the cuBLAS context binds to it, cuBLAS §2.1.2) and at every compute entry. The
 /// DEFAULT 0 keeps the single-GPU path — and every existing zero-arg call site
 /// (the reference tests + the M4 spike) — bound to device 0, unchanged. SNP
-/// sharding + the host-side fixed-order combine across the G devices are
-/// orchestrated ABOVE this seam by `Resources` (architecture.md §11.4), NOT here —
-/// that combine algorithm is the next workflow.
+/// sharding + the fixed-order combine across the G devices are orchestrated ABOVE
+/// this seam by `Resources` (architecture.md §11.4), NOT here — that combine is the
+/// IMPLEMENTED M4.5 path (ROADMAP §72, 867a4bf: bit-identical across G on both the
+/// host-staged and the device-resident P2P combine paths).
 [[nodiscard]] std::unique_ptr<ComputeBackend> make_cuda_backend(int device_id = 0);
 
 /// Number of CUDA devices VISIBLE to this process — a CUDA-free, process-global

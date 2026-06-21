@@ -23,10 +23,14 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
     out.missing_frac.assign(n_ind, 0.0);
     out.kept.reserve(n_ind);
 
-    // No-op fast path: when --mind is not requested (mind_max_missing >= 1.0) keep
-    // every sample (architecture.md §5 S-1: the pre-pass is skipped entirely). We
-    // still report the missing fractions if we have data, but do not stream when
-    // there is nothing to decide.
+    // `active` is the --mind request flag: when --mind is not requested
+    // (mind_max_missing >= 1.0) every sample is kept. Note `active` gates ONLY the
+    // drop decision (consulted at the kept-set resolution below) — NOT the streaming
+    // pass: the per-SNP missing-fraction count loop runs whenever packed data is
+    // present (in.packed != nullptr && n_snp > 0), regardless of `active`, so the
+    // missing_frac report is always populated when there is data to measure (the
+    // pass is not short-circuited on the no-op default — doing so would drop that
+    // reporting and change behavior; architecture.md §5 S-1).
     const bool active = cfg.mind_max_missing < 1.0;
 
     if (in.packed != nullptr && n_snp > 0) {

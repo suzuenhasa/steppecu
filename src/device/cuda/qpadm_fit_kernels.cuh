@@ -19,7 +19,7 @@
 
 namespace steppe::device {
 
-/// S3 f4-gather (the FROZEN CONTRACT §2a; CpuBackend cpu_backend.cpp:400-412). Build
+/// S3 f4-gather (the FROZEN CONTRACT §2a; CpuBackend assemble_f4, src/device/cpu/cpu_backend.cpp). Build
 /// the per-block f4 matrix X[k + m*b] for k = j + nr*i (ROW-MAJOR vectorization),
 /// batched over ALL nb blocks in one launch (grid over (k, b)). Reads the RESIDENT
 /// f2 tensor `f2` (column-major i + P*j + P*P*b, VRAM) directly — NO D2H. The
@@ -34,7 +34,7 @@ void launch_assemble_f4_gather(const double* f2, int P,
                                double* dX, cudaStream_t stream);
 
 /// S3 est_to_loo + x_total + tot_line (the FROZEN CONTRACT §2a; CpuBackend
-/// compute_loo_and_total cpu_backend.cpp:540-593). One thread per k (m = nl*nr
+/// compute_loo_and_total, src/device/cpu/cpu_backend.cpp). One thread per k (m = nl*nr
 /// small) reduces over the nb blocks, reproducing the CpuBackend's operation order
 /// in FP64 (the long-double accumulators become FP64; at nb=708 this matches the
 /// golden to rtol 1e-6, the gate tier). For each k:
@@ -50,7 +50,7 @@ void launch_f4_loo_total(const double* dX, const int* d_block_sizes,
                          double* dLoo, double* dTotal, double* dTotLine,
                          cudaStream_t stream);
 
-/// S4 xtau pseudo-values (the FROZEN CONTRACT §2b; CpuBackend cpu_backend.cpp:448-458).
+/// S4 xtau pseudo-values (the FROZEN CONTRACT §2b; CpuBackend xtau, src/device/cpu/cpu_backend.cpp).
 /// One thread per (k, b): h = n/bl_b, sh = sqrt(h-1),
 ///   xtau[k,b] = (est[k]*h - loo[k,b]*(h-1) - tot_line[k]) / sh
 /// laid out COLUMN-MAJOR (k + m*b) so cublasDsyrk(OP_N, lda=m, k=nb) forms
@@ -85,7 +85,7 @@ void launch_add_fudge_diag(double* dM, int n, double fudge, double tr,
 // dchisq). The constrained weight solve + chisq are folded into one kernel.
 // ---------------------------------------------------------------------------------
 
-/// S5 SVD seed (the FROZEN CONTRACT §2c; CpuBackend seed_AB cpu_backend.cpp:626-644).
+/// S5 SVD seed (the FROZEN CONTRACT §2c; CpuBackend seed_AB, src/device/cpu/cpu_backend.cpp).
 /// One-sided Jacobi SVD of the nl×nr COLUMN-MAJOR `dXmat` (transliterating
 /// core::jacobi_svd), then B = t(V[:,0:r]) (r×nr), A = xmat·t(B) (nl×r). dA[nl*r],
 /// dB[r*nr] written column-major. Single-thread kernel (nl,nr small). Native FP64.
@@ -93,23 +93,23 @@ void launch_qpadm_seed_ab(const double* dXmat, int nl, int nr, int r,
                           double* dA, double* dB, cudaStream_t stream);
 
 /// S6 ALS opt_A then opt_B for `als_iters` iterations (the FROZEN CONTRACT §2d;
-/// CpuBackend als_weights loop cpu_backend.cpp:788-791, opt_A 652-709, opt_B
-/// 715-768). Transliterates the Kronecker coeffs/rhs build + the LU solve
+/// CpuBackend als_weights loop / opt_A / opt_B, src/device/cpu/cpu_backend.cpp).
+/// Transliterates the Kronecker coeffs/rhs build + the LU solve
 /// (core::solve) + the byrow reshape, in native FP64, single-thread. Seeds A,B in
 /// place from the caller's dA/dB (filled by launch_qpadm_seed_ab) and overwrites
 /// them with the refined factors. `dQinv` is the m×m (m=nl*nr) column-major inverse.
 /// On a singular ALS system the corresponding factor is left zero (CpuBackend
-/// cpu_backend.cpp:704). Native FP64.
+/// opt_A/opt_B, src/device/cpu/cpu_backend.cpp). Native FP64.
 void launch_qpadm_als(const double* dXmat, const double* dQinv,
                       int nl, int nr, int r, double fudge, int als_iters,
                       double* dA, double* dB, cudaStream_t stream);
 
 /// S6 constrained weight solve + chisq (the FROZEN CONTRACT §2d/§2c; CpuBackend
-/// als_weights cpu_backend.cpp:798-825, chisq_of 833-858). From the refined dA
+/// als_weights / chisq_of, src/device/cpu/cpu_backend.cpp). From the refined dA
 /// (nl×r) build RHS=crossprod(cbind(A,1)) (nl×nl), LHS=ones, LU-solve, normalize
 /// Σw=1 → dW[nl]; and chisq = vec(E)'·Qinv·vec(E), E = xmat - A·B → dchisq[0].
 /// `d_status` (length 1, int) is set to 0=Ok, 6=RankDeficient (the weight solve was
-/// singular), matching CpuBackend cpu_backend.cpp:820. Single-thread, native FP64.
+/// singular), matching CpuBackend als_weights, src/device/cpu/cpu_backend.cpp. Single-thread, native FP64.
 /// For r==0 the trivial path (w=ones, chisq=chisq_of with empty A,B) is taken.
 void launch_qpadm_weights_chisq(const double* dXmat, const double* dQinv,
                                 const double* dA, const double* dB,
@@ -119,7 +119,7 @@ void launch_qpadm_weights_chisq(const double* dXmat, const double* dQinv,
 
 /// Build the nl×nr COLUMN-MAJOR xmat from the ROW-MAJOR x_total / loo slice
 /// (k = j + nr*i ⇒ xmat(i,j) at i + nl*j; CpuBackend xmat_from_total
-/// cpu_backend.cpp:598-605). For the full-data fit `dTotalSrc` = dTotal (one slice);
+/// xmat_from_total, src/device/cpu/cpu_backend.cpp). For the full-data fit `dTotalSrc` = dTotal (one slice);
 /// for batched S7 a per-block slice is passed. Single-thread kernel. Native FP64.
 void launch_qpadm_xmat_from_rowmajor(const double* dTotalSrc, int nl, int nr,
                                      double* dXmat, cudaStream_t stream);

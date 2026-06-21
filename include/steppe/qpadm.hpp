@@ -14,12 +14,13 @@
 // .md §4 layering rule). device::DeviceF2Blocks / device::Resources are forward-
 // declared CUDA-free below; the .cpp includes their real headers.
 //
-// SCOPE (M(fit-1), design §3 first-milestone contract): single-model qpAdm GLS fit
-// on the CpuBackend reference, native FP64, one model, full rank r = nl-1, no
-// missing blocks. The batched/search forms (run_qpadm_search, the rank sweep) are
-// later milestones; this header freezes only the single-model shapes M(fit-1)
-// needs, plus QpAdmModel as a vector-friendly value so the span form is a
-// non-breaking add later.
+// SCOPE: the single-model run_qpadm GLS fit (M(fit-1), design §3 first-milestone
+// contract) is the foundation — CpuBackend reference, native FP64, one model, full
+// rank r = nl-1, no missing blocks — but the header now ALSO freezes the shapes the
+// later milestones grew into: the qpWave / rank-sweep forms (run_qpwave +
+// QpWaveResult, the M(fit-2) rank-test fields) and the batched/search + S8 forms
+// (run_qpadm_search, JackknifePolicy jackknife). QpAdmModel stays a vector-friendly
+// value so the span form is a non-breaking add later.
 #ifndef STEPPE_QPADM_HPP
 #define STEPPE_QPADM_HPP
 

@@ -1516,8 +1516,9 @@ public:
     /// Routine (§1.4): gesvdj (one-sided Jacobi) when gesvdj_applicable (both dims
     /// <= kGesvdjMaxDim); gesvd otherwise. The dispatch + the svd_path report share
     /// that ONE predicate so they cannot drift.
-    /// `dXt` is the nr×nl transpose scratch (only used in the nr>=nl branch). The
-    /// math-mode is native (no CusolverMathModeScope for emulation — §1.5/§4).
+    /// `dXt` is the nr×nl transpose scratch used in BOTH branches (Xt = transpose(xmat)
+    /// for nr>=nl, V = transpose(dVt) for nl>nr). The math-mode is native (no
+    /// CusolverMathModeScope for emulation — §1.5/§4).
     void large_svd_V(const double* dXmat, int nl, int nr, int r,
                      double* dVout, double* dXt, cudaStream_t stream) {
         if (r <= 0) return;

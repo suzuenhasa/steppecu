@@ -3,9 +3,9 @@
 // The HOST-STAGED fixed-order f2 combine — the PORTABLE PARITY BASELINE of the
 // single-node multi-GPU (SPMG) precompute (architecture.md §11.4 "the host-staged
 // fixed-order combine remains the portable parity baseline", §12 parity; design
-// §3). It PLACES + SUMS the G per-device COMPACT partials into one full-shape
+// §3). It PLACES the G per-device COMPACT partials into one full-shape
 // [P × P × n_block] F2BlockTensor in the FIXED g=0..G-1 device order
-// (DeviceConfig::devices order, pinned in Resources). Summing in a
+// (DeviceConfig::devices order, pinned in Resources). Placing in a
 // configuration-INDEPENDENT fixed order is exactly what makes the result
 // BIT-IDENTICAL across G and to the single-GPU reference (architecture.md §12 —
 // NEVER an NCCL AllReduce, whose order varies with G).
@@ -16,8 +16,8 @@
 // §8). It is the ONLY combine path on the budget box (no peer access); the
 // device-resident cudaMemcpyPeer combine (device/p2p_combine.hpp, a separate unit)
 // is the opt-in fast-path and is BIT-IDENTICAL to this one by construction (both
-// sum the same fixed order onto a zero-initialized full tensor; architecture.md
-// §11.4, §12).
+// place the same fixed-order shards onto a zero-initialized full tensor; architecture
+// .md §11.4, §12).
 #ifndef STEPPE_CORE_FSTATS_F2_COMBINE_HPP
 #define STEPPE_CORE_FSTATS_F2_COMBINE_HPP
 

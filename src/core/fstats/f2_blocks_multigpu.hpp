@@ -42,9 +42,9 @@ namespace steppe::core {
 ///     persistent pinned staging buffer (laptop-friendly tiny RAM).
 /// PARITY-NEUTRAL (architecture.md §12): F2BlocksOut::to_host() is memcmp-bit-identical
 /// across all tiers and to the single-GPU device-resident reference — the tier changes
-/// only WHERE/WHEN a slab lands, never its bits. Multi-GPU block-sharding of the stream
-/// is the follow-on; this is the single-GPU (G==1) arm (G>=2 delegates to the existing
-/// device entry for now).
+/// only WHERE/WHEN a slab lands, never its bits. The tiered path ALWAYS drives gpus[0]
+/// regardless of G (it fail-fasts only on G < 1 and tier-selects on the root's free
+/// VRAM); multi-GPU block-sharding of the stream is the unimplemented follow-on.
 [[nodiscard]] steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
@@ -88,8 +88,9 @@ namespace steppe::core {
 /// no shard, no combine — it calls `resources.gpus[0].backend->compute_f2_blocks`
 /// over the FULL Q/V/N + partition and returns it UNCHANGED (zero behavior change,
 /// bit-for-bit the existing result; design §5). G >= 2: plan_block_shards →
-/// per-device sub-view compute → host-staged fixed-order combine
-/// (combine_f2_partials_host, the portable parity baseline; architecture.md §11.4).
+/// per-device sub-view compute → fixed-order combine via compute_multigpu_partials_into
+/// (the M4.5 direct sharded-D2H path; combine_f2_partials_host was deleted from this
+/// path, kept only as the bit-identical parity reference; architecture.md §11.4).
 ///
 /// The G per-device GEMMs are driven CONCURRENTLY — one host thread (std::jthread)
 /// per device, each driving its own backend on its own device and writing its own

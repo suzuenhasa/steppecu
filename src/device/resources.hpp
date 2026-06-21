@@ -12,7 +12,7 @@
 // POD, and the CUDA-free `DeviceConfig`. So this header compiles into `core`/the
 // tests without the CUDA toolkit. The BUILDER (build_resources, resources.cpp) is
 // device-layer: it calls make_cuda_backend, which `new`s a CudaBackend bound to a
-// device (the per-device-instance contract, backend.hpp:193-202).
+// device (the per-device-instance contract, backend.hpp).
 //
 // PER-DEVICE-INSTANCE CONTRACT (backend.hpp): one ComputeBackend == one CUDA device,
 // constructed with that device's id and cudaSetDevice-bound. The per-device CUDA

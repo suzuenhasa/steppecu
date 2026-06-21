@@ -199,7 +199,7 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
     }
 }
 
-/// Seed A,B from svd(xmat) at rank r — core::seed_AB (cpu_backend.cpp:626-644).
+/// Seed A,B from svd(xmat) at rank r — core::seed_AB (src/device/cpu/cpu_backend.cpp).
 /// B = t(V[:,0:r]) (r×nr): B[p,j]=V[j,p]; A = xmat·t(B) (nl×r). Native FP64.
 /// Templated on the per-thread local-array bound (MAXNL/MAXNR/MAXR): the single-
 /// thread sweep kernels instantiate it at a BIG bound (nr>32 fallback) while the
@@ -227,7 +227,7 @@ __device__ inline void dev_seed_ab(const double* xmat, int nl, int nr, int r,
         }
 }
 
-/// opt_A — core::opt_A (cpu_backend.cpp:652-709). Given B (r×nr), returns A (nl×r).
+/// opt_A — core::opt_A (src/device/cpu/cpu_backend.cpp). Given B (r×nr), returns A (nl×r).
 /// __noinline__ so its large local frame (Wm/coeffs) does NOT stack with opt_B's in
 /// the ALS-loop kernels (keeps the per-thread local-memory reservation small enough
 /// to launch — see the kQpMax* bound rationale). Templated on the local-array bound
@@ -281,7 +281,7 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
     }
 }
 
-/// opt_B — core::opt_B (cpu_backend.cpp:715-768). Given A (nl×r), returns B (r×nr).
+/// opt_B — core::opt_B (src/device/cpu/cpu_backend.cpp). Given A (nl×r), returns B (r×nr).
 /// __noinline__ (see dev_opt_A) so its frame does not stack with opt_A's. Templated
 /// on the local-array bound (MAXM/MAXT), see dev_opt_A.
 template <int MAXM, int MAXT>
@@ -333,7 +333,7 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
 }
 
 /// chisq = vec(E)'·qinv·vec(E), E = xmat - A·B, row-major vec — core::chisq_of
-/// (cpu_backend.cpp:833-858). Native FP64 (CpuBackend uses long double; FP64 matches
+/// (src/device/cpu/cpu_backend.cpp). Native FP64 (CpuBackend uses long double; FP64 matches
 /// the golden chisq to the gate tier). Templated on MAXM (the residual-vector bound).
 template <int MAXM>
 __device__ inline double dev_chisq_of(const double* xmat, const double* A,
@@ -356,7 +356,7 @@ __device__ inline double dev_chisq_of(const double* xmat, const double* A,
     return acc;
 }
 
-/// Full als_weights body — core::als_weights (cpu_backend.cpp:773-826). Refines A,B
+/// Full als_weights body — core::als_weights (src/device/cpu/cpu_backend.cpp). Refines A,B
 /// (seeded externally if r>0), runs the constrained weight solve, normalizes Σw=1,
 /// computes chisq. Returns 0=Ok / 6=RankDeficient. `A`/`B` are caller scratch
 /// (refined in place). When `seed`==true, seeds A,B from svd(xmat) first. Templated
@@ -437,7 +437,7 @@ __global__ void assemble_f4_gather_kernel(const double* __restrict__ f2, int P,
 
 // --- S3 est_to_loo + x_total + tot_line ------------------------------------------
 // One thread per k (m is tiny — m=10 at the golden). Reproduces CpuBackend
-// compute_loo_and_total cpu_backend.cpp:553-592 in FP64 (the long-double accumulators
+// compute_loo_and_total (src/device/cpu/cpu_backend.cpp) in FP64 (the long-double accumulators
 // become FP64). The CpuBackend term1 = mean(tot_line - loo)*nb = (Σ (tot_line-loo)/nb)*nb
 // = Σ (tot_line - loo) exactly; reproduced as the bare sum.
 __global__ void f4_loo_total_kernel(const double* __restrict__ dX,
@@ -608,7 +608,7 @@ __global__ void weights_chisq_kernel(const double* __restrict__ dXmat,
 // launch wrapper precomputes) is documented at each call.
 // ---------------------------------------------------------------------------------
 
-/// opt_A (large) — core::opt_A (cpu_backend.cpp:652-709) with VRAM scratch. B (r×nr)
+/// opt_A (large) — core::opt_A (src/device/cpu/cpu_backend.cpp) with VRAM scratch. B (r×nr)
 /// in, A (nl×r) out. Scratch: xvec[m], Wm[m*t], coeffs[t*t], rhs[t], A2[t], lu[t*t],
 /// y[t]; ipiv[t] (int). t = nl*r. Same op order as dev_opt_A.
 __device__ inline void dev_opt_A_large(const double* B, const double* xmat,
@@ -654,7 +654,7 @@ __device__ inline void dev_opt_A_large(const double* B, const double* xmat,
     }
 }
 
-/// opt_B (large) — core::opt_B (cpu_backend.cpp:715-768) with VRAM scratch. A (nl×r)
+/// opt_B (large) — core::opt_B (src/device/cpu/cpu_backend.cpp) with VRAM scratch. A (nl×r)
 /// in, B (r×nr) out. Scratch as dev_opt_A_large; t = r*nr.
 __device__ inline void dev_opt_B_large(const double* A, const double* xmat,
                                        int nl, int nr, int r, const double* qinv,
@@ -699,7 +699,7 @@ __device__ inline void dev_opt_B_large(const double* A, const double* xmat,
     }
 }
 
-/// chisq (large) — core::chisq_of (cpu_backend.cpp:833-858) with VRAM scratch e[m].
+/// chisq (large) — core::chisq_of (src/device/cpu/cpu_backend.cpp) with VRAM scratch e[m].
 __device__ inline double dev_chisq_of_large(const double* xmat, const double* A,
                                             const double* B, int nl, int nr, int r,
                                             const double* qinv, double* e) {
@@ -830,7 +830,7 @@ __global__ void weights_chisq_large_kernel(const double* __restrict__ dXmat,
 }
 
 // --- LARGE-path PARALLEL LOO re-fits (one thread per (model, block)) --------------
-// The large-model jackknife SE was the throughput wall: the host ran nb (=701 for
+// The large-model jackknife SE was the throughput wall: the host ran nb (~708 for
 // NRBIG) leave-one-block-out refits SERIALLY, each a cuSOLVER SVD seed + a single-
 // thread ALS chain + weight solve, with a per-block host round-trip. The refits are
 // INDEPENDENT, so this kernel runs all nb (and the future B·nb) refits CONCURRENTLY:
@@ -1155,7 +1155,7 @@ __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
         d_rank_chisq[static_cast<long>(model) * (rmax + 1) + rr] = cr;
     }
 
-    // NOTE: the LOO SE is NOT computed here (it would serialize nb=702 ALS fits per
+    // NOTE: the LOO SE is NOT computed here (it would serialize nb (~708 for NRBIG) ALS fits per
     // model-thread — the throughput wall). It runs as a SEPARATE batched kernel with
     // one thread per (model, block) (qpadm_loo_models_kernel) + a deterministic
     // variance reduction (qpadm_se_from_wmat_kernel) — good occupancy, deterministic

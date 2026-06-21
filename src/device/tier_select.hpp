@@ -45,7 +45,9 @@ enum class OutputTier {
 /// kFeederOutBufsPerPop·P·M = (3+4)·P·M = 7·P·M doubles) + the cuBLAS determinism
 /// workspace. The per-pop coefficients are named in config.hpp (single source) so
 /// this policy term cannot drift from the real feeder malloc. The chunk slabs reuse
-/// the freed-raw VRAM (cuda_backend.cu :544-560) so they fit under this envelope.
+/// the freed-raw VRAM (cuda_backend.cu, the "freed raw VRAM is reused by the bucket
+/// slabs" sync after the fused feeder, where the per-chunk slabs are pre-sized once)
+/// so they fit under this envelope.
 /// Mirrors estimate_peak_vram_bytes in test_f2_multigpu_parity.cu:223-230, MINUS the
 /// resident_tensor_bytes term (the caller adds the result separately). std::size_t
 /// throughout (no 32-bit wrap).

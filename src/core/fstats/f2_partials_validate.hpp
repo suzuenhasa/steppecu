@@ -21,10 +21,13 @@
 // "essentially free"), so there is no out-of-line TU to link and no link-layer
 // coupling between the tiers — each #includes the same CUDA-free header.
 //
-// The P2P tier additionally checks `device_ids.size() == G` (it threads a third
-// parallel span the host tier has no notion of); that one extra check stays at the
-// P2P call site (it names a transport detail core does not see), and this shared
-// guard validates everything the two tiers have in common.
+// The P2P tier no longer threads a parallel `device_ids` span (p2p_combine.hpp): each
+// DevicePartial now carries its own per-handle `device_id` (the peer source) and `b0`
+// (the disjoint placement offset) inline (device_partial.hpp), so there is no third
+// span for the host tier to be unaware of. The device-resident overload
+// (validate_resident_partials, below) folds that per-handle b0 into the shared
+// contract by cross-checking `partials[g].b0 == shards[g].b0`; everything else the two
+// tiers have in common is validated identically here.
 #ifndef STEPPE_CORE_FSTATS_F2_PARTIALS_VALIDATE_HPP
 #define STEPPE_CORE_FSTATS_F2_PARTIALS_VALIDATE_HPP
 

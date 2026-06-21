@@ -29,7 +29,7 @@ namespace steppe::core::qpadm {
 /// the caller from a device or host f2). block_sizes is the AT2 block_lengths
 /// jackknife weight (OQ-3). Domain outcomes are returned as result.status values.
 ///
-/// `se_policy` gates the S7 jackknife SE (the host-oracle mirror of the GPU two-pass):
+/// `opts.jackknife` (JackknifePolicy) gates the S7 jackknife SE (the host-oracle mirror of the GPU two-pass):
 /// All ⇒ always compute (the default / today's behavior, the goldens); FeasibleOnly ⇒
 /// compute only when the cheap point estimate is a survivor (feasible weights, optionally
 /// AND p>=opts.p_se_threshold); None ⇒ never. A non-survivor leaves res.se/z EMPTY

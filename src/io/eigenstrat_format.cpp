@@ -31,8 +31,10 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
     }
 
     // First token = magic. Determine the format (TGENO individual-major vs GENO
-    // SNP-major PACKEDANCESTRYMAP). A trailing-substring check keeps it robust to
-    // surrounding whitespace; we match the leading token exactly.
+    // SNP-major PACKEDANCESTRYMAP). We skip leading whitespace, isolate the leading
+    // token (up to the next space/tab via find_first_of), and compare it EXACTLY (==)
+    // against the known magics — so surrounding whitespace is tolerated while a magic
+    // that merely contains "GENO" as a substring is NOT accepted.
     std::size_t pos = text.find_first_not_of(" \t");
     if (pos == std::string::npos) return h;  // empty → Unknown
     const std::size_t magic_end = text.find_first_of(" \t", pos);
@@ -83,7 +85,7 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
         }
         if (any) ints[got++] = v;
     }
-    if (got < 2) {  // could not read both counts → leave format set but counts 0
+    if (got < 2) {  // could not read both counts → malformed header, route to Unknown
         h.format = GenoFormat::Unknown;
         return h;
     }

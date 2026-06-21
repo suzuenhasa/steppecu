@@ -8,7 +8,7 @@
 // strongly-typed C++ subset the early layers need so they can return outcomes
 // without dragging in the whole ABI. CUDA-free; standard-library-free.
 //
-// The three DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance) are
+// The two DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance) are
 // *expected* results of fitting some models in a large search — surfaced as
 // ordinary statuses, never exceptions or aborts (architecture.md §10). Faults
 // (e.g. InvalidConfig at build time) are fail-fast.
