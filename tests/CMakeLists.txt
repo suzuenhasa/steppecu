@@ -449,6 +449,33 @@ set_target_properties(test_qpadm_rotation PROPERTIES CUDA_SEPARABLE_COMPILATION 
 add_test(NAME qpadm_rotation
          COMMAND test_qpadm_rotation "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- M(fit-5) qpAdm DOMAIN-OUTCOME test (the contract acceptance gate, BOTH backends)
+# CUDA TU: the M(fit-5) acceptance gate (fit-engine.md §2 M(fit-5); architecture.md
+# §13:803; §18 DoD:939) — a deliberately DEGENERATE model returns a per-model
+# DOMAIN-OUTCOME STATUS VALUE (RankDeficient / NonSpdCovariance / ChisqUndefined),
+# never a crash / exception / silently-Ok NaN, on BOTH the CpuBackend ORACLE and the
+# production CudaBackend (f2 RESIDENT in VRAM). Every other qpadm status assertion
+# checks `== Status::Ok`; this covers the NON-Ok taxonomy the contract requires.
+#
+# NO SYNTHETIC DATA: every degenerate model is built from the SAME committed REAL-AADR
+# 9-pop f2 fixture (fixtures/f2_fit0_9pop.bin) the parity gate uses, arranged
+# degenerate by selecting REAL pops in a degenerate configuration (a left set with a
+# duplicated real source ⇒ RankDeficient / fudge=0 non-SPD; an over-parameterized
+# dof<=0 model ⇒ ChisqUndefined) — never a made-up matrix. The CpuBackend oracle block
+# runs under STEPPE_THOROUGH=1 OR when no GPU is visible (the CI-without-GPU gate); the
+# CudaBackend deliverable block runs whenever a CUDA device is visible (default FAST).
+# Self-checking main() (exits non-zero on failure; CTest gates on the exit code), so it
+# does NOT link gtest_main. Named .cu so it device-links steppe_device's RDC kernels and
+# can construct a real CudaBackend. Links steppe::core (run_qpadm) + steppe::device
+# (make_cpu_backend / make_cuda_backend + the fit virtuals on both backends).
+# architecture.md §10, §13, §18; fit-engine.md §2 M(fit-5); fit-engine-finish-punchlist F2.
+add_executable(test_qpadm_domain reference/test_qpadm_domain.cu)
+target_link_libraries(test_qpadm_domain
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpadm_domain PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpadm_domain
+         COMMAND test_qpadm_domain "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- M(fit-6) S8 model-search shard planner unit test (GPU-free) -----------------
 # Pure C++ TU (no CUDA, no GPU, no io, no data): drives
 # steppe::core::qpadm::plan_model_shards (the model->device shard plan) + the
