@@ -80,7 +80,15 @@ add_library(steppe_core STATIC
     # M(fit-6) S8 ROTATION: the model-space search orchestrator (run_qpadm_search +
     # the base fit_models_batched default) + the GPU-free model->device shard planner.
     qpadm/model_search.cpp
-    qpadm/model_search_core.cpp)
+    qpadm/model_search_core.cpp
+    # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
+    # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
+    # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps
+    # the raw flags onto the real structs (DeviceConfig/QpAdmOptions/FilterConfig/
+    # PopSelection) and fail-fasts (Status::InvalidConfig) on bad config. It lives in
+    # core (not app) so the bindings reuse it and it is host-testable GPU-free like
+    # test_config (the io PopSelection header is header-only; no steppe::io link needed).
+    config/config_builder.cpp)
 add_library(steppe::core ALIAS steppe_core)
 
 target_link_libraries(steppe_core

@@ -404,6 +404,27 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME config_unit COMMAND test_config)
 
+# --- M(cli-0) access-layer config-builder unit test (cli-bindings.md §8 M(cli-0)) ----
+# Pure C++ TU (no CUDA, no GPU, no data): drives the CUDA-FREE ConfigBuilder/RunConfig/
+# CliArgs (src/core/config/) — the §9 precedence merge (compiled defaults < TOML < env
+# STEPPE_* < CLI) + the validating build() that maps the raw flags onto the real structs
+# (DeviceConfig/QpAdmOptions/FilterConfig/PopSelection) and fail-fasts (InvalidConfig) on
+# bad config — plus the Status->exit-code record-and-continue map. The M(cli-0) GATE
+# (cli-bindings.md §8): "unit: precedence order + build() rejects ... reuse the
+# test_config pattern". It links steppe::core (the config_builder symbol + the io
+# PopSelection header path through core's PUBLIC src/ include root) + steppe::api; its
+# CUDA-free host compile/link WITHOUT the device layer is itself the §4-layering proof.
+# Mirrors test_config's dual GoogleTest / self-checking-main() harness (CTest gates on
+# the exit code). architecture.md §4, §9, §10, §13; cli-bindings.md §4.5, §8.
+add_executable(test_config_builder unit/test_config_builder.cpp)
+target_link_libraries(test_config_builder
+    PRIVATE steppe::core steppe::api steppe::warnings)
+if(STEPPE_HAVE_GTEST)
+  target_link_libraries(test_config_builder PRIVATE GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_config_builder PRIVATE STEPPE_TEST_WITH_GTEST=1)
+endif()
+add_test(NAME config_builder_unit COMMAND test_config_builder)
+
 # --- qpAdm parity test (the Phase-2 fit acceptance gate, BOTH backends) ---------
 # Reads the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the
 # SAME f2 ADMIXTOOLS 2 read internally — and runs the single-model qpAdm fit

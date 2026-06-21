@@ -62,6 +62,15 @@ add_subdirectory(src/io)         # steppe_io           (LEAF: genotype readers; 
 add_subdirectory(src/core)       # steppe_core_internal (INTERFACE) + steppe_core (host)
 add_subdirectory(src/device)     # steppe_device        (CUDA, PRIVATE cuBLAS)
 
+# app — the steppe CLI (Phase 3 / step 2 productization). A PLAIN CXX target (NO
+# LANGUAGES CUDA) behind the already-present STEPPE_BUILD_CLI option
+# (SteppeOptions.cmake:23, default OFF), per cli-bindings.md §6.1 + architecture.md §4.
+# It reaches the GPU ONLY through the CUDA-free seams; CLI11 + the CPM machinery it
+# fetches stay PRIVATE to the src/app subtree (never reaching core/device).
+if(STEPPE_BUILD_CLI)
+  add_subdirectory(src/app)
+endif()
+
 if(STEPPE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

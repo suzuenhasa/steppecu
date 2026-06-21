@@ -1,0 +1,126 @@
+// src/core/config/cli_args.hpp
+//
+// CliArgs — the FLAT, parse-time-mutable command-line surface (architecture.md §9
+// "ConfigBuilder& merge_cli(const CliArgs&)"). It is the highest-precedence config
+// LAYER (compiled defaults < TOML < env STEPPE_* < CLI; architecture.md §9, ROADMAP
+// §4 / cli-bindings.md §4.5). The CLI11 parser (src/app, plain CXX) binds flags into
+// this struct, then ConfigBuilder::merge_cli folds it over the lower layers and
+// build() validates + freezes into an immutable RunConfig.
+//
+// CUDA-FREE BY CONTRACT — like steppe/config.hpp, it depends only on the C++ standard
+// library, so it compiles into core, the CLI, and (later) the bindings without the
+// device toolkit (architecture.md §4). It names ONLY std types and the CUDA-free
+// public enums; the app->struct mapping (e.g. "--device 0,1" string -> devices) is
+// done in ConfigBuilder, the single validated merge site, not scattered in the parser.
+//
+// std::optional is the "was this flag SET on the command line?" sentinel: an UNSET
+// optional leaves the lower-precedence layer (env / TOML / compiled default) intact;
+// a SET optional overrides it (the §9 precedence rule made explicit per field). A bare
+// value (no optional) would conflate "user passed the default" with "user passed
+// nothing", silently clobbering a TOML/env override with the compiled default.
+#ifndef STEPPE_CORE_CONFIG_CLI_ARGS_HPP
+#define STEPPE_CORE_CONFIG_CLI_ARGS_HPP
+
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace steppe::config {
+
+/// Which subcommand was selected (mirrors cli-bindings.md §4.1 command set). `None`
+/// is the no-subcommand case (bare `steppe` -> help). The mapping to the real fit
+/// entry points (run_qpadm / run_qpwave / run_qpadm_search) is the app's job; this
+/// enum is only the parsed selection so build() can apply command-specific validation.
+enum class Command {
+    None,
+    ExtractF2,
+    QpAdm,
+    QpWave,
+    QpAdmRotate,
+};
+
+/// The flat, parse-time CLI surface. Every field is the std::optional "was it set?"
+/// sentinel for the §9 precedence merge (an UNSET field does NOT override the lower
+/// layer). The vector/string fields that default to empty use emptiness as the
+/// "unset" sentinel where an empty value is itself the no-op (e.g. an empty pop list).
+struct CliArgs {
+    /// Selected subcommand (None ⇒ no subcommand; the app prints help).
+    Command command = Command::None;
+
+    // ---- Global resource / precision knobs (every fit + extract command) -------
+
+    /// Raw `--device` argument string, UNPARSED ("auto" | "0" | "0,1"). Parsed +
+    /// validated into DeviceConfig::devices by ConfigBuilder (the single merge site),
+    /// NOT in the parser. GPU-ONLY: there is no "cpu" value (cli-bindings.md §5.4);
+    /// "cpu" is rejected at build() as InvalidConfig.
+    std::optional<std::string> device;
+
+    /// Raw `--precision` argument ("emu40" | "emu32" | "fp64" | "tf32"). Mapped to
+    /// steppe::Precision by ConfigBuilder; an unknown token is InvalidConfig.
+    std::optional<std::string> precision;
+
+    /// `--config FILE` — a TOML config to merge BELOW the CLI but ABOVE env/defaults
+    /// (architecture.md §9). Empty ⇒ no file. The app passes this to merge_file().
+    std::optional<std::string> config_path;
+
+    // ---- qpAdm / qpwave inputs + options (cli-bindings.md §4.1) ----------------
+
+    /// `--f2-dir DIR` — the precompute-once/fit-many f2_blocks dir (cli-bindings.md
+    /// §4.3). Resolved + uploaded by the app (M(cli-1)); here it is only carried.
+    std::optional<std::string> f2_dir;
+
+    /// `--target` pop label (qpadm/qpadm-rotate). Resolved to an index against
+    /// pops.txt by the app, never here (the engine is index-only).
+    std::optional<std::string> target;
+
+    /// `--left a,b,...` source labels (qpadm) / the full left set (qpwave, left[0]=ref).
+    std::vector<std::string> left;
+
+    /// `--right r0,r1,...` outgroup labels; right[0] == R0.
+    std::vector<std::string> right;
+
+    /// `--pool a,b,c,...` (qpadm-rotate) source pool the app enumerates subsets of.
+    std::vector<std::string> pool;
+
+    // ---- QpAdmOptions overrides (default to the struct defaults; cli-bindings.md
+    // §4.1 — flag names mirror QpAdmOptions so a bare invocation reproduces goldens).
+
+    std::optional<double> fudge;            ///< --fudge        (QpAdmOptions::fudge)
+    std::optional<int>    als_iterations;   ///< --als-iters    (QpAdmOptions::als_iterations)
+    std::optional<int>    rank;             ///< --rank         (QpAdmOptions::rank)
+    std::optional<double> rank_alpha;       ///< --rank-alpha   (QpAdmOptions::rank_alpha)
+    std::optional<bool>   allow_negative_weights;  ///< --allow-neg / --no-allow-neg
+    std::optional<int>    jackknife;        ///< --jackknife 0|1|2 (JackknifePolicy)
+    std::optional<double> p_se_threshold;   ///< --p-se-threshold
+    std::optional<bool>   se_require_p;     ///< --se-require-p
+
+    // ---- qpadm-rotate pool-enumeration bounds (cli-bindings.md §4.1) -----------
+    std::optional<int> min_sources;         ///< --min-sources
+    std::optional<int> max_sources;         ///< --max-sources
+
+    // ---- extract-f2 inputs (cli-bindings.md §4.1; consumed in M(cli-4)) --------
+    std::optional<std::string> geno;        ///< --geno
+    std::optional<std::string> snp;         ///< --snp
+    std::optional<std::string> ind;         ///< --ind
+    std::optional<std::string> out_dir;     ///< --out (extract-f2 dir)
+    std::vector<std::string>   pops;        ///< --pops (PopSelection::Explicit)
+    std::optional<int>         auto_top_k;  ///< --auto-top-k (PopSelection::AutoTopK)
+    std::optional<int>         min_n;       ///< --min-n (PopSelection::MinN)
+    std::optional<double>      blgsize;     ///< --blgsize (cM; kDefaultBlockSizeCm)
+
+    // ---- FilterConfig overrides (cli-bindings.md §4.1; M(cli-4)) ---------------
+    std::optional<double> maf;              ///< --maf
+    std::optional<double> geno_max_missing; ///< --geno-max-miss
+    std::optional<double> mind_max_missing; ///< --mind-max-miss
+    std::optional<bool>   autosomes_only;   ///< --auto-only
+    std::optional<bool>   drop_monomorphic; ///< --drop-mono
+    std::optional<bool>   transversions_only; ///< --transversions
+
+    // ---- Output (cli-bindings.md §4.4) ----------------------------------------
+    std::optional<std::string> out_file;    ///< --out FILE (stdout if unset)
+    std::optional<std::string> format;      ///< --format csv|tsv|json (default csv)
+};
+
+}  // namespace steppe::config
+
+#endif  // STEPPE_CORE_CONFIG_CLI_ARGS_HPP
