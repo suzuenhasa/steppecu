@@ -154,6 +154,23 @@ HostRamSink::~HostRamSink() {
         cv_work_.notify_all();
         writer_.join();
     }
+    // DEFENSIVE TEARDOWN BARRIER (14.4): the writer's per-ENQUEUED-slot event sync is the
+    // sole D2H-completion guarantee — but if spill_block faulted mid-issue (the 2nd
+    // cudaMemcpyAsync or the cudaEventRecord threw via STEPPE_CUDA_CHECK) the FIRST D2H is
+    // left in flight on `stream` and its slot was NEVER pushed to ready_, so the writer
+    // never synchronized it. Freeing the pinned ring (slots_ destruct -> PinnedBuffer::reset
+    // -> cudaFreeHost) under that still-running DMA is a use-after-free of pinned host
+    // memory. cudaDeviceSynchronize "blocks until the device has completed all preceding
+    // requested tasks ... in all streams" (CUDA 13.x Runtime API), so it drains any such
+    // orphaned in-flight transfer before teardown. Warn-not-throw (a dtor never throws,
+    // architecture.md §7); this is off the hot path so the sync cost is irrelevant. On the
+    // happy path every D2H was already drained before join, so this is a cheap no-op.
+    {
+        const cudaError_t e = cudaDeviceSynchronize();
+        if (e != cudaSuccess)
+            STEPPE_LOG_WARN("cudaDeviceSynchronize (HostRamSink teardown): %s",
+                            cudaGetErrorString(e));
+    }
     for (SinkSlot& s : slots_) {
         if (s.done) {
             const cudaError_t e = cudaEventDestroy(s.done);
@@ -343,6 +360,19 @@ DiskSink::~DiskSink() {
         { std::lock_guard<std::mutex> lk(mtx_); stop_ = true; }
         cv_work_.notify_all();
         writer_.join();
+    }
+    // DEFENSIVE TEARDOWN BARRIER (14.4): identical rationale to HostRamSink — if spill_block
+    // faulted mid-issue the first D2H is left in flight on `stream` with its slot never
+    // enqueued, so the writer never synchronized it. cudaDeviceSynchronize drains any such
+    // orphaned transfer ("blocks until the device has completed all preceding requested
+    // tasks ... in all streams", CUDA 13.x Runtime API) before the pinned ring is freed
+    // (cudaFreeHost), so no DMA outlives its pinned target. Warn-not-throw (a dtor never
+    // throws, §7); teardown path, sync cost irrelevant; happy-path no-op.
+    {
+        const cudaError_t e = cudaDeviceSynchronize();
+        if (e != cudaSuccess)
+            STEPPE_LOG_WARN("cudaDeviceSynchronize (DiskSink teardown): %s",
+                            cudaGetErrorString(e));
     }
     for (SinkSlot& s : slots_) {
         if (s.done) {

@@ -371,6 +371,68 @@ private:
     int device_id_ = -1;
 };
 
+/// Owning, move-only RAII wrapper for a cuSOLVER `gesvdjInfo_t` — the gesvdj
+/// (one-sided Jacobi SVD) parameter structure (architecture.md §2 RAII, §7, §8;
+/// cleanup device-cuda-cuda_backend group-14 [14.5]). `cusolverDnCreateGesvdjInfo`
+/// heap-allocates the structure (it can return CUSOLVER_STATUS_ALLOC_FAILED —
+/// VERIFIED against the CUDA 13.x cuSOLVER docs) and `cusolverDnDestroyGesvdjInfo`
+/// releases it; the two are the paired create/destroy, exactly like
+/// `cusolverDnCreate`/`cusolverDnDestroy`. The bare-pointer idiom (create →
+/// throwing `cusolverDnDgesvdj*`/`STEPPE_CUDA_CHECK` work → destroy) LEAKS the
+/// handle if any throwing check between create and destroy unwinds past the
+/// destroy line (CUSOLVER_CHECK / STEPPE_CUDA_CHECK throw — check.cuh) — the
+/// `gesvdjInfo_t` was the only non-RAII resource in cuda_backend.cu, violating
+/// that TU's "RAII for ALL ... handles" standard. This makes it RAII: an
+/// exception anywhere in the gesvdj branch still frees it on unwind.
+///
+/// Created and destroyed per gesvdj SHAPE (cheap host-side config struct, NOT a
+/// per-call device alloc), so there is no reuse-across-calls contract to honor
+/// here — unlike `CusolverDnHandle`, each gesvdj branch makes a fresh one. Stays
+/// stateless w.r.t. device ordinal: a `gesvdjInfo_t` is a plain configuration
+/// structure, not bound to a CUDA context (cuSOLVER docs: `info` is host memory),
+/// so it carries no device-ordinal record-and-assert. Move-only, mirroring the
+/// other handle wrappers above; the dtor NEVER throws — a nonzero destroy status
+/// routes to the §7 teardown-warning sink (`STEPPE_LOG_WARN`). A moved-from
+/// wrapper owns nothing (`info_ == nullptr`) and is safe to destroy.
+class GesvdjInfo {
+public:
+    /// Create the gesvdj parameter structure (default tolerance/sweeps; the
+    /// callers leave them at default). Throws CusolverError via CUSOLVER_CHECK on
+    /// CUSOLVER_STATUS_ALLOC_FAILED (a ctor may throw; the dtor may not).
+    GesvdjInfo() { CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&info_)); }
+
+    GesvdjInfo(GesvdjInfo&& o) noexcept : info_(std::exchange(o.info_, nullptr)) {}
+    GesvdjInfo& operator=(GesvdjInfo&& o) noexcept {
+        if (this != &o) {
+            destroy();
+            info_ = std::exchange(o.info_, nullptr);
+        }
+        return *this;
+    }
+    GesvdjInfo(const GesvdjInfo&) = delete;
+    GesvdjInfo& operator=(const GesvdjInfo&) = delete;
+    ~GesvdjInfo() { destroy(); }
+
+    [[nodiscard]] gesvdjInfo_t get() const noexcept { return info_; }
+
+private:
+    void destroy() noexcept {
+        // Destructor never throws (architecture.md §7); a nonzero destroy status is
+        // reported to the §7 teardown-warning sink, never thrown. A moved-from
+        // wrapper (`info_ == nullptr`) destroys nothing.
+        if (info_) {
+            const cusolverStatus_t s = cusolverDnDestroyGesvdjInfo(info_);
+            if (s != CUSOLVER_STATUS_SUCCESS) {
+                STEPPE_LOG_WARN("cusolverDnDestroyGesvdjInfo at scope exit: %s",
+                                CusolverError::status_name(s));
+            }
+        }
+        info_ = nullptr;
+    }
+
+    gesvdjInfo_t info_ = nullptr;
+};
+
 // ---------------------------------------------------------------------------
 // One-shot capability tag for the cuSOLVER FP64-emulated DOWNGRADE — the
 // cuSOLVER analogue of f2_block_kernel.cu's `warn_emulated_fp64_downgraded_once`

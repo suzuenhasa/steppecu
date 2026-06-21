@@ -44,6 +44,7 @@
 #include <source_location>  // std::source_location — call site for the typed throw
 #include <utility>
 
+#include "core/internal/host_device.hpp"  // STEPPE_ASSERT (the one debug-only fail-fast)
 #include "core/internal/log.hpp"  // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"  // STEPPE_CUDA_CHECK, STEPPE_CUDA_WARN, CudaError
 
@@ -257,6 +258,21 @@ public:
     /// the SAME (ptr, bytes) if present (the amortized fast path). A null/zero range
     /// is a no-op. If the range is not cached, evict the round-robin slot (its
     /// RegisteredHostRegion dtor unregisters the old range) and register the new one.
+    ///
+    /// PRECONDITION — EVICTION vs IN-FLIGHT COPY (14.4): on a cache MISS the victim
+    /// round-robin slot is evicted, whose RegisteredHostRegion move-assign runs the OLD
+    /// region's dtor → `cudaHostUnregister` SYNCHRONOUSLY with NO stream sync. The CUDA
+    /// 13.x Runtime API requires that no `cudaMemcpyAsync` be in flight over a range when
+    /// it is unregistered — `cudaHostUnregister` unmaps the range and reverts it to
+    /// PAGEABLE, so an in-flight DMA would then read pageable memory (a use-after-unregister
+    /// race, the exact unsafe overlap this cache exists to prevent). The CALLER must
+    /// therefore NOT cause a range with an outstanding async copy to be evicted (it must
+    /// have synced the stream / gated reuse via cudaEvent before any miss could displace
+    /// that range). `ensure` deliberately does NOT add a hidden sync here — that would
+    /// serialize the hot H2D path. With `kSlots == 3 == ` the Q/V/N inputs this never fires
+    /// in steady state; the only way to reach it is staging a 4th distinct stable H2D range,
+    /// which the debug assert below makes LOUD (a real registered victim about to be
+    /// unregistered) so silent self-eviction cannot reach the unregister while a copy is live.
     void ensure(const void* ptr, std::size_t bytes) {
         if (ptr == nullptr || bytes == 0) return;
         for (const Slot& s : slots_) {
@@ -266,6 +282,18 @@ public:
         // assignment runs the OLD RegisteredHostRegion's dtor first (unregisters the
         // evicted range), then move-assigns the freshly-registered region in.
         Slot& dst = slots_[next_];
+        // LOUD SELF-EVICTION GUARD (14.4): in the documented steady state (3 inputs ==
+        // kSlots) the victim slot is empty, so eviction never unregisters a live range. A
+        // miss whose victim is ACTUALLY registered means a 4th distinct stable range is
+        // being staged — the eviction-vs-in-flight-copy precondition above is now in play
+        // and the silent unregister could race a DMA. Fail loudly under debug /
+        // compute-sanitizer rather than silently revert a possibly-in-flight range to
+        // pageable; release is unaffected (STEPPE_ASSERT compiles out, the bounded
+        // round-robin eviction still degrades gracefully).
+        STEPPE_ASSERT(!dst.reg.registered(),
+                      "PinnedRegistryCache::ensure: evicting a still-registered slot "
+                      "(a 4th distinct H2D range exceeds kSlots); the evicted range must "
+                      "have no outstanding async copy (no hidden sync is performed here)");
         dst.reg = RegisteredHostRegion(ptr, bytes);
         dst.ptr = dst.reg.registered() ? ptr : nullptr;  // only remember a real pin
         dst.bytes = dst.reg.registered() ? bytes : 0;

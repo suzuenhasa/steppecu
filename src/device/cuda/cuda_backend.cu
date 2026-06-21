@@ -942,15 +942,20 @@ public:
             bool used = false;
         };
         Ring ring[kStreamDeviceChunks];
+        // The guard is constructed BEFORE the creation loop (group-14 [14.5] fold-in):
+        // each `r.reuse` starts nullptr (Ring's in-class init) and the dtor null-checks
+        // every slot, so if a LATER iteration's cudaEventCreateWithFlags throws, the
+        // events already created in earlier iterations are torn down on unwind (the
+        // DeviceBuffer members free themselves via their own RAII regardless).
+        struct RingGuard {
+            Ring* r; int n;
+            ~RingGuard() { for (int i = 0; i < n; ++i) if (r[i].reuse) (void)cudaEventDestroy(r[i].reuse); }
+        } ring_guard{ring, kStreamDeviceChunks};
         for (Ring& r : ring) {
             r.f2 = DeviceBuffer<double>(max_pp_nb);
             r.vpair = DeviceBuffer<double>(max_pp_nb);
             STEPPE_CUDA_CHECK(cudaEventCreateWithFlags(&r.reuse, cudaEventDisableTiming));
         }
-        struct RingGuard {
-            Ring* r; int n;
-            ~RingGuard() { for (int i = 0; i < n; ++i) if (r[i].reuse) (void)cudaEventDestroy(r[i].reuse); }
-        } ring_guard{ring, kStreamDeviceChunks};
 
         int chunk_idx = 0;
         for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
@@ -1506,6 +1511,62 @@ public:
         return nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim;
     }
 
+    /// The cuSOLVER gesvd/gesvdj DEVICE scratch a single `large_svd_V` call consumes,
+    /// hoistable to ONE arena reused across many same-shape SVDs (the §14.2 fix —
+    /// see `large_svd_V` and the Stage-A LOO loop). Element COUNTS (not bytes), sized
+    /// to whichever orientation+routine branch the fixed (nl,nr) selects: only one
+    /// branch ever runs, so each field is its branch's exact need (no over-allocation):
+    ///   * dS   = min(nl,nr)        (singular values, cols of the rows>=cols matrix)
+    ///   * dU   = nl*nr             (economy U, rows×cols == nl*nr both orientations)
+    ///   * dVt  = nr>=nl ? nl*nl : nr*nr   (right vectors, cols×cols; only the gesvdj
+    ///                                       branch reads it for nr>=nl)
+    ///   * dA2  = nl>nr ? nl*nr : 0 (non-const copy of A; gesvd/gesvdj OVERWRITE A and
+    ///                               the const dXmat must survive — needed ONLY when
+    ///                               nl>nr, where A=dXmat is handed in directly)
+    ///   * dInfo= 1
+    ///   * lwork= cuSOLVER's bufferSize for the selected routine (depends ONLY on the
+    ///            dims/params, NOT on the matrix values — VERIFIED against the CUDA
+    ///            13.x cuSOLVER docs "xyz_bufferSize ... only depends on some
+    ///            parameters ... device pointer is not used to decide the size of
+    ///            workspace" — so it is queried ONCE per shape and reused).
+    struct SvdScratchSizes {
+        std::size_t s = 0, u = 0, vt = 0, a2 = 0, info = 1;
+        int lwork = 0;
+    };
+
+    /// Size (and query lwork for) the gesvd/gesvdj scratch of an nl×nr, leading-r SVD.
+    /// Caller allocates ONE DeviceBuffer per field at these counts, then feeds the
+    /// slices to the scratch-taking `large_svd_V` overload — so a sweep of many
+    /// same-shape SVDs allocates/frees the scratch ONCE, not per call (each
+    /// `DeviceBuffer` free is a device-wide `cudaFree` sync; per-call frees serialize
+    /// the otherwise-async stream — the §14.2 wall).
+    [[nodiscard]] SvdScratchSizes large_svd_scratch_sizes(int nl, int nr) {
+        SvdScratchSizes sz;
+        const int rows = (nr >= nl) ? nr : nl;
+        const int cols = (nr >= nl) ? nl : nr;  // rows>=cols ✓ (the §1.3 orientation)
+        sz.s  = static_cast<std::size_t>(cols);
+        sz.u  = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);  // == nl*nr
+        sz.vt = static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols);
+        sz.a2 = (nr >= nl) ? 0
+                           : static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
+        solver_.set_stream(stream_.get());  // bufferSize is data-independent; stream irrelevant
+        if (gesvdj_applicable(nl, nr)) {
+            // RAII gesvdj params (group-14 [14.5]): the throwing bufferSize between a
+            // bare create/destroy would leak the handle on unwind; GesvdjInfo frees it.
+            GesvdjInfo params;
+            // bufferSize ignores the device pointers (VERIFIED, see SvdScratchSizes),
+            // so nullptr A/S/U/VT here is fine — we only want lwork for the shape.
+            CUSOLVER_CHECK(cusolverDnDgesvdj_bufferSize(
+                solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
+                nullptr, rows, nullptr, nullptr, rows, nullptr, cols, &sz.lwork,
+                params.get()));
+        } else {
+            CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(solver_.get(), rows, cols, &sz.lwork));
+        }
+        if (sz.lwork <= 0) sz.lwork = 1;
+        return sz;
+    }
+
     /// Compute the leading-r right singular vectors V[:,0:r] (nr×r, col-major) of the
     /// nl×nr col-major `dXmat` via cuSOLVER, native FP64, deterministic, on stream_.
     /// Writes dVout[nr*r] col-major (descending singular value order). The §1.3
@@ -1520,91 +1581,100 @@ public:
     /// `dXt` is the nr×nl transpose scratch used in BOTH branches (Xt = transpose(xmat)
     /// for nr>=nl, V = transpose(dVt) for nl>nr). The math-mode is native (no
     /// CusolverMathModeScope for emulation — §1.5/§4).
+    ///
+    /// SCRATCH-TAKING overload (the §14.2 hoist): the gesvd scratch (dS/dU/dVt/dA2/
+    /// dInfo/dWork) is CALLER-OWNED — slices of arenas the caller allocated ONCE at
+    /// `large_svd_scratch_sizes` counts and reuses across many same-shape SVDs. The
+    /// math (cuSOLVER gesvd/gesvdj, native FP64) is BIT-IDENTICAL to the
+    /// allocate-per-call form; only the scratch LOCATION moves out of the call, so a
+    /// per-block sweep no longer pays nb× device-wide `cudaFree` syncs. The `dWork`
+    /// arena must be `lwork` (from the same `large_svd_scratch_sizes`) doubles.
+    /// `sInfo` is 1 int. `sA2` is read ONLY when nl>nr (may be nullptr for nr>=nl).
     void large_svd_V(const double* dXmat, int nl, int nr, int r,
-                     double* dVout, double* dXt, cudaStream_t stream) {
+                     double* dVout, double* dXt,
+                     double* sS, double* sU, double* sVt, double* sA2,
+                     int* sInfo, double* sWork, int lwork, cudaStream_t stream) {
         if (r <= 0) return;
         solver_.set_stream(stream);
-        DeviceBuffer<int> dInfo(1);
         if (nr >= nl) {
             // Xt = transpose(xmat): nr×nl, rows(=nr) >= cols(=nl). U(Xt) == V(xmat).
             launch_transpose_small(dXmat, nl, nr, dXt, stream);
             const int rows = nr, cols = nl;  // rows>=cols ✓
-            DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
-            DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));  // econ: rows×cols
             if (gesvdj_applicable(nl, nr)) {
                 // gesvdj (one-sided Jacobi, single matrix), economy U (rows×cols).
-                gesvdjInfo_t params = nullptr;
-                CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
-                DeviceBuffer<double> dVt(static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols));
-                int lwork = 0;
-                CUSOLVER_CHECK(cusolverDnDgesvdj_bufferSize(
-                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
-                    dXt, rows, dS.data(), dU.data(), rows, dVt.data(), cols, &lwork, params));
-                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                // RAII gesvdj params (group-14 [14.5]): the throwing gesvdj solve
+                // between a bare create/destroy would leak the handle on unwind.
+                GesvdjInfo params;
                 CUSOLVER_CHECK(cusolverDnDgesvdj(
                     solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
-                    dXt, rows, dS.data(), dU.data(), rows, dVt.data(), cols,
-                    dWork.data(), lwork, dInfo.data(), params));
-                CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(params));
+                    dXt, rows, sS, sU, rows, sVt, cols,
+                    sWork, lwork, sInfo, params.get()));
             } else {
                 // gesvd: jobu='S' (economy U), jobvt='N' (V of Xt unused). Descending.
-                int lwork = 0;
-                CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(solver_.get(), rows, cols, &lwork));
-                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
                 CUSOLVER_CHECK(cusolverDnDgesvd(
-                    solver_.get(), 'S', 'N', rows, cols, dXt, rows, dS.data(),
-                    dU.data(), rows, /*VT*/nullptr, cols, dWork.data(), lwork,
-                    /*rwork*/nullptr, dInfo.data()));
+                    solver_.get(), 'S', 'N', rows, cols, dXt, rows, sS,
+                    sU, rows, /*VT*/nullptr, cols, sWork, lwork,
+                    /*rwork*/nullptr, sInfo));
             }
-            // dU is nr×cols (rows×cols) col-major; copy its leading r columns to dVout
-            // (nr×r col-major). Contiguous prefix since lda(dU)=rows=nr.
+            // sU is nr×cols (rows×cols) col-major; copy its leading r columns to dVout
+            // (nr×r col-major). Contiguous prefix since lda(sU)=rows=nr.
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(
-                dVout, dU.data(),
+                dVout, sU,
                 static_cast<std::size_t>(nr) * static_cast<std::size_t>(r) * sizeof(double),
                 cudaMemcpyDeviceToDevice, stream));
         } else {
             // nl>nr: hand xmat itself (nl×nr, rows>=cols). V(xmat) = VT^T leading r rows.
             // cuSOLVER gesvd/gesvdj OVERWRITE A, so copy dXmat into a non-const scratch
-            // (dA2, sized nl*nr) — the const dXmat must survive for the seed/ALS kernels.
+            // (sA2, sized nl*nr) — the const dXmat must survive for the seed/ALS kernels.
             const int rows = nl, cols = nr;  // rows>=cols ✓
-            DeviceBuffer<double> dA2(static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr));
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(
-                dA2.data(), dXmat,
+                sA2, dXmat,
                 static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr) * sizeof(double),
                 cudaMemcpyDeviceToDevice, stream));
-            DeviceBuffer<double> dS(static_cast<std::size_t>(cols));
-            DeviceBuffer<double> dVt(static_cast<std::size_t>(cols) * static_cast<std::size_t>(cols));
             if (gesvdj_applicable(nl, nr)) {
-                gesvdjInfo_t params = nullptr;
-                CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&params));
-                DeviceBuffer<double> dU(static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols));
-                int lwork = 0;
-                CUSOLVER_CHECK(cusolverDnDgesvdj_bufferSize(
-                    solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
-                    dA2.data(), rows, dS.data(), dU.data(), rows, dVt.data(), cols, &lwork, params));
-                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+                // RAII gesvdj params (group-14 [14.5]): the throwing gesvdj solve
+                // between a bare create/destroy would leak the handle on unwind.
+                GesvdjInfo params;
                 CUSOLVER_CHECK(cusolverDnDgesvdj(
                     solver_.get(), CUSOLVER_EIG_MODE_VECTOR, /*econ=*/1, rows, cols,
-                    dA2.data(), rows, dS.data(), dU.data(), rows, dVt.data(), cols,
-                    dWork.data(), lwork, dInfo.data(), params));
-                CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(params));
+                    sA2, rows, sS, sU, rows, sVt, cols,
+                    sWork, lwork, sInfo, params.get()));
             } else {
-                int lwork = 0;
-                CUSOLVER_CHECK(cusolverDnDgesvd_bufferSize(solver_.get(), rows, cols, &lwork));
-                DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
                 CUSOLVER_CHECK(cusolverDnDgesvd(
-                    solver_.get(), 'N', 'S', rows, cols, dA2.data(), rows, dS.data(),
-                    /*U*/nullptr, rows, dVt.data(), cols, dWork.data(), lwork,
-                    /*rwork*/nullptr, dInfo.data()));
+                    solver_.get(), 'N', 'S', rows, cols, sA2, rows, sS,
+                    /*U*/nullptr, rows, sVt, cols, sWork, lwork,
+                    /*rwork*/nullptr, sInfo));
             }
-            // V[:,p] = VT[p,:] (VT is cols×cols col-major): dVout[j + nr*p] = dVt[p + cols*j].
-            launch_transpose_small(dVt.data(), cols, cols, dXt, stream);
+            // V[:,p] = VT[p,:] (VT is cols×cols col-major): dVout[j + nr*p] = sVt[p + cols*j].
+            launch_transpose_small(sVt, cols, cols, dXt, stream);
             // dXt now holds V (cols×cols col-major); copy its leading r columns to dVout.
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(
                 dVout, dXt,
                 static_cast<std::size_t>(nr) * static_cast<std::size_t>(r) * sizeof(double),
                 cudaMemcpyDeviceToDevice, stream));
         }
+    }
+
+    /// Single-shot convenience overload: allocate the gesvd scratch ONCE on the stack
+    /// (RAII DeviceBuffers, freed at scope exit) and delegate to the scratch-taking
+    /// form above. For the per-CALL large fit (`large_fit_one`) this allocate-once is
+    /// within design (one small-LA burst per fit, not a per-block inner loop — see the
+    /// §14.2 finding's "OTHER hot paths" note); the Stage-A LOO SWEEP must NOT use this
+    /// overload — it hoists the scratch above its loop and calls the scratch-taking
+    /// form, so it does not pay a device-wide `cudaFree` per block.
+    void large_svd_V(const double* dXmat, int nl, int nr, int r,
+                     double* dVout, double* dXt, cudaStream_t stream) {
+        if (r <= 0) return;
+        const SvdScratchSizes sz = large_svd_scratch_sizes(nl, nr);
+        DeviceBuffer<double> dS(sz.s);
+        DeviceBuffer<double> dU(sz.u);
+        DeviceBuffer<double> dVt(sz.vt);
+        DeviceBuffer<double> dA2(sz.a2);          // 0 ⇒ no alloc (nr>=nl); else nl*nr
+        DeviceBuffer<int>    dInfo(sz.info);
+        DeviceBuffer<double> dWork(static_cast<std::size_t>(sz.lwork));
+        large_svd_V(dXmat, nl, nr, r, dVout, dXt,
+                    dS.data(), dU.data(), dVt.data(), dA2.data(),
+                    dInfo.data(), dWork.data(), sz.lwork, stream);
     }
 
     /// Dynamic VRAM scratch sizes for the large-path ALS + weight/chisq (§2.3).
@@ -1996,10 +2066,12 @@ public:
             // per-thread local). TWO stages:
             //   Stage A — per-block cuSOLVER SVD seed (large_svd_V + seed_from_V) into
             //     nb-strided dAseed/dBseed arenas, all async-enqueued on stream_ with NO
-            //     per-block cudaStreamSynchronize (the dominant 701× host round-trip is
-            //     gone). The SVD stays cuSOLVER gesvd per block ⇒ the seed is BIT-
-            //     IDENTICAL to the serial path (an on-device Jacobi seed would shift the
-            //     ALS fixed point in the LSBs ⇒ SE not bit-identical).
+            //     per-block cudaStreamSynchronize AND NO per-block device-wide cudaFree
+            //     (the gesvd scratch is hoisted ONCE above the loop — §14.2; both the
+            //     explicit-sync and the implicit-cudaFree-sync host round-trips are gone).
+            //     The SVD stays cuSOLVER gesvd per block ⇒ the seed is BIT-IDENTICAL to
+            //     the serial path (an on-device Jacobi seed would shift the ALS fixed
+            //     point in the LSBs ⇒ SE not bit-identical).
             //   Stage B — ONE many-thread launch (one thread per (model,block)) runs the
             //     EXACT als_large + weight-solve math from a per-thread VRAM-arena slice.
             // The wmat is bit-identical to the serial loop (only the parallelism + scratch
@@ -2022,8 +2094,31 @@ public:
             const std::size_t n_refit   = static_cast<std::size_t>(nb) * static_cast<std::size_t>(n_models);
             DeviceBuffer<double> dScratch(dbl_refit * n_refit);
             DeviceBuffer<int>    dIntScratch(int_refit * n_refit);
-            // ---- Stage A: per-block cuSOLVER SVD seed (NO per-block sync) ----
+            // ---- Stage A: per-block cuSOLVER SVD seed (NO per-block sync, NO per-block
+            //      device-wide cudaFree) ----
+            // The cuSOLVER gesvd scratch is hoisted ONCE out of the per-block loop (the
+            // §14.2 fix). Every block's SVD is the SAME (nl,nr) shape, so a single arena
+            // per scratch field serves all nb blocks: the Stage-A SVDs are async-enqueued
+            // SERIALLY on stream_, so they never overlap and can share one workspace (the
+            // next block's gesvd cannot start until the previous one — same stream —
+            // finishes; its result is already copied into the per-block dVout slice before
+            // the buffer is reused). Allocating per block instead would pay nb× device-wide
+            // `cudaFree` syncs (DeviceBuffer::reset ⇒ cudaFree, VERIFIED device-wide-
+            // synchronizing for non-async allocations against the CUDA 13.x Runtime API
+            // docs), which is exactly the serialization this PARALLEL stage was rewritten to
+            // remove. The scratch frees at this block's scope exit; that final `cudaFree`'s
+            // device-wide sync drains the in-flight gesvd/seed work BEFORE the buffers free
+            // (same use-after-free guarantee §17.4 audited for the per-call form). The gesvd
+            // MATH is unchanged ⇒ golden_fit1_NRBIG (nr=39, svd_path==2) stays bit-identical.
             if (r > 0) {
+                const SvdScratchSizes sz = large_svd_scratch_sizes(nl, nr);
+                DeviceBuffer<double> dSvdS(sz.s);
+                DeviceBuffer<double> dSvdU(sz.u);
+                DeviceBuffer<double> dSvdVt(sz.vt);
+                DeviceBuffer<double> dSvdA2(sz.a2);  // 0 ⇒ no alloc (nr>=nl)
+                DeviceBuffer<int>    dSvdInfo(sz.info);
+                DeviceBuffer<double> dSvdWork(static_cast<std::size_t>(sz.lwork));
+                const int svd_lwork = sz.lwork;
                 for (int b = 0; b < nb; ++b) {
                     const std::size_t ob = static_cast<std::size_t>(b);
                     double* xmat_b = dXmatB.data() + static_cast<std::size_t>(m) * ob;
@@ -2033,6 +2128,8 @@ public:
                     large_svd_V(xmat_b, nl, nr, r,
                                 dVout.data() + static_cast<std::size_t>(nr) * r * ob,
                                 dXt.data() + static_cast<std::size_t>(nr) * nl * ob,
+                                dSvdS.data(), dSvdU.data(), dSvdVt.data(), dSvdA2.data(),
+                                dSvdInfo.data(), dSvdWork.data(), svd_lwork,
                                 stream_.get());
                     launch_qpadm_seed_from_V(
                         xmat_b, dVout.data() + static_cast<std::size_t>(nr) * r * ob,
