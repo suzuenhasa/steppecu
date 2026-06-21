@@ -5,6 +5,15 @@ Scope: the Phase-2 qpAdm/qpWave fit engine (S3–S8 + the qpAdm/qpWave domain). 
 independent audit lenses (stage-coverage, AT2-feature-gaps, domain-correctness) reconciled
 into one ranked list. Every claim cites a verified `file:line` / design ref / AT2 behavior.
 
+> **UPDATE (`main` == `phase2-fit-engine` @ `2496a14`): ALL SIX FINISH-NOW ITEMS ARE DONE.**
+> F5 (`e8430a2`), F3 (`ffdcba2`), F2 (`c8fe397`), F6 (`360e386`), F4 (`6481dfa`), F1 (`2496a14`)
+> all landed, each golden-gated on the REAL-AADR AT2 goldens (default ctest + `STEPPE_THOROUGH`
+> oracle green, CPU/GPU consistent, deterministic, wallclock unchanged). **The fit-engine BACKEND is
+> now FINISHED (step 1 of backend-first complete).** The DEFER and NEW-FEATURE sections below stay
+> open (multi-GPU rotation, `boot=N`, `allsnps=TRUE`, …). Next = step 2 productization (CLI + Python
+> bindings), then step 3 (standalone f-stats each with its own CLI/bindings). The per-row **DONE**
+> annotations in the FINISH-NOW table are the source of truth.
+
 ---
 
 ## (1) HEADLINE
@@ -19,8 +28,9 @@ public entry (`run_qpwave`) has zero test coverage, and one AT2 correctness beha
 (missing-block NA handling) the design itself said to add "before the at-scale search" was
 never added even though the at-scale search (M(fit-6)) shipped.
 
-**FINISH-NOW count: 6 items** (3 are tight/cheap contract closures; 1 is a real correctness
-gap on sparse real AADR; 2 are test/API-hygiene). None require new GPU kernels of substance.
+**FINISH-NOW count: 6 items — ALL 6 NOW DONE** (3 tight/cheap contract closures; 1 a real
+correctness gap on sparse real AADR; 2 test/API-hygiene). None required new GPU kernels of
+substance. Landed `e8430a2`/`ffdcba2`/`c8fe397`/`360e386`/`6481dfa`/`2496a14`.
 
 The single most important one is the **domain-outcome test** (the M(fit-5) acceptance gate
 that is named in `architecture.md:803` §13 and the §18 DoD `architecture.md:939`, but has no
@@ -43,12 +53,12 @@ as-is.
 
 | # | Item | What it is + ref | Class | Effort | Parity risk | One-line approach |
 |---|---|---|---|---|---|---|
-| F1 | **Missing-block / NA handling (`est_to_loo_nafix`)** | AT2 excludes NA blocks from the LOO/jackknife; a `vpair[i,j,b]==0` makes that f4 entry NA and must NOT be imputed 0 (biases toward 0, inflates variance). NEVER added: `cpu_backend.cpp:682` explicitly states "With no missing blocks (M(fit-1), OQ-12)"; no NA mask in the LOO loops or kernels. Design OQ-12 (`fit-engine.md:681-685`) said "add NA handling **before the at-scale search**" — the at-scale search (M(fit-6)) already shipped, so this is **overdue by the design's own gate**. | **FINISH-NOW** | M–L | **high** (on sparse aDNA) | Implement the NA-aware LOO (skip `vpair==0` per-(entry,block)) **or** prove + hard-document that the resident global-intersection (maxmiss=0) f2 can never contain empty blocks and gate the CLI to that precondition. |
-| F2 | **M(fit-5) domain-outcome TEST** | The M(fit-5) gate (`fit-engine.md:432`; spec §13 `architecture.md:803`; §18 DoD `architecture.md:939` — outcomes "returned as values and covered by a test") requires a deliberately collinear/rank-deficient/non-SPD model to return a **status VALUE, not a crash/NaN**. No such test exists: every `status` assertion in both `test_qpadm_parity.cu` and `test_qpadm_rotation.cu` checks `== Status::Ok`; grep for an expected `RankDeficient`/`NonSpdCovariance`/`collinear`/`degenerate` model in `tests/` = 0 hits. The machinery is built + wired; only the contract-required test is missing. | **FINISH-NOW** | S–M | low (test only) | Add a domain-outcome test: a collinear left set → `RankDeficient`; an indefinite-but-nonsingular Q fixture → `NonSpdCovariance`; a `dof≤0` model → `ChisqUndefined` (after F3). Assert status values, no crash/NaN. |
-| F3 | **`ChisqUndefined` status value** | Spec §10 lists **three** domain outcomes incl. `STEPPE_ERR_CHISQ_UNDEFINED` "dof ≤ 0 or χ² not computable" (`architecture.md:676`); ROADMAP M(fit-5) names all three (`ROADMAP.md:92`); the design header documents it (`fit-engine.md:298`). But `error.hpp:21-41` defines only `RankDeficient`/`NonSpdCovariance` — `ChisqUndefined` is **absent** (already self-flagged HIGH in `docs/cleanup/include-error.md:43-47`). Live consequence: `qpadm_fit.cpp:98` calls `pchisq_upper(chisq, dof)` which returns **NaN** for `dof≤0` (`pchisq.hpp:89`) into `res.p` while `res.status` stays **Ok** — a rotation consumer filtering on `status==Ok` accepts a NaN-`p` model. | **FINISH-NOW** | S | low | Add the `ChisqUndefined` enumerator + a `dof≤0 ⇒ Status::ChisqUndefined` guard in `qpadm_fit.cpp:98` and the Cuda assemble path. One enumerator; §16 makes a later add a deliberate MINOR-bump churn. |
-| F4 | **`run_qpwave` golden + test** | `run_qpwave` is a first-class public entry (4 overloads `qpadm.hpp:226-237`; impl `qpadm_fit.cpp:266-309` via `run_qpwave_impl`) with its own `QpWaveResult` (`qpadm.hpp:212-222`) — but **zero test coverage**: grep for `run_qpwave(` in `tests/` = only the comment label "M(fit-2) RANK TEST / qpWave" on `run_qpadm` paths, no actual call. qpWave's distinguishing semantic (no target prepend; `left[0]` is the reference row, `qpadm_fit.cpp:270-271`) is unvalidated. The design's own reference model #1 "qpWave 2-way feasible" (`fit-engine.md:548`, a [PROPOSAL]) was never pinned. Step 3 wants qpWave with its own CLI — exposing it untested is a real gap. | **FINISH-NOW** | S–M | med | Pin an AT2 `qpwave()` golden; add a test that calls `run_qpwave` directly and gates `est_rank`/rankdrop. Reuses the existing rank-sweep machinery. |
-| F5 | **`opts.constrained` dead public flag** | `QpAdmOptions::constrained` exists (`qpadm.hpp:73`, documented "reserved") but is **never read** in any solve path (grep confirms the only "constrained" in the solve is the **Σw=1 equality-constraint** `solve_constrained_weights`, unconditional and unrelated to non-negativity). This is NOT AT2's `constrained=TRUE` (non-negative weights). A public reserved-but-ignored flag is an API trap once it lands in bindings. | **FINISH-NOW** (decision) | S | low | Decide: either implement AT2's non-negative-weights constrained solve, **or** remove/clearly mark the dead field before it ships in the public struct. Default is `false`, so the feature is low-priority; the dead public field is the hygiene issue. |
-| F6 | **Determinism gate covers only a subset of result fields** | The G1==G2 bit-identical contract (`fit-engine.md:374`, §18) is tested (`test_qpadm_rotation.cu:452-467`) but the memcmp covers only `model_index/status/f4rank/weight/p/chisq/se`. It does NOT memcmp `z`, `dof`, `est_rank`, `rank_chisq/rank_dof`, or the `rankdrop_*` / `popdrop_*` arrays — all reported fields. A nondeterminism in any would pass. | **FINISH-NOW** | S | low | Widen the determinism memcmp to the full `QpAdmResult`. Cheap hardening. |
+| F1 ✅ DONE `2496a14` | **Missing-block / NA handling (`est_to_loo_nafix`)** — CLOSED via PATH B (DROP `Vpair==0`/non-finite blocks on BOTH backends, `core::pair_block_is_missing`); golden `golden_fitNA.json` + `test_qpadm_missing_block.cu` (REAL AADR `maxmiss=0.99`). OQ-12 RESOLVED. | AT2 excludes NA blocks from the LOO/jackknife; a `vpair[i,j,b]==0` makes that f4 entry NA and must NOT be imputed 0 (biases toward 0, inflates variance). NEVER added: `cpu_backend.cpp:682` explicitly states "With no missing blocks (M(fit-1), OQ-12)"; no NA mask in the LOO loops or kernels. Design OQ-12 (`fit-engine.md:681-685`) said "add NA handling **before the at-scale search**" — the at-scale search (M(fit-6)) already shipped, so this is **overdue by the design's own gate**. | **FINISH-NOW** | M–L | **high** (on sparse aDNA) | Implement the NA-aware LOO (skip `vpair==0` per-(entry,block)) **or** prove + hard-document that the resident global-intersection (maxmiss=0) f2 can never contain empty blocks and gate the CLI to that precondition. |
+| F2 ✅ DONE `c8fe397` | **M(fit-5) domain-outcome TEST** — NEW `tests/reference/test_qpadm_domain.cu` (REAL-AADR collinear ⇒ `RankDeficient`, `fudge=0` singular Q ⇒ `NonSpdCovariance`, `dof≤0` ⇒ `ChisqUndefined`), asserted as STATUS VALUES on BOTH backends; ctest now 42 tests (`qpadm_domain` #19). | The M(fit-5) gate (`fit-engine.md:432`; spec §13 `architecture.md:803`; §18 DoD `architecture.md:939` — outcomes "returned as values and covered by a test") requires a deliberately collinear/rank-deficient/non-SPD model to return a **status VALUE, not a crash/NaN**. No such test exists: every `status` assertion in both `test_qpadm_parity.cu` and `test_qpadm_rotation.cu` checks `== Status::Ok`; grep for an expected `RankDeficient`/`NonSpdCovariance`/`collinear`/`degenerate` model in `tests/` = 0 hits. The machinery is built + wired; only the contract-required test is missing. | **FINISH-NOW** | S–M | low (test only) | Add a domain-outcome test: a collinear left set → `RankDeficient`; an indefinite-but-nonsingular Q fixture → `NonSpdCovariance`; a `dof≤0` model → `ChisqUndefined` (after F3). Assert status values, no crash/NaN. |
+| F3 ✅ DONE `ffdcba2` | **`ChisqUndefined` status value** — added `Status::ChisqUndefined` (`include/steppe/error.hpp`) + a `dof≤0 ⇒ ChisqUndefined` guard on the HOST (`qpadm_fit.cpp`) AND the CUDA model-batched path (`cuda_backend.cu`); was leaking NaN `p` with `status=Ok`. | Spec §10 lists **three** domain outcomes incl. `STEPPE_ERR_CHISQ_UNDEFINED` "dof ≤ 0 or χ² not computable" (`architecture.md:676`); ROADMAP M(fit-5) names all three (`ROADMAP.md:92`); the design header documents it (`fit-engine.md:298`). But `error.hpp:21-41` defines only `RankDeficient`/`NonSpdCovariance` — `ChisqUndefined` is **absent** (already self-flagged HIGH in `docs/cleanup/include-error.md:43-47`). Live consequence: `qpadm_fit.cpp:98` calls `pchisq_upper(chisq, dof)` which returns **NaN** for `dof≤0` (`pchisq.hpp:89`) into `res.p` while `res.status` stays **Ok** — a rotation consumer filtering on `status==Ok` accepts a NaN-`p` model. | **FINISH-NOW** | S | low | Add the `ChisqUndefined` enumerator + a `dof≤0 ⇒ Status::ChisqUndefined` guard in `qpadm_fit.cpp:98` and the Cuda assemble path. One enumerator; §16 makes a later add a deliberate MINOR-bump churn. |
+| F4 ✅ DONE `6481dfa` | **`run_qpwave` golden + test** — pinned REAL AT2 `qpwave()` golden `tests/reference/goldens/at2/golden_qpwave.json` (admixtools 2.0.10 / R 4.3.3, real AADR v66.p1_HO) + NEW `tests/reference/test_qpwave_parity.cu` gating `run_qpwave` on BOTH backends. | `run_qpwave` is a first-class public entry (4 overloads `qpadm.hpp:226-237`; impl `qpadm_fit.cpp:266-309` via `run_qpwave_impl`) with its own `QpWaveResult` (`qpadm.hpp:212-222`) — but **zero test coverage**: grep for `run_qpwave(` in `tests/` = only the comment label "M(fit-2) RANK TEST / qpWave" on `run_qpadm` paths, no actual call. qpWave's distinguishing semantic (no target prepend; `left[0]` is the reference row, `qpadm_fit.cpp:270-271`) is unvalidated. The design's own reference model #1 "qpWave 2-way feasible" (`fit-engine.md:548`, a [PROPOSAL]) was never pinned. Step 3 wants qpWave with its own CLI — exposing it untested is a real gap. | **FINISH-NOW** | S–M | med | Pin an AT2 `qpwave()` golden; add a test that calls `run_qpwave` directly and gates `est_rank`/rankdrop. Reuses the existing rank-sweep machinery. |
+| F5 ✅ DONE `e8430a2` | **`opts.constrained` dead public flag** — REMOVED the dead public `QpAdmOptions::constrained` field (`include/steppe/qpadm.hpp`); AT2's non-negative-weights `constrained=TRUE` is a deferred step-3 NEW-FEATURE, not a reserved flag. | `QpAdmOptions::constrained` exists (`qpadm.hpp:73`, documented "reserved") but is **never read** in any solve path (grep confirms the only "constrained" in the solve is the **Σw=1 equality-constraint** `solve_constrained_weights`, unconditional and unrelated to non-negativity). This is NOT AT2's `constrained=TRUE` (non-negative weights). A public reserved-but-ignored flag is an API trap once it lands in bindings. | **FINISH-NOW** (decision) | S | low | Decide: either implement AT2's non-negative-weights constrained solve, **or** remove/clearly mark the dead field before it ships in the public struct. Default is `false`, so the feature is low-priority; the dead public field is the hygiene issue. |
+| F6 ✅ DONE `360e386` | **Determinism gate covers only a subset of result fields** — WIDENED the G1==G2 memcmp in `test_qpadm_rotation.cu` to the FULL `QpAdmResult` (`z`/`dof`/`est_rank`/`rank_*`/`rankdrop_*`/`popdrop_*`), previously a subset. | The G1==G2 bit-identical contract (`fit-engine.md:374`, §18) is tested (`test_qpadm_rotation.cu:452-467`) but the memcmp covers only `model_index/status/f4rank/weight/p/chisq/se`. It does NOT memcmp `z`, `dof`, `est_rank`, `rank_chisq/rank_dof`, or the `rankdrop_*` / `popdrop_*` arrays — all reported fields. A nondeterminism in any would pass. | **FINISH-NOW** | S | low | Widen the determinism memcmp to the full `QpAdmResult`. Cheap hardening. |
 
 ### DEFER (defensible — additive later, name as a known limitation)
 
@@ -84,27 +94,28 @@ Cholesky check or document the divergence and cover it in the F2 fixture.
 
 ---
 
-## (3) RECOMMENDED FINISH SET (the minimal "backend done" bar)
+## (3) RECOMMENDED FINISH SET (the minimal "backend done" bar) — ✅ ALL DONE
 
-To call the fit-engine backend **done and ready for the CLI step**, finish these, in order:
+**This bar is now MET** (`main` == `phase2-fit-engine` @ `2496a14`): the fit-engine backend is **done
+and ready for the CLI step**. The recommended order was followed; all six landed (commits below):
 
-1. **F3 — `ChisqUndefined`** (S, ~one enumerator + a `dof≤0` guard). Stops the silent
-   NaN-`p`-with-`status==Ok` bug; makes the taxonomy match the spec. Do this first because F2
-   depends on it.
-2. **F2 — the M(fit-5) domain-outcome test** (S–M). This is the named acceptance gate
-   (`architecture.md:803`, §18 DoD `architecture.md:939`) and the single most load-bearing
-   missing test — a CLI that crashes on a degenerate user model instead of returning a status
-   is the canonical qpAdm UX failure. Fold the CPU-oracle non-SPD caveat into this fixture.
-3. **F4 — the `run_qpwave` golden + direct test** (S–M). A shipped public entry must not go
-   into bindings unproven; cheap, reuses the rank-sweep.
-4. **F1 — the missing-block decision** (M–L). This is the one with real numeric-parity risk
-   on sparse real AADR (the project's stated envelope). **Minimal acceptable closure:** if it
-   can be proven that the resident global-intersection f2 for dense AADR never produces an
-   empty block, document that precondition and hard-gate the CLI to maxmiss=0 — that converts
-   a latent silent bias into an explicit, honest limitation. Full closure is the NA-aware LOO.
-   Either is acceptable to ship the CLI; silently doing neither is not.
-5. **F5 — the `opts.constrained` dead-flag decision** (S) and **F6 — widen the determinism
-   memcmp** (S). API hygiene + a free determinism hardening; do them in the same pass.
+1. **F3 — `ChisqUndefined`** ✅ DONE `ffdcba2` (one enumerator + a `dof≤0` guard, host + CUDA
+   batched). Stopped the silent NaN-`p`-with-`status==Ok` bug; the taxonomy now matches the spec.
+   Done first because F2 depends on it.
+2. **F2 — the M(fit-5) domain-outcome test** ✅ DONE `c8fe397`. The named acceptance gate
+   (`architecture.md:803`, §18 DoD `architecture.md:939`) — `test_qpadm_domain.cu`, REAL-AADR
+   degenerate models asserted as STATUS VALUES (no crash/NaN) on BOTH backends; the CPU-oracle
+   non-SPD caveat is folded into the `fudge=0` fixture. ctest now 42 tests (`qpadm_domain` #19).
+3. **F4 — the `run_qpwave` golden + direct test** ✅ DONE `6481dfa`. Pinned a REAL AT2 `qpwave()`
+   golden + `test_qpwave_parity.cu` gating `run_qpwave` on both backends; reuses the rank-sweep.
+4. **F1 — the missing-block decision** ✅ DONE `2496a14`. Resolved via the FULL NA-aware closure
+   (PATH B), not the minimal hard-gate: steppe is pairwise-complete (NOT global-intersection), so
+   `Vpair==0` CAN occur on sparse AADR — DROP `Vpair==0`/non-finite blocks before the LOO on BOTH
+   backends (AT2 `read_f2(remove_na=TRUE)`), golden-gated by REAL-AADR `golden_fitNA.json`
+   (`maxmiss=0.99`, 1 real dropped block). Legacy `maxmiss=0` goldens byte-identical. OQ-12 RESOLVED.
+5. **F5 — the `opts.constrained` dead-flag decision** ✅ DONE `e8430a2` (REMOVED the dead public
+   field) and **F6 — widen the determinism memcmp** ✅ DONE `360e386` (full `QpAdmResult`). API
+   hygiene + the determinism hardening.
 
 **Rationale for what to defer:** `boot=N` (D1), `fudge_twice`/`getcov`/`return_f4` (D2), the
 cuSOLVER emulated seam (D4), multi-GPU rotation (D5), and OQ-11 tiered f2 (D6) are all either

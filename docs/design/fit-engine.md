@@ -1,32 +1,47 @@
 # qpAdm FIT ENGINE — design + milestone build-order + first-milestone frozen contract
 
-**Status:** BUILT (Phase 2, S3–S8 implemented + golden-gated ON THE GPU). The S0–S2 precompute is
-BUILT through M5 on `main` and produces a device-resident `steppe::device::DeviceF2Blocks`
-(`src/device/device_f2_blocks.hpp`); this document designs **and now describes** the engine that
-consumes it. The design body below is preserved as the architecture-of-record; the per-milestone
-**BUILT** annotations in the §2 milestone table and the `[AT2]`/`[SPEC]`/`[PROPOSAL]` provenance tags
-are the source of truth for what shipped versus what was a proposal.
+**Status:** BACKEND FINISHED (Phase 2, S3–S8 implemented + golden-gated ON THE GPU, plus the six
+backend-FINISH items F1–F6 from `fit-engine-finish-punchlist.md` all landed — `main` ==
+`phase2-fit-engine` @ `2496a14`). The S0–S2 precompute is BUILT through M5 on `main` and produces a
+device-resident `steppe::device::DeviceF2Blocks` (`src/device/device_f2_blocks.hpp`); this document
+designs **and now describes** the engine that consumes it. The design body below is preserved as the
+architecture-of-record; the per-milestone **BUILT** annotations in the §2 milestone table and the
+`[AT2]`/`[SPEC]`/`[PROPOSAL]` provenance tags are the source of truth for what shipped versus what was
+a proposal. **Not yet built** is step-2 productization (NO CLI, NO Python bindings) and step-3
+standalone f-stats — see the STATUS banner below and `docs/research/desirable-features-survey.md`.
 
-> **STATUS (as of `25c882a`, branch `phase2-fit-engine`).** The qpAdm/qpWave fit engine is **BUILT** —
-> **M(fit-0..6) complete**: AT2-golden scaffold, f4 + GLS weight fit, rank test / qpWave (`rankdrop` +
-> `popdrop`, both the `nr≤32` 9-pop path and the `nr=39` NRBIG large path via cuSOLVER `gesvd`),
-> block-jackknife SE + the opt-in `JackknifePolicy{None,FeasibleOnly,All}`, the CUDA backend, the
-> per-model domain `status` outcomes (`RankDeficient`/`NonSpdCovariance`), and the S8 model-space
-> **rotation** (`run_qpadm_search`, the device-batched `fit_models_batched`, multi-GPU shard). The GPU
-> path matches the REAL-AADR AT2 goldens (`tests/reference/goldens/at2/golden_fit0.json` 9-pop,
-> `golden_fit1_NRBIG.json` nr=39, `golden_rot.json` 84-model rotation; admixtools 2.0.10 / R 4.3.3 /
-> v66.p1_HO); the `CpuBackend` is the native oracle (run under `STEPPE_THOROUGH`). The big-refactor is
-> **complete** (`docs/cleanup/bigrefactor/`): bit-identical, wallclock unchanged, one consistent
-> precision policy (emulated-FP64 default + native fallback via the single `emulation_honorable`
-> predicate). **Multi-GPU rotation is DEFERRED** (`TODO(multigpu-host-bounce)`): on the consumer 5090s
-> the one-time `f2` replication is a ~8.72 GB / ~3.8 s HOST BOUNCE (no GeForce P2P) ⇒ only ~1.21× at
-> 9086 real models ⇒ **run the rotation single-GPU**; the payoff needs P2P hardware (RTX PRO 6000) or
-> per-device precompute. **NOT yet built** (the honest "what is left"): no CLI, no Python bindings, no
-> standalone f4/f3/D-stat/f4-ratio/qpDstat entry points (the f4 math is internal to the fit), no
-> qpfstats/DATES/qpGraph, and precompute M6 (multi-dataset merge) / M7 (on-disk cache) are pending —
-> see `docs/research/desirable-features-survey.md`. The verified build/test commands are in the
-> RUN-GUIDE (`ctest --test-dir build-rel -R qpadm`: `qpadm_parity` 0.86 s, `qpadm_rotation` 3.42 s;
-> `STEPPE_THOROUGH=1` adds the CpuBackend oracle + NRBIG full SE, ~56 s).
+> **STATUS (as of `2496a14`, `main` == branch `phase2-fit-engine`).** The qpAdm/qpWave fit engine is
+> **BACKEND FINISHED** — **M(fit-0..6) complete** AND the **six backend-FINISH items F1–F6** landed
+> (step 1 of the backend-first sequence; `fit-engine-finish-punchlist.md`). M(fit-0..6): AT2-golden
+> scaffold, f4 + GLS weight fit, rank test / qpWave (`rankdrop` + `popdrop`, both the `nr≤32` 9-pop path
+> and the `nr=39` NRBIG large path via cuSOLVER `gesvd`), block-jackknife SE + the opt-in
+> `JackknifePolicy{None,FeasibleOnly,All}`, the CUDA backend, the per-model domain `status` outcomes
+> (`RankDeficient`/`NonSpdCovariance`/`ChisqUndefined`), and the S8 model-space **rotation**
+> (`run_qpadm_search`, the device-batched `fit_models_batched`, multi-GPU shard). The six FINISH items:
+> **F5** (`e8430a2`) removed the dead public `QpAdmOptions::constrained` field; **F3** (`ffdcba2`) added
+> `Status::ChisqUndefined` + a `dof≤0 ⇒ ChisqUndefined` guard on the HOST and the CUDA batched path (was
+> leaking NaN `p` with `status=Ok`); **F2** (`c8fe397`) added the M(fit-5) domain-outcome acceptance
+> test (`tests/reference/test_qpadm_domain.cu`, both backends; ctest is now 42 tests, `qpadm_domain`
+> #19); **F6** (`360e386`) widened the G1==G2 determinism memcmp to the FULL `QpAdmResult`; **F4**
+> (`6481dfa`) pinned a REAL AT2 `qpwave()` golden (`golden_qpwave.json`) + `test_qpwave_parity.cu`
+> gating `run_qpwave` on both backends; **F1** (`2496a14`) closed the missing-block / NA handling
+> (OQ-12) via PATH B drop-on-both-backends (see §2 + OQ-12). The GPU path matches the REAL-AADR AT2
+> goldens (`tests/reference/goldens/at2/golden_fit0.json` 9-pop, `golden_fit1_NRBIG.json` nr=39,
+> `golden_rot.json` 84-model rotation, `golden_qpwave.json`, `golden_fitNA.json`; admixtools 2.0.10 /
+> R 4.3.3 / v66.p1_HO); the `CpuBackend` is the native oracle (run under `STEPPE_THOROUGH`). The
+> big-refactor is **complete** (`docs/cleanup/bigrefactor/`): bit-identical, wallclock unchanged, one
+> consistent precision policy (emulated-FP64 default + native fallback via the single
+> `emulation_honorable` predicate). **Multi-GPU rotation is DEFERRED** (`TODO(multigpu-host-bounce)`):
+> on the consumer 5090s the one-time `f2` replication is a ~8.72 GB / ~3.8 s HOST BOUNCE (no GeForce
+> P2P) ⇒ only ~1.21× at 9086 real models ⇒ **run the rotation single-GPU**; the payoff needs P2P
+> hardware (RTX PRO 6000) or per-device precompute. **NOT yet built** (the honest "what is left" = step
+> 2 productization then step 3): no CLI, no Python bindings (no `app/` or `bindings/` dir, no
+> nanobind/CLI11 in CMake, no `main()`), no standalone f4/f3/D-stat/f4-ratio/qpDstat entry points (the
+> f4 math is internal to the fit), no qpfstats/DATES/qpGraph, and precompute M6 (multi-dataset merge) /
+> M7 (on-disk cache) are pending — see `docs/research/desirable-features-survey.md`. The verified
+> build/test commands are in the RUN-GUIDE (`ctest --test-dir build-rel -R qpadm`: `qpadm_parity`
+> 0.86 s, `qpadm_rotation` 3.42 s; `STEPPE_THOROUGH=1` adds the CpuBackend oracle + NRBIG full SE,
+> ~56 s).
 
 **Scope.** The qpAdm/qpWave fit engine: stages S3 (f4 from f2) → S8 (model-space search), per
 `docs/architecture.md` §5. This began as a contracts/architecture deliverable so the milestone build
@@ -409,11 +424,16 @@ Each milestone is buildable as Contracts → per-file Implement → Build → Ve
 speed [SPEC §2]: the native-FP64 CPU oracle is built first and is the seam every GPU path is diffed
 against [SPEC §13, §18].
 
-**ALL of M(fit-0..6) are BUILT as of `25c882a`** (branch `phase2-fit-engine`). The table rows below
-carry per-milestone annotations; the inline **BUILT** notes on M(fit-2), M(fit-3 SE-policy) and
-M(fit-6) record the GPU deliverable detail, but M(fit-0) (frozen contract + oracle scaffold), M(fit-1)
-(f4 + single GLS fit), M(fit-3) (jackknife SE), M(fit-4) (CUDA backend), and M(fit-5) (domain `status`
-outcomes) are likewise complete and golden-gated. The shipped code lives in `include/steppe/qpadm.hpp`
+**ALL of M(fit-0..6) are BUILT, AND the six backend-FINISH items F1–F6 have landed, as of `2496a14`**
+(`main` == branch `phase2-fit-engine`). The table rows below carry per-milestone annotations; the
+inline **BUILT** notes on M(fit-2), M(fit-3 SE-policy) and M(fit-6) record the GPU deliverable detail,
+but M(fit-0) (frozen contract + oracle scaffold), M(fit-1) (f4 + single GLS fit), M(fit-3) (jackknife
+SE), M(fit-4) (CUDA backend), and M(fit-5) (domain `status` outcomes — its acceptance TEST landed as F2)
+are likewise complete and golden-gated. The six FINISH-NOW items (the **F-rows** at the foot of the
+table: F1 NA handling/OQ-12, F2 domain-outcome test, F3 `ChisqUndefined`, F4 `run_qpwave` golden+test,
+F5 dead-flag removal, F6 determinism-widen) close the backend contract; the DEFER + NEW-FEATURE items
+(multi-GPU, `boot=N`, `allsnps=TRUE`, …) stay open — see `fit-engine-finish-punchlist.md`. The shipped
+code lives in `include/steppe/qpadm.hpp`
 and `src/core/qpadm/*` (`f4_matrix`, `jackknife`, `ranktest`, `gls_solve`, `nested_models`,
 `qpadm_fit`, `model_search`, `model_search_core`) with the device overrides in
 `src/device/cuda/cuda_backend.cu`; the GPU path is validated against the REAL-AADR AT2 goldens
@@ -430,8 +450,14 @@ single-GPU on the consumer 5090s (no P2P → host-bounce-capped; no multi-GPU sp
 | **M(fit-3) — jackknife SE (S7)** | S7: `n_block` LOO weight re-fits reusing full `qinv`; `cov(wmat)` → `se`, `z`; `finreps` non-finite drop; batched over the block axis (not `n_block` host launches). | M(fit-2). | `se`/`z` in the loose tier (`rtol` **derived** from observed jackknife spread + margin, recorded in golden meta, not a magic constant) [SPEC §12, §18]. |
 | **M(fit-3 SE-policy) — opt-in jackknife-SE policy on the rotation (S8)** — **BUILT** (single-GPU, batched two-pass; ALL mode bit-identical to today) | The LOO jackknife SE dominates the per-model rotation cost (`qpadm_loo_models_kernel` ≈ `n_block` per-model refits; the point estimate is a small fraction), and ~64% of real rotation models are INFEASIBLE — so compute the cheap point estimate (weights/χ²/p/f4rank/feasible/popdrop) for ALL models, but pay the expensive SE only for the SURVIVORS worth reporting. **API:** `JackknifePolicy { None=0, FeasibleOnly=1, All=2 }` (the `--jackknife=0/1/2` mapping) on `QpAdmOptions` (default `All` = today's behavior ⇒ goldens UNCHANGED; the feature is purely additive/opt-in), plus `p_se_threshold`(=0.05) + `se_require_p`(=false). **Criterion (default):** feasibility ALONE (all full-model weights in [0,1], the existing `popdrop_feasible[0]` test — a cheap-pass output), optionally AND `p>=p_se_threshold` when `se_require_p` (justified: feasibility is the canonical, hard qpAdm screen; the p-boundary is statistically noisy so a default p-gate would drop the SE on exactly the feasible-but-marginal models a researcher most needs it for). **Empty-marking:** a model with no SE leaves `se`/`z` EMPTY (the sentinel; NEVER a fake 0/NaN — same shape a domain-failed model already has). **GPU two-pass (`CudaBackend::fit_chunk`):** Pass 1 (gather→Q→Qinv→rank-sweep→weights→χ²→popdrop→feasibility) runs for ALL B models UNCHANGED; the cheap fields D2H; a host per-chunk survivor filter selects positions; Pass 2 runs the UNCHANGED LOO-SE kernels ONLY over survivors. ALL-mode FAST PATH (every Ok model a survivor) runs the SE block VERBATIM ⇒ byte-for-byte the pre-policy path; FEASIBLE-ONLY/NONE gather the survivor `dLoo`/`dQinv` slices into compact arenas (pure D2D, parity-neutral) and call the SAME kernels with `n_models=#survivors`, scattering the SE back. **Kernels UNCHANGED** (the parity-safest seam). | M(fit-6). | **GATE green** (test_qpadm_rotation §F, REAL 84-model AADR rotation): ALL == `golden_rot` weights (parity); the cheap point estimate (weights/p/χ²/f4rank/feasible) memcmp-IDENTICAL across all three modes; FEASIBLE-ONLY/NONE survivors' `se`/`z` memcmp-IDENTICAL to ALL; NONE has empty `se`/`z` everywhere; survivor count == feasible count (30/84). REAL single-GPU speedup + feasible fraction + SE/point cost split measured. [SPEC §12, §18] |
 | **M(fit-4) — CUDA backend, single GPU** | `CudaBackend` overrides of `assemble_f4`/`jackknife_cov`/`rank_test`/`gls_weights`; `PerGpuResources` extended with cuSOLVER + search-stream pool; EmulatedFp64{40} on the S4 SYRK only; deterministic cuSOLVER + single statistic stream. | M(fit-3); resources extension (OQ-10). | GPU == CPU oracle at the `X`/`Q`/`w`/`χ²`/`se` seams within tier; AT2 golden re-passes on the GPU path; `cublasSetWorkspace` present under `deterministic` [SPEC §12, §18]. |
-| **M(fit-5) — domain outcomes** | Rank-deficient / non-SPD / χ²-undefined returned as per-model `status` values; `STEPPE_ERR_*` taxonomy. | M(fit-4). | Domain-outcome test: a deliberately collinear model returns `RankDeficient` as a value, not a crash [SPEC §10, §13]. |
+| **M(fit-5) — domain outcomes** — **BUILT** (status machinery wired M(fit-4); the acceptance TEST landed as F2, `c8fe397`) | Rank-deficient / non-SPD / χ²-undefined returned as per-model `status` values; `STEPPE_ERR_*` taxonomy (all three: `RankDeficient` / `NonSpdCovariance` / `ChisqUndefined`, the last added by F3). | M(fit-4). | **GATE green** (`tests/reference/test_qpadm_domain.cu`, F2): degenerate REAL-AADR models return STATUS VALUES (no crash/NaN) on BOTH CpuBackend + CudaBackend — collinear left ⇒ `RankDeficient`; `fudge=0` singular Q ⇒ `NonSpdCovariance`; over-parameterized `dof≤0` ⇒ `ChisqUndefined` [SPEC §10, §13]. |
 | **M(fit-6) — S8 rotation, G==1 then G==2** — **BUILT** (the model-space ROTATION on the GPU(s), GENUINELY BATCHED + multi-GPU sharded, vs a REAL AADR AT2 rotation golden; full ctest green) | `run_qpadm_search` x2 (device-resident + host-oracle, `include/steppe/qpadm.hpp`); `core/qpadm/model_search_core.{hpp,cpp}` (`plan_model_shards` — the count-balanced CONTIGUOUS model→device tiling, the pre-sized-slot re-sort is implicit); `core/qpadm/model_search.{hpp,cpp}` (the orchestrator: G==1 fast path; G≥2 jthread-per-device fan-out, one-time `f2` broadcast via `to_host`→`upload_f2_blocks_to_device`, per-worker `exception_ptr` + lowest-g rethrow, race-free pre-sized-slot writes; `fit_shard` PARTITIONS each device's models into the SMALL-path bucket → the device-BATCHED `be.fit_models_batched` virtual, and the >32/large tail → the per-model `fit_models_batched_default`). **THE BATCHED DEVICE PATH (the deliverable):** `CudaBackend::fit_models_batched` (cuda_backend.cu) buckets the models by `(nl,nr,r)` and fits each bucket of B models in ONE batched dispatch — NOT a per-model loop: a `(k,b,MODEL)`-grid f4 gather reading the RESIDENT f2 with per-model `d_left`/`d_right` index arenas (`launch_assemble_f4_gather_models_batched`) + model-batched loo/total/xtau; the covariance Q = xtau·xtauᵀ/nb via `cublasDgemmStridedBatched` (ENGAGES `precision` — emulated{40} default, the SAME `engage_f2_precision` math-mode scope the f2/jackknife SYRK uses, now strided across the model axis); the per-model SPD inverse Qinv via cuSOLVER `potrfBatched` + column-wise `potrsBatched` (vs a batched identity; per-model devInfo>0 ⇒ NonSpdCovariance); the rank-sweep + constrained weight solve + chisq + popdrop via a MODEL-batched kernel (`qpadm_fit_models_kernel`, one thread per model — the proven `loo_batched_kernel` lift); and the LOO SE via a `(model,block)`-grid kernel (`qpadm_loo_models_kernel`, B·nb parallel threads) + a deterministic variance reduction (`qpadm_se_from_wmat_kernel`, fixed op order ⇒ G=1==G=2 bit-identical, NO atomics). VRAM-budgeted chunking (`free_vram_bytes` − f2 − headroom). `batched_dispatch_count()` (one per bucket chunk) is the observability that the test asserts is ≪ the model count (PROVES batched, not a host loop). **POPDROP RANK FIX (shared M(fit-2) path):** `popdrop_one` fits each (sub-)model at its FULL rank `f4rank = len(surv)−1` (the AT2 popdrop column), NOT the rank-DECISION `rs.f4rank`. | M(fit-5). | **GPU GATE green** vs the REAL AADR AT2 rotation golden `golden_rot.json` + `fixtures/f2_rot.bin` (v66.p1_HO, admixtools 2.0.10, R 4.3.3; target=England_BellBeaker, an 8-pop source POOL, the 6-pop nr≤32 right set; all 28 two-source + 56 three-source subsets = 84 models, boot=FALSE; 30 feasible): per-model **weights rtol 1e-5+atol 1e-5 (the WELL-DETERMINED feasible set matches at max rel-Δ 2.32e-7; the looser tier only covers 2 pathological INFEASIBLE extrapolations — both agree infeasible), p loose (rtol 1e-3), feasible DECISION-match, f4rank EXACT** — 0 f4rank mismatches, 0 feasible mismatches; runs GENUINELY BATCHED on the CudaBackend (precision_tag EmulatedFp64, f2 RESIDENT, `batched_dispatch_count`=2 buckets for the 84-model set, NOT 84 per-model launches, NOT the CpuBackend); **G=1 vs G=2 results BIT-IDENTICAL AND identically ordered** (the determinism gate); **no regression** (9-pop + NRBIG single-model goldens pass via a 1-element `run_qpadm_search` AND `run_qpadm`; NRBIG nr=39 is the LARGE tail → the per-model device path); `model_search_core` GPU-free unit test. **Throughput (box5090, 2x RTX 5090, RELEASE):** 84-model validated set 351 (G=1) / 894 (G=2) models/sec; **[synthetic scale-N RETRACTED — see [[real-data-only-all-results]] / commit 2a0c020]**. On REAL AADR (P=600, real k-subset models) the one-time f2 replication is a ~8.72 GB / ~3.8 s HOST BOUNCE (no P2P on the 5090s), so multi-GPU reached only **G2/G1 ≈ 1.21× at 9086 real models, no 1.5× crossover** — host-bounce-capped ⇒ **RUN SINGLE-GPU**; the multi-GPU payoff is DEFERRED (`TODO(multigpu-host-bounce)`, needs P2P HW or per-device precompute). Parity stands (84/84 real models == AT2) and G=1==G=2 bit-identical. [SPEC §11.4, §18] |
+| **F5 — remove dead `QpAdmOptions::constrained`** — **DONE** (`e8430a2`) | API hygiene: the reserved-but-never-read public `constrained` field is REMOVED from `include/steppe/qpadm.hpp` (the unconditional Σw=1 equality solve is unrelated; AT2's non-negative-weights `constrained=TRUE` is a deferred step-3 NEW-FEATURE). | M(fit-4). | No dead public flag ships into bindings; the public struct compiles and the goldens are unchanged. |
+| **F3 — `Status::ChisqUndefined` + `dof≤0` guard** — **DONE** (`ffdcba2`) | Adds the third spec §10 domain outcome `ChisqUndefined` (`include/steppe/error.hpp`) + a `dof≤0 ⇒ ChisqUndefined` guard on the HOST (`qpadm_fit.cpp`) AND the CUDA model-batched path (`cuda_backend.cu`) — was leaking a NaN `p` with `status=Ok` into a rotation consumer filtering on `status==Ok`. | M(fit-4). | A `dof≤0` model returns `Status::ChisqUndefined` (a value), no NaN-`p`-with-`Ok`; exercised by the F2 test [SPEC §10]. |
+| **F2 — M(fit-5) domain-outcome acceptance test** — **DONE** (`c8fe397`) | NEW `tests/reference/test_qpadm_domain.cu`: degenerate REAL-AADR models asserted as STATUS VALUES on BOTH backends (collinear left ⇒ `RankDeficient`; `fudge=0` singular Q ⇒ `NonSpdCovariance`; over-parameterized `dof≤0` ⇒ `ChisqUndefined`). ctest is now 42 tests (`qpadm_domain` #19). | F3. | No crash / no NaN; the status VALUE matches per case on CpuBackend AND CudaBackend [SPEC §10, §13, §18 DoD]. |
+| **F4 — `run_qpwave` golden + test** — **DONE** (`6481dfa`) | Pins a REAL AT2 `qpwave()` golden `tests/reference/goldens/at2/golden_qpwave.json` (admixtools 2.0.10 / R 4.3.3, real AADR v66.p1_HO) + NEW `tests/reference/test_qpwave_parity.cu` gating the first-class public `run_qpwave` entry (no target prepend; `left[0]` is the reference row) on BOTH backends. | M(fit-2). | **GATE green** vs `golden_qpwave`: `est_rank` / rankdrop on CpuBackend + CudaBackend; the previously-untested public entry is now golden-gated. |
+| **F6 — widen the G1==G2 determinism memcmp** — **DONE** (`360e386`) | The multi-GPU determinism gate (`test_qpadm_rotation.cu`) now memcmps the FULL `QpAdmResult` (`z`/`dof`/`est_rank`/`rank_*`/`rankdrop_*`/`popdrop_*`) — previously only a subset (`model_index/status/f4rank/weight/p/chisq/se`). | M(fit-6). | G=1 == G=2 bit-identical across ALL reported fields [SPEC §18]. |
+| **F1 — missing-block / NA handling (OQ-12)** — **DONE** (`2496a14`) | steppe is pairwise-complete (NOT AT2 `maxmiss=0` global-intersection), so a pair-block `Vpair==0` CAN occur on sparse AADR and was silently imputed `f2=0` (bias-toward-0). Now implements AT2 `read_f2(remove_na=TRUE)` — DROP any block with a non-finite / `Vpair==0` pair before the LOO/jackknife (NOT impute-0, NOT `allsnps=TRUE`), via a single shared host/device predicate `core::pair_block_is_missing` (`f2_estimator.hpp`): CpuBackend oracle + GPU (`f2_block_keep_kernel`; single-model AND S8 model-batched survivor-compaction). Legacy `maxmiss=0` goldens stay BYTE-IDENTICAL (no-drop identity arm). See OQ-12 (now RESOLVED). | M(fit-6). | **GATE green** vs NEW REAL-AADR `golden_fitNA.json` + `test_qpadm_missing_block.cu` (`maxmiss=0.99`, a sparse right pop ⇒ 1 real dropped block, real `Vpair==0`); CpuBackend == CudaBackend; the buggy impute-0 path differs ~1.4% (the gate discriminates). NO synthetic data [AT2 `resampling.R` + `io.R` `read_f2`]. |
 
 **The CPU oracle (M(fit-1)) needs nothing new from the device layer** — it is layering-legal and
 GPU-free-testable [SPEC §2, §13]. The device path (M(fit-4)+) is diffed against this oracle at the

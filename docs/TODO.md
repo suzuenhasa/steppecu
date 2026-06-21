@@ -2,7 +2,7 @@
 
 Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationale**) and [`architecture.md`](architecture.md) (the **design & standards**). This is the **granular next-steps checklist for future-us** — keep it current as milestones land. Update the checkboxes; move finished items to "Done".
 
-**Big picture (2026-06-19):** the **precompute half is substantially COMPLETE through M5.** M0–M4 done (validated 3-GEMM f2 kernel → data front-end → filters → per-block `f2_blocks` tensor) **+ the entire before-M4.5 cleanup (B1–B27)** **+ M4.5 single-node multi-GPU (correct, bit-identical)** **+ device-resident output (`1f80c0c`)** **+ M5 out-of-core streaming (tiered output `176a07d` + SNP-tile input streaming `c65179f`).** M0–M4 + cleanup + M4.5 on `main`; branch `m5-input-streaming` (HEAD ~`60b0332`) is **being merged to `main` now**. **THE KEY LESSON: the precompute was HOST-RESULT-BOUND** — ~80% of the old wall was copying the 6.36 GB+ result to CPU; the real win was getting the result OFF the CPU (device-resident output `1f80c0c`, ~4.3× at P=512: ~673 ms vs ~2879 ms bulk-to-host), **NOT multi-GPU**. M5 then removed the input-feeder wall: per-block decode makes the GPU footprint `O(P·tile + P²)` **independent of M** — **full-autosome (M=584131, n_block=757) P=2500 now COMPLETES on a single 32 GB RTX 5090 in ~51.5 s** (76 GB result streamed, GPU peak ~26 GB bounded), parity bit-identical. The **fit engine (Phase 2 / S3–S8) does not exist yet** — **that is the NEXT PHASE.** Multi-GPU's proper home is the fit's model rotation (thousands of independent models), not the precompute. The remaining precompute milestones are M6 (multi-dataset QC front-end) + M7 (on-disk cache / FST / AT2 goldens). **Next = the qpAdm FIT ENGINE (Phase 2)**, with AT2 goldens as its validation gate.
+**Big picture (2026-06-21):** **the BACKEND is now FINISHED.** Both halves are built and golden-gated. (1) The **precompute half is COMPLETE through M5** — M0–M4 (validated 3-GEMM f2 kernel → data front-end → filters → per-block `f2_blocks` tensor) **+ the entire before-M4.5 cleanup (B1–B27)** **+ M4.5 single-node multi-GPU (correct, bit-identical)** **+ device-resident output (`1f80c0c`)** **+ M5 out-of-core streaming (tiered output `176a07d` + SNP-tile input streaming `c65179f`)**; full-autosome (M=584131, n_block=757) P=2500 completes on one 32 GB RTX 5090 in ~51.5 s, parity bit-identical. (2) The **qpAdm FIT ENGINE (Phase 2 / S3–S8) is BUILT on the GPU and golden-gated** — the f3/f4 contraction, weighted block-jackknife covariance, the qpWave/qpAdm rank sweep (small-Jacobi + NRBIG cuSOLVER-`gesvd`), the GLS ALS + Σw=1 constrained weight solve, χ²/p, block-jackknife SE, and the S8 batched model rotation, on both `CpuBackend` (parity oracle) and `CudaBackend`. (3) The **BACKEND-FINISH** (step 1 of the backend-first sequence) is COMPLETE: the 6 FINISH-NOW items from [`fit-engine-finish-punchlist.md`](design/fit-engine-finish-punchlist.md) all landed (`e8430a2`→`2496a14`), closing the domain-outcome taxonomy, missing-block (NA) handling, the `run_qpwave` golden, and API/test hygiene. **All fit/qpwave goldens are REAL AADR AT2 goldens** (`golden_fit0`/`fit1_NRBIG`/`rot`/`qpwave`/`fitNA`; admixtools 2.0.10, R 4.3.3, real AADR v66.p1_HO) — no synthetic data; **42 ctest tests** green (default + `STEPPE_THOROUGH`), CPU/GPU consistent, deterministic, wallclock unchanged. `main == phase2-fit-engine`. **THE HONEST NEXT = step 2 productization: there is NO CLI, NO Python bindings, NO standalone f-stats yet** (no `app/` or `bindings/` dir; `STEPPE_BUILD_PYTHON` is an OFF stub; no production `main()`). Remaining precompute milestones M6 (multi-dataset QC front-end) + M7 (on-disk cache / FST). **THE KEY PRECOMPUTE LESSON (kept): the precompute was HOST-RESULT-BOUND** — ~80% of the old wall was copying the result to CPU; the win was getting it OFF the CPU (device-resident output `1f80c0c`, ~4.3× at P=512), **NOT multi-GPU**. Multi-GPU's proper home is the fit's model rotation (thousands of independent models) — that remains DEFERRED (run single-GPU; `TODO(multigpu-host-bounce)`), do NOT claim a multi-GPU speedup.
 
 ---
 
@@ -57,7 +57,7 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 - [ ] **[optional]** Bench byte-traffic columns are observability-only (currently print 0.00).
 - [ ] **[optional / reassess]** B2 P2P transport rework (`agentscripts/m4.5-b2-p2p-fix-pass.js`) — subsumed by the resident combine; **not a pending speedup.**
 
-## ✅ M5 — Out-of-core streaming — DONE (2026-06-19, branch `m5-input-streaming`)
+## ✅ M5 — Out-of-core streaming — DONE (2026-06-19, on `main`; `176a07d` + `c65179f`)
 
 > **COMPLETE, parity bit-identical.** Two pieces: **adaptive tiered OUTPUT (`176a07d`)** + **SNP-tile INPUT streaming (`c65179f`)**. **(a) Tiered output is ADAPTIVE, not mandatory** — the result goes to the fastest tier it FITS, auto-selected from runtime free VRAM/RAM: VRAM-resident (small P — keeps the device-resident 4.3×) → host RAM (big box) → disk (laptop). **(b) SNP-tile input streaming** — per-block decode makes the GPU footprint `O(P·tile + P²)` **INDEPENDENT of M** (kills the old `7·P·M` feeder wall). **RESULT: full-autosome (M=584131, n_block=757) P=2500 COMPLETES on a single 32 GB RTX 5090 in ~51.5 s** (76 GB result streamed, GPU peak ~26 GB bounded), parity memcmp **bit-identical** to the in-core path. **Measured sweep (one 5090, streamed):** P=512 ~3.6 s, P=1000 ~10.4 s, P=1500 ~20.2 s, P=2000 ~34.0 s, P=2500 ~51.5 s. This **supersedes** the pre-M5 scaling sweep (`docs/cleanup/m4.5/scaling-sweep.md`, which claimed P=2500 OOMs on every path — now FALSE; that doc is historical/SUPERSEDED). **Optional / deferred:** multi-GPU block-sharding on the stream (throughput); GDS lane on the PRO-6000 (`.f64`/M7 cache).
 - [x] `PinnedBuffer<T>` RAII (page-locked staging) + dedicated copy `Stream` (pays the default-stream debt).
@@ -65,38 +65,65 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 - [x] Per-block streaming decode → AF → per-block f2 partial → accumulate/spill → discard; GPU footprint `O(P·tile + P²)`, independent of M.
 - [x] Parity gate: streamed P=2500 full-autosome memcmp bit-identical to the in-core reference.
 
-## M6 — QC / data-munging front-end (multi-dataset)
+## ⏭️ M6 — QC / data-munging front-end (multi-dataset) — **REMAINING precompute**
 *Depends: M1 + M2. Refs: architecture §5 (S-2/S-1/S0′ table), §1 (scope).*
 - [ ] S-2 merge plan: intersection (default) / union; declared-allele polarity; **drop** ambiguous/multiallelic (never strand-flip).
 - [ ] S-1 conditional pre-pass (`--mind` / external `prune.in`, read not computed).
 - [ ] S0′ harmonized + filtered tile produce; transversions-only option. No on-disk rewrite, no strand inference, no LD compute.
 
-## M7 — On-disk cache + FST + AT2 parity
-*Depends: M4. Refs: architecture §5 (FST), §12/§13 (parity).*
+## ⏭️ M7 — On-disk cache + FST — **REMAINING precompute**
+*Depends: M4. Refs: architecture §5 (FST), §12/§13 (parity). NOTE: R + admixtools is already installed and the REAL AADR AT2 goldens are PINNED (used by the Phase-2 fit gate — `golden_fit0`/`fit1_NRBIG`/`rot`/`qpwave`/`fitNA`); M7 only needs the on-disk-cache + FST parity arms.*
 - [ ] On-disk `f2_blocks` cache, ADMIXTOOLS-compatible read/write.
 - [ ] **FST** as a cheap add-on output of the same pass.
-- [ ] **Install R + admixtools on the box → generate pinned AT2 goldens** (record R version / `RNGkind` / AT2 version / `blgsize` / `boot` / seed, §12) → **wire the AT2-parity gate** (the deferred acceptance criterion for M1–M7; ROADMAP §6 note).
+- [ ] Wire an `extract_f2` AT2-parity arm for the on-disk cache round-trip (the goldens already exist; §12 metadata recorded).
 
 ---
 
-## ⏭️ Phase 2 — qpAdm FIT ENGINE (operates on `f2_blocks`) — **THE NEXT PHASE (does not exist yet)**
-*Refs: architecture §5 (S3–S8), §11.4 (S8 multi-GPU), §12 (determinism near rank-deficiency). The precompute is substantially complete through M5; this is the next real work.*
+## ✅ Phase 2 — qpAdm FIT ENGINE (S3–S8) — DONE (2026-06-21, on `main` == `phase2-fit-engine`)
+*Refs: [`docs/design/fit-engine.md`](design/fit-engine.md), architecture §5 (S3–S8), §11.4 (S8 multi-GPU), §12 (determinism near rank-deficiency). The fit operates on `f2_blocks`.*
 
-> **Input contract:** reads `f2_blocks` **DEVICE-RESIDENT** for the in-VRAM case (small P — per `docs/cleanup/m4.5/why-d2h.md`, never bounce it through the host) and **streamed tiles** for large P (the M5 path). The **MODEL ROTATION (S8) is the embarrassingly-parallel, multi-GPU-friendly phase** — thousands of INDEPENDENT qpAdm models, no combine — which is multi-GPU's *proper home* (unlike the precompute, where it was marginal).
-- [ ] S3 — f3/f4 contraction from `f2_blocks` (identity-based derivation).
-- [ ] S4 — block jackknife → covariance `Q` + SEs (weighted by `Vpair`).
-- [ ] S5 — qpWave rank test (SVD; batched `gesvdj` where dims allow, per-model `gesvd` fallback).
-- [ ] S6 — qpAdm GLS fit (`potrf`/`trsm`/`gemm`) → weights, χ².
-- [ ] S7 — p-values / nested-model test.
-- [ ] S8 — model-space search / rotation (multi-GPU, embarrassingly parallel; **CUDA-graph capture per fit** — this stage is launch/host-bound, see perf research). This is where multi-GPU genuinely shines.
-- [ ] **AT2 goldens = the FIT validation gate** — install R + admixtools, pin `extract_f2`/`qpadm` goldens per §12, wire the parity gate for the fit outputs (weights/χ²/p-values).
-- ⚠️ Phase 2 is far more **host/launch-sensitive** than the precompute → lean on CUDA graphs + keep-resident (perf research `wqd0a9o0l`).
-- **Deferred/optional (after the fit exists):** multi-GPU block-sharding on the M5 stream (throughput); the device-resident final-D2H pinning (rtxbox); the **TurboQuant-L2 rotation screen** (`docs/research/turboquant-l2-experiment.md`) — only AFTER the fit exists.
+> **BUILT + golden-gated on the GPU.** Input contract: reads `f2_blocks` **DEVICE-RESIDENT** for the in-VRAM case (small P — never bounce through the host) and **streamed tiles** for large P (the M5 path). Built on BOTH `CpuBackend` (the parity oracle) and the production `CudaBackend`. The **S8 MODEL ROTATION is the embarrassingly-parallel phase** — thousands of INDEPENDENT models, no combine — multi-GPU's proper home, but **multi-GPU is DEFERRED** (`TODO(multigpu-host-bounce)`; run single-GPU — do NOT claim a multi-GPU speedup).
+- [x] **S3** — f3/f4 contraction from `f2_blocks` (identity-based derivation; `assemble_f4`).
+- [x] **S4** — weighted block-jackknife → covariance `Q` + SEs.
+- [x] **S5** — qpWave/qpAdm rank sweep (SVD: small on-device Jacobi + the NRBIG cuSOLVER-`gesvd` path).
+- [x] **S6** — qpAdm GLS fit (ALS opt_A/opt_B + the Σw=1 constrained weight solve) → weights, χ².
+- [x] **S7** — p-values / nested-model test (dof-aware χ² tail).
+- [x] **S8** — model-space search / rotation (batched, single-GPU; multi-GPU deferred).
+- [x] **AT2 goldens = the FIT validation gate (REAL AADR, no synthetic data)** — `tests/reference/goldens/at2/golden_fit0.json`, `golden_fit1_NRBIG.json`, `golden_rot.json` (admixtools 2.0.10 / R 4.3.3, AADR v66.p1_HO); gated by `qpadm_parity` (#17) + `qpadm_rotation` (#18).
+- **Deferred/optional (do NOT re-litigate as blockers):** S8 multi-GPU block-sharding/rotation (`TODO(multigpu-host-bounce)`, run single-GPU); the device-resident final-D2H pinning (rtxbox); the **TurboQuant-L2 rotation screen** (`docs/research/turboquant-l2-experiment.md`); GPU SVD nr>32 sweep is currently CPU-oracle-validated only. Phase-2 is far more **host/launch-sensitive** than the precompute → CUDA-graph capture per fit remains a future perf lever (perf research `wqd0a9o0l`).
 
-## Phase 3 — Interfaces
-- [ ] CLI (`extract-f2`, `qpadm`, `qpdstat`).
-- [ ] nanobind Python bindings.
-- [ ] scikit-build-core wheels.
+## ✅ Backend FINISH (step 1 of backend-first) — DONE (2026-06-21, `e8430a2`→`2496a14` on `main`)
+*The 6 FINISH-NOW items from [`docs/design/fit-engine-finish-punchlist.md`](design/fit-engine-finish-punchlist.md) — contract closure (NOT new math). After these, the BACKEND is honestly done; the NEXT is step 2 (CLI + bindings) below.*
+- [x] **F5** (`e8430a2`) — REMOVE the dead public `QpAdmOptions::constrained` field (`include/steppe/qpadm.hpp`); non-negative constrained-weights is a deferred step-3 feature (API hygiene).
+- [x] **F3** (`ffdcba2`) — add `Status::ChisqUndefined` (`include/steppe/error.hpp:44`) + a `dof<=0 ⇒ ChisqUndefined` guard on the HOST (`qpadm_fit.cpp`) AND the CUDA model-batched path (`cuda_backend.cu`); was leaking NaN p with `status=Ok`.
+- [x] **F2** (`c8fe397`) — the M(fit-5) domain-outcome acceptance gate, NEW `tests/reference/test_qpadm_domain.cu` (ctest `qpadm_domain`, #19): degenerate REAL-AADR models asserted as STATUS VALUES (no crash/NaN) on BOTH backends — collinear left ⇒ `RankDeficient`; fudge=0 singular Q ⇒ `NonSpdCovariance`; over-parameterized dof<=0 ⇒ `ChisqUndefined`.
+- [x] **F6** (`360e386`) — widen the G1==G2 determinism memcmp in `test_qpadm_rotation.cu` to the FULL `QpAdmResult` (z/dof/est_rank/rank_*/rankdrop_*/popdrop_*).
+- [x] **F4** (`6481dfa`) — pin a REAL AT2 `qpwave()` golden `tests/reference/goldens/at2/golden_qpwave.json` + NEW `tests/reference/test_qpwave_parity.cu` (ctest `qpwave_parity`, #21) gating the first-class `run_qpwave` entry on BOTH backends.
+- [x] **F1** (`2496a14`) — missing-block / NA handling (OQ-12). steppe is pairwise-complete (NOT AT2 maxmiss=0 global-intersection), so a pair-block `Vpair==0` CAN occur on sparse AADR and was silently imputed `f2=0`. Now implements AT2 `read_f2(remove_na=TRUE)`: DROP any block with a non-finite/`Vpair==0` pair before the LOO/jackknife, via the single shared host/device predicate `core::pair_block_is_missing` (`f2_estimator.hpp`) on the CpuBackend oracle + GPU (`f2_block_keep_kernel`; single-model AND S8 survivor-compaction). Legacy maxmiss=0 goldens stay BYTE-IDENTICAL (no-drop identity arm). NEW `golden_fitNA.json` + `tests/reference/test_qpadm_missing_block.cu` (ctest `qpadm_missing_block`, #20; real-AADR maxmiss=0.99, a real `Vpair==0` dropped block). NO synthetic data.
+
+> **Gate status:** 42 ctest tests green (default + `STEPPE_THOROUGH` oracle), CPU/GPU consistent, deterministic, wallclock unchanged. Legacy maxmiss=0 goldens byte-identical.
+
+---
+
+## ⏭️ Step 2 — Productization: CLI + Python bindings — **THE HONEST NEXT (does not exist yet)**
+*Refs: [`docs/research/desirable-features-survey.md`](research/desirable-features-survey.md); memory `build-sequence-backend-first`. CONFIRMED absent in git: no `app/` or `bindings/` dir, no nanobind/CLI11 wired in CMake (only `STEPPE_BUILD_PYTHON` as an OFF stub in `cmake/SteppeOptions.cmake`), no production `main()`. architecture.md keeps `app/` + standalone f3/f4/D-stat/qpDstat "(planned)".*
+
+**CLI** (new `app/`; pick the parser — CLI11 etc. — and wire it into CMake):
+- [ ] `extract-f2` — run the Phase-1 precompute, write the `f2_blocks` cache.
+- [ ] `qpadm` — run the fit on a saved/derived `f2_blocks` (left/right/target → weights/χ²/p).
+- [ ] `qpwave` — run the rank test (the first-class `run_qpwave` entry).
+- [ ] `qpadm-rotate` — the S8 model-space search / rotation.
+- [ ] CLI arg/IO contract: dataset paths, pop lists, `blgsize`/`boot`/seed, output format (JSON/CSV); `--dry-run` reports per-box P_max.
+
+**Python bindings** (new `bindings/`; flip `STEPPE_BUILD_PYTHON`):
+- [ ] nanobind module exposing `extract_f2` / `run_qpadm` / `run_qpwave` / the rotation + the `QpAdmResult`/`Status` types.
+- [ ] scikit-build-core packaging → wheels (CMake wiring for the nanobind target).
+
+## ⏭️ Step 3 — Standalone f-stats (each WITH its own CLI/bindings)
+*After step 2. Refs: architecture.md (the "(planned)" standalone tools); `desirable-features-survey.md`.*
+- [ ] Standalone **f3** / **f4** statistics (direct from `f2_blocks`) + CLI + bindings.
+- [ ] **D-statistic / qpDstat** + CLI + bindings.
+- [ ] Non-negative constrained-weights qpAdm (the deferred F5 feature).
 
 ---
 
@@ -176,7 +203,7 @@ Shared `__host__ __device__` per-element primitives (oracle≡GPU) · every cons
 
 ## 🔧 Cross-cutting tracked tasks
 - [x] **Merge M4 → `main`** — DONE @ `1fbb417` (M0–M4 + before-M4.5 cleanup B1–B27, 24/24 ctest green).
-- [ ] **Install R + admixtools** on the box → AT2 goldens — now primarily the **Phase-2 FIT validation gate** (also M7 cache parity) → the PRO-6000 session.
+- [x] **Install R + admixtools → pin AT2 goldens** — DONE for the **Phase-2 FIT validation gate** (admixtools 2.0.10 / R 4.3.3, real AADR v66.p1_HO): `golden_fit0`/`fit1_NRBIG`/`rot`/`qpwave`/`fitNA` under `tests/reference/goldens/at2/`. Remaining use: the M7 on-disk-cache parity arm.
 - [x] **GPU-dominant perf research** (`wqd0a9o0l`) — DONE; results folded into the ⚡ section (M5 pinned ingest, M4.5 filter-fusion, Phase 2 graphs, M7 nvCOMP; GDS ruled out on vast).
 - [ ] **[adopt now] Nsight Systems measure-first gate** (§11.3) — classify ingest/launch/orchestration-bound before building any perf lever (see ⚡ section). **Already applied for M4.5** (nsys diagnosed the data-bounce wart → `867a4bf`, `why-multigpu-slow.md`) **and M5** (the host-result-bound diagnosis → device-resident output `1f80c0c`, `why-d2h.md`); now the gate for Phase-2 fit levers.
-- [ ] Prune the merged feature branches (`m0-f2-scaffold`, `m1-decode-af`, `m2-filters`, `m3-block-partition`, `m4-perblock-f2`, `m4.5-multigpu`) — all merged to `main`.
+- [ ] Prune the merged feature branches (`m0-f2-scaffold`, `m1-decode-af`, `m2-filters`, `m3-block-partition`, `m4-perblock-f2`, `m4.5-multigpu`, `m5-input-streaming`) — all merged to `main`. (`phase2-fit-engine` IS `main` — keep until step 2 branches off it.)
