@@ -303,8 +303,9 @@ struct QpAdmResult {
 struct QpWaveResult { std::vector<double> rank_p; std::vector<int> dof; std::vector<double> chisq;
                       int est_rank = 0; Status status = Status::Ok; };
 
-struct QpAdmOptions { bool   allow_negative_weights = false;
-                      bool   constrained            = false;
+struct QpAdmOptions { bool   allow_negative_weights = true;    // AT2 does NOT clip (the prior dead `constrained`
+                                                              //   reserved flag was REMOVED; AT2 constrained=TRUE
+                                                              //   non-negative weights is a step-3 NEW-FEATURE, F5)
                       double fudge                  = 1e-4;   // AT2 parity constant (NOT a magic number; OQ-4)
                       int    als_iterations         = 20; };  // AT2 opt_A/opt_B default (§0; OQ-1)
 

@@ -68,12 +68,11 @@ struct QpAdmOptions {
     /// single best rank; the full qpWave rank sweep is M(fit-2).
     int rank = -1;
 
-    /// AT2 'constrained' (reserved; false in M(fit-1) — the unconstrained
-    /// solve(crossprod(x), crossprod(x,y)) path).
-    bool constrained = false;
-
     /// AT2 does NOT clip; weights may exit [0,1] (an infeasible model is a domain
-    /// outcome, not an error).
+    /// outcome, not an error). (AT2's `constrained=TRUE` non-negative-weights solve
+    /// is a deliberate step-3 NEW-FEATURE, NOT a backend-finish item — see the
+    /// fit-engine-finish-punchlist F5 decision; the prior dead `constrained` reserved
+    /// flag was removed rather than shipped unread in the public/bindings struct.)
     bool allow_negative_weights = true;
 
     /// M(fit-2) rank-decision significance (AT2 res$f4rank default 0.05): f4rank is
