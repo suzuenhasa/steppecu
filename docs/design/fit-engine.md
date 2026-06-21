@@ -679,11 +679,25 @@ reference-model set; reproducing AT2's `opt_A`/`opt_B` ALS verbatim (the §0 def
   tiered/streamed input, or is the first cut resident-tier-only? **Recommendation:** resident-only for
   the first cut; state the boundary explicitly. [seam lens; SPEC §11.1, §11.2]
 
-- **OQ-12 [LOW]. Missing-block handling.** AT2 `est_to_loo_nafix` excludes NA blocks; a
+- **OQ-12 [RESOLVED — F1]. Missing-block handling.** AT2 `est_to_loo_nafix` excludes NA blocks; a
   `vpair[i,j,b]==0` makes that f4 entry NA for that block — must NOT impute 0 (biases toward 0,
-  inflates variance). Decide whether the first milestone assumes no missing blocks (simplifies) or
-  handles NA from day one. **Recommendation:** assume no missing blocks for M(fit-1); add NA handling
-  before the at-scale search. [algebra lens; AT2 `resampling.R`]
+  inflates variance). **RESOLVED (F1):** steppe's resident f2 is NOT a global intersection (the geno
+  filter is a POOLED per-SNP missing fraction, not all-pops-present, and the keep-mask is SNP-global
+  while per-pop validity V is per (pop, SNP)), so a `Vpair[i,j,b]==0` CAN occur on real sparse AADR —
+  PATH B was required. The exact AT2 semantic for the precomputed-f2 fit is `read_f2(remove_na=TRUE)`:
+  DROP any jackknife block in which ANY loaded pop pair is non-finite (`keep = apply(f2,3,
+  sum(!is.finite)==0)`) BEFORE the standard est_to_loo / jack_pairarr_stats over the survivors — NOT
+  the per-entry `est_to_loo` NA reweighting (which never fires because read_f2 removed the NA blocks
+  first), and NOT `allsnps=TRUE` (that needs the genotype prefix, unreachable from the f2 seam — N1).
+  steppe implements the block DROP on BOTH backends: a model-INDEPENDENT survivor-block set is built
+  once from Vpair (`core::pair_block_is_missing`; a block is MISSING only when PARTIALLY covered — ≥1
+  pair Vpair==0 AND ≥1 pair Vpair>0, so a fully-zero "no-Vpair-info" slab is kept, the legacy
+  maxmiss=0 path byte-identical), `assemble_f4` COMPACTS the f4 block arrays onto the survivors +
+  carries the survivor `block_sizes` (the single-model CpuBackend oracle + the CudaBackend resident
+  path), and the S8 model-batched rotation gather is survivor-compacted via a shared `d_surv` map.
+  Gated by the REAL-AADR `golden_fitNA` (maxmiss=0.99, one dropped block; CpuBackend==CudaBackend;
+  the buggy impute-0 path differs ~1.4% ⇒ the gate discriminates). [algebra lens; AT2 `resampling.R`
+  + `io.R` read_f2; tests/reference/test_qpadm_missing_block.cu]
 
 - **OQ-13 [LOW]. `pchisq` parity.** The p tier is loose, but `pchisq` is a deterministic special
   function. Decide host implementation (Boost vs own) and whether `p` is compared at all or only the

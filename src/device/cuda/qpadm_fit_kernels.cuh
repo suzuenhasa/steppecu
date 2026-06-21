@@ -28,10 +28,26 @@ namespace steppe::device {
 /// with Li = d_left[i+1], Rj = d_right[j+1], L0 = d_left[0], R0 = d_right[0]. Native
 /// FP64 (the cancellation-sensitive f-stat difference). `d_left`/`d_right` are the
 /// small H2D'd index buffers (length nl+1 / nr+1). Output dX[m*nb], m = nl*nr.
+/// F1 / OQ-12: `nb` is the SURVIVOR block count and `d_surv` (length nb, ASCENDING)
+/// maps a compacted survivor index to its ORIGINAL resident block id (so the gather
+/// reads the resident f2 at the original block, writing the dense compacted dX). A
+/// MISSING block (Vpair==0 for any pair; AT2 read_f2(remove_na=TRUE)) is excluded from
+/// d_surv. `d_surv==nullptr` ⇒ identity (no drop — the maxmiss=0 no-missing-block path,
+/// bit-identical to the pre-F1 gather). The keep-mask is built by launch_f2_block_keep.
 void launch_assemble_f4_gather(const double* f2, int P,
                                const int* d_left, const int* d_right,
-                               int nl, int nr, int nb,
+                               int nl, int nr, int nb, const int* d_surv,
                                double* dX, cudaStream_t stream);
+
+/// F1 / OQ-12 keep-mask: one thread per resident block writes d_keep[b]=0 iff block b
+/// is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair Vpair>0 — AT2 read_f2's
+/// `!is.finite` drop), else 1. A fully-zero slab is the "no Vpair info" sentinel (the
+/// legacy/parity zero-fill), NOT a missing block ⇒ kept. `vpair` is the RESIDENT
+/// [P×P×nb] Vpair tensor; `d_keep` is length nb. The host reads d_keep down and builds
+/// the ASCENDING survivor id list. Mirrors the CpuBackend oracle survivor_blocks and
+/// shares the single-source predicate core::pair_block_is_missing.
+void launch_f2_block_keep(const double* vpair, int P, int nb, int* d_keep,
+                          cudaStream_t stream);
 
 /// S3 est_to_loo + x_total + tot_line (the FROZEN CONTRACT §2a; CpuBackend
 /// compute_loo_and_total, src/device/cpu/cpu_backend.cpp). One thread per k (m = nl*nr
@@ -219,11 +235,15 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
 /// S3 f4-gather, MODEL-BATCHED. Grid over (k + m*b, model). Reads the RESIDENT f2
 /// tensor `f2` (col-major i + P*j + P*P*b) with PER-MODEL index arenas
 /// `d_left_arena` ([B][nl+1] row-major) / `d_right_arena` ([B][nr+1]) and writes the
-/// strided arena `dX` (per-model slice dX + model*(m*nb), layout k + m*b). Native FP64.
+/// strided arena `dX` (per-model slice dX + model*(m*nb), layout k + m*bs). Native FP64.
+/// F1 / OQ-12: `nb` is the SURVIVOR block count; `d_surv` (length nb, ASCENDING, SHARED
+/// across models) maps the compacted survivor index to the original resident block id
+/// (a missing block — Vpair==0 for any pair — is dropped). `d_surv==nullptr` ⇒ identity.
 void launch_assemble_f4_gather_models_batched(const double* f2, int P,
                                               const int* d_left_arena,
                                               const int* d_right_arena,
                                               int nl, int nr, int nb, int n_models,
+                                              const int* d_surv,
                                               double* dX, cudaStream_t stream);
 
 /// S3 est_to_loo + x_total + tot_line, MODEL-BATCHED. One thread per (k, model); reduces

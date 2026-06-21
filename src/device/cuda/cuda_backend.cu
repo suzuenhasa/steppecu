@@ -1331,6 +1331,36 @@ public:
         return batched_dispatch_count_;
     }
 
+    /// F1 / OQ-12 — the ASCENDING SURVIVOR block id list for a resident f2 (AT2
+    /// read_f2(remove_na=TRUE)). Runs the on-device keep kernel over the resident Vpair
+    /// (shared predicate core::pair_block_is_missing), reads the tiny [nb] keep vector
+    /// down, and returns `which(keep)`. When the resident handle carries NO Vpair (an
+    /// upload path that left it empty — the global-intersection invariant: no missing
+    /// blocks) OR Vpair is empty, EVERY block survives (identity 0..nb-1) and no kernel
+    /// runs — the bit-identical no-drop path. The result is model-INDEPENDENT (a property
+    /// of the loaded f2), so callers compute it once per assemble/bucket.
+    [[nodiscard]] std::vector<int> device_survivor_blocks(
+        const steppe::device::DeviceF2Blocks& f2, int nb, int P) {
+        std::vector<int> surv;
+        if (nb <= 0) return surv;
+        surv.reserve(static_cast<std::size_t>(nb));
+        // No resident Vpair ⇒ keep every block (no missing-block info ⇒ no drop).
+        if (f2.vpair_device() == nullptr) {
+            for (int b = 0; b < nb; ++b) surv.push_back(b);
+            return surv;
+        }
+        DeviceBuffer<int> dKeep(static_cast<std::size_t>(nb));
+        launch_f2_block_keep(f2.vpair_device(), P, nb, dKeep.data(), stream_.get());
+        std::vector<int> keep(static_cast<std::size_t>(nb), 1);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(keep.data(), dKeep.data(),
+                                          static_cast<std::size_t>(nb) * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        for (int b = 0; b < nb; ++b)
+            if (keep[static_cast<std::size_t>(b)] != 0) surv.push_back(b);
+        return surv;
+    }
+
     /// S3 — assemble the per-block f4 matrix X from DEVICE-RESIDENT f2 (zero D2H of
     /// the big tensor; the FROZEN CONTRACT §2a). The gather kernel reads
     /// f2.f2_device() in VRAM; the est_to_loo/x_total/tot_line reduction runs
@@ -1356,54 +1386,85 @@ public:
         F4Blocks out;
         out.nl = nl;
         out.nr = nr;
-        out.n_block = nb;
         const std::size_t m = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
-        out.x_blocks.assign(m * static_cast<std::size_t>(nb < 0 ? 0 : nb), 0.0);
         out.x_total.assign(m, 0.0);
-        out.x_loo.assign(m * static_cast<std::size_t>(nb < 0 ? 0 : nb), 0.0);
         tot_line_.assign(m, 0.0);
-        if (nl <= 0 || nr <= 0 || nb <= 0 || f2.f2_device() == nullptr) return out;
+        if (nl <= 0 || nr <= 0 || nb <= 0 || f2.f2_device() == nullptr) {
+            out.n_block = 0;
+            return out;
+        }
 
-        // H2D the small model index vectors (length nl+1 / nr+1).
+        // F1 / OQ-12 — MISSING-block drop (AT2 read_f2(remove_na=TRUE)), the GPU mirror
+        // of the CpuBackend oracle. The keep-mask is computed ON-DEVICE from the resident
+        // Vpair (launch_f2_block_keep, sharing core::pair_block_is_missing with the
+        // oracle), read down as a tiny [nb] int vector, and the host builds the ASCENDING
+        // SURVIVOR id list + the survivor block_sizes. The gather then COMPACTS dX onto
+        // the survivor axis (d_surv maps compacted→original block). With NO Vpair (the
+        // legacy upload path that leaves it empty) or no missing block, every block
+        // survives ⇒ d_surv is identity and the path is bit-identical to pre-F1.
+        const std::vector<int> surv = device_survivor_blocks(f2, nb, P);
+        const int nb_s = static_cast<int>(surv.size());
+        out.n_block = nb_s;
+        out.block_sizes.assign(static_cast<std::size_t>(nb_s), 0);
+        for (int bs = 0; bs < nb_s; ++bs)
+            out.block_sizes[static_cast<std::size_t>(bs)] =
+                f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        out.x_loo.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        if (nb_s <= 0) return out;  // all blocks missing — degenerate (caller-gated)
+
+        // Whether the survivor set differs from the full set (a real drop occurred);
+        // identity survivor ⇒ pass d_surv = nullptr (the bit-identical no-drop kernel arm).
+        const bool dropped = (nb_s != nb);
+
+        // H2D the small model index vectors (length nl+1 / nr+1) + the SURVIVOR block
+        // sizes + (only when a drop occurred) the survivor map.
         DeviceBuffer<int> dLeft(left_idx.size());
         DeviceBuffer<int> dRight(right_idx.size());
-        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb));
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
+        DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLeft.data(), left_idx.data(),
                                           left_idx.size() * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRight.data(), right_idx.data(),
                                           right_idx.size() * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), f2.block_sizes.data(),
-                                          static_cast<std::size_t>(nb) * sizeof(int),
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), out.block_sizes.data(),
+                                          static_cast<std::size_t>(nb_s) * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
+        if (dropped)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
+                                              static_cast<std::size_t>(nb_s) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
 
-        // Device-resident X / loo / total / tot_line.
-        DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb));
-        DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb));
+        // Device-resident X / loo / total / tot_line (sized to the SURVIVOR block count).
+        DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
         DeviceBuffer<double> dTotal(m);
         DeviceBuffer<double> dTotLine(m);
 
-        // S3 gather (reads RESIDENT f2; native FP64 4-slab combine).
+        // S3 gather (reads RESIDENT f2; native FP64 4-slab combine), compacted onto the
+        // survivor axis via d_surv (nullptr when no drop ⇒ identity, bit-identical).
         launch_assemble_f4_gather(f2.f2_device(), P, dLeft.data(), dRight.data(),
-                                  nl, nr, nb, dX.data(), stream_.get());
+                                  nl, nr, nb_s, dropped ? dSurv.data() : nullptr,
+                                  dX.data(), stream_.get());
 
-        // n = Σ block_sizes (host int → double; the jackknife normalizer).
+        // n = Σ SURVIVOR block_sizes (host int → double; the jackknife normalizer).
         long long n_ll = 0;
-        for (int v : f2.block_sizes) n_ll += v;
+        for (int v : out.block_sizes) n_ll += v;
         const double n = static_cast<double>(n_ll);
 
-        // est_to_loo + x_total + tot_line (on-device reduction; FP64 op order).
+        // est_to_loo + x_total + tot_line (on-device reduction over SURVIVORS; FP64 order).
         launch_f4_loo_total(dX.data(), dBlockSizes.data(),
-                            static_cast<int>(m), nb, n,
+                            static_cast<int>(m), nb_s, n,
                             dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
 
-        // D2H the small fit intermediates across the CUDA-free seam.
+        // D2H the small fit intermediates across the CUDA-free seam (SURVIVOR-sized).
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
-                                          m * static_cast<std::size_t>(nb) * sizeof(double),
+                                          m * static_cast<std::size_t>(nb_s) * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
-                                          m * static_cast<std::size_t>(nb) * sizeof(double),
+                                          m * static_cast<std::size_t>(nb_s) * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
                                           m * sizeof(double),
@@ -2316,10 +2377,31 @@ public:
             bucket_members[bk].push_back(mi);
         }
 
+        // F1 / OQ-12 — the SURVIVOR block set for the rotation (computed ONCE; the
+        // keep-mask is a property of the resident f2, shared by every model/bucket). A
+        // missing block (Vpair==0 for any pair) is dropped, exactly as the single-model
+        // assemble_f4 does (AT2 read_f2(remove_na=TRUE)). With no missing blocks (every
+        // existing golden) surv is identity and dSurv stays nullptr ⇒ the batched gather
+        // runs its bit-identical no-drop arm. The survivor block_sizes + resident dSurv
+        // are built here and threaded into every bucket/chunk.
+        const std::vector<int> surv = device_survivor_blocks(f2, f2.n_block, f2.P);
+        const int nb_s = static_cast<int>(surv.size());
+        const bool dropped = (nb_s != f2.n_block);
+        std::vector<int> surv_block_sizes(static_cast<std::size_t>(nb_s), 0);
+        for (int bs = 0; bs < nb_s; ++bs)
+            surv_block_sizes[static_cast<std::size_t>(bs)] =
+                f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+        DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
+        if (dropped)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
+                                              static_cast<std::size_t>(nb_s) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+        const int* d_surv = dropped ? dSurv.data() : nullptr;
+
         for (std::size_t bk = 0; bk < bucket_keys.size(); ++bk) {
             fit_one_bucket(f2, models, bucket_members[bk], bucket_keys[bk].nl,
-                           bucket_keys[bk].nr, bucket_keys[bk].r, opts, precision, tag,
-                           results);
+                           bucket_keys[bk].nr, bucket_keys[bk].r, nb_s, surv_block_sizes,
+                           d_surv, opts, precision, tag, results);
         }
         return results;
     }
@@ -2334,26 +2416,32 @@ private:
     void fit_one_bucket(const steppe::device::DeviceF2Blocks& f2,
                         std::span<const QpAdmModel> models,
                         const std::vector<std::size_t>& mem, int nl, int nr, int r,
-                        const QpAdmOptions& opts, const Precision& precision,
+                        int nb, const std::vector<int>& survivor_block_sizes,
+                        const int* d_surv, const QpAdmOptions& opts,
+                        const Precision& precision,
                         Precision::Kind tag, std::vector<QpAdmResult>& results) {
         if (mem.empty()) return;
         const int m = nl * nr;
-        const int nb = f2.n_block;
+        // F1 / OQ-12: `nb` is the SURVIVOR block count + `survivor_block_sizes` the
+        // survivor SNP counts (the f2 source's full set MINUS the missing blocks), and
+        // `d_surv` (nullptr when no drop) maps the compacted survivor block to its
+        // resident block id. Everything below weights/normalizes by the SURVIVOR set,
+        // mirroring the single-model assemble_f4 (AT2 read_f2(remove_na=TRUE)).
         const int P = f2.P;
         const int rmax = (nl < nr ? nl : nr) - 1;
         const int r_fit = r;
         const std::size_t m_sz = static_cast<std::size_t>(m);
         const std::size_t Mm = m_sz * m_sz;
 
-        // n = Σ block_sizes.
+        // n = Σ SURVIVOR block_sizes.
         long long n_ll = 0;
-        for (int v : f2.block_sizes) n_ll += v;
+        for (int v : survivor_block_sizes) n_ll += v;
         const double n = static_cast<double>(n_ll);
 
-        // block_sizes resident once (reused across chunks).
+        // SURVIVOR block_sizes resident once (reused across chunks).
         DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb > 0 ? nb : 1));
         if (nb > 0)
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), f2.block_sizes.data(),
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), survivor_block_sizes.data(),
                                               static_cast<std::size_t>(nb) * sizeof(int),
                                               cudaMemcpyHostToDevice, stream_.get()));
 
@@ -2377,16 +2465,18 @@ private:
         for (std::size_t off = 0; off < mem.size(); off += B_max) {
             const std::size_t B = std::min(B_max, mem.size() - off);
             fit_chunk(f2, models, mem, off, B, nl, nr, r_fit, rmax, m, nb, P, n,
-                      dBlockSizes.data(), opts, precision, tag, results);
+                      dBlockSizes.data(), d_surv, opts, precision, tag, results);
         }
     }
 
     /// One BATCHED chunk of B same-shape models — the genuine batched dispatch.
+    /// F1 / OQ-12: `nb`/`dBlockSizes` are the SURVIVOR set; `d_surv` (nullptr=no drop)
+    /// compacts the gather onto the survivor blocks (AT2 read_f2(remove_na=TRUE)).
     void fit_chunk(const steppe::device::DeviceF2Blocks& f2,
                    std::span<const QpAdmModel> models,
                    const std::vector<std::size_t>& mem, std::size_t off, std::size_t B,
                    int nl, int nr, int r_fit, int rmax, int m, int nb, int P, double n,
-                   const int* dBlockSizes, const QpAdmOptions& opts,
+                   const int* dBlockSizes, const int* d_surv, const QpAdmOptions& opts,
                    const Precision& precision, Precision::Kind tag,
                    std::vector<QpAdmResult>& results) {
         ++batched_dispatch_count_;  // S8 observability: one BATCHED dispatch per chunk
@@ -2423,10 +2513,10 @@ private:
         DeviceBuffer<double> dQ(B * Mm);
         DeviceBuffer<double> dQf(B * Mm);
 
-        // ---- S3 gather (model-batched, reads resident f2) ------------------------
+        // ---- S3 gather (model-batched, reads resident f2; F1 survivor-compacted) -
         launch_assemble_f4_gather_models_batched(f2.f2_device(), P, dLeft.data(),
                                                  dRight.data(), nl, nr, nb,
-                                                 static_cast<int>(B), dX.data(),
+                                                 static_cast<int>(B), d_surv, dX.data(),
                                                  stream_.get());
         launch_f4_loo_total_models_batched(dX.data(), dBlockSizes, m, nb, n,
                                            static_cast<int>(B), dLoo.data(),

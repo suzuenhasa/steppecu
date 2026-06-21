@@ -23,6 +23,9 @@ synthetic data, no fabricated numbers. Every value here was reproduced **bit-exa
 | `scripts/golden_fit0_generate.R` | the original generation script (extract_f2 + qpadm + X/Q) |
 | `scripts/golden_fit0_fixup.R` | the re-capture that wrote the FINAL rds/csvs (labels on X, all shas) |
 | `scripts/verify_bitexact.R` | the independent verdict re-run that reproduced every value bit-exact |
+| `golden_fitNA.json` | **F1 / OQ-12 MISSING-BLOCK golden** (the ONE maxmiss>0 golden): qpAdm over an f2 set with a partially-covered block (a pop pair with Vpair==0). AT2 read_f2(remove_na=TRUE) DROPS that block; steppe reproduces the drop (NOT impute-0). weights/chisq/dof/p/rankdrop/popdrop + steppe-convention X. `test_qpadm_missing_block.cu` reads this. |
+| `fixtures/f2_fitNA.bin` | the RAW (pre-drop) f2 block tensor for the F1 golden (P=10, nb=710), with the NA pair stored as IEEE-754 NaN; steppe derives Vpair (0 iff NaN) + reproduces the keep-mask drop (1 block, id 534, dropped). |
+| `scripts/golden_fitNA_generate.R` | the F1 generation script (extract_f2 maxmiss=0.99 + the f2-OBJECT-path qpadm + the drop/impute-0 discriminator + the RAW f2 binary dump). |
 
 The CSV/JSON are the authoritative committed values. The `.rds`, `/tmp` transcripts,
 and the precomputed f2 blocks live on box5090 (too large / not source) at

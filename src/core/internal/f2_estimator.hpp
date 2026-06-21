@@ -122,8 +122,27 @@ inline constexpr int kF2StackedBlocks = 2;
 /// `> 0.0` is kept for exactness.) The per-block divide here and the S4
 /// jackknife weighting by `vpair` must COMPOSE to AT2's f2_blocks definition,
 /// not double-normalize (architecture.md §5 S2 caveat (a), §12).
+///
+/// NB (F1 / OQ-12): a `Vpair == 0` pair-block returns f2 = 0 here, NOT a NaN — so
+/// the f2 VALUE alone cannot distinguish "no data" from "true zero f4". The
+/// MISSING-block test is therefore on `Vpair` itself (`pair_block_is_missing`
+/// below), not on the finalized f2; assemble_f4 reads Vpair to drop the block.
 [[nodiscard]] STEPPE_HD inline double finalize_f2(double numerator, double vpair) noexcept {
     return (vpair > 0.0) ? (numerator / vpair) : 0.0;
+}
+
+/// THE single-source missing-block predicate (F1 / OQ-12; AT2 `read_f2(remove_na
+/// =TRUE)` `keep = apply(f2,3,sum(!is.finite)==0)`). A jackknife block is MISSING
+/// for a population pair (i, j) when no SNP in the block is jointly valid in both
+/// pops — i.e. `Vpair(i,j,b) == 0` — and AT2 then treats that pair's per-block f2
+/// as NA. AT2 DROPS any block in which ANY loaded pair is NA (it imputes nothing):
+/// the f2 0-fill of `finalize_f2` would otherwise bias the f4 toward 0 and inflate
+/// the jackknife variance (the OQ-12 defect). `vpair` is an exact integer count
+/// carried as a double; `<= 0.0` catches the 0 count exactly (and any malformed
+/// negative). Single-homed here so the CpuBackend oracle and the GPU keep-mask
+/// kernel cannot diverge on the rule (architecture.md §8 single-source, §13).
+[[nodiscard]] STEPPE_HD inline bool pair_block_is_missing(double vpair) noexcept {
+    return !(vpair > 0.0);
 }
 
 // The launch-config helpers `cdiv`/`grid_for` now live in their own single home,

@@ -42,8 +42,11 @@ QpAdmResult fit_one_model(ComputeBackend& be, const F2Src& f2,
     const std::vector<int> left_idx = left_with_target(model);
     F4Blocks X = be.assemble_f4(f2, std::span<const int>(left_idx),
                                 std::span<const int>(model.right), prec);
-    QpAdmResult res = run_impl(be, std::move(X),
-                               std::span<const int>(f2.block_sizes), model, opts);
+    // F1 / OQ-12: weight the jackknife by the SURVIVOR blocks assemble_f4 kept
+    // (X.block_sizes) — a missing block (Vpair==0 for any pair) was dropped from X.
+    // With no missing blocks this == f2.block_sizes (byte-identical).
+    std::span<const int> bs(X.block_sizes);
+    QpAdmResult res = run_impl(be, std::move(X), bs, model, opts);
     res.model_index = model.model_index;  // echo the caller's stable identity
     return res;
 }

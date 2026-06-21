@@ -99,6 +99,55 @@ namespace {
     return pairwise_sum(a, h) + pairwise_sum(a + h, n - h);
 }
 
+/// F1 / OQ-12 — the host-side SURVIVOR-block id list (AT2 read_f2(remove_na=TRUE)
+/// `which(apply(f2,3,sum(!is.finite)==0))`). Returns the ASCENDING original block
+/// ids `b` for which NO loaded pop pair has Vpair == 0 (`pair_block_is_missing`,
+/// the single-source predicate in f2_estimator.hpp). assemble_f4 then COMPACTS the
+/// f4 block arrays onto this survivor axis and weights the jackknife by the survivor
+/// SNP counts — exactly AT2's drop-then-standard-jackknife, NOT impute-0.
+///
+/// LEGACY / no-Vpair fixtures: when `vpair` is EMPTY (the maxmiss=0 goldens that do
+/// not carry it — the global-intersection invariant guarantees no missing blocks),
+/// EVERY block is a survivor, so the result is `0..nb-1` and the downstream path is
+/// byte-identical to the pre-F1 behavior (the all-true keep-mask). When `vpair` is
+/// present but mis-sized (a programming error), we likewise keep all blocks rather
+/// than silently corrupting the survivor set — the fail-soft default is "no drop".
+[[nodiscard]] std::vector<int> survivor_blocks(const std::vector<double>& vpair,
+                                               int P, int nb,
+                                               const std::vector<int>& block_sizes) {
+    std::vector<int> surv;
+    if (nb <= 0) return surv;
+    surv.reserve(static_cast<std::size_t>(nb));
+    const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const bool have_vpair =
+        !vpair.empty() && vpair.size() == slab * static_cast<std::size_t>(nb) &&
+        block_sizes.size() == static_cast<std::size_t>(nb);
+    for (int b = 0; b < nb; ++b) {
+        bool keep = true;
+        if (have_vpair) {
+            // F1 / OQ-12 — a block is MISSING only when it is PARTIALLY covered: at
+            // least one pair has Vpair == 0 AND at least one pair has Vpair > 0. A
+            // fully-zero slab is NOT a missing block — it is the "no Vpair info"
+            // sentinel (the legacy/parity uploads zero-fill Vpair, and assign_blocks
+            // never emits a 0-SNP block, so a real block always has a positive diagonal
+            // Vpair(i,i) for any pop with data). Requiring the MIX makes the drop fire
+            // exactly on AT2's `!is.finite` case (some pair NA, the block otherwise
+            // valid) and leaves the all-zero "no info" path keeping every block —
+            // byte-identical to pre-F1 on every existing maxmiss=0 golden.
+            const std::size_t base = slab * static_cast<std::size_t>(b);
+            bool any_missing = false, any_present = false;
+            for (std::size_t e = 0; e < slab; ++e) {
+                if (core::pair_block_is_missing(vpair[base + e])) any_missing = true;
+                else any_present = true;
+                if (any_missing && any_present) break;
+            }
+            keep = !(any_missing && any_present);
+        }
+        if (keep) surv.push_back(b);
+    }
+    return surv;
+}
+
 /// The per-pair f2 ORACLE body — the cancellation-free long-double reference for ONE
 /// (i, j) population pair over the SNP range [s0, s1). The SINGLE source shared by
 /// compute_f2 (range [0, M)) and compute_f2_blocks (per-block range [begin, end)) so
@@ -384,10 +433,28 @@ public:
         F4Blocks out;
         out.nl = nl;
         out.nr = nr;
-        out.n_block = nb;
         const std::size_t m = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
-        out.x_blocks.assign(m * static_cast<std::size_t>(nb), 0.0);
-        if (nl <= 0 || nr <= 0 || nb <= 0) return out;
+        if (nl <= 0 || nr <= 0 || nb <= 0) { out.n_block = 0; return out; }
+
+        // F1 / OQ-12 — MISSING-block drop (AT2 read_f2(remove_na=TRUE)): build the
+        // per-block keep-mask + the survivor block id list ONCE from Vpair. A block is
+        // KEPT iff NO loaded pop pair has Vpair == 0 in it; a dropped block is excluded
+        // from the f4 jackknife ENTIRELY (NOT impute-0). The mask is model-INDEPENDENT
+        // (it is a property of the loaded f2 set, exactly as AT2 drops at read_f2 time),
+        // so it is computed over ALL P×P pairs here. block_keep + compaction is the
+        // SINGLE source the GPU path mirrors. With NO Vpair (the legacy maxmiss=0
+        // fixtures that do not carry it ⇒ the global-intersection invariant: no missing
+        // blocks) keep is all-true and the path is byte-identical (the survivor set ==
+        // the full set, survivor block_sizes == f2.block_sizes).
+        const std::vector<int> surv = survivor_blocks(f2.vpair, P, nb, f2.block_sizes);
+        const int nb_s = static_cast<int>(surv.size());
+        out.n_block = nb_s;
+        out.block_sizes.assign(static_cast<std::size_t>(nb_s), 0);
+        for (int bs = 0; bs < nb_s; ++bs)
+            out.block_sizes[static_cast<std::size_t>(bs)] =
+                f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        if (nb_s <= 0) return out;  // all blocks missing — degenerate (caller-gated)
 
         const int L0 = left_idx[0];
         const int R0 = right_idx[0];
@@ -403,18 +470,22 @@ public:
                 const int Rj = right_idx[static_cast<std::size_t>(j) + 1];
                 const std::size_t k = static_cast<std::size_t>(j) +
                                       static_cast<std::size_t>(nr) * static_cast<std::size_t>(i);
-                for (int b = 0; b < nb; ++b) {
+                // Gather into the COMPACTED survivor block axis (bs), reading the
+                // original block id surv[bs] from the resident f2.
+                for (int bs = 0; bs < nb_s; ++bs) {
+                    const int b = surv[static_cast<std::size_t>(bs)];
                     const double x = 0.5 * (f2at(Li, R0, b) + f2at(L0, Rj, b) -
                                             f2at(L0, R0, b) - f2at(Li, Rj, b));
-                    out.x_blocks[k + m * static_cast<std::size_t>(b)] = x;
+                    out.x_blocks[k + m * static_cast<std::size_t>(bs)] = x;
                 }
             }
         }
 
-        // est_to_loo + the AT2 jackknife point estimate, computed once here so S4
-        // (Q) and S7 (LOO re-fits) share the SAME loo array. block_sizes are read
-        // from the host tensor (OQ-3: AT2 block_lengths, NOT Vpair).
-        compute_loo_and_total(out, f2.block_sizes);
+        // est_to_loo + the AT2 jackknife point estimate over the SURVIVOR blocks
+        // (compaction already applied), computed once here so S4 (Q) and S7 (LOO
+        // re-fits) share the SAME loo array. block_sizes are the SURVIVOR SNP counts
+        // (OQ-3: AT2 block_lengths over the kept blocks, NOT Vpair).
+        compute_loo_and_total(out, out.block_sizes);
         return out;
     }
 

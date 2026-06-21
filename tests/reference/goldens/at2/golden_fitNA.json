@@ -1,0 +1,67 @@
+{
+  "schema": ["steppe.golden.at2.qpadm/1"],
+  "purpose": ["F1 / OQ-12 MISSING-BLOCK acceptance oracle: qpAdm over a REAL-AADR f2 set extracted with maxmiss>0, so the f2 block array contains a PARTIALLY-covered block (a population pair with Vpair==0). AT2 read_f2(remove_na=TRUE) DROPS such a block ENTIRELY before the jackknife (keep=apply(f2,3,sum(!is.finite)==0)); steppe must reproduce the drop (NOT impute-0, which biases f4 toward 0 + inflates variance). The fit must match these to bit/tolerance parity per architecture.md S12 PARITY LAW + S13. UNLIKE every maxmiss=0 golden (no missing blocks), this exercises the est_to_loo_nafix path."],
+  "reproduction": {
+    "canonical_invocation": ["extract_f2(pref, outdir, pops=allpops, blgsize=0.05, maxmiss=0.99); f2b <- read_f2(outdir, pops=allpops); qpadm(f2b, left=left, right=right, target=target, boot=FALSE, getcov=TRUE, return_f4=TRUE, fudge=1e-4, cpp=TRUE)"],
+    "generator": ["tests/reference/goldens/at2/scripts/golden_fitNA_generate.R (box5090: R 4.3.3 + admixtools 2.0.10 + real AADR)"],
+    "note": ["CANONICAL = the f2-BLOCKS-OBJECT path qpadm(read_f2(dir), ...) — steppe's device-resident fit consumes a precomputed f2 tensor, so it is the analogue of qpadm(f2_object,...), NOT qpadm(dir,...) (the directory path applies a different internal f2-read arg set; on a sparse model the two diverge a lot — the documented golden_fit0 caveat). The committed fixture fixtures/f2_fitNA.bin is the RAW (pre-drop) f2 block tensor with the NA pair stored as IEEE-754 NaN; steppe derives Vpair (0 iff NaN) and reproduces AT2's keep-mask drop. The dropped block (0-based id 534) is the ONLY block with a Vpair==0 pair: Afghanistan_DarraiKurCave_MBA (pop idx 9) x Mbuti (pop idx 3). The 2-source model is a poor fit for these outgroups (the weights are large) — that is AT2's exact answer and steppe reproduces it bit-for-bit; the gate is steppe==AT2 WITH the drop, NOT a pretty fit. DISCRIMINATOR: the buggy impute-0 path gives weights [22.21207714, -21.21207714] (reldiff 1.45% from the drop) — above the tight tier, so the test fails impute-0."]
+  },
+  "metadata": {
+    "R": ["R version 4.3.3 (2024-02-29)"],
+    "admixtools": ["2.0.10"],
+    "target": ["England_BellBeaker"],
+    "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
+    "right": ["Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana", "Afghanistan_DarraiKurCave_MBA"],
+    "pop_order": ["England_BellBeaker", "Czechia_EBA_CordedWare", "Turkey_N", "Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana", "Afghanistan_DarraiKurCave_MBA"],
+    "blgsize": [0.05],
+    "maxmiss": [0.99],
+    "fudge": [0.0001],
+    "boot": [false],
+    "path": ["f2_object"],
+    "dataset": ["v66.p1_HO.aadr.patch.PUB"],
+    "geno_sha256": ["7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3"]
+  },
+  "missing_block": {
+    "raw_n_blocks": 710,
+    "surviving_n_blocks": 709,
+    "dropped_block_ids_0based": [534],
+    "na_pair_pop_indices": [9, 3],
+    "na_pair_pop_names": ["Afghanistan_DarraiKurCave_MBA", "Mbuti"],
+    "surviving_sum_block_lengths": 566483,
+    "impute0_weights_buggy": [22.21207714, -21.21207714],
+    "drop_vs_impute_max_reldiff": 0.01447
+  },
+  "weights": {
+    "target": ["England_BellBeaker", "England_BellBeaker"],
+    "left": ["Czechia_EBA_CordedWare", "Turkey_N"],
+    "weight": [21.9095007306, -20.9095007306],
+    "se": [139.254797565, 139.254797565],
+    "z": [0.157333902413, -0.150152821276]
+  },
+  "rankdrop": {
+    "f4rank": [1, 0],
+    "dof": [5, 12],
+    "chisq": [8.26893432701, 97.84153701761],
+    "p": [0.142023723110, 1.47237078355e-15],
+    "dofdiff": [7, "NA"],
+    "chisqdiff": [89.5726026906, "NA"],
+    "p_nested": [1.51429402157e-16, "NA"]
+  },
+  "popdrop": {
+    "pat": ["00", "01", "10"],
+    "wt": [0, 1, 1],
+    "dof": [5, 6, 6],
+    "chisq": [8.26893432701, 100.33938845288, 108.28291116802],
+    "p": [0.142023723110, 2.13176889670e-19, 4.66373498145e-21],
+    "f4rank": [1, 0, 0],
+    "feasible": [false, true, true]
+  },
+  "X_f4_estimate_vector_steppe_convention": {
+    "description": ["steppe's internal f4 X (leftref=TARGET=England_BellBeaker, rows=sources, rightref=Mbuti) over the SURVIVING 709 blocks — what assemble_f4 computes (k = j + nr*i, i over rows, j over the 6 rights). This is steppe's parameterization (NOT AT2's source-ref f4); the GLS weights it yields equal AT2's qpadm(f2_object) weights above. The drop discriminator: the last column (Afghan_MBA) is the one a missing block most perturbs."],
+    "rows": ["Czechia_EBA_CordedWare", "Turkey_N"],
+    "rightref": ["Mbuti"],
+    "rightpair": ["Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana", "Afghanistan_DarraiKurCave_MBA"],
+    "x_total_row_CordedWare": [2.64042025208e-05, 2.43227639508e-05, 0.000704048777804, 0.000445239755203, 0.000112900574313, 4.74253984197e-05],
+    "x_total_row_TurkeyN": [1.66993190213e-04, 3.47353762472e-05, 0.000742604696600, 0.000417419530876, 0.000176477228166, -3.01081865168e-04]
+  }
+}

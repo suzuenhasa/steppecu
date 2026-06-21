@@ -476,6 +476,27 @@ set_target_properties(test_qpadm_domain PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_domain
          COMMAND test_qpadm_domain "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# CUDA TU: the F1 / OQ-12 MISSING-BLOCK acceptance gate (fit-engine.md OQ-12). EVERY other
+# qpAdm golden is maxmiss=0 (global SNP intersection ⇒ NO missing blocks); this is the ONE
+# that exercises a MISSING block — a REAL-AADR f2 set extracted with maxmiss>0 in which one
+# jackknife block has a population pair with Vpair==0. AT2 read_f2(remove_na=TRUE) DROPS that
+# block ENTIRELY before the jackknife (NOT impute-0, which biases f4 toward 0 + inflates
+# variance); steppe reproduces the drop on BOTH backends. Gates weights/chisq/dof/p/rankdrop +
+# the f4 X over survivors vs a pinned REAL AT2 golden (golden_fitNA.json; admixtools 2.0.10 /
+# R 4.3.3; maxmiss=0.99) AND CpuBackend==CudaBackend. Without the drop the X/Q differ by ~1e-3
+# (above the tight tier) ⇒ the test fails the buggy impute-0 path.
+#
+# NO SYNTHETIC DATA: the missing block arises from a REAL sparse ancient pop
+# (Afghanistan_DarraiKurCave_MBA, a single low-coverage individual) as a right pop; the fixture
+# fixtures/f2_fitNA.bin is the RAW (pre-drop) AT2 f2 tensor with the NA pair stored as NaN.
+# CpuBackend oracle runs under STEPPE_THOROUGH=1 or no GPU; CudaBackend (f2 RESIDENT) on default.
+add_executable(test_qpadm_missing_block reference/test_qpadm_missing_block.cu)
+target_link_libraries(test_qpadm_missing_block
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpadm_missing_block PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpadm_missing_block
+         COMMAND test_qpadm_missing_block "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # CUDA TU: the F4 standalone qpWave acceptance gate (fit-engine-finish-punchlist F4). The
 # first-class PUBLIC run_qpwave entry (include/steppe/qpadm.hpp; impl qpadm_fit.cpp
 # run_qpwave_impl) had ZERO direct test coverage — its distinguishing no-target-prepend /

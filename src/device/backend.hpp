@@ -108,7 +108,22 @@ struct F4Blocks {
 
     int nl = 0;       ///< = left.size()       (rows of the f4 matrix)
     int nr = 0;       ///< = right.size() - 1  (cols of the f4 matrix)
-    int n_block = 0;
+    int n_block = 0;  ///< the SURVIVOR block count (== block_sizes.size()).
+
+    /// [n_block]: the per-SURVIVOR-block SNP count (AT2 block_lengths) — the S4
+    /// jackknife weight. F1 / OQ-12 (est_to_loo_nafix): a jackknife block in which
+    /// ANY population pair has Vpair == 0 (no SNP jointly valid in both pops) is a
+    /// MISSING block; AT2's `read_f2(remove_na=TRUE)` DROPS such blocks ENTIRELY
+    /// (`keep = apply(f2,3,sum(!is.finite)==0)`) before the jackknife, then runs the
+    /// standard est_to_loo / jack_pairarr_stats over the survivors — NOT impute-0
+    /// (which biases f4 toward 0 + inflates variance). assemble_f4 therefore COMPACTS
+    /// the f4 block arrays (x_blocks/x_loo) to the survivor blocks and carries the
+    /// survivor SNP counts HERE (not the f2 source's full block_sizes), so jackknife_cov
+    /// / the rank sweep / S7 consume the survivor set with no further change. With NO
+    /// missing blocks (every existing maxmiss=0 golden) this equals the full f2.block_sizes
+    /// and the path is byte-identical (the keep-mask is all-true). [AT2 resampling.R /
+    /// io.R read_f2 remove_na; fit-engine.md OQ-12]
+    std::vector<int> block_sizes;
 };
 
 /// S4 output: the covariance Q and the inverse of the FUDGED Q.

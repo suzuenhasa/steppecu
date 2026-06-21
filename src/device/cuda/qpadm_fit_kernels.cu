@@ -19,6 +19,7 @@
 // qpadm_fit_kernels.cuh; the kernel bodies + <<<>>> are confined here (§7).
 #include <cuda_runtime.h>
 
+#include "core/internal/f2_estimator.hpp"   // core::pair_block_is_missing — the F1/OQ-12 single-source drop predicate
 #include "core/internal/launch_config.hpp"  // core::kMaxGridX — the SINGLE-SOURCE grid-dim limit
 #include "core/qpadm/qpadm_bounds.hpp"      // kQpMaxNl/Nr/R/M/T — the SINGLE-SOURCE small-path envelope
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_CHECK_KERNEL
@@ -580,19 +581,49 @@ __device__ inline double f4_xtau_elem(double est, double loo, double tot_line,
 // One thread per (k, b), k = j + nr*i in 0..m-1, b in 0..nb-1. Reads the resident
 // f2 tensor (column-major i + P*j + P*P*b) and writes dX[k + m*b]. Native FP64; the
 // 4-slab subtraction is the cancellation-sensitive f-stat difference (§12).
+//
+// F1 / OQ-12 SURVIVOR COMPACTION: `nb` is the SURVIVOR block count and `d_surv`
+// (length nb, ASCENDING) maps a compacted survivor index `bs` to its ORIGINAL block
+// id in the resident f2 — so the gather reads the resident f2 at the original block
+// while writing the dense compacted dX[k + m*bs]. d_surv == nullptr ⇒ identity (no
+// drop; the maxmiss=0 path with no missing blocks), bit-identical to the pre-F1 gather.
 __global__ void assemble_f4_gather_kernel(const double* __restrict__ f2, int P,
                                           const int* __restrict__ d_left,
                                           const int* __restrict__ d_right,
                                           int nl, int nr, int nb,
+                                          const int* __restrict__ d_surv,
                                           double* __restrict__ dX) {
     const int m = nl * nr;
     const long total = static_cast<long>(m) * static_cast<long>(nb);
     for (long idx = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
          idx < total; idx += static_cast<long>(gridDim.x) * blockDim.x) {
-        const int k = static_cast<int>(idx % m);
-        const int b = static_cast<int>(idx / m);
+        const int k  = static_cast<int>(idx % m);
+        const int bs = static_cast<int>(idx / m);            // compacted survivor index
+        const int b  = d_surv ? d_surv[bs] : bs;             // original resident block id
         dX[idx] = f4_gather_elem(f2, P, d_left, d_right, nr, b, k);
     }
+}
+
+// F1 / OQ-12 keep-mask: one thread per resident block b scans the [P×P] Vpair slab and
+// writes d_keep[b] = 0 iff the block is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair
+// Vpair>0) — AT2 read_f2's `!is.finite` drop. A fully-zero slab is the "no Vpair info"
+// sentinel (the legacy/parity zero-fill; a real block always has a positive diagonal),
+// NOT a missing block ⇒ kept. Mirrors the CpuBackend oracle survivor_blocks EXACTLY and
+// shares the SINGLE-SOURCE predicate core::pair_block_is_missing, so the two backends
+// cannot diverge on the drop rule.
+__global__ void f2_block_keep_kernel(const double* __restrict__ vpair, int P, int nb,
+                                     int* __restrict__ d_keep) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nb) return;
+    const long slab = static_cast<long>(P) * static_cast<long>(P);
+    const long base = slab * b;
+    bool any_missing = false, any_present = false;
+    for (long e = 0; e < slab; ++e) {
+        if (steppe::core::pair_block_is_missing(vpair[base + e])) any_missing = true;
+        else any_present = true;
+        if (any_missing && any_present) break;
+    }
+    d_keep[b] = (any_missing && any_present) ? 0 : 1;
 }
 
 // --- S3 est_to_loo + x_total + tot_line ------------------------------------------
@@ -1005,10 +1036,14 @@ loo_batched_kernel(const double* __restrict__ dLoo,
 // =================================================================================
 
 // --- S3 f4-gather (model-batched): grid over (k+m*b, model) ----------------------
+// F1 / OQ-12: `nb` is the SURVIVOR block count and `d_surv` (length nb, ASCENDING,
+// SHARED across models since the keep-mask is a property of the resident f2) maps the
+// compacted survivor index to the original resident block id. d_surv==nullptr ⇒ identity.
 __global__ void assemble_f4_gather_models_kernel(const double* __restrict__ f2, int P,
                                                  const int* __restrict__ d_left_arena,
                                                  const int* __restrict__ d_right_arena,
                                                  int nl, int nr, int nb, int n_models,
+                                                 const int* __restrict__ d_surv,
                                                  double* __restrict__ dX) {
     const long m = static_cast<long>(nl) * nr;
     const long per = m * nb;                         // elements per model
@@ -1016,9 +1051,10 @@ __global__ void assemble_f4_gather_models_kernel(const double* __restrict__ f2, 
     for (long gid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
          gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
         const int model = static_cast<int>(gid / per);
-        const long idx = gid - static_cast<long>(model) * per;  // k + m*b within model
-        const int k = static_cast<int>(idx % m);
-        const int b = static_cast<int>(idx / m);
+        const long idx = gid - static_cast<long>(model) * per;  // k + m*bs within model
+        const int k  = static_cast<int>(idx % m);
+        const int bs = static_cast<int>(idx / m);               // compacted survivor index
+        const int b  = d_surv ? d_surv[bs] : bs;                // original resident block id
         const int* lft = d_left_arena + static_cast<long>(model) * (nl + 1);
         const int* rgt = d_right_arena + static_cast<long>(model) * (nr + 1);
         dX[gid] = f4_gather_elem(f2, P, lft, rgt, nr, b, k);
@@ -1361,13 +1397,14 @@ void launch_assemble_f4_gather_models_batched(const double* f2, int P,
                                               const int* d_left_arena,
                                               const int* d_right_arena,
                                               int nl, int nr, int nb, int n_models,
+                                              const int* d_surv,
                                               double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * nr * nb * n_models;
     if (total <= 0) return;
     const int block = 256;
     const int grid = launch_grid_stride(total, block);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
-        f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, dX);
+        f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
@@ -1472,14 +1509,23 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
 
 void launch_assemble_f4_gather(const double* f2, int P,
                                const int* d_left, const int* d_right,
-                               int nl, int nr, int nb,
+                               int nl, int nr, int nb, const int* d_surv,
                                double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * nr * nb;
     if (total <= 0) return;
     const int block = 256;
     const int grid = static_cast<int>((total + block - 1) / block);
     assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(f2, P, d_left, d_right,
-                                                          nl, nr, nb, dX);
+                                                          nl, nr, nb, d_surv, dX);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_f2_block_keep(const double* vpair, int P, int nb, int* d_keep,
+                          cudaStream_t stream) {
+    if (nb <= 0) return;
+    const int block = 128;
+    const int grid = (nb + block - 1) / block;
+    f2_block_keep_kernel<<<grid, block, 0, stream>>>(vpair, P, nb, d_keep);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

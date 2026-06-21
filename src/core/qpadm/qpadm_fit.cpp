@@ -264,8 +264,12 @@ QpAdmResult run_qpadm_impl(ComputeBackend& be, const F2Src& f2, const QpAdmModel
     const Precision prec = core::qpadm::default_fit_precision();
     F4Blocks X = core::qpadm::assemble_f4(be, f2, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);
-    return core::qpadm::run_impl(be, std::move(X),
-                                 std::span<const int>(f2.block_sizes), model, opts);
+    // F1 / OQ-12: jackknife over the SURVIVOR blocks assemble_f4 kept (X.block_sizes),
+    // NOT the f2 source's full block_sizes — a missing block (Vpair==0 for any pair)
+    // was DROPPED from X by AT2 read_f2(remove_na=TRUE) semantics. With no missing
+    // blocks X.block_sizes == f2.block_sizes (byte-identical).
+    std::span<const int> bs(X.block_sizes);
+    return core::qpadm::run_impl(be, std::move(X), bs, model, opts);
 }
 
 /// Shared qpWave body: gather X with `left` as the rows DIRECTLY (NO target
@@ -278,8 +282,10 @@ QpWaveResult run_qpwave_impl(ComputeBackend& be, const F2Src& f2,
     const Precision prec = core::qpadm::default_fit_precision();
     // qpWave: NO target prepend — `left` IS the rows (left[0] the reference).
     F4Blocks X = core::qpadm::assemble_f4(be, f2, left, right, prec);
+    // F1 / OQ-12: jackknife over the SURVIVOR blocks (X.block_sizes), NOT the f2
+    // source's full block_sizes — missing blocks (Vpair==0 for any pair) were dropped.
     const JackknifeCov cov =
-        core::qpadm::jackknife_cov(be, X, std::span<const int>(f2.block_sizes), opts.fudge, prec);
+        core::qpadm::jackknife_cov(be, X, std::span<const int>(X.block_sizes), opts.fudge, prec);
     // HONEST precision_tag — single-homed in honored_tag ([7.1] dedup, §9/§12).
     const Precision::Kind tag = core::qpadm::honored_tag(prec, be);
     if (cov.status != Status::Ok) {
