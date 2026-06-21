@@ -484,6 +484,14 @@ public:
         std::vector<double> Qf = out.Q;
         ridge_diagonal(Qf, m, fudge);
         const core::LinAlgStatus st = core::inverse(Qf, m, out.Qinv);
+        // Producer-side "always sized" contract ([10.2][MED]): core::inverse early-
+        // returns on a singular Qf BEFORE zeroing its out-param, leaving out.Qinv
+        // default-constructed EMPTY. Size+zero it here so EVERY downstream consumer
+        // (als_weights/gls_weights -> als_ridge_solve, which indexes qinv[kr+m*kc])
+        // sees a well-formed m×m buffer even on the non-SPD path. No parity impact:
+        // the in-SPD-contract path already filled it, and NonSpdCovariance is gated
+        // upstream (qpadm_fit.cpp) — this only removes the latent OOB read.
+        if (!st.ok) out.Qinv.assign(static_cast<std::size_t>(m) * static_cast<std::size_t>(m), 0.0);
         out.status = st.ok ? Status::Ok : Status::NonSpdCovariance;
         return out;
     }

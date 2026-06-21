@@ -107,7 +107,7 @@ struct QpAdmOptions {
 struct QpAdmModel {
     /// L_0 ; target pop index (0..P-1). PREPENDED to left to form the AT2
     /// left = c(target, sources) convention (design §1.2).
-    int target;
+    int target = -1;  // value-type default to match model_index ([10.2][LOW])
 
     /// source pops L_1..L_nl (indices). nl == left.size().
     std::vector<int> left;

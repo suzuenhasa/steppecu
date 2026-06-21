@@ -2372,7 +2372,7 @@ private:
             const bool ok_fit = (h_info[j] == 0) && (h_status[j] == 0);
             if (!ok_fit) continue;
             ++n_eligible;
-            bool survivor;
+            bool survivor = false;  // structural no-uninitialized-read, not switch-coverage-dependent ([10.1][LOW])
             switch (opts.jackknife) {
                 case JackknifePolicy::None:
                     survivor = false;

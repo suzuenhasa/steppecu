@@ -137,11 +137,16 @@ __device__ inline bool dev_solve(const double* A, int n, const double* b,
 /// One-sided Jacobi SVD of m×n column-major A → V (n×k col-major, k=min(m,n),
 /// descending), and the W columns (normalized) are NOT needed by the seed (only V).
 /// Transliterates core::jacobi_svd (small_linalg.hpp:162-267). `W`/`Vfull`/`sigma`/
-/// `order` are caller scratch. Writes the leading r columns of V into `Vout` (n×r
-/// col-major). Native FP64.
+/// `order` are caller scratch. Writes the leading min(r,k) columns of V into `Vout`
+/// (n×r col-major, k=min(m,n)); the FULL n×r buffer is zero-initialized first, so
+/// any columns [k,r) (only reachable if a caller violates r<=k) read as 0 in
+/// dev_seed_ab instead of uninitialized garbage ([10.2][MED], defensive — in-
+/// contract r is bounded by rmax<k so those columns are overwritten by the copy
+/// loop, a no-op). Native FP64.
 __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
                                         double* W, double* Vfull, double* sigma,
                                         int* order, double* Vout) {
+    for (int i = 0; i < n * r; ++i) Vout[i] = 0.0;  // fully-written device output ([10.2][MED])
     for (int i = 0; i < m * n; ++i) W[i] = A[i];
     for (int i = 0; i < n * n; ++i) Vfull[i] = 0.0;
     for (int i = 0; i < n; ++i) Vfull[i + n * i] = 1.0;
@@ -955,7 +960,7 @@ __global__ void loo_batched_kernel(const double* __restrict__ dLoo,
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xmat[i + nl * j] = dLoo[(j + nr * i) + static_cast<long>(m) * b];
-    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq;            // many-thread ⇒ SMALL bound
+    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq = 0.0;      // many-thread ⇒ SMALL bound; chisq filled via out-ptr ([10.1][LOW] sentinel)
     const int st = dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
         xmat, nl, nr, r, dQinv, fudge, als_iters, /*seed=*/true, A, B, w, &chisq);
     for (int i = 0; i < nl; ++i)
@@ -1139,7 +1144,7 @@ __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
             xmat[i + nl * j] = total[j + nr * i];
 
     // ---- the full-rank fit at r_fit (weights + chisq) ----------------------------
-    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq;
+    double A[kQpMaxT], B[kQpMaxT], w[kQpMaxNl], chisq = 0.0;  // chisq filled via out-ptr by dev_als_weights ([10.1][LOW] sentinel)
     int st = dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
         xmat, nl, nr, r_fit, qinv, fudge, als_iters, /*seed=*/true, A, B, w, &chisq);
     d_status[model] = st;
@@ -1149,7 +1154,7 @@ __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
 
     // ---- the rank sweep r = 0..rmax (chisq(r); reuses the SAME xmat + qinv) -------
     for (int rr = 0; rr <= rmax; ++rr) {
-        double Ar[kQpMaxT], Br[kQpMaxT], wr[kQpMaxNl], cr;
+        double Ar[kQpMaxT], Br[kQpMaxT], wr[kQpMaxNl], cr = 0.0;  // cr filled via out-ptr by dev_als_weights ([10.1][LOW] sentinel)
         dev_als_weights<kQpMaxNl, kQpMaxNr, kQpMaxR>(
             xmat, nl, nr, rr, qinv, fudge, als_iters, /*seed=*/true, Ar, Br, wr, &cr);
         d_rank_chisq[static_cast<long>(model) * (rmax + 1) + rr] = cr;
