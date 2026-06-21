@@ -24,27 +24,18 @@ const STD = [
   'REAL DATA ONLY (memory real-data-only-all-results): the gate is the REAL-AADR AT2 goldens — golden_fit0 (9-pop) / golden_fit1_NRBIG (nr=39) / golden_rot (84-model) under tests/reference/goldens/at2/. NO synthetic data, EVER. The default ctest validates the GPU path vs the goldens; STEPPE_THOROUGH=1 additionally runs the CpuBackend oracle vs the same goldens (REQUIRED to catch CpuBackend regressions, since the default ctest is GPU-only).',
   'DOC-VERIFY (memory refactor-process-rules): VERIFY any CUDA/cuBLAS/cuSOLVER/C++-stdlib API-behavior claim against the official CUDA 13.x docs (ToolSearch select:WebSearch,WebFetch) and cite it. Do not fix API semantics from memory.',
   'HARDWARE (memory refactor-process-rules + steppebox5090): box5090 = 2x RTX 5090 (consumer, P2P DISABLED) = the FALLBACK/baseline, keep it green. If a fix touches P2P / multi-GPU / pro-GPU / CUDA-13+ capability (e.g. p2p_combine.cu, cudaMemcpyPeer, multi-GPU device-correct free in RAII groups 16/17, memory-pool/async-alloc in group 14), treat the CAPABLE path (RTX PRO 6000 / stock-driver P2P / newest CUDA-13 feature) as the PRIORITY and the 5090 limit as the explicitly-tagged graceful-degrade — NEVER hardcode to the 5090.',
+  'RELEASE / NDEBUG PITFALL (this is why group 7 failed its first pass — DO NOT repeat it): the gate build is RELEASE (-DNDEBUG, warnings-as-errors). STEPPE_ASSERT / STEPPE_DEBUG_ONLY (core/internal/host_device.hpp) COMPILE OUT under NDEBUG, so any function (esp. a NEW extracted helper) whose parameters are ONLY touched inside STEPPE_ASSERT will have UNUSED params on Release -> -Werror=unused-parameter -> build FAILS. When you extract a validate_*/assert-only helper, mark such params [[maybe_unused]] (or (void)x them), and build mentally for NDEBUG. Verify the helper compiles clean on Release, not just debug.',
   'SCOPE DISCIPLINE: fix ONLY the [g.x][MED] findings of the CURRENT group (and any [g.x][LOW] that folds in for free WITHOUT extra risk). Do NOT touch other groups\' findings, do NOT do speculative rewrites. MED findings that a prior phase already resolved (e.g. the [9.2][MED] kQpMax cross-ref resolved by H2, the [13.1][MED] made moot by H1, the [7.2]/[7.4] folded by H3) — SKIP them, note "already resolved". Behavior-preserving where possible; the golden gate catches any parity break.',
   'BOX = box5090. ' + SSH + ' (alias); nvcc -> ' + PATHENV + ' . build-rel exists, RELEASE only. NOTHING builds locally. Core dumps cleared before+after every build.',
 ].join('\n')
 
 const DEVLOOP = 'DEV LOOP (nothing builds locally): the tree is at a CLEAN HEAD at group start. Task-fixers ACCUMULATE edits on the working tree (do NOT clean between tasks of the same group). Edit locally; the group verdict does the rsync (' + RSYNC + ') + build (' + BUILD + ') + thorough (' + THOROUGH + '). Do NOT commit (the verdict commits the whole group). Do NOT use synthetic data.'
 
+// RE-RUN: only group 7 (Duplication) — it failed first pass on Release -Werror=unused-parameter
+// (a new helper's params go unused when STEPPE_ASSERT compiles out under NDEBUG). All other MED
+// groups (5,8,9,10,12,13,14,15,16,17,20,21,22) already committed. See the NDEBUG note in STD.
 const GROUPS = [
-  { g: 5,  name: 'Hardcoded values / magic numbers', scope: 'all' },
   { g: 7,  name: 'Duplication', scope: 'all' },
-  { g: 8,  name: 'Comments', scope: 'all' },
-  { g: 9,  name: 'Constants & configuration', scope: 'all' },
-  { g: 10, name: 'Initialization', scope: 'all' },
-  { g: 12, name: 'Launch config & indexing', scope: 'kernel' },
-  { g: 13, name: 'Error handling', scope: 'device' },
-  { g: 14, name: 'Memory: allocation & lifetime', scope: 'device' },
-  { g: 15, name: 'Memory: transfers', scope: 'device' },
-  { g: 16, name: 'RAII: ownership & wrapper hygiene', scope: 'device' },
-  { g: 17, name: 'RAII: lifetime & deleter pitfalls', scope: 'device' },
-  { g: 20, name: 'Performance: memory access', scope: 'kernel' },
-  { g: 21, name: 'Performance: occupancy & registers', scope: 'kernel' },
-  { g: 22, name: 'Performance: compute & launch', scope: 'kernel' },
 ]
 
 async function tryAgent(p, opts) {
