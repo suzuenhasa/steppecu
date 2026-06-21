@@ -210,10 +210,31 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
     }
 }
 
+/// Seed A,B from the right singular vectors V[:,0:r] (the GEMM tail of seed_AB) —
+/// core::seed_AB (src/device/cpu/cpu_backend.cpp). The ONE body (group-7 7.1) for both
+/// the on-device-Jacobi path (dev_seed_ab passes its Jacobi `Vout`) AND the cuSOLVER
+/// large path (seed_from_V_kernel passes the host-supplied `dVout`). `V` is nr×r
+/// col-major. B = t(V[:,0:r]) (r×nr): B[p,j]=V[j,p]; A = xmat·t(B) (nl×r). The global
+/// indices are 64-bit-widened (in-range ⇒ identical to the un-widened form; the prior
+/// large copy already widened). Native FP64.
+__device__ inline void seed_ab_from_V(const double* xmat, const double* V,
+                                      int nl, int nr, int r, double* A, double* B) {
+    for (int p = 0; p < r; ++p)
+        for (int j = 0; j < nr; ++j)
+            B[p + r * j] = V[j + static_cast<long>(nr) * p];
+    for (int i = 0; i < nl; ++i)
+        for (int p = 0; p < r; ++p) {
+            double acc = 0.0;
+            for (int j = 0; j < nr; ++j)
+                acc += xmat[i + static_cast<long>(nl) * j] * B[p + r * j];
+            A[i + static_cast<long>(nl) * p] = acc;
+        }
+}
+
 /// Seed A,B from svd(xmat) at rank r — core::seed_AB (src/device/cpu/cpu_backend.cpp).
-/// B = t(V[:,0:r]) (r×nr): B[p,j]=V[j,p]; A = xmat·t(B) (nl×r). Native FP64.
-/// Templated on the per-thread local-array bound (MAXNL/MAXNR/MAXR): the single-
-/// thread sweep kernels instantiate it at a BIG bound (nr>32 fallback) while the
+/// On-device one-sided Jacobi SVD → V, then the shared seed_ab_from_V GEMM tail.
+/// Native FP64. Templated on the per-thread local-array bound (MAXNL/MAXNR/MAXR): the
+/// single-thread sweep kernels instantiate it at a BIG bound (nr>32 fallback) while the
 /// many-thread LOO batched kernel uses the SMALL bound — so widening the sweep's
 /// scratch never bloats the batched kernel's per-thread local memory (the launch
 /// constraint; the kQpMax* rationale at the top of this file).
@@ -226,31 +247,32 @@ __device__ inline void dev_seed_ab(const double* xmat, int nl, int nr, int r,
     int order[MAXNR];
     double Vout[MAXNR * MAXR];
     dev_jacobi_svd_V(xmat, nl, nr, r, W, Vfull, sigma, order, Vout);
-    for (int p = 0; p < r; ++p)
-        for (int j = 0; j < nr; ++j)
-            B[p + r * j] = Vout[j + nr * p];
-    for (int i = 0; i < nl; ++i)
-        for (int p = 0; p < r; ++p) {
-            double acc = 0.0;
-            for (int j = 0; j < nr; ++j)
-                acc += xmat[i + nl * j] * B[p + r * j];
-            A[i + nl * p] = acc;
-        }
+    seed_ab_from_V(xmat, Vout, nl, nr, r, A, B);
 }
 
-/// opt_A — core::opt_A (src/device/cpu/cpu_backend.cpp). Given B (r×nr), returns A (nl×r).
-/// __noinline__ so its large local frame (Wm/coeffs) does NOT stack with opt_B's in
-/// the ALS-loop kernels (keeps the per-thread local-memory reservation small enough
-/// to launch — see the kQpMax* bound rationale). Templated on the local-array bound
-/// (MAXM/MAXT) so the single-thread sweep can use a big bound while the batched LOO
-/// kernel keeps the small one.
-template <int MAXM, int MAXT>
-__device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
-                                       int nl, int nr, int r, const double* qinv,
-                                       double fudge, double* Aout) {
+// --- ONE math body per concept (group-7 7.1 device-side dedup) --------------------
+// opt_A / opt_B / chisq each had a templated LOCAL-array twin AND a VRAM-pointer
+// `*_large` twin (line-for-line copies differing ONLY by where the working arrays
+// live). They are now ONE `__device__` CORE taking the scratch as POINTERS; the
+// caller decides local-vs-VRAM. The SMALL path passes pointers to its OWN per-thread
+// LOCAL arrays (declared in the thin templated wrapper, which is `__noinline__` so
+// opt_A's frame does not stack with opt_B's — the original launch-OOM guard, kept);
+// the LARGE path passes VRAM-scratch pointers. SAME math + SAME FP op order as both
+// prior copies (the twin sites asserted bit-identity); this is mechanical dedup.
+
+/// opt_A CORE — core::opt_A (src/device/cpu/cpu_backend.cpp). Given B (r×nr), returns
+/// A (nl×r) into `Aout`. ALL working storage is caller scratch (pointers): xvec[m],
+/// Wm[m*t], coeffs[t*t], rhs[t], A2[t], lu[t*t], y[t]; piv[t] (int). t = nl*r. The
+/// caller (small templated wrapper OR large VRAM kernel) decides whether these point
+/// at per-thread local arrays or a VRAM arena slice. Native FP64.
+__device__ inline void dev_opt_A_core(const double* B, const double* xmat,
+                                      int nl, int nr, int r, const double* qinv,
+                                      double fudge, double* Aout,
+                                      double* xvec, double* Wm, double* coeffs,
+                                      double* rhs, double* A2, double* lu, double* y,
+                                      int* piv) {
     const int m = nl * nr;
     const int t = nl * r;
-    double xvec[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
@@ -261,7 +283,6 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
         const int ii = k / nr, j = k % nr;
         return (i == ii) ? B[p + r * j] : 0.0;
     };
-    double Wm[MAXM * MAXT];  // m×t
     for (int kr = 0; kr < m; ++kr)
         for (int a = 0; a < t; ++a) {
             const int i = a / r, p = a % r;
@@ -269,8 +290,6 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
             for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(i, p, kc);
             Wm[kr + m * a] = acc;
         }
-    double coeffs[MAXT * MAXT];
-    double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
         const int i = a / r, p = a % r;
         for (int c = 0; c < t; ++c) {
@@ -285,8 +304,6 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
     double tr = 0.0;
     for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
     for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    double A2[MAXT], lu[MAXT * MAXT], y[MAXT];
-    int piv[MAXT];
     for (int i = 0; i < nl * r; ++i) Aout[i] = 0.0;
     if (dev_solve(coeffs, t, rhs, A2, lu, piv, y)) {
         for (int i = 0; i < nl; ++i)
@@ -295,16 +312,16 @@ __device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
     }
 }
 
-/// opt_B — core::opt_B (src/device/cpu/cpu_backend.cpp). Given A (nl×r), returns B (r×nr).
-/// __noinline__ (see dev_opt_A) so its frame does not stack with opt_A's. Templated
-/// on the local-array bound (MAXM/MAXT), see dev_opt_A.
-template <int MAXM, int MAXT>
-__device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
-                                       int nl, int nr, int r, const double* qinv,
-                                       double fudge, double* Bout) {
+/// opt_B CORE — core::opt_B (src/device/cpu/cpu_backend.cpp). Given A (nl×r), returns
+/// B (r×nr) into `Bout`. Caller scratch as dev_opt_A_core; t = r*nr. Native FP64.
+__device__ inline void dev_opt_B_core(const double* A, const double* xmat,
+                                      int nl, int nr, int r, const double* qinv,
+                                      double fudge, double* Bout,
+                                      double* xvec, double* Wm, double* coeffs,
+                                      double* rhs, double* B2v, double* lu, double* y,
+                                      int* piv) {
     const int m = nl * nr;
     const int t = r * nr;
-    double xvec[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j)
             xvec[i * nr + j] = xmat[i + nl * j];
@@ -316,7 +333,6 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
         const int i = k / nr, j = k % nr;
         return (j == jc) ? A[i + nl * p] : 0.0;
     };
-    double Wm[MAXM * MAXT];
     for (int kr = 0; kr < m; ++kr)
         for (int c = 0; c < t; ++c) {
             const int p = c / nr, jc = c % nr;
@@ -324,8 +340,6 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
             for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, p, jc);
             Wm[kr + m * c] = acc;
         }
-    double coeffs[MAXT * MAXT];
-    double rhs[MAXT];
     for (int a = 0; a < t; ++a) {
         const int pa = a / nr, jca = a % nr;
         for (int c = 0; c < t; ++c) {
@@ -340,8 +354,6 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
     double tr = 0.0;
     for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
     for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    double B2v[MAXT], lu[MAXT * MAXT], y[MAXT];
-    int piv[MAXT];
     for (int i = 0; i < r * nr; ++i) Bout[i] = 0.0;
     if (dev_solve(coeffs, t, rhs, B2v, lu, piv, y)) {
         for (int p = 0; p < r; ++p)
@@ -350,15 +362,14 @@ __device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
     }
 }
 
-/// chisq = vec(E)'·qinv·vec(E), E = xmat - A·B, row-major vec — core::chisq_of
-/// (src/device/cpu/cpu_backend.cpp). Native FP64 (CpuBackend uses long double; FP64 matches
-/// the golden chisq to the gate tier). Templated on MAXM (the residual-vector bound).
-template <int MAXM>
-__device__ inline double dev_chisq_of(const double* xmat, const double* A,
-                                      const double* B, int nl, int nr, int r,
-                                      const double* qinv) {
+/// chisq CORE = vec(E)'·qinv·vec(E), E = xmat - A·B, row-major vec — core::chisq_of
+/// (src/device/cpu/cpu_backend.cpp). `e` is the caller-provided residual scratch
+/// (local array for the small path, VRAM slice for the large). Native FP64 (CpuBackend
+/// uses long double; FP64 matches the golden chisq to the gate tier).
+__device__ inline double dev_chisq_of_core(const double* xmat, const double* A,
+                                           const double* B, int nl, int nr, int r,
+                                           const double* qinv, double* e) {
     const int m = nl * nr;
-    double e[MAXM];
     for (int i = 0; i < nl; ++i)
         for (int j = 0; j < nr; ++j) {
             double ab = 0.0;
@@ -372,6 +383,84 @@ __device__ inline double dev_chisq_of(const double* xmat, const double* A,
         acc += e[a] * row;
     }
     return acc;
+}
+
+/// opt_A (SMALL) — thin templated wrapper over dev_opt_A_core: declares the per-thread
+/// LOCAL scratch (sized by MAXM/MAXT) and passes POINTERS to it into the core, so the
+/// arrays stay register/local-resident (no VRAM). `__noinline__` so this frame is
+/// allocated only for the duration of the opt_A call and does NOT stack with opt_B's
+/// in the ALS loop (the launch-OOM guard the original `__noinline__ dev_opt_A` gave).
+/// Templated on the local-array bound (MAXM/MAXT) so the single-thread sweep can use a
+/// big bound while the batched LOO kernel keeps the small one.
+template <int MAXM, int MAXT>
+__device__ __noinline__ void dev_opt_A(const double* B, const double* xmat,
+                                       int nl, int nr, int r, const double* qinv,
+                                       double fudge, double* Aout) {
+    double xvec[MAXM];
+    double Wm[MAXM * MAXT];  // m×t
+    double coeffs[MAXT * MAXT];
+    double rhs[MAXT];
+    double A2[MAXT], lu[MAXT * MAXT], y[MAXT];
+    int piv[MAXT];
+    dev_opt_A_core(B, xmat, nl, nr, r, qinv, fudge, Aout,
+                   xvec, Wm, coeffs, rhs, A2, lu, y, piv);
+}
+
+/// opt_B (SMALL) — thin templated wrapper over dev_opt_B_core; see dev_opt_A. Native FP64.
+template <int MAXM, int MAXT>
+__device__ __noinline__ void dev_opt_B(const double* A, const double* xmat,
+                                       int nl, int nr, int r, const double* qinv,
+                                       double fudge, double* Bout) {
+    double xvec[MAXM];
+    double Wm[MAXM * MAXT];
+    double coeffs[MAXT * MAXT];
+    double rhs[MAXT];
+    double B2v[MAXT], lu[MAXT * MAXT], y[MAXT];
+    int piv[MAXT];
+    dev_opt_B_core(A, xmat, nl, nr, r, qinv, fudge, Bout,
+                   xvec, Wm, coeffs, rhs, B2v, lu, y, piv);
+}
+
+/// chisq (SMALL) — thin templated wrapper over dev_chisq_of_core with a per-thread
+/// LOCAL residual array e[MAXM]. Native FP64.
+template <int MAXM>
+__device__ inline double dev_chisq_of(const double* xmat, const double* A,
+                                      const double* B, int nl, int nr, int r,
+                                      const double* qinv) {
+    double e[MAXM];
+    return dev_chisq_of_core(xmat, A, B, nl, nr, r, qinv, e);
+}
+
+/// Constrained weight solve CORE (group-7 7.1: the ONE body for the FOUR copies in
+/// dev_als_weights / weights_chisq_kernel / weights_chisq_large_kernel /
+/// loo_large_batched_kernel). From the refined A (nl×r) build the nl×nl crossprod
+/// RHS = Σ_p xm(i,p)·xm(ip,p) with xm(i,p)=A(i,p) for p<r, xm(i,r)=1, set the constant
+/// vector LHS = ones, dev_solve(RHS,nl,LHS,wv,...), then normalize Σw=1 into `w_out`.
+/// Returns true=Ok, false=RankDeficient (singular solve; `w_out` untouched ⇒ the caller
+/// writes its own zeros/NaN per its status contract). ALL working storage is caller
+/// scratch (POINTERS): RHS[nl*nl], lhs[nl], wv[nl], lu[nl*nl], y[nl]; piv[nl] (int) —
+/// the small path passes per-thread LOCAL arrays, the large path a VRAM slice. The math
+/// + FP op order are bit-identical to all four prior copies (xm(i,r) ≡ the literal 1.0,
+/// so lhs=ones reproduces it exactly). Native FP64.
+__device__ inline bool solve_constrained_weights(const double* A, int nl, int r,
+                                                 double* RHS, double* lhs, double* wv,
+                                                 double* lu, double* y, int* piv,
+                                                 double* w_out) {
+    const int rp = r + 1;
+    auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
+    for (int i = 0; i < nl; ++i) {
+        for (int ip = 0; ip < nl; ++ip) {
+            double acc = 0.0;
+            for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
+            RHS[i + nl * ip] = acc;
+        }
+        lhs[i] = 1.0;  // = xm(i,r); the constant ones vector
+    }
+    if (!dev_solve(RHS, nl, lhs, wv, lu, piv, y)) return false;  // RankDeficient
+    double sum = 0.0;
+    for (int i = 0; i < nl; ++i) sum += wv[i];
+    for (int i = 0; i < nl; ++i) w_out[i] = wv[i] / sum;
+    return true;
 }
 
 /// Full als_weights body — core::als_weights (src/device/cpu/cpu_backend.cpp). Refines A,B
@@ -400,27 +489,91 @@ __device__ inline int dev_als_weights(const double* xmat, int nl, int nr, int r,
         dev_opt_B<MAXM, MAXT>(A, xmat, nl, nr, r, qinv, fudge, Btmp);
         for (int i = 0; i < r * nr; ++i) B[i] = Btmp[i];
     }
-    // Constrained weight solve: xm(i,p)=A(i,p) for p<r, xm(i,r)=1.
-    const int rp = r + 1;
-    auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
-    double RHS[MAXNL * MAXNL];
-    double LHS[MAXNL];
-    for (int i = 0; i < nl; ++i) {
-        for (int ip = 0; ip < nl; ++ip) {
-            double acc = 0.0;
-            for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
-            RHS[i + nl * ip] = acc;
-        }
-        LHS[i] = xm(i, r);  // = 1
-    }
-    double wv[MAXNL], lu[MAXNL * MAXNL], y[MAXNL];
+    // Constrained weight solve (the shared core; per-thread LOCAL scratch passed in).
+    double RHS[MAXNL * MAXNL], LHS[MAXNL], wv[MAXNL], lu[MAXNL * MAXNL], y[MAXNL];
     int piv[MAXNL];
-    if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) return 6;  // RankDeficient
-    double sum = 0.0;
-    for (int i = 0; i < nl; ++i) sum += wv[i];
-    for (int i = 0; i < nl; ++i) w_out[i] = wv[i] / sum;
+    if (!solve_constrained_weights(A, nl, r, RHS, LHS, wv, lu, y, piv, w_out))
+        return 6;  // RankDeficient
     *chisq_out = dev_chisq_of<MAXM>(xmat, A, B, nl, nr, r, qinv);
     return 0;
+}
+
+// --- S3/S4 f4 element/row CORES (group-7 7.1: ONE body for the single-model and the
+// model-batched kernels) -----------------------------------------------------------
+// Each model-batched f4 kernel was the single-model body with a `model` grid axis +
+// a per-model slice offset on every index; the 4-slab combine, the loo/tot_line/est
+// reduction, and the xtau formula were duplicated verbatim. The math is now ONE core
+// per concept; the single-model kernel passes the base/direct pointers (base = 0), the
+// model-batched kernel passes the per-model slice pointers. SAME FP op order ⇒ bit-
+// identical (§12). Native FP64.
+
+/// f4 4-slab gather for ONE element (left index lft[], right index rgt[], block b,
+/// k = j + nr*i). Reads the RESIDENT f2 tensor (col-major a + P*c + P*P*b). The
+/// cancellation-sensitive f-stat difference: 0.5*(f2(Li,R0)+f2(L0,Rj)-f2(L0,R0)-f2(Li,Rj)).
+__device__ inline double f4_gather_elem(const double* f2, int P, const int* lft,
+                                        const int* rgt, int nr, int b, int k) {
+    const int i = k / nr;  // left source index (0..nl-1)
+    const int j = k % nr;  // right index       (0..nr-1)
+    const int L0 = lft[0];
+    const int R0 = rgt[0];
+    const int Li = lft[i + 1];
+    const int Rj = rgt[j + 1];
+    const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
+    const auto at = [&](int a, int c) -> double {
+        return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
+    };
+    return 0.5 * (at(Li, R0) + at(L0, Rj) - at(L0, R0) - at(Li, Rj));
+}
+
+/// est_to_loo + x_total + tot_line for ONE row k of one model's slice (CpuBackend
+/// compute_loo_and_total). `dX_slice` is this model's dX (m*nb), `dLoo_slice` this
+/// model's dLoo (written in place). Returns tot_line + total via out-params (the caller
+/// stores them at its own strided output position). The loo-pass fold (cleanup 20.3/MED)
+/// is unchanged: wln/wld/wbn accumulate from the just-computed loo (no re-read), only
+/// diffsum re-reads loo — IDENTICAL ascending-b/operand order ⇒ bit-parity (§12).
+__device__ inline void f4_loo_total_row(const double* dX_slice,
+                                        const int* d_block_sizes, int m, int nb,
+                                        double n, int k, double* dLoo_slice,
+                                        double* tot_line_out, double* total_out) {
+    // tot_ij = (Σ_b X[k,b]*bl_b) / n.
+    double num = 0.0;
+    for (int b = 0; b < nb; ++b)
+        num += dX_slice[k + static_cast<long>(m) * b] *
+               static_cast<double>(d_block_sizes[b]);
+    const double tot_ij = num / n;
+    // loo[k,b] = (tot_ij - X*rel_b)/(1-rel_b); fold in the tot_line weighted-mean
+    // (wln/wld) and the loo*bl term (wbn) from the just-computed loo (no re-read).
+    double wln = 0.0, wld = 0.0, wbn = 0.0;
+    for (int b = 0; b < nb; ++b) {
+        const double bl = static_cast<double>(d_block_sizes[b]);
+        const double rel = bl / n;
+        const double xv = dX_slice[k + static_cast<long>(m) * b];
+        const double loo = (tot_ij - xv * rel) / (1.0 - rel);
+        dLoo_slice[k + static_cast<long>(m) * b] = loo;
+        const double w = 1.0 - rel;  // == 1 - bl/n (identical FP64), the tot_line weight
+        wln += loo * w;
+        wld += w;
+        wbn += loo * bl;
+    }
+    const double tot_line = wln / wld;
+    *tot_line_out = tot_line;
+    // est[k] = Σ_b (tot_line - loo) + (Σ_b loo*bl)/n. The diffsum term needs tot_line
+    // (only now known), so it alone re-reads loo in this deferred pass.
+    double diffsum = 0.0;
+    for (int b = 0; b < nb; ++b) {
+        const double loo = dLoo_slice[k + static_cast<long>(m) * b];
+        diffsum += tot_line - loo;
+    }
+    *total_out = diffsum + wbn / n;
+}
+
+/// xtau pseudo-value for ONE (k,b): h = n/bl, sh = sqrt(h-1),
+/// xtau = (est*h - loo*(h-1) - tot_line) / sh. Native FP64.
+__device__ inline double f4_xtau_elem(double est, double loo, double tot_line,
+                                      double bl, double n) {
+    const double h = n / bl;
+    const double sh = sqrt(h - 1.0);
+    return (est * h - loo * (h - 1.0) - tot_line) / sh;
 }
 
 // --- S3 f4-gather kernel ---------------------------------------------------------
@@ -438,18 +591,7 @@ __global__ void assemble_f4_gather_kernel(const double* __restrict__ f2, int P,
          idx < total; idx += static_cast<long>(gridDim.x) * blockDim.x) {
         const int k = static_cast<int>(idx % m);
         const int b = static_cast<int>(idx / m);
-        const int i = k / nr;  // left source index (0..nl-1)
-        const int j = k % nr;  // right index       (0..nr-1)
-        const int L0 = d_left[0];
-        const int R0 = d_right[0];
-        const int Li = d_left[i + 1];
-        const int Rj = d_right[j + 1];
-        const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
-        const auto at = [&](int a, int c) -> double {
-            return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
-        };
-        const double x = 0.5 * (at(Li, R0) + at(L0, Rj) - at(L0, R0) - at(Li, Rj));
-        dX[idx] = x;
+        dX[idx] = f4_gather_elem(f2, P, d_left, d_right, nr, b, k);
     }
 }
 
@@ -482,36 +624,7 @@ __global__ void f4_loo_total_kernel(const double* __restrict__ dX,
                                     double* __restrict__ dTotLine) {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= m) return;
-    // tot_ij = (Σ_b X[k,b]*bl_b) / n.
-    double num = 0.0;
-    for (int b = 0; b < nb; ++b)
-        num += dX[k + static_cast<long>(m) * b] *
-               static_cast<double>(d_block_sizes[b]);
-    const double tot_ij = num / n;
-    // loo[k,b] = (tot_ij - X*rel_b)/(1-rel_b); fold in the tot_line weighted-mean
-    // (wln/wld) and the loo*bl term (wbn) from the just-computed loo (no re-read).
-    double wln = 0.0, wld = 0.0, wbn = 0.0;
-    for (int b = 0; b < nb; ++b) {
-        const double bl = static_cast<double>(d_block_sizes[b]);
-        const double rel = bl / n;
-        const double xv = dX[k + static_cast<long>(m) * b];
-        const double loo = (tot_ij - xv * rel) / (1.0 - rel);
-        dLoo[k + static_cast<long>(m) * b] = loo;
-        const double w = 1.0 - rel;  // == 1 - bl/n (identical FP64), the tot_line weight
-        wln += loo * w;
-        wld += w;
-        wbn += loo * bl;
-    }
-    const double tot_line = wln / wld;
-    dTotLine[k] = tot_line;
-    // est[k] = Σ_b (tot_line - loo) + (Σ_b loo*bl)/n. The diffsum term needs tot_line
-    // (only now known), so it alone re-reads loo in this deferred pass.
-    double diffsum = 0.0;
-    for (int b = 0; b < nb; ++b) {
-        const double loo = dLoo[k + static_cast<long>(m) * b];
-        diffsum += tot_line - loo;
-    }
-    dTotal[k] = diffsum + wbn / n;
+    f4_loo_total_row(dX, d_block_sizes, m, nb, n, k, dLoo, &dTotLine[k], &dTotal[k]);
 }
 
 // --- S4 xtau pseudo-values -------------------------------------------------------
@@ -529,10 +642,7 @@ __global__ void f4_xtau_kernel(const double* __restrict__ dLoo,
         const int k = static_cast<int>(idx % m);
         const int b = static_cast<int>(idx / m);
         const double bl = static_cast<double>(d_block_sizes[b]);
-        const double h = n / bl;
-        const double sh = sqrt(h - 1.0);
-        const double loo = dLoo[idx];
-        dXtau[idx] = (dEst[k] * h - loo * (h - 1.0) - dTotLine[k]) / sh;
+        dXtau[idx] = f4_xtau_elem(dEst[k], dLoo[idx], dTotLine[k], bl, n);
     }
 }
 
@@ -612,152 +722,56 @@ __global__ void weights_chisq_kernel(const double* __restrict__ dXmat,
         *d_status = 0;
         return;
     }
-    const int rp = r + 1;
-    auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
-    double RHS[kQpMaxNl * kQpMaxNl], LHS[kQpMaxNl];
-    for (int i = 0; i < nl; ++i) {
-        for (int ip = 0; ip < nl; ++ip) {
-            double acc = 0.0;
-            for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
-            RHS[i + nl * ip] = acc;
-        }
-        LHS[i] = xm(i, r);
-    }
-    double wv[kQpMaxNl], lu[kQpMaxNl * kQpMaxNl], y[kQpMaxNl];
+    double RHS[kQpMaxNl * kQpMaxNl], LHS[kQpMaxNl], wv[kQpMaxNl], lu[kQpMaxNl * kQpMaxNl], y[kQpMaxNl];
     int piv[kQpMaxNl];
-    if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) { *d_status = 6; return; }
-    double sum = 0.0;
-    for (int i = 0; i < nl; ++i) sum += wv[i];
-    for (int i = 0; i < nl; ++i) dW[i] = wv[i] / sum;
+    if (!solve_constrained_weights(A, nl, r, RHS, LHS, wv, lu, y, piv, dW)) {
+        *d_status = 6; return;
+    }
     *dchisq = dev_chisq_of<MAXM>(dXmat, A, B, nl, nr, r, dQinv);
     *d_status = 0;
 }
 
 // ---------------------------------------------------------------------------------
-// LARGE-path device helpers (the FROZEN CONTRACT §2.2): VRAM-scratch versions of
-// opt_A / opt_B / chisq / seed-from-V. SAME math + SAME op order as the templated
-// small kernels above, but every per-model working array is a `double*` into caller-
-// provided VRAM (so arbitrary nl/nr/m/r fit — no per-thread local frame to OOM at
-// launch). Single thread per model. Native FP64. The scratch layout (offsets the
-// launch wrapper precomputes) is documented at each call.
+// LARGE-path device helpers (the FROZEN CONTRACT §2.2): VRAM-scratch entry points for
+// opt_A / opt_B / chisq. These are now THIN forwarders to the shared cores above
+// (dev_opt_A_core / dev_opt_B_core / dev_chisq_of_core) — the math + op order are the
+// cores' single body (group-7 7.1: one body replacing the small/large copies). The
+// `*_large` names + signatures are kept so the large kernels (als_large_kernel,
+// loo_large_batched_kernel) carve the VRAM scratch and call them unchanged; every
+// per-model working array is a `double*` into caller-provided VRAM (so arbitrary
+// nl/nr/m/r fit — no per-thread local frame to OOM at launch). Single thread per
+// model. Native FP64. The scratch layout (offsets the caller precomputes) is at each call.
 // ---------------------------------------------------------------------------------
 
-/// opt_A (large) — core::opt_A (src/device/cpu/cpu_backend.cpp) with VRAM scratch. B (r×nr)
-/// in, A (nl×r) out. Scratch: xvec[m], Wm[m*t], coeffs[t*t], rhs[t], A2[t], lu[t*t],
-/// y[t]; ipiv[t] (int). t = nl*r. Same op order as dev_opt_A.
+/// opt_A (large) — VRAM-scratch entry to dev_opt_A_core. B (r×nr) in, A (nl×r) out.
+/// Scratch: xvec[m], Wm[m*t], coeffs[t*t], rhs[t], A2[t], lu[t*t], y[t]; ipiv[t]. t = nl*r.
 __device__ inline void dev_opt_A_large(const double* B, const double* xmat,
                                        int nl, int nr, int r, const double* qinv,
                                        double fudge, double* Aout,
                                        double* xvec, double* Wm, double* coeffs,
                                        double* rhs, double* A2, double* lu, double* y,
                                        int* ipiv) {
-    const int m = nl * nr;
-    const int t = nl * r;
-    for (int i = 0; i < nl; ++i)
-        for (int j = 0; j < nr; ++j)
-            xvec[i * nr + j] = xmat[i + nl * j];
-    // B2(a,k): outer-index split (i=a/r,p=a%r) hoisted once per `a` (loop-invariant across
-    // the inner kc/k loops); inner decode (ii=k/nr,j=k%nr) is per-element. See dev_opt_A.
-    auto B2 = [&](int i, int p, int k) -> double {
-        const int ii = k / nr, j = k % nr;
-        return (i == ii) ? B[p + r * j] : 0.0;
-    };
-    for (int kr = 0; kr < m; ++kr)
-        for (int a = 0; a < t; ++a) {
-            const int i = a / r, p = a % r;
-            double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * B2(i, p, kc);
-            Wm[kr + m * a] = acc;
-        }
-    for (int a = 0; a < t; ++a) {
-        const int i = a / r, p = a % r;
-        for (int c = 0; c < t; ++c) {
-            double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += B2(i, p, k) * Wm[k + m * c];
-            coeffs[a + t * c] = acc;
-        }
-        double rr = 0.0;
-        for (int k = 0; k < m; ++k) rr += xvec[k] * Wm[k + m * a];
-        rhs[a] = rr;
-    }
-    double tr = 0.0;
-    for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
-    for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    for (int i = 0; i < nl * r; ++i) Aout[i] = 0.0;
-    if (dev_solve(coeffs, t, rhs, A2, lu, ipiv, y)) {
-        for (int i = 0; i < nl; ++i)
-            for (int p = 0; p < r; ++p)
-                Aout[i + nl * p] = A2[i * r + p];
-    }
+    dev_opt_A_core(B, xmat, nl, nr, r, qinv, fudge, Aout,
+                   xvec, Wm, coeffs, rhs, A2, lu, y, ipiv);
 }
 
-/// opt_B (large) — core::opt_B (src/device/cpu/cpu_backend.cpp) with VRAM scratch. A (nl×r)
-/// in, B (r×nr) out. Scratch as dev_opt_A_large; t = r*nr.
+/// opt_B (large) — VRAM-scratch entry to dev_opt_B_core. A (nl×r) in, B (r×nr) out.
+/// Scratch as dev_opt_A_large; t = r*nr.
 __device__ inline void dev_opt_B_large(const double* A, const double* xmat,
                                        int nl, int nr, int r, const double* qinv,
                                        double fudge, double* Bout,
                                        double* xvec, double* Wm, double* coeffs,
                                        double* rhs, double* B2v, double* lu, double* y,
                                        int* ipiv) {
-    const int m = nl * nr;
-    const int t = r * nr;
-    for (int i = 0; i < nl; ++i)
-        for (int j = 0; j < nr; ++j)
-            xvec[i * nr + j] = xmat[i + nl * j];
-    // A2(k,c): column-index split (p=c/nr,jc=c%nr) hoisted once per outer iteration
-    // (loop-invariant across the inner kc/k loops); first-arg decode (i=k/nr,j=k%nr) is
-    // per-element. See dev_opt_B.
-    auto A2f = [&](int k, int p, int jc) -> double {
-        const int i = k / nr, j = k % nr;
-        return (j == jc) ? A[i + nl * p] : 0.0;
-    };
-    for (int kr = 0; kr < m; ++kr)
-        for (int c = 0; c < t; ++c) {
-            const int p = c / nr, jc = c % nr;
-            double acc = 0.0;
-            for (int kc = 0; kc < m; ++kc) acc += qinv[kr + m * kc] * A2f(kc, p, jc);
-            Wm[kr + m * c] = acc;
-        }
-    for (int a = 0; a < t; ++a) {
-        const int pa = a / nr, jca = a % nr;
-        for (int c = 0; c < t; ++c) {
-            double acc = 0.0;
-            for (int k = 0; k < m; ++k) acc += A2f(k, pa, jca) * Wm[k + m * c];
-            coeffs[a + t * c] = acc;
-        }
-        double rr = 0.0;
-        for (int k = 0; k < m; ++k) rr += xvec[k] * Wm[k + m * a];
-        rhs[a] = rr;
-    }
-    double tr = 0.0;
-    for (int a = 0; a < t; ++a) tr += coeffs[a + t * a];
-    for (int a = 0; a < t; ++a) coeffs[a + t * a] += fudge * tr;
-    for (int i = 0; i < r * nr; ++i) Bout[i] = 0.0;
-    if (dev_solve(coeffs, t, rhs, B2v, lu, ipiv, y)) {
-        for (int p = 0; p < r; ++p)
-            for (int j = 0; j < nr; ++j)
-                Bout[p + r * j] = B2v[p * nr + j];
-    }
+    dev_opt_B_core(A, xmat, nl, nr, r, qinv, fudge, Bout,
+                   xvec, Wm, coeffs, rhs, B2v, lu, y, ipiv);
 }
 
-/// chisq (large) — core::chisq_of (src/device/cpu/cpu_backend.cpp) with VRAM scratch e[m].
+/// chisq (large) — VRAM-scratch entry to dev_chisq_of_core with residual e[m].
 __device__ inline double dev_chisq_of_large(const double* xmat, const double* A,
                                             const double* B, int nl, int nr, int r,
                                             const double* qinv, double* e) {
-    const int m = nl * nr;
-    for (int i = 0; i < nl; ++i)
-        for (int j = 0; j < nr; ++j) {
-            double ab = 0.0;
-            for (int p = 0; p < r; ++p) ab += A[i + nl * p] * B[p + r * j];
-            e[i * nr + j] = xmat[i + nl * j] - ab;
-        }
-    double acc = 0.0;
-    for (int a = 0; a < m; ++a) {
-        double row = 0.0;
-        for (int b = 0; b < m; ++b) row += qinv[a + m * b] * e[b];
-        acc += e[a] * row;
-    }
-    return acc;
+    return dev_chisq_of_core(xmat, A, B, nl, nr, r, qinv, e);
 }
 
 // --- LARGE-path transpose (nl×nr col-major xmat -> nr×nl col-major Xt) ------------
@@ -781,16 +795,7 @@ __global__ void seed_from_V_kernel(const double* __restrict__ dXmat,
                                    double* __restrict__ dA, double* __restrict__ dB) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     if (r <= 0) return;
-    for (int p = 0; p < r; ++p)
-        for (int j = 0; j < nr; ++j)
-            dB[p + r * j] = dVout[j + static_cast<long>(nr) * p];
-    for (int i = 0; i < nl; ++i)
-        for (int p = 0; p < r; ++p) {
-            double acc = 0.0;
-            for (int j = 0; j < nr; ++j)
-                acc += dXmat[i + static_cast<long>(nl) * j] * dB[p + r * j];
-            dA[i + static_cast<long>(nl) * p] = acc;
-        }
+    seed_ab_from_V(dXmat, dVout, nl, nr, r, dA, dB);  // the shared GEMM tail (group-7 7.1)
 }
 
 // --- LARGE-path ALS opt_A/opt_B loop (single thread; VRAM scratch) ---------------
@@ -850,22 +855,12 @@ __global__ void weights_chisq_large_kernel(const double* __restrict__ dXmat,
         *d_status = 0;
         return;
     }
-    const int rp = r + 1;
-    auto xm = [&](int i, int p) -> double { return (p < r) ? dA[i + nl * p] : 1.0; };
-    for (int i = 0; i < nl; ++i) {
-        for (int ip = 0; ip < nl; ++ip) {
-            double acc = 0.0;
-            for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
-            RHS[i + nl * ip] = acc;
-        }
+    // Constrained weight solve (the shared core): LHS reuses `e` as the nl-length ones
+    // vector (e has m >= nl slots, and is consumed by the solve before dev_chisq_of_large
+    // overwrites it below) — same buffer aliasing as before, bit-identical math.
+    if (!solve_constrained_weights(dA, nl, r, RHS, /*lhs=*/e, wv, lu, y, piv, dW)) {
+        *d_status = 6; return;
     }
-    // LHS = ones (xm(i,r) == 1); solve RHS·wv = 1.
-    double* LHS = e;  // reuse e as the nl-length RHS vector (e has m >= nl slots)
-    for (int i = 0; i < nl; ++i) LHS[i] = 1.0;
-    if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) { *d_status = 6; return; }
-    double sum = 0.0;
-    for (int i = 0; i < nl; ++i) sum += wv[i];
-    for (int i = 0; i < nl; ++i) dW[i] = wv[i] / sum;
     *dchisq = dev_chisq_of_large(dXmat, dA, dB, nl, nr, r, dQinv, e);
     *d_status = 0;
 }
@@ -966,24 +961,13 @@ loo_large_batched_kernel(const double* __restrict__ dLoo,
             for (int i = 0; i < nl; ++i) row[i] = 1.0;   // status Ok, w = ones (Σ=1 after norm)
             continue;
         }
-        const int rp = r + 1;
-        auto xm = [&](int i, int p) -> double { return (p < r) ? A[i + nl * p] : 1.0; };
-        for (int i = 0; i < nl; ++i) {
-            for (int ip = 0; ip < nl; ++ip) {
-                double acc = 0.0;
-                for (int p = 0; p < rp; ++p) acc += xm(i, p) * xm(ip, p);
-                RHS[i + nl * ip] = acc;
-            }
-        }
-        double* LHS = e;
-        for (int i = 0; i < nl; ++i) LHS[i] = 1.0;
-        if (!dev_solve(RHS, nl, LHS, wv, lu, piv, y)) {
+        // Constrained weight solve (the shared core): LHS reuses `e` (ones), writes the
+        // UNSCALED normalized weights into `row` (host scales by (nb-1)/√nb); on a
+        // singular solve the core leaves `row` untouched ⇒ write the zeros here.
+        if (!solve_constrained_weights(A, nl, r, RHS, /*lhs=*/e, wv, lu, y, piv, row)) {
             for (int i = 0; i < nl; ++i) row[i] = 0.0;   // RankDeficient ⇒ zeros (status guard)
             continue;
         }
-        double sum = 0.0;
-        for (int i = 0; i < nl; ++i) sum += wv[i];
-        for (int i = 0; i < nl; ++i) row[i] = wv[i] / sum;  // UNSCALED (host scales by (nb-1)/√nb)
     }
 }
 
@@ -1035,19 +1019,9 @@ __global__ void assemble_f4_gather_models_kernel(const double* __restrict__ f2, 
         const long idx = gid - static_cast<long>(model) * per;  // k + m*b within model
         const int k = static_cast<int>(idx % m);
         const int b = static_cast<int>(idx / m);
-        const int i = k / nr;  // left source index (0..nl-1)
-        const int j = k % nr;  // right index       (0..nr-1)
         const int* lft = d_left_arena + static_cast<long>(model) * (nl + 1);
         const int* rgt = d_right_arena + static_cast<long>(model) * (nr + 1);
-        const int L0 = lft[0];
-        const int R0 = rgt[0];
-        const int Li = lft[i + 1];
-        const int Rj = rgt[j + 1];
-        const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
-        const auto at = [&](int a, int c) -> double {
-            return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
-        };
-        dX[gid] = 0.5 * (at(Li, R0) + at(L0, Rj) - at(L0, R0) - at(Li, Rj));
+        dX[gid] = f4_gather_elem(f2, P, lft, rgt, nr, b, k);
     }
 }
 
@@ -1068,31 +1042,9 @@ __global__ void f4_loo_total_models_kernel(const double* __restrict__ dX,
         const int model = static_cast<int>(gid / m);
         const int k = static_cast<int>(gid % m);
         const long base = static_cast<long>(model) * m * nb;  // this model's dX/dLoo slice
-        double num = 0.0;
-        for (int b = 0; b < nb; ++b)
-            num += dX[base + k + static_cast<long>(m) * b] *
-                   static_cast<double>(d_block_sizes[b]);
-        const double tot_ij = num / n;
-        double wln = 0.0, wld = 0.0, wbn = 0.0;
-        for (int b = 0; b < nb; ++b) {
-            const double bl = static_cast<double>(d_block_sizes[b]);
-            const double rel = bl / n;
-            const double xv = dX[base + k + static_cast<long>(m) * b];
-            const double loo = (tot_ij - xv * rel) / (1.0 - rel);
-            dLoo[base + k + static_cast<long>(m) * b] = loo;
-            const double w = 1.0 - rel;  // == 1 - bl/n (identical FP64)
-            wln += loo * w;
-            wld += w;
-            wbn += loo * bl;
-        }
-        const double tot_line = wln / wld;
-        dTotLine[static_cast<long>(model) * m + k] = tot_line;
-        double diffsum = 0.0;  // the only tot_line-dependent term ⇒ the lone re-read pass
-        for (int b = 0; b < nb; ++b) {
-            const double loo = dLoo[base + k + static_cast<long>(m) * b];
-            diffsum += tot_line - loo;
-        }
-        dTotal[static_cast<long>(model) * m + k] = diffsum + wbn / n;
+        const long out = static_cast<long>(model) * m + k;    // this model's tot/totline slot
+        f4_loo_total_row(dX + base, d_block_sizes, m, nb, n, k, dLoo + base,
+                         &dTotLine[out], &dTotal[out]);
     }
 }
 
@@ -1112,12 +1064,9 @@ __global__ void f4_xtau_models_kernel(const double* __restrict__ dLoo,
         const int k = static_cast<int>(idx % m);
         const int b = static_cast<int>(idx / m);
         const double bl = static_cast<double>(d_block_sizes[b]);
-        const double h = n / bl;
-        const double sh = sqrt(h - 1.0);
-        const double loo = dLoo[gid];
         const double est = dEst[static_cast<long>(model) * m + k];
         const double tl = dTotLine[static_cast<long>(model) * m + k];
-        dXtau[gid] = (est * h - loo * (h - 1.0) - tl) / sh;
+        dXtau[gid] = f4_xtau_elem(est, dLoo[gid], tl, bl, n);
     }
 }
 
@@ -1395,6 +1344,17 @@ __global__ void qpadm_gather_loo_qinv_kernel(const double* __restrict__ dLooSrc,
     }
 }
 
+// --- launch-geometry helper (group-7 7.4) ----------------------------------------
+/// 1-D grid-stride launch geometry: ceil-div `total` by `block` and clamp to
+/// kMaxGridDimX (== INT_MAX ⇒ the returned int is in range). The ONE ceil-div + clamp
+/// definition for the 8 grid-stride launch wrappers (each kernel is grid-stride, so the
+/// clamp is the safety net beyond INT_MAX). `total` MUST be > 0 (caller guards).
+inline int launch_grid_stride(long total, int block) {
+    const long grid_l = (total + block - 1) / block;
+    const long grid_cap = static_cast<long>(kMaxGridDimX);
+    return static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+}
+
 }  // namespace
 
 void launch_assemble_f4_gather_models_batched(const double* f2, int P,
@@ -1405,9 +1365,7 @@ void launch_assemble_f4_gather_models_batched(const double* f2, int P,
     const long total = static_cast<long>(nl) * nr * nb * n_models;
     if (total <= 0) return;
     const int block = 256;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1420,9 +1378,7 @@ void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_siz
     const long total = static_cast<long>(m) * n_models;
     if (total <= 0 || nb <= 0) return;
     const int block = 128;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     f4_loo_total_models_kernel<<<grid, block, 0, stream>>>(
         dX, d_block_sizes, m, nb, n, n_models, dLoo, dTotal, dTotLine);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1435,9 +1391,7 @@ void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
     const long total = static_cast<long>(m) * nb * n_models;
     if (total <= 0) return;
     const int block = 256;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     f4_xtau_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dEst, dTotLine, d_block_sizes, m, nb, n, n_models, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1457,9 +1411,7 @@ void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t 
     const long total = static_cast<long>(m) * m * n_models;
     if (total <= 0) return;
     const int block = 256;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     fill_identity_batched_kernel<<<grid, block, 0, stream>>>(dI, m, n_models);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1489,9 +1441,7 @@ void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
     const long total = static_cast<long>(nb) * n_models;
     if (total <= 0) return;
     const int block = 128;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     qpadm_loo_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, nl, nr, r_fit, fudge, als_iters, nb, n_models, s, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1502,9 +1452,7 @@ void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
     const long total = static_cast<long>(nl) * n_models;
     if (total <= 0) return;
     const int block = 128;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1516,9 +1464,7 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
     const long total = per * n_surv;
     if (total <= 0) return;
     const int block = 256;
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     qpadm_gather_loo_qinv_kernel<<<grid, block, 0, stream>>>(
         dLooSrc, dQinvSrc, d_surv, m, nb, n_surv, dLooDst, dQinvDst);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1666,9 +1612,7 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
     const long total = static_cast<long>(nb) * n_models;
     if (total <= 0) return;
     const int block = 64;  // large per-thread VRAM-scratch refit ⇒ small block, grid-stride
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);  // == INT_MAX, so the cast below is in range
-    const int grid = static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
+    const int grid = launch_grid_stride(total, block);
     loo_large_batched_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, dAseed, dBseed, nl, nr, r, fudge, als_iters, nb, n_models,
         dbl_refit, int_refit, dScratch, dIntScratch, dWmat);
