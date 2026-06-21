@@ -84,6 +84,7 @@ namespace steppe::device {
 using core::assemble_f2_numerator;
 using core::finalize_f2;
 using core::het_correction;
+using core::kF2StackedBlocks;  // the [2P × …] stacked-S row-block count (f2_estimator.hpp)
 
 namespace {
 
@@ -131,7 +132,7 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
 
     const long Pl = static_cast<long>(P);
     const long idx = i + Pl * s;            // (i,s) in a [P  × M] matrix
-    const long sidx = i + (2 * Pl) * s;     // (i,s) in the [2P × M] stacked S
+    const long sidx = i + (kF2StackedBlocks * Pl) * s;  // (i,s) in the [2P × M] stacked S
 
     const bool valid = (V_raw[idx] != 0.0);
     // Hoist the single raw-Q load (20.3/LOW): Q_raw[idx] feeds BOTH the masked q
@@ -188,7 +189,7 @@ __global__ void assemble_f2_kernel(const double* __restrict__ G,
     if (i >= P || j >= P) return;
 
     const size_t Pp = static_cast<size_t>(P);
-    const size_t twoP = 2 * Pp;
+    const size_t twoP = kF2StackedBlocks * Pp;
     const size_t si = static_cast<size_t>(i);
     const size_t sj = static_cast<size_t>(j);
 
@@ -383,7 +384,7 @@ void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
                   "run_f2_gemms: M exceeds INT_MAX; cublasGemmEx k is a 32-bit int "
                   "(guarded by CudaBackend::compute_f2, B22)");
     const int Mi = static_cast<int>(M);   // safe: M <= INT_MAX (guarded upstream)
-    const int twoP = 2 * P;
+    const int twoP = kF2StackedBlocks * P;
 
     // G[P × P] = Q · Qᵀ.  C(i,j) = Σ_s Q(i,s) Q(j,s).
     //   A=Q [P×M] OP_N (m=P, k=M, lda=P); B=Q [P×M] OP_T (n=P, ldb=P); C=G ldc=P.

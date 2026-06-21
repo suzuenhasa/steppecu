@@ -14,24 +14,30 @@
 
 namespace steppe::io::filter {
 
+// The "zero missing / no-data fail-safe" missing fraction. Single-homed so the
+// initial assign default, the no-data keep-all branch, and the not-active drop-test
+// input all reference ONE value for the same concept (DRY; NAMING-STYLE-STANDARD
+// §2.5 single-source; group-5 5.3). Plain fraction value, not a tunable threshold.
+constexpr double kNoMissingFrac = 0.0;
+
 MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg) {
     const std::size_t n_ind = in.n_individuals;
     const std::size_t n_snp = in.n_snp;
 
     MindSummary out;
     out.nonmissing.assign(n_ind, 0);
-    out.missing_frac.assign(n_ind, 0.0);
+    out.missing_frac.assign(n_ind, kNoMissingFrac);
     out.kept.reserve(n_ind);
 
     // `active` is the --mind request flag: when --mind is not requested
-    // (mind_max_missing >= 1.0) every sample is kept. Note `active` gates ONLY the
-    // drop decision (consulted at the kept-set resolution below) — NOT the streaming
-    // pass: the per-SNP missing-fraction count loop runs whenever packed data is
-    // present (in.packed != nullptr && n_snp > 0), regardless of `active`, so the
-    // missing_frac report is always populated when there is data to measure (the
-    // pass is not short-circuited on the no-op default — doing so would drop that
-    // reporting and change behavior; architecture.md §5 S-1).
-    const bool active = cfg.mind_max_missing < 1.0;
+    // (mind_max_missing >= kMindFilterInactiveThreshold) every sample is kept. Note
+    // `active` gates ONLY the drop decision (consulted at the kept-set resolution
+    // below) — NOT the streaming pass: the per-SNP missing-fraction count loop runs
+    // whenever packed data is present (in.packed != nullptr && n_snp > 0), regardless
+    // of `active`, so the missing_frac report is always populated when there is data
+    // to measure (the pass is not short-circuited on the no-op default — doing so
+    // would drop that reporting and change behavior; architecture.md §5 S-1).
+    const bool active = cfg.mind_max_missing < kMindFilterInactiveThreshold;
 
     if (in.packed != nullptr && n_snp > 0) {
         // One streaming pass over the packed records, counting non-missing SNPs per
@@ -71,7 +77,7 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
     // (not active) every sample passes (missing_frac <= 1.0 always); when active,
     // a sample is dropped iff its missing fraction exceeds the threshold.
     for (std::size_t g = 0; g < n_ind; ++g) {
-        const double frac = active ? out.missing_frac[g] : 0.0;
+        const double frac = active ? out.missing_frac[g] : kNoMissingFrac;
         if (sample_passes_mind(frac, cfg.mind_max_missing)) {
             out.kept.push_back(g);
         }

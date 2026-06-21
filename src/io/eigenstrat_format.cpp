@@ -39,19 +39,24 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
     if (pos == std::string::npos) return h;  // empty → Unknown
     const std::size_t magic_end = text.find_first_of(" \t", pos);
     const std::string magic = text.substr(pos, magic_end - pos);
-    if (magic == "TGENO") {
+    if (magic == kMagicTgeno) {
         h.format = GenoFormat::Tgeno;
-    } else if (magic == "GENO") {
+    } else if (magic == kMagicGeno) {
         h.format = GenoFormat::Geno;
     } else {
         return h;  // unrecognized magic → Unknown (caller fails loudly)
     }
 
-    // Parse the first two decimal integers after the magic: n_ind, n_snp.
-    std::size_t ints[2] = {0, 0};
+    // Parse the first two decimal integers after the magic: n_ind, n_snp. The
+    // count `2` is single-homed here so the array dimension, the parse-loop bound,
+    // and the underflow guard cannot drift — a mismatch between the array size and
+    // the loop bound would be an out-of-bounds write (DRY; NAMING-STYLE-STANDARD
+    // §2.5 single-source; group-5 5.3).
+    constexpr int kHeaderCounts = 2;  // # decimal counts after the magic (n_ind, n_snp)
+    std::size_t ints[kHeaderCounts] = {0, 0};
     int got = 0;
     std::size_t i = magic_end;
-    while (i < text.size() && got < 2) {
+    while (i < text.size() && got < kHeaderCounts) {
         while (i < text.size() && !std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
         if (i >= text.size()) break;
         std::size_t v = 0;
@@ -85,7 +90,7 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
         }
         if (any) ints[got++] = v;
     }
-    if (got < 2) {  // could not read both counts → malformed header, route to Unknown
+    if (got < kHeaderCounts) {  // could not read both counts → malformed header, route to Unknown
         h.format = GenoFormat::Unknown;
         return h;
     }

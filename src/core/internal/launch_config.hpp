@@ -67,10 +67,13 @@ inline constexpr unsigned kMaxGridX = 2147483647u;  // 2^31 − 1
 /// Maximum `gridDim.y` — hardware-capped at 65 535 on every compute capability.
 inline constexpr unsigned kMaxGridY = 65535u;
 
-/// Maximum `gridDim.z` — hardware-capped at 65 535 on every compute capability.
-/// The M4 strided-batched batch count (`n_in_group`) rides this axis; the backend
-/// tiles the batch so it never exceeds this (cleanup X-7/B6).
-inline constexpr unsigned kMaxGridZ = 65535u;
+/// Maximum `gridDim.z` — hardware-capped at 65 535 on every compute capability,
+/// the SAME cap as `gridDim.y`. Single-sourced from `kMaxGridY` (NOT a re-typed
+/// literal) so the shared y/z cap is stated once: a future per-axis hardware change
+/// edits one site, never two in lock-step (DRY; NAMING-STYLE-STANDARD §2.5
+/// single-source; group-5 5.3). The M4 strided-batched batch count (`n_in_group`)
+/// rides this axis; the backend tiles the batch so it never exceeds this (X-7/B6).
+inline constexpr unsigned kMaxGridZ = kMaxGridY;
 
 // ===========================================================================
 // Ceiling division — the launch-grid building block.

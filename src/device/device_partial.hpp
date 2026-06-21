@@ -8,6 +8,8 @@
 #include <memory>
 #include <vector>
 
+#include "steppe/config.hpp"  // kInvalidDeviceId — the shared no-device sentinel
+
 namespace steppe::device {
 
 /// Move-only, OPAQUE owner of ONE device's f2/Vpair partial left RESIDENT on the
@@ -38,7 +40,7 @@ public:
     int P = 0;             ///< population count (leading dim of every slab).
     int n_block_local = 0; ///< blocks this device owns (== shard b1-b0); 0 == empty shard.
     int b0 = 0;            ///< this partial's global block placement offset (== shard.b0).
-    int device_id = -1;    ///< the physical CUDA ordinal the buffers are resident on.
+    int device_id = kInvalidDeviceId;  ///< the physical CUDA ordinal the buffers are resident on.
 
     // ---- Per-block SNP counts (host int, placed host-side; mirrors the existing
     // F2BlockTensor.block_sizes the host combine copies). Sized n_block_local. ----

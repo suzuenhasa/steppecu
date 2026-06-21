@@ -142,7 +142,7 @@ public:
     /// Make `stream` wait until this event completes — the cross-stream
     /// dependency primitive (architecture.md §7), preferred over device-wide sync.
     void wait(const Stream& stream) const {
-        STEPPE_CUDA_CHECK(cudaStreamWaitEvent(stream.get(), e_, 0));
+        STEPPE_CUDA_CHECK(cudaStreamWaitEvent(stream.get(), e_, cudaEventWaitDefault));
     }
 
     /// Block the host until this event completes.

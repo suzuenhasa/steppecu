@@ -13,6 +13,7 @@
 #ifndef STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 #define STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 
+#include <cstddef>
 #include <cstdint>
 
 namespace steppe::device {
@@ -34,7 +35,11 @@ struct F2DiskHeader {                       // sizeof == 64 (padded)
     std::uint64_t block_sizes_offset;       // == vpair_offset + P²·n_block·8
     std::uint8_t  reserved[16];             // zero
 };
-static_assert(sizeof(F2DiskHeader) == 64, "F2DiskHeader must be exactly 64 bytes");
+/// The fixed on-disk header size in bytes (file offset 0; the f2 region begins here).
+/// Single home for the "64" that the prose (above), the layout, and the M7 reader's
+/// strip all reference, so they cannot desync. Value frozen by the on-disk format.
+inline constexpr std::size_t kF2DiskHeaderSize = sizeof(F2DiskHeader);
+static_assert(kF2DiskHeaderSize == 64, "F2DiskHeader must be exactly 64 bytes");
 
 /// Byte offset of block b's [P²] f2 slab (column-major i+P·j within the slab).
 [[nodiscard]] inline std::uint64_t f2_block_offset(const F2DiskHeader& h, int b) noexcept {

@@ -460,11 +460,14 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
         case steppe::device::OutputTier::Disk: {
             out.tier = steppe::device::OutputTier::Disk;
             // Disk path precedence: config.disk_cache_path, else STEPPE_F2_CACHE_PATH
-            // env, else the frozen default "./steppe_f2_blocks.cache" in the cwd.
+            // env, else the frozen default (steppe::kDefaultDiskCachePath, config.hpp)
+            // in the cwd — single-homed there so the literal lives in one place
+            // (cleanup 5.4 / 9.2; NAMING-STYLE-STANDARD §2.5).
             std::string path = resources.config.disk_cache_path;
             if (path.empty()) {
                 const char* env = std::getenv("STEPPE_F2_CACHE_PATH");
-                path = (env && env[0]) ? std::string(env) : std::string("./steppe_f2_blocks.cache");
+                path = (env && env[0]) ? std::string(env)
+                                       : std::string(steppe::kDefaultDiskCachePath);
             }
             steppe::device::StreamTarget target;
             target.tier = steppe::device::OutputTier::Disk;

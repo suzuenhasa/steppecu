@@ -178,6 +178,9 @@ struct SvdResult {
 
     constexpr double kTol = 1e-15;
     constexpr int kMaxSweeps = 60;
+    // PARITY-FROZEN (§3.2/§12): the Jacobi off-diagonal convergence floor. Name only —
+    // the magnitude 1e-30 is oracle-diffable against the AT2/cuSOLVER SVD and must not change.
+    constexpr double kOffDiagTol = 1e-30;
     for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
         double off = 0.0;
         for (int p = 0; p < n - 1; ++p) {
@@ -217,7 +220,7 @@ struct SvdResult {
                 }
             }
         }
-        if (off < 1e-30) break;
+        if (off < kOffDiagTol) break;
     }
 
     // Singular values = column norms of W; U columns = W columns normalized.

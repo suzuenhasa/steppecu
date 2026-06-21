@@ -47,7 +47,9 @@ SeResult se_from_loo(ComputeBackend& be, const F4Blocks& x, const JackknifeCov& 
     SeResult out;
     out.se.assign(static_cast<std::size_t>(nl), 0.0);
     out.z.assign(static_cast<std::size_t>(nl), 0.0);
-    if (nb < 2 || nl <= 0) return out;
+    // Block jackknife needs >=2 delete-1 replicates to form a sample covariance.
+    constexpr int kMinJackknifeBlocks = 2;
+    if (nb < kMinJackknifeBlocks || nl <= 0) return out;
 
     // wmat: nb × nl row-major (the AT2 replicate matrix). The per-block re-fits run
     // through the BATCHED-capable backend seam (gls_weights_loo_batched): the CUDA

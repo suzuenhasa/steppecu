@@ -65,8 +65,11 @@ F2DiskHeader disk_header(const DiskF2Blocks& d) {
     h.P = d.P;
     h.n_block = d.n_block;
     h.f2_offset = sizeof(F2DiskHeader);
+    // P² (single-homed slab shape, 5.3) × n_block × 8; slab_elems widens P before the
+    // multiply and returns std::size_t (64-bit on the LP64 target), so the whole
+    // product is 64-bit — no int overflow before widening (the region reaches multi-GB).
     const std::uint64_t region =
-        static_cast<std::uint64_t>(d.P) * static_cast<std::uint64_t>(d.P) *
+        static_cast<std::uint64_t>(slab_elems(d.P)) *
         static_cast<std::uint64_t>(d.n_block < 0 ? 0 : d.n_block) * sizeof(double);
     h.vpair_offset = h.f2_offset + region;
     h.block_sizes_offset = h.vpair_offset + region;
@@ -76,7 +79,7 @@ F2DiskHeader disk_header(const DiskF2Blocks& d) {
 
 // ---- F2BlocksOut::read_block_to_host — the FIT's tile reader (tier-agnostic) ----
 void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_slab_out) const {
-    const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const std::size_t slab = slab_elems(P);  // P² per-block slab (single-homed shape, 5.3)
     const std::size_t bytes = slab * sizeof(double);
     if (slab == 0) return;
 
@@ -160,8 +163,7 @@ F2BlockTensor F2BlocksOut::to_host() const {
             out.n_block = (n_block < 0 ? 0 : n_block);
             out.block_sizes = block_sizes;
             const std::size_t total =
-                static_cast<std::size_t>(P) * static_cast<std::size_t>(P) *
-                static_cast<std::size_t>(out.n_block);
+                slab_elems(P) * static_cast<std::size_t>(out.n_block);  // P²·n_block (5.3)
             out.f2.assign(total, 0.0);
             out.vpair.assign(total, 0.0);
             if (total == 0) return out;

@@ -131,7 +131,7 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
 
     SnpTable t;
     std::map<std::string, int> other_codes;
-    int next_other = -1;
+    int next_other = kFirstOtherChromCode;  // distinct negative codes, decrementing
     std::string line;
     std::size_t line_no = 0;  // 1-based, counts EVERY physical line for diagnostics
     while (t.count < max_snps && std::getline(in, line)) {
@@ -157,10 +157,11 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         // malformed record — fail-fast with the line number rather than the old
         // silent `continue` (which dropped the row and shifted every later SNP's
         // metadata relative to its genotype).
-        if (fields.size() < 3) {
+        if (fields.size() < kMinSnpFields) {
             throw std::runtime_error(
-                "io::read_snp: malformed record (expected >= 3 whitespace-separated"
-                " fields <id> <chrom> <genpos>, got " +
+                "io::read_snp: malformed record (expected >= " +
+                std::to_string(kMinSnpFields) +
+                " whitespace-separated fields <id> <chrom> <genpos>, got " +
                 std::to_string(fields.size()) + ") at line " +
                 std::to_string(line_no));
         }
@@ -170,9 +171,11 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         const double genpos = parse_genpos(fields[2], line_no);  // throws if non-finite/garbage
         // Alleles present only when the full 6-column record is given (cols 5,6);
         // otherwise default to the EIGENSTRAT "missing/unknown base" 'N'.
-        const bool has_alleles = fields.size() >= 6;
-        const char ref = has_alleles && !fields[4].empty() ? fields[4][0] : 'N';
-        const char alt = has_alleles && !fields[5].empty() ? fields[5][0] : 'N';
+        const bool has_alleles = fields.size() >= kFullSnpFields;
+        const char ref =
+            has_alleles && !fields[kRefAlleleCol].empty() ? fields[kRefAlleleCol][0] : kMissingAllele;
+        const char alt =
+            has_alleles && !fields[kAltAlleleCol].empty() ? fields[kAltAlleleCol][0] : kMissingAllele;
 
         t.id.push_back(id);
         t.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));

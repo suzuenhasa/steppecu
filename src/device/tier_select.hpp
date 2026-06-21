@@ -39,6 +39,13 @@ enum class OutputTier {
                ///< persistent pinned staging buffer (laptop-friendly tiny RAM).
 };
 
+/// STEPPE_FORCE_TIER env-var token spellings (lowercase, case-insensitively matched),
+/// one per OutputTier arm. Single home so the env parse (host_ram.cpp resolve_output_tier)
+/// and the documented spellings cannot drift from the enum arms.
+inline constexpr const char* kForceTierTokenResident = "resident";  ///< -> OutputTier::Resident
+inline constexpr const char* kForceTierTokenHostRam  = "host";      ///< -> OutputTier::HostRam
+inline constexpr const char* kForceTierTokenDisk     = "disk";      ///< -> OutputTier::Disk
+
 /// Non-result transient VRAM the Resident-tier single-GPU compute holds co-resident
 /// with the [P×P×n_block] result during run_f2_blocks_resident: the feeder phase
 /// (raw inputs kFeederRawBufsPerPop·P·M + persisted feeder outputs
@@ -94,10 +101,10 @@ enum class OutputTier {
     const std::size_t p = static_cast<std::size_t>(P);
     const std::size_t t = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
     const std::size_t nb = static_cast<std::size_t>(max_nb < 0 ? 0 : max_nb);
-    const std::size_t sp = static_cast<std::size_t>(max_s_pad < 0 ? 0 : max_s_pad);
     const std::size_t feeder =                                           // raw + tile feeder
         (kFeederRawBufsPerPop * p * t + kFeederOutBufsPerPop * p * t);    // (3+4)·P·tile, named in config.hpp
-    const std::size_t slabs = (4u * p * sp + 4u * p * p) * nb;            // gather/GEMM scratch
+    const std::size_t slabs =                                            // gather/GEMM scratch
+        per_block_chunk_elems(P, max_s_pad) * nb;                        // single-source coeffs (vram_budget.hpp)
     const std::size_t ring =                                             // §5 device ring
         static_cast<std::size_t>(kStreamDeviceChunks) * p * p * nb;       // kStreamDeviceChunks f2/vpair buffers (config.hpp, single-source)
     return (feeder + slabs + ring) * sizeof(double) + kCublasWorkspaceBytes;

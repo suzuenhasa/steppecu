@@ -69,6 +69,15 @@ constexpr int qpadm_dof(int nl, int nr, int r) {
     return (nl - r) * (nr - r);
 }
 
+/// The fit-kernel "rank-deficient solve" status code: emitted into d_status when the
+/// per-model weight solve hits a singular LHS, decoded on the host into
+/// Status::RankDeficient. Single-homed here (the kQpMax* host/kernel contract home) so
+/// the host decode (cuda_backend.cu) and the kernel EMIT sites cannot drift apart.
+/// NOTE: the matching kernel emit sites (qpadm_fit_kernels.cu small/large/loo paths)
+/// are group-7 device-side leftovers (DEFERRED) and still emit the bare `6`; they adopt
+/// this symbol when group-7 runs. Value frozen at 6 for that contract — name only.
+inline constexpr int kQpStatusRankDeficient = 6;
+
 }  // namespace steppe::core::qpadm
 
 #endif  // STEPPE_CORE_QPADM_QPADM_BOUNDS_HPP

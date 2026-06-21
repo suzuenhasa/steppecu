@@ -33,7 +33,7 @@
 #include <cstddef>
 
 #include "core/internal/launch_config.hpp"  // kMaxGridZ (the M4 batch rides gridDim.z)
-#include "steppe/config.hpp"                // kMaxVramUtilizationFraction, kCublasWorkspaceBytes
+#include "steppe/config.hpp"                // kMaxVramUtilizationFraction, kCublasWorkspaceBytes, kResidentTensorCount, kChunkInputStacks, kChunkOutputStacks
 
 namespace steppe::device {
 
@@ -64,24 +64,31 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
     const std::size_t p = static_cast<std::size_t>(P);
     const std::size_t nb = static_cast<std::size_t>(n_block);
     // f2 AND vpair: two equal [P×P×n_block] FP64 tensors (the B26 2× term).
-    return 2u * p * p * nb * sizeof(double);
+    return kResidentTensorCount * p * p * nb * sizeof(double);
 }
 
-/// Per-block-in-chunk byte footprint of one strided-batched M4 chunk at width
-/// `s_pad`. A chunk holds, per block: the gathered inputs Qg + Vg (`P·s_pad` each)
-/// and Sg (`2·P·s_pad`) = `4·P·s_pad` doubles, plus the GEMM outputs Gg + Vpairg
-/// (`P²` each) and Rg (`2·P²`) = `4·P²` doubles. ×8 bytes. (The `4`s are the
-/// structural input/output stack counts, not tunable; documented in
-/// cuda_backend.cu's per-block-bytes comment.) Done in `std::size_t`.
+/// Per-block-in-chunk ELEMENT (double) count of one strided-batched M4 chunk at
+/// width `s_pad`. A chunk holds, per block: the gathered inputs Qg + Vg (`P·s_pad`
+/// each) and Sg (`2·P·s_pad`) = `kChunkInputStacks·P·s_pad` doubles, plus the GEMM
+/// outputs Gg + Vpairg (`P²` each) and Rg (`2·P²`) = `kChunkOutputStacks·P²` doubles.
+/// (The stack counts are structural, not tunable; named once in config.hpp.) This is
+/// the SINGLE source of the chunk per-block coefficients — `per_block_chunk_bytes`
+/// (here) and `streamed_working_set_bytes` (tier_select.hpp) both derive from it, so
+/// the two `4`s are maintained ONCE. Done in `std::size_t`.
 ///
 /// @param P      number of populations.
 /// @param s_pad  the bucket's padded SNP-block width (≥ 1 by construction).
-/// @return       `(4·P·s_pad + 4·P²)·sizeof(double)` bytes (≥ sizeof(double)).
-[[nodiscard]] inline constexpr std::size_t per_block_chunk_bytes(int P, int s_pad) noexcept {
+/// @return       `kChunkInputStacks·P·s_pad + kChunkOutputStacks·P²` doubles.
+[[nodiscard]] inline constexpr std::size_t per_block_chunk_elems(int P, int s_pad) noexcept {
     const std::size_t p = static_cast<std::size_t>(P < 0 ? 0 : P);
     const std::size_t sp = static_cast<std::size_t>(s_pad < 0 ? 0 : s_pad);
     const std::size_t slab = p * p;
-    return (4u * p * sp + 4u * slab) * sizeof(double);
+    return kChunkInputStacks * p * sp + kChunkOutputStacks * slab;
+}
+
+/// Per-block-in-chunk BYTE footprint = `per_block_chunk_elems(P, s_pad)·sizeof(double)`.
+[[nodiscard]] inline constexpr std::size_t per_block_chunk_bytes(int P, int s_pad) noexcept {
+    return per_block_chunk_elems(P, s_pad) * sizeof(double);
 }
 
 /// VRAM left for ONE M4 chunk's slabs after the resident set + workspace, at the

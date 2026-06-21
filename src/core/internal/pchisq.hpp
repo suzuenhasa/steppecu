@@ -18,32 +18,37 @@
 
 namespace steppe::core::internal {
 
+/// Shared convergence knobs for BOTH incomplete-gamma tails — single-homed at
+/// namespace scope so the series and continued-fraction forms cannot drift apart
+/// (DRY; NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3). Compile-time
+/// constants, so `inline constexpr`, NOT `const` (standard §2.5 [MIXED Group 9.1]).
+/// `kPchisqMaxIter` = the iteration cap (1000); `kPchisqEps` = the relative
+/// convergence tolerance (1e-15). Loose-`p`-tier values (OQ-13), not parity-frozen.
+inline constexpr int    kPchisqMaxIter = 1000;
+inline constexpr double kPchisqEps     = 1e-15;
+
 /// Regularized lower incomplete gamma P(a, x) by series (good for x < a+1).
 [[nodiscard]] inline double pchisq_gammp_series(double a, double x) {
-    const int kMaxIter = 1000;
-    const double kEps = 1e-15;
     double ap = a;
     double sum = 1.0 / a;
     double del = sum;
-    for (int n = 0; n < kMaxIter; ++n) {
+    for (int n = 0; n < kPchisqMaxIter; ++n) {
         ap += 1.0;
         del *= x / ap;
         sum += del;
-        if (std::fabs(del) < std::fabs(sum) * kEps) break;
+        if (std::fabs(del) < std::fabs(sum) * kPchisqEps) break;
     }
     return sum * std::exp(-x + a * std::log(x) - std::lgamma(a));
 }
 
 /// Regularized upper incomplete gamma Q(a, x) by continued fraction (x >= a+1).
 [[nodiscard]] inline double pchisq_gammq_cf(double a, double x) {
-    const int kMaxIter = 1000;
-    const double kEps = 1e-15;
     const double kFpMin = 1e-300;
     double b = x + 1.0 - a;
     double c = 1.0 / kFpMin;
     double d = 1.0 / b;
     double h = d;
-    for (int i = 1; i <= kMaxIter; ++i) {
+    for (int i = 1; i <= kPchisqMaxIter; ++i) {
         const double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
         b += 2.0;
         d = an * d + b;
@@ -53,7 +58,7 @@ namespace steppe::core::internal {
         d = 1.0 / d;
         const double del = d * c;
         h *= del;
-        if (std::fabs(del - 1.0) < kEps) break;
+        if (std::fabs(del - 1.0) < kPchisqEps) break;
     }
     return std::exp(-x + a * std::log(x) - std::lgamma(a)) * h;
 }

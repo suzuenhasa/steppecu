@@ -2119,7 +2119,10 @@ public:
         }
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         gw.chisq = chisq;
-        if (status_i == 6) { gw.status = Status::RankDeficient; return gw; }
+        // NOTE: the matching kernel EMIT sites (qpadm_fit_kernels.cu small/large/loo)
+        // still emit the bare 6 — they are group-7 device-side leftovers (DEFERRED) and
+        // adopt kQpStatusRankDeficient when group-7 runs. Host decode uses the symbol now.
+        if (status_i == core::qpadm::kQpStatusRankDeficient) { gw.status = Status::RankDeficient; return gw; }
         gw.status = Status::Ok;
         return gw;
     }

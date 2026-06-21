@@ -28,6 +28,16 @@
 
 namespace steppe::device {
 
+/// Per-block f2/vpair slab element count = P² (the within-block [P × P] column-major
+/// slab, i + P·j). Single home for the block-major slab shape so the read-back paths
+/// (F2BlocksOut::read_block_to_host / to_host) and F2BlocksOut::size() cannot drift
+/// from it (DRY; NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3). Widens `P`
+/// to std::size_t BEFORE the multiply so the product never overflows a 32-bit int
+/// (P² and P²·n_block reach ~10^10 elements at scale).
+[[nodiscard]] inline std::size_t slab_elems(int P) noexcept {
+    return static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+}
+
 /// Binary on-disk f2_blocks cache descriptor (TIER 2). Holds the path + parsed header
 /// shape + an open read handle for slab read-back. The fit + parity test pread a block
 /// by offset (f2_disk_format.hpp byte layout). Move-only (it owns a FILE*); the read
@@ -85,8 +95,7 @@ public:
     void read_block_to_host(int b, double* f2_slab_out, double* vpair_slab_out) const;
 
     [[nodiscard]] std::size_t size() const noexcept {
-        return static_cast<std::size_t>(P) * static_cast<std::size_t>(P) *
-               static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+        return slab_elems(P) * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
     }
 };
 

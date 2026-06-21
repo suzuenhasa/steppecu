@@ -126,6 +126,28 @@ inline constexpr std::size_t kFitBudgetHeadroomBytes = static_cast<std::size_t>(
 inline constexpr unsigned kFeederRawBufsPerPop = 3u;
 inline constexpr unsigned kFeederOutBufsPerPop = 4u;
 
+/// M4 resident-tensor count: the f2 and vpair tensors held co-resident for the whole
+/// bucket loop (each [P²·n_block] FP64, the B26 2× term). Single home so the resident
+/// footprint coefficient in vram_budget.hpp (resident_tensor_bytes) is not a bare 2.
+/// Structural count — CUDA-free, parity-neutral (changes WHERE bytes land, §12).
+inline constexpr std::size_t kResidentTensorCount = 2;
+
+/// M4 strided-batched chunk per-block stack counts (vram_budget.hpp
+/// per_block_chunk_bytes / tier_select.hpp per_block_chunk_elems):
+///   kChunkInputStacks  = 4·P·s_pad : gathered inputs Qg + Vg (P·s_pad each) + Sg
+///                                    (2·P·s_pad) = 4 stacks.
+///   kChunkOutputStacks = 4·P²     : GEMM outputs Gg + Vpairg (P² each) + Rg (2·P²)
+///                                    = 4 stacks.
+/// Single home so the per-block footprint coefficients are not maintained twice (the
+/// bytes and the elems helpers). Structural counts — CUDA-free, parity-neutral (§12).
+inline constexpr std::size_t kChunkInputStacks = 4;
+inline constexpr std::size_t kChunkOutputStacks = 4;
+
+/// No-device sentinel for a CUDA-ordinal field/member (an empty / moved-from /
+/// not-yet-resolved device id). Shared home so the -1 "no device" convention is one
+/// symbol rather than a bare literal at each device-id default. CUDA-free.
+inline constexpr int kInvalidDeviceId = -1;
+
 /// M5 STREAMED-path device ring depth: the number of per-chunk [P²·max_nb] f2/vpair
 /// device buffers the streamed (HostRam/Disk) backend cycles through so a chunk's D2H
 /// can drain while the next chunk computes (cuda_backend.cu stream_f2_blocks_impl).
@@ -135,6 +157,12 @@ inline constexpr unsigned kFeederOutBufsPerPop = 4u;
 /// (tier_select.hpp streamed_working_set_bytes) cannot drift apart (ROADMAP §4; group-5
 /// 5.3). Plain count — CUDA-free, parity-neutral (it changes WHERE bytes land, §12).
 inline constexpr int kStreamDeviceChunks = 2;
+
+/// Default number of throughput-only search lanes (streams) PER GPU for the
+/// model-space search (S8). Throughput knob only — results are recomputed in
+/// EmulatedFp64/Fp64 before any reported number (§12), so this is parity-neutral.
+/// Single home for the Config::search_streams default below.
+inline constexpr std::size_t kDefaultSearchStreams = 4;
 
 /// Target fraction of device VRAM the resident working set may occupy
 /// (architecture.md §11.1/§11.2 — the `build()`-validated budget fraction; ROADMAP
@@ -208,6 +236,23 @@ inline constexpr double kCentimorgansPerMorgan = 100.0;
 /// is consistent: dropping chr 23 AND 24 here is the AT2-parity autosome set.)
 inline constexpr int kAutosomeChromMin = 1;
 inline constexpr int kAutosomeChromMax = 22;
+
+/// The --mind filter "inactive" threshold: the max possible per-sample missing
+/// fraction (1.0 = "never drop"). When FilterConfig::mind_max_missing equals this,
+/// the conditional S-1 pre-pass keeps every sample (the drop decision is a no-op).
+/// Single home for the field default AND the mind_prepass.cpp activity test so the
+/// two cannot drift. Parity-neutral filter policy.
+inline constexpr double kMindFilterInactiveThreshold = 1.0;
+
+/// M5 Disk-tier frozen default on-disk f2_blocks cache path (cwd-relative). The
+/// LAST-RESORT value used only when both the `Config::disk_cache_path` knob and
+/// the `STEPPE_F2_CACHE_PATH` env var are empty. Single-homed here (the doc on
+/// `Config::disk_cache_path` already calls it the "frozen default") so the value
+/// lives in one place and the consumer references it rather than re-spelling the
+/// literal (cleanup f2_blocks_multigpu 5.4 / 9.2; NAMING-STYLE-STANDARD §2.5
+/// single-source, §4 "Unnamed literal"). Parity-neutral: it only chooses WHERE
+/// the bytes land, never a reported number (§12). Value unchanged.
+inline constexpr char kDefaultDiskCachePath[] = "./steppe_f2_blocks.cache";
 
 // ---------------------------------------------------------------------------
 // Precision — the typed precision knob (architecture.md §9, §12; ROADMAP §4).
@@ -291,7 +336,7 @@ struct DeviceConfig {
 
     /// Throughput-only lanes for the model-space search (S8), where results are
     /// recomputed in EmulatedFp64/Fp64 before any reported number (§12).
-    std::size_t search_streams = 4;
+    std::size_t search_streams = kDefaultSearchStreams;
 
     /// Use a pool-backed (cudaMallocAsync) allocator so per-iteration
     /// allocations recycle from cache rather than round-tripping the OS
@@ -433,10 +478,11 @@ struct FilterConfig {
     double geno_max_missing = 1.0;
 
     /// Maximum per-sample missing fraction (the `mind` filter): drop a sample
-    /// whose missing fraction exceeds this. 1.0 ⇒ keep every sample. Decidable
-    /// only from a streaming pre-pass over ALL SNPs (the conditional S-1 pass),
-    /// since per-sample missingness is not a single-tile quantity.
-    double mind_max_missing = 1.0;
+    /// whose missing fraction exceeds this. kMindFilterInactiveThreshold (1.0) ⇒
+    /// keep every sample (the max possible missing fraction = "never drop").
+    /// Decidable only from a streaming pre-pass over ALL SNPs (the conditional S-1
+    /// pass), since per-sample missingness is not a single-tile quantity.
+    double mind_max_missing = kMindFilterInactiveThreshold;
 
     // ----- NEW M2 flag-gated filters (each defaults to a NO-OP so the parity /
     // pairwise-complete path is untouched unless the flag is explicitly set).

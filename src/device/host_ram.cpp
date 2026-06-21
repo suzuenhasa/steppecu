@@ -45,9 +45,9 @@ OutputTier resolve_output_tier(
         case DeviceConfig::ForceTier::Disk:     return OutputTier::Disk;
         case DeviceConfig::ForceTier::Auto:     break;  // fall through to env, then auto
     }
-    if (iequals(env_value, "resident")) return OutputTier::Resident;
-    if (iequals(env_value, "host"))     return OutputTier::HostRam;
-    if (iequals(env_value, "disk"))     return OutputTier::Disk;
+    if (iequals(env_value, kForceTierTokenResident)) return OutputTier::Resident;
+    if (iequals(env_value, kForceTierTokenHostRam))  return OutputTier::HostRam;
+    if (iequals(env_value, kForceTierTokenDisk))     return OutputTier::Disk;
     // Any other env value (or unset) ⇒ ignored ⇒ automatic policy.
     return select_output_tier(P, M, n_block, free_vram, free_host_ram);
 }

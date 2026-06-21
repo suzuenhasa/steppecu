@@ -51,6 +51,7 @@ namespace steppe::device {
 
 using core::assemble_f2_numerator;
 using core::finalize_f2;
+using core::kF2StackedBlocks;  // the [2P × …] stacked-S row-block count (f2_estimator.hpp)
 
 namespace {
 
@@ -86,7 +87,7 @@ gather_group_kernel(const double* __restrict__ Q_all,
     if (i >= P || c >= s_pad || k >= n_in_group) return;
 
     const long Pl = static_cast<long>(P);
-    const long twoP = 2 * Pl;
+    const long twoP = kF2StackedBlocks * Pl;
     const long Psp = Pl * s_pad;
     const long twoPsp = twoP * s_pad;
 
@@ -165,7 +166,7 @@ assemble_blocks_group_kernel(const double* __restrict__ Gg,
     if (i >= P || j >= P || k >= n_in_group) return;
 
     const size_t Pp = static_cast<size_t>(P);
-    const size_t twoP = 2 * Pp;
+    const size_t twoP = kF2StackedBlocks * Pp;
     const size_t si = static_cast<size_t>(i);
     const size_t sj = static_cast<size_t>(j);
 
@@ -263,7 +264,7 @@ void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
     const cublasComputeType_t ct = f2_compute_type(precision);
     const double one = 1.0;
     const double zero = 0.0;
-    const int twoP = 2 * P;
+    const int twoP = kF2StackedBlocks * P;
     const long Psp = static_cast<long>(P) * s_pad;
     const long twoPsp = static_cast<long>(twoP) * s_pad;
 

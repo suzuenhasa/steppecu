@@ -34,6 +34,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace steppe::io {
 
@@ -49,12 +50,30 @@ namespace steppe::io {
 /// the real AADR v66 TGENO file (the 48-byte `TGENO 27594 584131 ...` header).
 inline constexpr std::size_t kGenoHeaderBytes = 48;
 
+/// Format magic for the TGENO (individual-major) packing — the first whitespace-
+/// delimited token of the .geno header. Single-homed here (the "single home for
+/// format literals" policy) so the parse site references the constant rather than
+/// re-spelling the literal (cleanup eigenstrat_format 5.4; NAMING-STYLE-STANDARD
+/// §2.5 single-source, §4 "Unnamed literal"). Value unchanged — parity-neutral.
+inline constexpr std::string_view kMagicTgeno = "TGENO";
+
+/// Format magic for the GENO (SNP-major PACKEDANCESTRYMAP) packing — the first
+/// header token. Single-homed beside kMagicTgeno for the same reason; recognized
+/// so the reader can tell the two axes apart and refuse to mis-decode (cleanup
+/// eigenstrat_format 5.4; NAMING-STYLE-STANDARD §2.5, §4). Value unchanged.
+inline constexpr std::string_view kMagicGeno = "GENO";
+
 /// Genotype codes packed per byte (4 SNPs/byte for TGENO, 4 individuals/byte for
 /// GENO) — 2 bits each. A true structural constant of the 2-bit packing.
 inline constexpr int kCodesPerByte = 4;
 
 /// Bits per packed genotype code (2-bit packing).
 inline constexpr int kBitsPerCode = 2;
+
+/// Low-bit mask for a single packed code, derived from kBitsPerCode so the mask
+/// (0x3 for 2-bit codes) can never desync from the packing width. Used by
+/// code_in_byte to isolate the extracted code.
+inline constexpr std::uint8_t kCodeMask = (1u << kBitsPerCode) - 1u;
 
 /// The 2-bit code that denotes a MISSING genotype. Codes 0/1/2 are reference-
 /// allele copy counts; code 3 is missing (RAW-VALUE mapping — verified against
@@ -89,6 +108,28 @@ inline constexpr int kChromCodeY = 24;
 /// the autosomes-only filter (outside the 1..22 autosome range).
 inline constexpr int kChromCodeMt = 90;
 
+// ---------------------------------------------------------------------------
+// EIGENSTRAT .snp TEXT-record format constants — the column layout
+//   <id> <chrom> <genpos> [<physpos> <ref> <alt>]
+// single-homed here (snp_reader.cpp consumes them) so the field-count gates, the
+// allele column indices, and the prose cannot drift (cleanup snp_reader F12/B14).
+// ---------------------------------------------------------------------------
+
+/// Minimum well-formed .snp field count: <id> <chrom> <genpos>. Fewer ⇒ malformed.
+inline constexpr std::size_t kMinSnpFields = 3;
+/// Full .snp record field count (the 6-column form carrying explicit ref/alt).
+inline constexpr std::size_t kFullSnpFields = 6;
+/// 0-based column index of the reference allele in a full 6-column .snp record.
+inline constexpr std::size_t kRefAlleleCol = 4;
+/// 0-based column index of the alternate allele in a full 6-column .snp record.
+inline constexpr std::size_t kAltAlleleCol = 5;
+/// EIGENSTRAT "missing/unknown base": ref/alt default for a <6-column record.
+inline constexpr char kMissingAllele = 'N';
+/// First synthetic code for a non-numeric/non-X/Y/MT chromosome label; subsequent
+/// distinct labels decrement (codes start at -1 and go more negative). Outside the
+/// 1..22 autosome range, so such labels are dropped by the autosomes-only filter.
+inline constexpr int kFirstOtherChromCode = -1;
+
 /// Number of bytes needed to pack `n_codes` 2-bit codes, 4 per byte: ceil(n/4).
 /// This is the `ceil(nsnp/4)` (TGENO) / `ceil(nind/4)` (GENO) record-stride
 /// formula the §4 inventory flags — computed here, never open-coded elsewhere.
@@ -103,7 +144,7 @@ inline constexpr int kChromCodeMt = 90;
 /// the host reader and (via the decode primitive) the GPU/CPU decoders.
 [[nodiscard]] constexpr std::uint8_t code_in_byte(std::uint8_t byte, int k) noexcept {
     const int shift = (kCodesPerByte - 1 - (k % kCodesPerByte)) * kBitsPerCode;  // 6,4,2,0
-    return static_cast<std::uint8_t>((byte >> shift) & 0x3u);
+    return static_cast<std::uint8_t>((byte >> shift) & kCodeMask);
 }
 
 // ---------------------------------------------------------------------------
