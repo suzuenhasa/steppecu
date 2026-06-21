@@ -194,9 +194,13 @@ namespace steppe::io::filter {
 /// The complementary classification to a transversion. Non-ACGT or equal alleles
 /// are neither (is_multiallelic catches them).
 [[nodiscard]] inline bool is_transition(char a, char b) noexcept {
+    // The "clean biallelic ACGT pair" rule lives once, in is_multiallelic: a pair that
+    // fails it is multiallelic and is neither a transition nor a transversion (cleanup
+    // 7.1, §8 single-source). is_multiallelic normalizes a/b, so na/nb are re-derived
+    // here only for the ring-class test.
+    if (is_multiallelic(a, b)) return false;
     const char na = normalize_allele(a);
     const char nb = normalize_allele(b);
-    if (na == '\0' || nb == '\0' || na == nb) return false;
     const bool a_purine = (na == 'A' || na == 'G');
     const bool b_purine = (nb == 'A' || nb == 'G');
     return a_purine == b_purine;  // same ring class ⇒ transition
@@ -206,9 +210,11 @@ namespace steppe::io::filter {
 /// is_transition over clean biallelic ACGT pairs. Used by the transversions_only
 /// flag (keep iff transversion). Non-ACGT or equal alleles are NOT transversions.
 [[nodiscard]] inline bool is_transversion(char a, char b) noexcept {
-    const char na = normalize_allele(a);
-    const char nb = normalize_allele(b);
-    if (na == '\0' || nb == '\0' || na == nb) return false;
+    // Normalize once per logical check: guard the clean-pair rule via is_multiallelic,
+    // then delegate the ring-class test to is_transition (its complement over clean
+    // biallelic ACGT pairs). The prior body normalized a/b only to re-run the guard
+    // that is_transition already applies — a redundant double-normalize (cleanup 7.2).
+    if (is_multiallelic(a, b)) return false;
     return !is_transition(a, b);
 }
 

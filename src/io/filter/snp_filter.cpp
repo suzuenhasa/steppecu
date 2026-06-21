@@ -83,9 +83,12 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
         double pooled_ref_count = 0.0;     // Σ_pop Q·N  (== Σ ssum_pop)
         double pooled_allele_count = 0.0;  // Σ_pop N    (== Σ 2·scnt_pop)
         double nonmissing_indiv = 0.0;     // Σ_pop N/ploidy
+        // `(size_t)P * (size_t)s` is invariant w.r.t. `p` (only the pop index varies
+        // across this inner loop), so hoist it once per SNP instead of recomputing it
+        // P times (cleanup 7.2). Identical 64-bit-widened index, just CSE'd by hand.
+        const std::size_t base = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
         for (int p = 0; p < P; ++p) {
-            const std::size_t off =
-                static_cast<std::size_t>(p) + static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+            const std::size_t off = base + static_cast<std::size_t>(p);
             const double npn = in.n[off];  // non-missing haploid count for (pop, snp)
             // Q is zero-filled where invalid, and N is 0 there, so Q·N and N both
             // contribute 0 from a missing (pop, snp) cell — no branch needed.
@@ -123,22 +126,29 @@ std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
     // membership) for a mismatched .snp/decode length, a silent wrong answer for a
     // wiring/data bug that must abort with context (architecture.md §2 fail-fast).
     const bool mem_noop = mem.is_noop();
+
+    // Fold the per-field "requires this column to cover all M" preconditions: each is
+    // the same throw shape gated on whether the consuming filter is active, differing
+    // only by `what` (cleanup 7.4). Distinct diagnostics preserved via `what`.
+    const auto require_at_least = [&](const char* what, std::size_t have, bool active) {
+        if (active && have < Mu) {
+            throw std::invalid_argument(
+                std::string("snp_filter: ") + what + " >= M (" + std::to_string(M) +
+                "); got " + std::to_string(have));
+        }
+    };
+
+    // ref/alt drive the unconditional class drop for EVERY SNP (always active) and the
+    // throw reports BOTH fields, so it keeps its dedicated two-field shape.
     if (snps.ref.size() < Mu || snps.alt.size() < Mu) {
         throw std::invalid_argument(
             "snp_filter: snps.ref/alt must have >= M (" + std::to_string(M) +
             ") entries; got ref=" + std::to_string(snps.ref.size()) +
             " alt=" + std::to_string(snps.alt.size()));
     }
-    if (cfg.autosomes_only && snps.chrom.size() < Mu) {
-        throw std::invalid_argument(
-            "snp_filter: autosomes_only requires snps.chrom >= M (" +
-            std::to_string(M) + "); got " + std::to_string(snps.chrom.size()));
-    }
-    if (!mem_noop && snps.id.size() < Mu) {
-        throw std::invalid_argument(
-            "snp_filter: active membership requires snps.id >= M (" +
-            std::to_string(M) + "); got " + std::to_string(snps.id.size()));
-    }
+    require_at_least("autosomes_only requires snps.chrom", snps.chrom.size(),
+                     cfg.autosomes_only);
+    require_at_least("active membership requires snps.id", snps.id.size(), !mem_noop);
 
     const std::vector<PerSnpSummary> summary = derive_per_snp_summary(in);
 

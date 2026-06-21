@@ -134,8 +134,10 @@ inline constexpr int kFirstOtherChromCode = -1;
 /// This is the `ceil(nsnp/4)` (TGENO) / `ceil(nind/4)` (GENO) record-stride
 /// formula the §4 inventory flags — computed here, never open-coded elsewhere.
 [[nodiscard]] constexpr std::size_t packed_bytes(std::size_t n_codes) noexcept {
-    return (n_codes + static_cast<std::size_t>(kCodesPerByte) - 1) /
-           static_cast<std::size_t>(kCodesPerByte);
+    // Widen the int format constant once; it appears in both the numerator and the
+    // divisor of the ceil-divide (cleanup eigenstrat_format 7.3).
+    constexpr std::size_t cpb = static_cast<std::size_t>(kCodesPerByte);
+    return (n_codes + cpb - 1) / cpb;
 }
 
 /// Extract the 2-bit code for position `k` (0-based) within a packed byte,

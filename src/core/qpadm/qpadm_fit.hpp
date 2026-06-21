@@ -13,9 +13,24 @@
 #include <vector>
 
 #include "device/backend.hpp"  // steppe::ComputeBackend, F4Blocks
+#include "steppe/config.hpp"    // Precision, kDefaultMantissaBits (the SAME default f2 uses)
 #include "steppe/qpadm.hpp"     // public QpAdmModel/QpAdmResult/QpAdmOptions + run_qpadm decls
 
 namespace steppe::core::qpadm {
+
+/// The UNIFIED default fit precision (= the f2 precompute default): emulated FP64 at
+/// the SAME kDefaultMantissaBits the f2 GEMMs use (fit-engine.md §1.4). Single-homed
+/// HERE (the header) so EVERY fit-chain TU — the orchestrator (qpadm_fit.cpp) AND the
+/// S8 rotation (model_search.cpp) — references ONE (kind, mantissa_bits) source and
+/// cannot drift the pair apart ([7.2]/[9.1] dedup). The stages that cannot honor it
+/// fall back internally (see the PRECISION POLICY note in run_impl). The VALUE is
+/// frozen vs the f2 path (§3.2/§5.8) — this only folds the identical ctors, it does
+/// NOT change the policy. constexpr ⇒ implicitly inline: the factory is a compile-time
+/// value single-defined in the header (ODR-safe across all including TUs), not a
+/// runtime call. (Precision is an aggregate with constexpr defaults.)
+[[nodiscard]] constexpr Precision default_fit_precision() {
+    return Precision{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+}
 
 /// Upper-tail chi-squared probability P(X > x | dof) via the regularized upper
 /// incomplete gamma Q(dof/2, x/2) — a deterministic special function (OQ-13: p is

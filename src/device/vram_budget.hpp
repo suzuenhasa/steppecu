@@ -46,6 +46,28 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
               "kMaxVramUtilizationFraction must lie in (0, 1] — it is the fraction "
               "of free VRAM the resident working set may occupy (architecture.md §11.1).");
 
+/// Clamp a (possibly negative) `int` dimension to a non-negative `std::size_t` — the
+/// "negatives → 0, then widen" idiom every byte-count helper here applies before a
+/// product (so a stray negative can never wrap the unsigned multiply). The callers
+/// already guard `P, n_block, s_pad > 0`; this keeps each helper total/well-defined
+/// regardless. SINGLE home for the conversion so the budget fns (and tier_select.hpp)
+/// no longer spell the clamp-then-widen two divergent ways (cleanup group-7 7.4).
+[[nodiscard]] inline constexpr std::size_t nonneg(int v) noexcept {
+    return v < 0 ? 0u : static_cast<std::size_t>(v);
+}
+
+/// Floor of `fraction · free` in `std::size_t` — the "utilization budget" idiom: take
+/// a fractional share of a free-byte figure, computing the product in `double` and
+/// truncating to bytes. SINGLE home for the "floor(fraction·free) in size_t" pattern
+/// repeated across the device layer (chunk_budget_bytes here, and the Resident/HostRam
+/// thresholds in tier_select.hpp::select_output_tier) so the three sites cannot drift
+/// (cleanup group-7 7.1). `fraction` is a tunable policy share in (0, 1]; `free` is a
+/// RUNTIME free-VRAM / free-host-RAM probe (never hardcoded). Parity-neutral (§12): a
+/// budget threshold moves no bits.
+[[nodiscard]] inline std::size_t budget_bytes(double fraction, std::size_t free) noexcept {
+    return static_cast<std::size_t>(fraction * static_cast<double>(free));
+}
+
 /// Bytes of the M4 resident f2+Vpair tensors held co-resident for the whole run.
 ///
 /// BOTH `f2` and `vpair` are `[P × P × n_block]` FP64 (`P²·n_block·8` bytes each;
@@ -61,8 +83,8 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// @return         `2 · P² · n_block · sizeof(double)` bytes (0 if P or n_block ≤ 0).
 [[nodiscard]] inline constexpr std::size_t resident_tensor_bytes(int P, int n_block) noexcept {
     if (P <= 0 || n_block <= 0) return 0;
-    const std::size_t p = static_cast<std::size_t>(P);
-    const std::size_t nb = static_cast<std::size_t>(n_block);
+    const std::size_t p = nonneg(P);          // clamp-then-widen via the shared helper (7.4)
+    const std::size_t nb = nonneg(n_block);
     // f2 AND vpair: two equal [P×P×n_block] FP64 tensors (the B26 2× term).
     return kResidentTensorCount * p * p * nb * sizeof(double);
 }
@@ -80,8 +102,8 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// @param s_pad  the bucket's padded SNP-block width (≥ 1 by construction).
 /// @return       `kChunkInputStacks·P·s_pad + kChunkOutputStacks·P²` doubles.
 [[nodiscard]] inline constexpr std::size_t per_block_chunk_elems(int P, int s_pad) noexcept {
-    const std::size_t p = static_cast<std::size_t>(P < 0 ? 0 : P);
-    const std::size_t sp = static_cast<std::size_t>(s_pad < 0 ? 0 : s_pad);
+    const std::size_t p = nonneg(P);          // same clamp-then-widen as resident_tensor_bytes (7.4)
+    const std::size_t sp = nonneg(s_pad);
     const std::size_t slab = p * p;
     return kChunkInputStacks * p * sp + kChunkOutputStacks * slab;
 }
@@ -111,7 +133,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
                                                     int n_block) noexcept {
     const std::size_t reserved = resident_tensor_bytes(P, n_block) + kCublasWorkspaceBytes;
     const std::size_t net = (free_vram > reserved) ? (free_vram - reserved) : 0u;
-    return static_cast<std::size_t>(kMaxVramUtilizationFraction * static_cast<double>(net));
+    return budget_bytes(kMaxVramUtilizationFraction, net);  // floor(fraction·net), shared helper (7.1)
 }
 
 /// Largest number of blocks of one bucket that fit in a single strided-batched

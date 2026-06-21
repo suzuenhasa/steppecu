@@ -45,9 +45,19 @@ OutputTier resolve_output_tier(
         case DeviceConfig::ForceTier::Disk:     return OutputTier::Disk;
         case DeviceConfig::ForceTier::Auto:     break;  // fall through to env, then auto
     }
-    if (iequals(env_value, kForceTierTokenResident)) return OutputTier::Resident;
-    if (iequals(env_value, kForceTierTokenHostRam))  return OutputTier::HostRam;
-    if (iequals(env_value, kForceTierTokenDisk))     return OutputTier::Disk;
+    // The STEPPE_FORCE_TIER token → tier mapping as a small {token, tier} table + loop,
+    // instead of three near-identical if (iequals(...)) lines that differ only by the
+    // (token, enum) pair — one row per tier, so a tier add/rename touches a single place
+    // (cleanup group-7 7.1; the tokens are single-homed beside OutputTier in tier_select.hpp).
+    struct ForceTierToken { const char* token; OutputTier tier; };
+    static constexpr ForceTierToken kForceTierTokens[] = {
+        {kForceTierTokenResident, OutputTier::Resident},
+        {kForceTierTokenHostRam,  OutputTier::HostRam},
+        {kForceTierTokenDisk,     OutputTier::Disk},
+    };
+    for (const ForceTierToken& entry : kForceTierTokens) {
+        if (iequals(env_value, entry.token)) return entry.tier;
+    }
     // Any other env value (or unset) ⇒ ignored ⇒ automatic policy.
     return select_output_tier(P, M, n_block, free_vram, free_host_ram);
 }

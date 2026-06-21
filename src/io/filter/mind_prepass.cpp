@@ -44,6 +44,10 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
         // sample. Same bit extraction as the decode front-end (io::code_in_byte,
         // MSB-first) and the same missing sentinel (io::kMissingCode == code 3), so
         // "non-missing" here is identical to the decode's notion.
+        // `n_snp` is fixed across the whole pass, so the divisor cast is hoisted out of
+        // the per-sample loop instead of being re-evaluated once per individual
+        // (cleanup 7.2). `n_snp > 0` is guaranteed by the enclosing branch.
+        const double n_snp_d = static_cast<double>(n_snp);
         for (std::size_t ind = 0; ind < n_ind; ++ind) {
             const std::uint8_t* rec = in.packed + ind * in.bytes_per_record;
             std::size_t nonmissing_count = 0;
@@ -59,8 +63,7 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
             }
             out.nonmissing[ind] = nonmissing_count;
             out.missing_frac[ind] =
-                1.0 - static_cast<double>(nonmissing_count) /
-                          static_cast<double>(n_snp);
+                1.0 - static_cast<double>(nonmissing_count) / n_snp_d;
         }
     } else {
         // No SNPs (or no data): the missing fraction is UNDEFINED. We treat every

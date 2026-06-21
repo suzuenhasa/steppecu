@@ -27,6 +27,17 @@ namespace steppe::core::internal {
 inline constexpr int    kPchisqMaxIter = 1000;
 inline constexpr double kPchisqEps     = 1e-15;
 
+/// The regularized-incomplete-gamma normalizing prefactor
+/// `exp(-x + a·log(x) − lgamma(a))`, shared by BOTH the series (`pchisq_gammp_series`)
+/// and continued-fraction (`pchisq_gammq_cf`) tails. Single-homed so the two tails
+/// cannot drift: the exact SAME expression — same op order, same intrinsics — must
+/// produce a bit-identical prefactor for the two forms to compose into a consistent
+/// `pchisq_upper` (DRY; NAMING-STYLE-STANDARD §2.5 single-source, §3.2 parity-sensitive
+/// — name only, value unchanged; findings group-7 7.2).
+[[nodiscard]] inline double pchisq_gamma_prefactor(double a, double x) {
+    return std::exp(-x + a * std::log(x) - std::lgamma(a));
+}
+
 /// Regularized lower incomplete gamma P(a, x) by series (good for x < a+1).
 [[nodiscard]] inline double pchisq_gammp_series(double a, double x) {
     double ap = a;
@@ -38,7 +49,7 @@ inline constexpr double kPchisqEps     = 1e-15;
         sum += del;
         if (std::fabs(del) < std::fabs(sum) * kPchisqEps) break;
     }
-    return sum * std::exp(-x + a * std::log(x) - std::lgamma(a));
+    return sum * pchisq_gamma_prefactor(a, x);
 }
 
 /// Regularized upper incomplete gamma Q(a, x) by continued fraction (x >= a+1).
@@ -49,7 +60,8 @@ inline constexpr double kPchisqEps     = 1e-15;
     double d = 1.0 / b;
     double h = d;
     for (int i = 1; i <= kPchisqMaxIter; ++i) {
-        const double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
+        const double di = static_cast<double>(i);
+        const double an = -di * (di - a);
         b += 2.0;
         d = an * d + b;
         if (std::fabs(d) < kFpMin) d = kFpMin;
@@ -60,7 +72,7 @@ inline constexpr double kPchisqEps     = 1e-15;
         h *= del;
         if (std::fabs(del - 1.0) < kPchisqEps) break;
     }
-    return std::exp(-x + a * std::log(x) - std::lgamma(a)) * h;
+    return pchisq_gamma_prefactor(a, x) * h;
 }
 
 /// Upper-tail chi-squared probability P(X > x | dof) = Q(dof/2, x/2). dof <= 0 ⇒

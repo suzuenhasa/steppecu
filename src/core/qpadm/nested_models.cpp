@@ -15,20 +15,26 @@ namespace {
 /// diagonal is needed for SE.
 [[nodiscard]] std::vector<double> sample_cov_diag(const std::vector<double>& w,
                                                   int nrows, int ncols) {
-    std::vector<double> mean(static_cast<std::size_t>(ncols), 0.0);
+    // Hoist the column-stride widening once (§3.3: keep the widening, fold the boilerplate);
+    // the (i,c)->w[i*ncols+c] row-major access then lives in one accessor used by both loops
+    // (§4 one concept = one spelling — a divergent index edit can no longer miss a copy).
+    const std::size_t nc = static_cast<std::size_t>(ncols);
+    const auto row_major_at = [&w, nc](int i, int c) -> double {
+        return w[static_cast<std::size_t>(i) * nc + static_cast<std::size_t>(c)];
+    };
+
+    std::vector<double> mean(nc, 0.0);
     for (int i = 0; i < nrows; ++i)
         for (int c = 0; c < ncols; ++c)
-            mean[static_cast<std::size_t>(c)] +=
-                w[static_cast<std::size_t>(i) * static_cast<std::size_t>(ncols) +
-                  static_cast<std::size_t>(c)];
+            mean[static_cast<std::size_t>(c)] += row_major_at(i, c);
     for (int c = 0; c < ncols; ++c) mean[static_cast<std::size_t>(c)] /= static_cast<double>(nrows);
 
-    std::vector<double> diag(static_cast<std::size_t>(ncols), 0.0);
+    std::vector<double> diag(nc, 0.0);
     for (int c = 0; c < ncols; ++c) {
+        const double mc = mean[static_cast<std::size_t>(c)];  // loop-invariant w.r.t. inner i
         long double acc = 0.0L;
         for (int i = 0; i < nrows; ++i) {
-            const double d = w[static_cast<std::size_t>(i) * static_cast<std::size_t>(ncols) +
-                               static_cast<std::size_t>(c)] - mean[static_cast<std::size_t>(c)];
+            const double d = row_major_at(i, c) - mc;
             acc += static_cast<long double>(d) * static_cast<long double>(d);
         }
         diag[static_cast<std::size_t>(c)] = static_cast<double>(acc / static_cast<long double>(nrows - 1));

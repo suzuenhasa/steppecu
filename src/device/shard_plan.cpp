@@ -75,6 +75,18 @@ std::vector<DeviceShard> plan_block_shards(
     std::size_t b0 = 0;         // first block of the current device's range
     long device_snps = 0;       // SNPs accumulated into the current device
 
+    // One home for the {b0,b1,s0,s1} shard shape (the int-narrowing of the block ids
+    // + the begin/end column lookup off `ranges`): the mid-loop close and the final
+    // close differ only by the upper block bound, so they build the shard identically
+    // here (cleanup group-7 7.1 — no two copies to drift, e.g. on the `hi-1` end index).
+    const auto make_shard = [&](std::size_t lo, std::size_t hi) {
+        return DeviceShard{
+            static_cast<int>(lo),
+            static_cast<int>(hi),
+            ranges[lo].begin,
+            ranges[hi - 1].end};
+    };
+
     for (std::size_t b = 0; b < n_block; ++b) {
         device_snps += ranges[b].size();
 
@@ -85,11 +97,7 @@ std::vector<DeviceShard> plan_block_shards(
         const bool reached_target = (device_snps >= target_per_device);
         if (more_devices_left && reached_target && (b + 1 < n_block)) {
             const std::size_t b1 = b + 1;
-            plan[g] = DeviceShard{
-                static_cast<int>(b0),
-                static_cast<int>(b1),
-                ranges[b0].begin,
-                ranges[b1 - 1].end};
+            plan[g] = make_shard(b0, b1);
             ++g;
             b0 = b1;
             device_snps = 0;
@@ -99,11 +107,7 @@ std::vector<DeviceShard> plan_block_shards(
     // Close the FINAL non-empty range (device g) over the remaining blocks
     // [b0, n_block). This always runs because the loop never closes the last
     // device (the b+1 < n_block guard leaves the trailing run for here).
-    plan[g] = DeviceShard{
-        static_cast<int>(b0),
-        static_cast<int>(n_block),
-        ranges[b0].begin,
-        ranges[n_block - 1].end};
+    plan[g] = make_shard(b0, n_block);
 
     // Devices g+1 .. G-1 (if any) keep their value-initialized EMPTY shard
     // {0,0,0,0} — the n_block < G case where trailing devices own nothing. An

@@ -31,6 +31,10 @@ std::vector<int> left_with_target(const QpAdmModel& model) {
     return left_idx;
 }
 
+// default_fit_precision() — the UNIFIED default fit precision — is single-homed in
+// qpadm_fit.hpp ([7.2]/[9.1] dedup) so the orchestrator, both run_qpadm/run_qpwave
+// forwarders, AND the S8 rotation (model_search.cpp) reference ONE source.
+
 // HONEST precision_tag (architecture.md §9, §12; fit-engine.md §1.4). Report what
 // ACTUALLY ran on the covariance SYRK, not what was requested: EmulatedFp64 iff the
 // request is emulated AND the backend can honor it (the SAME `emulated_fp64_honorable`
@@ -67,7 +71,7 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     // but cannot recover bits a prior subtraction annihilated); and the ill-
     // conditioned cuSOLVER SPD inverse stays native (the d6d3cbb promotion seam,
     // gated on a future FP64-emulated cuSOLVER mode the toolkit does not yet expose).
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+    const Precision prec = default_fit_precision();
 
     // HONEST precision_tag — what ACTUALLY ran on the covariance SYRK (single-homed in
     // honored_tag so run_impl + run_qpwave_impl cannot drift; [7.1] dedup, §9/§12).
@@ -219,41 +223,41 @@ double pchisq_upper(double x, int dof) {
 // ---- Public entry points (include/steppe/qpadm.hpp) -------------------------
 namespace steppe {
 
-QpAdmResult run_qpadm(const device::DeviceF2Blocks& f2, const QpAdmModel& model,
-                      const QpAdmOptions& opts, device::Resources& resources) {
-    ComputeBackend& be = *resources.gpus.at(0).backend;
+namespace {
+
+/// The single-model entry-point GPU index: select the FIRST backend (the multi-GPU
+/// fan-out lives ABOVE this seam; the model-batched rotation drives the others). Names
+/// the device-index `0` repeated at the four public wrappers ([7.2] dedup; mirrors
+/// gpus[0] = the combine root, resources.hpp). TU-private convention constant, so it
+/// is homed here rather than in config.hpp (it is not a cross-TU tunable).
+inline constexpr std::size_t kPrimaryGpu = 0;
+
+/// The backend bound to kPrimaryGpu — folds the identical `*resources.gpus.at(0).backend`
+/// at every public fit/wave entry into one accessor + names the magic index ([7.2] dedup).
+[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
+    return *resources.gpus.at(kPrimaryGpu).backend;
+}
+
+/// Shared qpAdm body: prepend the target to `left` (left = c(target, sources)), run the
+/// S3 assemble + the S4→S6→S7 chain via run_impl. Templated on the f2 SOURCE so the two
+/// public run_qpadm overloads (DeviceF2Blocks vs F2BlockTensor) are thin forwarders —
+/// mirroring run_qpwave_impl ([7.1] dedup). assemble_f4 is the cancellation-sensitive
+/// 4-slab combine and stays native ALWAYS by carve-out (cuda_backend.cu OQ-5
+/// `(void)precision`), exactly like the f2 numerator — passing the emulated default here
+/// is the one-policy consistency, not a behavior change for S3. The CpuBackend host-
+/// oracle path ignores precision ⇒ always native (the native oracle the GPU path is
+/// diffed against). run_impl fills the M(fit-2) rankdrop + popdrop (both on the same
+/// X + cov).
+template <class F2Src>
+QpAdmResult run_qpadm_impl(ComputeBackend& be, const F2Src& f2, const QpAdmModel& model,
+                           const QpAdmOptions& opts) {
     const std::vector<int> left_idx = core::qpadm::left_with_target(model);
-    // Unified default precision (= the f2 default). assemble_f4 is the cancellation-
-    // sensitive 4-slab combine and stays native ALWAYS by carve-out (cuda_backend.cu
-    // OQ-5 `(void)precision`), exactly like the f2 numerator — passing the emulated
-    // default here is the one-policy consistency, not a behavior change for S3.
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
-    // S3 — device-resident assemble (zero D2H on the CUDA path).
+    const Precision prec = core::qpadm::default_fit_precision();
     F4Blocks X = core::qpadm::assemble_f4(be, f2, std::span<const int>(left_idx),
                                           std::span<const int>(model.right), prec);
-    // run_impl fills the M(fit-2) rankdrop + popdrop (both on the same X + cov).
     return core::qpadm::run_impl(be, std::move(X),
                                  std::span<const int>(f2.block_sizes), model, opts);
 }
-
-QpAdmResult run_qpadm(const F2BlockTensor& f2_host, const QpAdmModel& model,
-                      const QpAdmOptions& opts, device::Resources& resources) {
-    ComputeBackend& be = *resources.gpus.at(0).backend;
-    const std::vector<int> left_idx = core::qpadm::left_with_target(model);
-    // Unified default precision (= the f2 default); see the DeviceF2Blocks overload.
-    // The CpuBackend (this host-oracle path) ignores precision ⇒ always native, so it
-    // is the native oracle the emulated GPU path is diffed against.
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
-    // S3 — host-oracle assemble (the CpuBackend reads host memory directly).
-    F4Blocks X = core::qpadm::assemble_f4(be, f2_host, std::span<const int>(left_idx),
-                                          std::span<const int>(model.right), prec);
-    // run_impl fills the M(fit-2) rankdrop + popdrop (both on the same X + cov).
-    return core::qpadm::run_impl(be, std::move(X),
-                                 std::span<const int>(f2_host.block_sizes), model, opts);
-}
-
-// ---- qpWave (M(fit-2) item (4): the rank sweep WITHOUT a target) -------------
-namespace {
 
 /// Shared qpWave body: gather X with `left` as the rows DIRECTLY (NO target
 /// prepend; left[0] is the qpWave reference, nl = left.size()-1), run S4 + the
@@ -262,7 +266,7 @@ template <class F2Src>
 QpWaveResult run_qpwave_impl(ComputeBackend& be, const F2Src& f2,
                              std::span<const int> left, std::span<const int> right,
                              const QpAdmOptions& opts) {
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+    const Precision prec = core::qpadm::default_fit_precision();
     // qpWave: NO target prepend — `left` IS the rows (left[0] the reference).
     F4Blocks X = core::qpadm::assemble_f4(be, f2, left, right, prec);
     const JackknifeCov cov =
@@ -279,18 +283,30 @@ QpWaveResult run_qpwave_impl(ComputeBackend& be, const F2Src& f2,
 
 }  // namespace
 
+QpAdmResult run_qpadm(const device::DeviceF2Blocks& f2, const QpAdmModel& model,
+                      const QpAdmOptions& opts, device::Resources& resources) {
+    // S3 — device-resident assemble (zero D2H on the CUDA path).
+    return run_qpadm_impl(primary_backend(resources), f2, model, opts);
+}
+
+QpAdmResult run_qpadm(const F2BlockTensor& f2_host, const QpAdmModel& model,
+                      const QpAdmOptions& opts, device::Resources& resources) {
+    // S3 — host-oracle assemble (the CpuBackend reads host memory directly).
+    return run_qpadm_impl(primary_backend(resources), f2_host, model, opts);
+}
+
+// ---- qpWave (M(fit-2) item (4): the rank sweep WITHOUT a target) -------------
+
 QpWaveResult run_qpwave(const device::DeviceF2Blocks& f2, std::span<const int> left,
                         std::span<const int> right, const QpAdmOptions& opts,
                         device::Resources& resources) {
-    ComputeBackend& be = *resources.gpus.at(0).backend;
-    return run_qpwave_impl(be, f2, left, right, opts);
+    return run_qpwave_impl(primary_backend(resources), f2, left, right, opts);
 }
 
 QpWaveResult run_qpwave(const F2BlockTensor& f2_host, std::span<const int> left,
                         std::span<const int> right, const QpAdmOptions& opts,
                         device::Resources& resources) {
-    ComputeBackend& be = *resources.gpus.at(0).backend;
-    return run_qpwave_impl(be, f2_host, left, right, opts);
+    return run_qpwave_impl(primary_backend(resources), f2_host, left, right, opts);
 }
 
 }  // namespace steppe

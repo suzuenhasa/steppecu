@@ -39,19 +39,19 @@ namespace {
 /// Resolve the FIXED device ordering the combine sums over (architecture.md §11.4,
 /// §12). A non-empty `config.devices` PINS both the set AND the g=0..G-1 order
 /// verbatim. EMPTY ⇒ auto-enumerate every visible CUDA device in ordinal order
-/// 0..visible-1 (the §9 DeviceConfig::devices contract). The visible count is read
-/// from the CUDA-free visible_device_count() factory query (a one-line
-/// cudaGetDeviceCount in cuda_backend.cu), so this stays CUDA-free — no
-/// <cuda_runtime.h> here, and NO throwaway device-0 backend / leaked cudaSetDevice(0)
-/// (cleanup B8; this function is now a pure resolution with no device side effect).
-[[nodiscard]] std::vector<int> resolve_device_order(const DeviceConfig& config) {
+/// 0..visible-1 (the §9 DeviceConfig::devices contract). `visible` is the ONE
+/// CUDA-free visible_device_count() query, taken once by build_resources and passed
+/// in (it also feeds validate_device_order), so the count is read exactly once per
+/// build — no <cuda_runtime.h> here, and NO throwaway device-0 backend / leaked
+/// cudaSetDevice(0) (cleanup B8; group-7 7.2 single-query). This stays a pure
+/// resolution with no device side effect.
+[[nodiscard]] std::vector<int> resolve_device_order(const DeviceConfig& config, int visible) {
     if (!config.devices.empty()) {
         return config.devices;  // explicit list pins the set AND the order
     }
-    // Auto-enumerate: the dense ordinal list 0..visible-1. visible_device_count() is
-    // the CUDA-free count query (no context spin-up, no workspace alloc, no device
-    // selection — unlike the old throwaway make_cuda_backend(0)).
-    const int visible = visible_device_count();
+    // Auto-enumerate: the dense ordinal list 0..visible-1 from the single CUDA-free
+    // count query build_resources already took (no context spin-up, no workspace
+    // alloc, no device selection — unlike the old throwaway make_cuda_backend(0)).
     if (visible < 1) {
         throw std::runtime_error(
             "steppe::device::build_resources: auto-enumeration found no visible CUDA "
@@ -94,7 +94,12 @@ void validate_device_order(std::span<const int> order, int visible) {
 }
 
 Resources build_resources(const DeviceConfig& config) {
-    const std::vector<int> device_order = resolve_device_order(config);
+    // ONE CUDA-free count query per build, shared by both the auto-enumerate sizing
+    // (resolve_device_order) and the §9 validation (validate_device_order) below — so
+    // the "one count query serves both" contract is literally true (cleanup group-7
+    // 7.2). visible_device_count() is the CUDA-free cudaGetDeviceCount factory query.
+    const int visible = visible_device_count();
+    const std::vector<int> device_order = resolve_device_order(config, visible);
 
     // Fail-fast (architecture.md §2): a resolved Resources must own >= 1 device.
     if (device_order.empty()) {
@@ -104,12 +109,12 @@ Resources build_resources(const DeviceConfig& config) {
     }
 
     // §9 build() validation BEFORE binding any device: reject duplicate / out-of-range
-    // ordinals (cleanup B8/C1). One CUDA-free count query (visible_device_count())
-    // serves both the auto-enumerate sizing above and this validation — and on the
-    // auto path the dense 0..visible-1 order it produced trivially passes. Validating
-    // first turns the silent {0,0} footgun (two lanes on one GPU) and the deep
-    // cudaSetDevice "invalid device ordinal" throw into a §9-grade fail-fast.
-    validate_device_order(device_order, visible_device_count());
+    // ordinals (cleanup B8/C1). The single `visible` count query taken above serves
+    // both the auto-enumerate sizing (resolve_device_order) and this validation — and
+    // on the auto path the dense 0..visible-1 order it produced trivially passes.
+    // Validating first turns the silent {0,0} footgun (two lanes on one GPU) and the
+    // deep cudaSetDevice "invalid device ordinal" throw into a §9-grade fail-fast.
+    validate_device_order(device_order, visible);
 
     Resources resources;
     resources.config = config;  // freeze the resolved intent levers (§9)

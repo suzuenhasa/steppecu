@@ -70,7 +70,10 @@ inline constexpr int kF2StackedBlocks = 2;
 /// correct). Sample size is per-SNP `n`, never a hardcoded constant.
 [[nodiscard]] STEPPE_HD inline double het_correction(double q, double n, bool valid) noexcept {
     if (!valid) return 0.0;
-    const double denom = (n - 1.0 > kHetCorrDenomFloor) ? (n - 1.0) : kHetCorrDenomFloor;
+    // `n - 1.0` bound once (DRY; NAMING-STYLE-STANDARD §2.5; findings group-7 7.2).
+    // Value-identical to the prior twice-computed form (the compiler already CSEs it).
+    const double nm1 = n - 1.0;
+    const double denom = (nm1 > kHetCorrDenomFloor) ? nm1 : kHetCorrDenomFloor;
     return q * (1.0 - q) / denom;
 }
 

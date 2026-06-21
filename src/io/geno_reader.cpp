@@ -36,8 +36,11 @@ GenoReader::GenoReader(const std::string& geno_path) : path_(geno_path) {
     }
 
     std::array<char, kGenoHeaderBytes> head{};
-    in.read(head.data(), static_cast<std::streamsize>(kGenoHeaderBytes));
-    if (in.gcount() != static_cast<std::streamsize>(kGenoHeaderBytes)) {
+    // Hoist the loop-invariant streamsize header width once (cleanup geno_reader
+    // 7.2): the read length and the gcount comparand are the same cast.
+    const auto header_size = static_cast<std::streamsize>(kGenoHeaderBytes);
+    in.read(head.data(), header_size);
+    if (in.gcount() != header_size) {
         throw std::runtime_error("io::GenoReader: .geno shorter than the " +
                                  std::to_string(kGenoHeaderBytes) +
                                  "-byte header: " + path_);
@@ -137,11 +140,17 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
     // (architecture.md §2). The idiom is the standard `a > MAX/b` overflow test
     // (bytes_per_record is provably nonzero here: tile_snps >= 1 ⇒
     // packed_bytes(tile_snps) >= 1).
+    // The overflow throw and both resize() catch handlers report the SAME
+    // n_individuals * bytes_per_record operands for the same path_; build that
+    // shared count substring once and reuse it across all three, each site
+    // supplying its own surrounding phrasing (cleanup geno_reader 7.1, 7.2).
+    const std::string size_operands =
+        std::to_string(n_individuals) + " individuals * " +
+        std::to_string(bytes_per_record) + " bytes/record";
     if (n_individuals > std::numeric_limits<std::size_t>::max() / bytes_per_record) {
         throw std::runtime_error(
-            "io::GenoReader::read_tile: tile size overflow (n_individuals=" +
-            std::to_string(n_individuals) + " * bytes_per_record=" +
-            std::to_string(bytes_per_record) + " exceeds size_t) for " + path_);
+            "io::GenoReader::read_tile: tile size overflow (" + size_operands +
+            " exceeds size_t) for " + path_);
     }
 
     GenotypeTile tile;
@@ -165,14 +174,11 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
     } catch (const std::bad_alloc&) {
         throw std::runtime_error(
             "io::GenoReader::read_tile: out of memory allocating tile (" +
-            std::to_string(n_individuals) + " individuals * " +
-            std::to_string(bytes_per_record) + " bytes/record) for " + path_);
+            size_operands + ") for " + path_);
     } catch (const std::length_error&) {
         throw std::runtime_error(
             "io::GenoReader::read_tile: tile too large for the allocator (" +
-            std::to_string(n_individuals) + " individuals * " +
-            std::to_string(bytes_per_record) +
-            " bytes/record exceeds vector::max_size()) for " + path_);
+            size_operands + " exceeds vector::max_size()) for " + path_);
     }
     tile.pop_offsets.reserve(part.groups.size() + 1);
     tile.pop_labels.reserve(part.groups.size());
@@ -187,6 +193,9 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
     // slot. Individuals land pop-contiguous, so pop_offsets segment the result.
     std::size_t out_ind = 0;
     tile.pop_offsets.push_back(0);
+    // Hoist the loop-invariant streamsize record width once (cleanup geno_reader
+    // 7.2): the read length and the gcount comparand are the same cast every row.
+    const std::streamsize rec_bytes = static_cast<std::streamsize>(bytes_per_record);
     for (const auto& g : part.groups) {
         tile.pop_labels.push_back(g.label);
         for (std::size_t row : g.rows) {
@@ -196,8 +205,8 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
                     static_cast<std::streamoff>(header_.bytes_per_record);
             in.seekg(off, std::ios::beg);
             char* dst = reinterpret_cast<char*>(tile.packed.data() + out_ind * bytes_per_record);
-            in.read(dst, static_cast<std::streamsize>(bytes_per_record));
-            if (in.gcount() != static_cast<std::streamsize>(bytes_per_record)) {
+            in.read(dst, rec_bytes);
+            if (in.gcount() != rec_bytes) {
                 throw std::runtime_error(
                     "io::GenoReader::read_tile: short read for individual row " +
                     std::to_string(row) + " in " + path_);

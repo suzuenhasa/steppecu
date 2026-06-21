@@ -27,6 +27,23 @@ namespace steppe::io {
 
 namespace {
 
+// Parse the WHOLE token `tok` as a T via std::from_chars, writing the value into
+// `out`. Returns true iff the parse succeeded (errc{}) AND the entire token was
+// consumed (ptr == end) — the "fully-consumed" contract both numeric parsers
+// below share. std::from_chars is locale-free, allocation-free, and throws
+// nothing (it reports failure through the returned errc), so the
+// runtime_error-only contract of read_snp is preserved (cleanup snp_reader 7.1;
+// it has overloads for both integer and floating-point T). The from_chars setup
+// triple (begin/end + the errc/consumed check) was copy-pasted in chrom_code and
+// parse_genpos differing only by the value type; this folds them to one site.
+template <class T>
+[[nodiscard]] bool parse_full(const std::string& tok, T& out) {
+    const char* begin = tok.data();
+    const char* end = tok.data() + tok.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, out);
+    return ec == std::errc{} && ptr == end;
+}
+
 // EIGENSTRAT chromosome-label conventions for the common non-numeric codes, so
 // adjacent-equality (all the block rule consumes) is well-defined. Numeric codes
 // pass through as their integer value; X/Y/MT take the EIGENSOFT codes named in
@@ -56,14 +73,11 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
     }
     if (numeric) {
         int value = 0;
-        const char* begin = tok.data();
-        const char* end = tok.data() + tok.size();
-        const auto [ptr, ec] = std::from_chars(begin, end, value);
         // The all-digit check above guarantees a non-empty, sign-free, fully-
         // consumed run, so the only possible failure is errc::result_out_of_range
         // (token > INT_MAX). On success return the integer; on overflow fall
         // through to the sentinel path below (never throw — B15).
-        if (ec == std::errc{} && ptr == end) {
+        if (parse_full(tok, value)) {
             return value;
         }
     }
@@ -110,10 +124,10 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
 // HUGE_VAL on implementations that map overflow to ±inf rather than out_of_range).
 [[nodiscard]] double parse_genpos(const std::string& tok, std::size_t line_no) {
     double value = 0.0;
-    const char* begin = tok.data();
-    const char* end = tok.data() + tok.size();
-    const auto [ptr, ec] = std::from_chars(begin, end, value);
-    if (ec != std::errc{} || ptr != end || !std::isfinite(value)) {
+    // parse_full enforces the whole-token-consumed contract (rejects trailing
+    // garbage like "0.5x" and overflow result_out_of_range, e.g. "1e400"); the
+    // non-finite guard is genpos-specific and stays here (see the header comment).
+    if (!parse_full(tok, value) || !std::isfinite(value)) {
         throw std::runtime_error(
             "io::read_snp: malformed genetic position \"" + tok +
             "\" at line " + std::to_string(line_no));
@@ -170,12 +184,15 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         const std::string& chrom_tok = fields[1];
         const double genpos = parse_genpos(fields[2], line_no);  // throws if non-finite/garbage
         // Alleles present only when the full 6-column record is given (cols 5,6);
-        // otherwise default to the EIGENSTRAT "missing/unknown base" 'N'.
+        // otherwise default to the EIGENSTRAT "missing/unknown base" 'N'. Fold the
+        // identical ref/alt extraction (differs only by column) into one lambda so
+        // fields[col] is evaluated once per allele (cleanup snp_reader 7.2).
         const bool has_alleles = fields.size() >= kFullSnpFields;
-        const char ref =
-            has_alleles && !fields[kRefAlleleCol].empty() ? fields[kRefAlleleCol][0] : kMissingAllele;
-        const char alt =
-            has_alleles && !fields[kAltAlleleCol].empty() ? fields[kAltAlleleCol][0] : kMissingAllele;
+        const auto allele = [&](std::size_t col) {
+            return has_alleles && !fields[col].empty() ? fields[col][0] : kMissingAllele;
+        };
+        const char ref = allele(kRefAlleleCol);
+        const char alt = allele(kAltAlleleCol);
 
         table.id.push_back(id);
         table.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));

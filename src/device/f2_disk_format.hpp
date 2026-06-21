@@ -41,14 +41,26 @@ struct F2DiskHeader {                       // sizeof == 64 (padded)
 inline constexpr std::size_t kF2DiskHeaderSize = sizeof(F2DiskHeader);
 static_assert(kF2DiskHeaderSize == 64, "F2DiskHeader must be exactly 64 bytes");
 
+namespace detail {
+/// Byte offset of block b's [P²] FP64 slab within a region that starts at `base`:
+/// `base + P²·b·sizeof(double)`. The `P·P·b` widening is done in `std::uint64_t`
+/// (cast each factor BEFORE multiplying) so the stride cannot wrap at P²·b scale.
+/// SINGLE home for the f2/vpair slab arithmetic — both region accessors below differ
+/// ONLY by their `base` offset, so the identical stride lives here once (cleanup
+/// group-7 7.1 dup + 7.3 repeated widening cast chain).
+[[nodiscard]] inline std::uint64_t slab_offset(std::uint64_t base, const F2DiskHeader& h,
+                                               int b) noexcept {
+    return base + static_cast<std::uint64_t>(h.P) * static_cast<std::uint64_t>(h.P) *
+                      static_cast<std::uint64_t>(b) * sizeof(double);
+}
+}  // namespace detail
+
 /// Byte offset of block b's [P²] f2 slab (column-major i+P·j within the slab).
 [[nodiscard]] inline std::uint64_t f2_block_offset(const F2DiskHeader& h, int b) noexcept {
-    return h.f2_offset + static_cast<std::uint64_t>(h.P) * static_cast<std::uint64_t>(h.P) *
-                             static_cast<std::uint64_t>(b) * sizeof(double);
+    return detail::slab_offset(h.f2_offset, h, b);
 }
 [[nodiscard]] inline std::uint64_t vpair_block_offset(const F2DiskHeader& h, int b) noexcept {
-    return h.vpair_offset + static_cast<std::uint64_t>(h.P) * static_cast<std::uint64_t>(h.P) *
-                                static_cast<std::uint64_t>(b) * sizeof(double);
+    return detail::slab_offset(h.vpair_offset, h, b);
 }
 
 }  // namespace steppe::device

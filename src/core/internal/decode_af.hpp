@@ -141,16 +141,17 @@ struct AfResult {
 /// per-call DecodeTileView, not RunConfig) — masks out; the host filter throws.
 [[nodiscard]] STEPPE_HD inline AfResult finalize_af(std::int64_t ac, std::int64_t an,
                                                     int ploidy) noexcept {
+    // `AfResult r;` already yields the masked-out {q:0, n:0, v:0} via its in-class
+    // default member initializers, so the masked-out path needs no else branch — the
+    // re-assignment of the same constants was a dead store (DRY/dead-code;
+    // NAMING-STYLE-STANDARD §4 dead-store; findings group-7 7.4). Only the
+    // has-data arm assigns.
     AfResult r;
     if (an > 0 && ploidy > 0) {
         const double n = static_cast<double>(ploidy) * static_cast<double>(an);
         r.n = n;
         r.q = static_cast<double>(ac) / n;
         r.v = 1.0;
-    } else {
-        r.n = 0.0;
-        r.q = 0.0;
-        r.v = 0.0;
     }
     return r;
 }

@@ -37,6 +37,16 @@
 
 namespace steppe::core {
 
+/// Index-cast helper: the per-SNP `long` column index → the `std::size_t` a
+/// std::vector / std::span subscript wants ([7.3] dedup). The
+/// `block_id[static_cast<std::size_t>(...)]` cast boilerplate was hand-repeated in
+/// the per-SNP loops of BOTH assign_blocks and block_ranges; this writes the widening
+/// ONCE. Callers guarantee a non-negative index (file-order SNP columns in [0, M)),
+/// so the widening is value-preserving (parity-NEUTRAL).
+[[nodiscard]] constexpr std::size_t idx(long i) noexcept {
+    return static_cast<std::size_t>(i);
+}
+
 /// Block index of a SNP from its genetic position, both in MORGANS.
 ///
 /// The deterministic pure function of genetic position that defines jackknife
@@ -209,6 +219,14 @@ struct BlockRange {
         return {};
     }
 
+    // The three fail-fast paths below share the "core::block_ranges: " prefix; this
+    // local throw lambda writes the prefix ONCE ([7.4] dedup). The distinct per-check
+    // message text is still supplied at each call site (the checks remain genuinely
+    // different); only the common prefix is single-homed.
+    const auto fail = [](const std::string& msg) {
+        throw std::runtime_error("core::block_ranges: " + msg);
+    };
+
     // FAIL-FAST contract guard (architecture.md §2): the scan below indexes
     // out[block_id[s]] for s in [0, M), so a short block_id or an id outside
     // [0, n_block) would be an out-of-bounds read/write. assign_blocks guarantees
@@ -218,10 +236,9 @@ struct BlockRange {
     // This is the single home: both backends and the M4 test call this; the OOB
     // is closed in every build config, not just debug.
     if (block_id.size() < static_cast<std::size_t>(M)) {
-        throw std::runtime_error(
-            "core::block_ranges: block_id has " + std::to_string(block_id.size()) +
-            " entries but M = " + std::to_string(M) +
-            " columns are required (partition shorter than the SNP count)");
+        fail("block_id has " + std::to_string(block_id.size()) +
+             " entries but M = " + std::to_string(M) +
+             " columns are required (partition shorter than the SNP count)");
     }
 
     std::vector<BlockRange> ranges(static_cast<std::size_t>(n_block));
@@ -232,21 +249,19 @@ struct BlockRange {
     long s = 0;
     int prev_b = -1;  // last block id seen; ids must be non-decreasing.
     while (s < M) {
-        const int b = block_id[static_cast<std::size_t>(s)];
+        const int b = block_id[idx(s)];
         if (b < 0 || b >= n_block) {
-            throw std::runtime_error(
-                "core::block_ranges: block_id[" + std::to_string(s) + "] = " +
-                std::to_string(b) + " is out of range [0, " + std::to_string(n_block) + ")");
+            fail("block_id[" + std::to_string(s) + "] = " +
+                 std::to_string(b) + " is out of range [0, " + std::to_string(n_block) + ")");
         }
         if (b < prev_b) {
-            throw std::runtime_error(
-                "core::block_ranges: block_id is not non-decreasing at column " +
-                std::to_string(s) + " (" + std::to_string(b) + " < " +
-                std::to_string(prev_b) + "); the partition is not contiguous");
+            fail("block_id is not non-decreasing at column " +
+                 std::to_string(s) + " (" + std::to_string(b) + " < " +
+                 std::to_string(prev_b) + "); the partition is not contiguous");
         }
 
         long e = s;
-        while (e < M && block_id[static_cast<std::size_t>(e)] == b) ++e;
+        while (e < M && block_id[idx(e)] == b) ++e;
         ranges[static_cast<std::size_t>(b)] = BlockRange{s, e};
         prev_b = b;
         s = e;

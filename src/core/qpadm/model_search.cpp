@@ -12,37 +12,49 @@
 
 #include "core/qpadm/model_search_core.hpp"  // plan_model_shards, ModelShard
 #include "core/qpadm/qpadm_bounds.hpp"       // model_fits_small_path — the SINGLE-SOURCE kQpMax* envelope
-#include "core/qpadm/qpadm_fit.hpp"          // run_impl, left_with_target
+#include "core/qpadm/qpadm_fit.hpp"          // run_impl, left_with_target, default_fit_precision
 #include "device/backend.hpp"                // ComputeBackend
 #include "device/device_f2_blocks.hpp"       // DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"              // device::Resources
-#include "steppe/config.hpp"                 // Precision, kDefaultMantissaBits
+#include "steppe/config.hpp"                 // Precision
 #include "steppe/error.hpp"                  // Status
 #include "steppe/fstats.hpp"                 // F2BlockTensor
 
 namespace steppe::core::qpadm {
 
-QpAdmResult fit_one_model_device(ComputeBackend& be,
-                                 const device::DeviceF2Blocks& f2,
-                                 const QpAdmModel& model,
-                                 const QpAdmOptions& opts) {
-    // Unified default precision (= the f2 default; fit-engine.md §1.4). assemble_f4
-    // stays native by carve-out; the covariance SYRK engages this (emulated{40}
-    // default, auto-native fallback) inside jackknife_cov; SVD/Qinv/chi^2 native.
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+// The single per-model fit chain ([7.4] dedup): assemble S3 → run_impl(S4→S6→S7) →
+// echo the caller's stable model_index. Templated on the f2 SOURCE so the device-
+// resident DeviceF2Blocks path AND the host-oracle F2BlockTensor path share ONE
+// assemble→run→echo definition (assemble_f4 is overloaded for both f2 types, and both
+// expose .block_sizes) — mirroring qpadm_fit.cpp's run_qpadm_impl. The precision is the
+// unified default (single-homed in qpadm_fit.hpp), passed identically to both paths.
+//
+// assemble_f4 stays native by carve-out; the covariance SYRK engages the emulated{40}
+// default (auto-native fallback) inside jackknife_cov; SVD/Qinv/chi^2 native. NOTE:
+// assemble_f4 caches tot_line_ as a per-backend member consumed by jackknife_cov inside
+// run_impl, so the assemble and the run_impl MUST be adjacent on the SAME backend (they
+// are — one model at a time on one backend instance; callers invoke this sequentially
+// per device worker).
+template <class F2Src>
+QpAdmResult fit_one_model(ComputeBackend& be, const F2Src& f2,
+                          const QpAdmModel& model, const QpAdmOptions& opts) {
+    const Precision prec = default_fit_precision();
     const std::vector<int> left_idx = left_with_target(model);
-    // S3 — device-resident assemble (zero D2H of the tensor on the CUDA path; the
-    // CpuBackend oracle reads host memory). NOTE: assemble_f4 caches tot_line_ as a
-    // per-backend member consumed by jackknife_cov inside run_impl, so the assemble
-    // and the run_impl must be adjacent on the SAME backend (they are — this whole
-    // function runs on one backend instance, one model at a time; the search loop
-    // calls it sequentially per device worker).
     F4Blocks X = be.assemble_f4(f2, std::span<const int>(left_idx),
                                 std::span<const int>(model.right), prec);
     QpAdmResult res = run_impl(be, std::move(X),
                                std::span<const int>(f2.block_sizes), model, opts);
     res.model_index = model.model_index;  // echo the caller's stable identity
     return res;
+}
+
+QpAdmResult fit_one_model_device(ComputeBackend& be,
+                                 const device::DeviceF2Blocks& f2,
+                                 const QpAdmModel& model,
+                                 const QpAdmOptions& opts) {
+    // Thin forwarder onto the shared, f2-source-templated fit_one_model ([7.4] dedup) —
+    // the device-resident path (zero D2H of the tensor on the CUDA path).
+    return fit_one_model(be, f2, model, opts);
 }
 
 // ---- The per-model DEFAULT body (the LARGE/tail path + the CpuBackend oracle) ----
@@ -78,6 +90,17 @@ bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts) {
     return model_fits_small_path(nl, nr, r);
 }
 
+// Scatter a sub-list's results back into `out` by their SAVED positions ([7.4] dedup).
+// `pos[k]` is the index into `out` that `results[k]` came from (the partition recorded
+// it). Single-homes the defensive double-bound (`k < results.size() && k < pos.size()`)
+// so the small-path and large-path scatter share one definition and cannot drift. Moves
+// each result into its slot (results is consumed).
+void scatter_by_pos(std::vector<QpAdmResult>& out, std::vector<QpAdmResult>& results,
+                    const std::vector<std::size_t>& pos) {
+    for (std::size_t k = 0; k < results.size() && k < pos.size(); ++k)
+        out[pos[k]] = std::move(results[k]);
+}
+
 // Fit a shard of models on `be` (one device): SMALL-path models go through the device-
 // BATCHED virtual `be.fit_models_batched` (the genuine batched rotation primitive — a
 // single batched dispatch per same-shape bucket, NOT a per-model loop); the LARGE/>32
@@ -88,7 +111,7 @@ bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts) {
 std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blocks& f2,
                                    std::span<const QpAdmModel> models,
                                    const QpAdmOptions& opts) {
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
+    const Precision prec = default_fit_precision();  // single-homed ([7.2]/[9.1] dedup)
     std::vector<QpAdmResult> out(models.size());
 
     // Partition into small-path (batched) and large-path (per-model) sub-lists,
@@ -113,14 +136,12 @@ std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blo
             // route the small-path models through the per-model default too.
             small_results = fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
         }
-        for (std::size_t k = 0; k < small_results.size() && k < small_pos.size(); ++k)
-            out[small_pos[k]] = std::move(small_results[k]);
+        scatter_by_pos(out, small_results, small_pos);  // [7.4] dedup
     }
     if (!large.empty()) {
         std::vector<QpAdmResult> large_results =
             fit_models_batched_default(be, f2, std::span<const QpAdmModel>(large), opts);
-        for (std::size_t k = 0; k < large_results.size() && k < large_pos.size(); ++k)
-            out[large_pos[k]] = std::move(large_results[k]);
+        scatter_by_pos(out, large_results, large_pos);  // [7.4] dedup
     }
     return out;
 }
@@ -310,16 +331,13 @@ std::vector<QpAdmResult> run_qpadm_search(const F2BlockTensor& f2_host,
     ComputeBackend& be = *resources.gpus.at(0).backend;
     const std::size_t n = models.size();
     std::vector<QpAdmResult> results(n);
-    const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
     for (std::size_t i = 0; i < n; ++i) {
-        const QpAdmModel& m = models[i];
-        const std::vector<int> left_idx = core::qpadm::left_with_target(m);
-        F4Blocks X = be.assemble_f4(f2_host, std::span<const int>(left_idx),
-                                    std::span<const int>(m.right), prec);
-        QpAdmResult r = core::qpadm::run_impl(be, std::move(X),
-                                              std::span<const int>(f2_host.block_sizes),
-                                              m, opts);
-        r.model_index = m.model_index;
+        // Shared per-model fit chain (assemble→run→echo model_index), [7.4] dedup —
+        // the F2BlockTensor instantiation of the same fit_one_model the device path uses.
+        QpAdmResult r = core::qpadm::fit_one_model(be, f2_host, models[i], opts);
+        // Distinct from scatter_into_slots BY DESIGN: the oracle does NOT fail-fast on a
+        // bad model_index — it FALLS BACK to the loop index `i` (its semantics genuinely
+        // differ, per the [7.4] note), so this scatter stays inline here.
         const int mi = r.model_index;
         const std::size_t slot = (mi >= 0 && static_cast<std::size_t>(mi) < n)
                                      ? static_cast<std::size_t>(mi) : i;

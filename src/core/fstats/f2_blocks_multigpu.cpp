@@ -55,6 +55,27 @@ namespace steppe::core {
 
 namespace {
 
+// ---- Defensive non-negative clamp (single-home; [7.2] dedup) -----------------
+// The "treat a defensive negative as 0" rule for M / n_block was hand-written as
+// the `X < 0 ? 0 : X` ternary at ~8 sites (easy to copy with one operand wrong).
+// Two tiny helpers write it ONCE: clamp_nonneg stays in the value's own type (for
+// the `int`-typed out.n_block assignments); nonneg_count clamps AND widens to the
+// std::size_t count/extent the allocators want. Parity-NEUTRAL hygiene: identical
+// arithmetic to the inline ternaries, no value change. M/P/n_block are §3.2
+// protected parity vocabulary and are NOT renamed — only the clamp idiom is folded.
+
+/// Clamp a possibly-negative count to 0, keeping its `int` type (for n_block fields).
+[[nodiscard]] constexpr int clamp_nonneg(int n) noexcept { return n < 0 ? 0 : n; }
+
+/// Clamp a possibly-negative count to 0 AND widen to std::size_t (for allocation
+/// extents). The `long` overload covers the M (SNP-count) axis (views.hpp MatView::M).
+[[nodiscard]] constexpr std::size_t nonneg_count(int n) noexcept {
+    return static_cast<std::size_t>(n < 0 ? 0 : n);
+}
+[[nodiscard]] constexpr std::size_t nonneg_count(long n) noexcept {
+    return static_cast<std::size_t>(n < 0 ? 0 : n);
+}
+
 // ============================ THE §4 COMBINE GATE =========================
 // SINGLE AUTHORITATIVE HOME of the device-resident-P2P gate predicate, now a
 // CUDA-free file-local helper so the four-term AND exists ONCE in code, not
@@ -127,7 +148,7 @@ void validate_multigpu_inputs([[maybe_unused]] const MatView& Q,
                   "validate_multigpu_inputs: Q/V/N disagree on M");
     STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
                   "validate_multigpu_inputs: negative P or M (uninitialized MatView)");
-    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+    STEPPE_ASSERT(partition.block_id.size() == nonneg_count(M),
                   "validate_multigpu_inputs: block_id length != M");
 }
 
@@ -143,6 +164,30 @@ void validate_multigpu_inputs([[maybe_unused]] const MatView& Q,
             "the SPMG precompute requires at least one (architecture.md §9)");
     }
     return G;
+}
+
+// ---- Shared streamed-tier finisher (single-home; [7.4] dedup) ----------------
+// The HostRam and Disk switch arms share a skeleton: run the per-device streamed
+// compute into the StreamTarget, then mirror P / block_sizes from the tier handle
+// back onto the tier-agnostic `out` surface. This helper runs that identical pair
+// ONCE; each arm keeps only what genuinely differs (its tier tag, its dst wiring on
+// the target, the Disk path resolution, and its own n_block mirror rule — HostRam
+// trusts the sink count only when >= 0, Disk clamps, a pre-existing difference left
+// untouched here so the fold stays behavior-NEUTRAL, §12). `handle` is the tier's POD
+// result (F2BlockTensor host or DiskF2Blocks disk); both carry P / n_block /
+// block_sizes by the same field names, so one template binds both.
+template <typename TierHandle>
+void finish_streamed_tier(steppe::device::Resources& resources,
+                          const MatView& Q, const MatView& V, const MatView& N,
+                          const BlockPartition& partition, int n_block,
+                          const Precision& precision,
+                          steppe::device::StreamTarget& target,
+                          steppe::device::F2BlocksOut& out,
+                          const TierHandle& handle) {
+    resources.gpus[0].backend->compute_f2_blocks_streamed(
+        Q, V, N, partition.block_id.data(), n_block, precision, target);
+    out.P = handle.P;
+    if (!handle.block_sizes.empty()) out.block_sizes = handle.block_sizes;
 }
 
 }  // namespace
@@ -275,10 +320,10 @@ F2BlockTensor compute_f2_blocks_multigpu(
     out.P = P;
     out.n_block = n_block;
     const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
-    const std::size_t total = slab * static_cast<std::size_t>(n_block < 0 ? 0 : n_block);
+    const std::size_t total = slab * nonneg_count(n_block);
     out.f2.resize(total);                          // pinned + written by the workers
     out.vpair.resize(total);
-    out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+    out.block_sizes.assign(nonneg_count(n_block), 0);
 
     core::compute_multigpu_partials_into(
         resources, Q, V, N, partition, shards_span,
@@ -413,7 +458,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     // Disk out.P=out.disk.P) before any read, and the block_sizes derivation reads only
     // partition.block_id/M. (Contrast the non-tiered compute_f2_blocks_multigpu, where
     // out.P = P IS a live parity init mirroring combine_f2_partials_host, §12.) [3.4]
-    out.n_block = (n_block < 0 ? 0 : n_block);
+    out.n_block = clamp_nonneg(n_block);
 
     // Block_sizes are needed on the result for every tier (the S4 jackknife metadata).
     // The streamed sinks fill them from the per-device compute's block_ranges; for
@@ -423,9 +468,9 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     {
         const std::vector<core::BlockRange> ranges =
             core::block_ranges(std::span<const int>(partition.block_id.data(),
-                                                    static_cast<std::size_t>(M < 0 ? 0 : M)),
+                                                    nonneg_count(M)),
                                M, n_block);
-        out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+        out.block_sizes.assign(nonneg_count(n_block), 0);
         for (int b = 0; b < n_block; ++b)
             out.block_sizes[static_cast<std::size_t>(b)] =
                 static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
@@ -441,7 +486,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             // The handle carries its own block_sizes/P/n_block; mirror onto out for the
             // tier-agnostic surface.
             out.P = out.resident.P;
-            out.n_block = out.resident.n_block < 0 ? 0 : out.resident.n_block;
+            out.n_block = clamp_nonneg(out.resident.n_block);
             if (!out.resident.block_sizes.empty()) out.block_sizes = out.resident.block_sizes;
             break;
         }
@@ -450,11 +495,12 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             steppe::device::StreamTarget target;
             target.tier = steppe::device::OutputTier::HostRam;
             target.host_dst = &out.host;
-            resources.gpus[0].backend->compute_f2_blocks_streamed(
-                Q, V, N, partition.block_id.data(), n_block, precision, target);
+            // Streamed compute + P/block_sizes mirror via the shared finisher ([7.4]).
+            finish_streamed_tier(resources, Q, V, N, partition, n_block, precision,
+                                 target, out, out.host);
+            // HostRam-specific n_block rule (preserved verbatim): trust the sink's
+            // count only when non-negative, else keep the partition prologue value.
             if (out.host.n_block >= 0) out.n_block = out.host.n_block;
-            out.P = out.host.P;
-            if (!out.host.block_sizes.empty()) out.block_sizes = out.host.block_sizes;
             break;
         }
         case steppe::device::OutputTier::Disk: {
@@ -473,11 +519,11 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             target.tier = steppe::device::OutputTier::Disk;
             target.disk_path = path;
             target.disk_dst = &out.disk;
-            resources.gpus[0].backend->compute_f2_blocks_streamed(
-                Q, V, N, partition.block_id.data(), n_block, precision, target);
-            out.P = out.disk.P;
-            out.n_block = out.disk.n_block < 0 ? 0 : out.disk.n_block;
-            if (!out.disk.block_sizes.empty()) out.block_sizes = out.disk.block_sizes;
+            // Streamed compute + P/block_sizes mirror via the shared finisher ([7.4]).
+            finish_streamed_tier(resources, Q, V, N, partition, n_block, precision,
+                                 target, out, out.disk);
+            // Disk-specific n_block rule (preserved verbatim): clamp the sink's count.
+            out.n_block = clamp_nonneg(out.disk.n_block);
             break;
         }
     }

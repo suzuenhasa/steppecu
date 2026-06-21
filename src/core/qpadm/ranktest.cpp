@@ -47,34 +47,41 @@ void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
     x_reduced.nr = nr;
     x_reduced.n_block = x.n_block;
     x_reduced.x_total.assign(static_cast<std::size_t>(m_red), 0.0);
-    for (int ii = 0; ii < nl_red; ++ii) {
-        const int i = surv[static_cast<std::size_t>(ii)];
-        for (int j = 0; j < nr; ++j)
-            x_reduced.x_total[static_cast<std::size_t>(j + nr * ii)] =
-                x.x_total[static_cast<std::size_t>(j + nr * i)];
-    }
 
     // ind[a] = the full-vec index of reduced-vec position a (a = j + nr*ii).
+    // Fused single pass (§4 one concept = one spelling): the x_total gather and the
+    // ind index-map share the same (ii,j) iteration and the same reduced dest index
+    // j+nr*ii, so a divergent edit to one can no longer miss the other.
     std::vector<int> ind(static_cast<std::size_t>(m_red), 0);
     for (int ii = 0; ii < nl_red; ++ii) {
         const int i = surv[static_cast<std::size_t>(ii)];
-        for (int j = 0; j < nr; ++j)
-            ind[static_cast<std::size_t>(j + nr * ii)] = j + nr * i;
+        for (int j = 0; j < nr; ++j) {
+            const int dst = j + nr * ii;
+            const int src = j + nr * i;
+            x_reduced.x_total[static_cast<std::size_t>(dst)] =
+                x.x_total[static_cast<std::size_t>(src)];
+            ind[static_cast<std::size_t>(dst)] = src;
+        }
     }
     cov_reduced.m = m_red;
     cov_reduced.status = cov.status;
     cov_reduced.Qinv.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
     cov_reduced.Q.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
-    for (int a = 0; a < m_red; ++a)
+    const std::size_t m_full_sz = static_cast<std::size_t>(m_full);
+    const std::size_t m_red_sz = static_cast<std::size_t>(m_red);
+    for (int a = 0; a < m_red; ++a) {
+        // Both the source row operand ind[a] and the dest row term a are invariant in the
+        // inner b loop — hoist them so b only re-evaluates the column term (§4 loop-invariant
+        // hygiene; the size_t widening is preserved per §3.3).
+        const std::size_t ia = static_cast<std::size_t>(ind[static_cast<std::size_t>(a)]);
+        const std::size_t a_sz = static_cast<std::size_t>(a);
         for (int b = 0; b < m_red; ++b) {
-            const std::size_t src = static_cast<std::size_t>(ind[static_cast<std::size_t>(a)]) +
-                                    static_cast<std::size_t>(m_full) *
-                                        static_cast<std::size_t>(ind[static_cast<std::size_t>(b)]);
-            const std::size_t dst = static_cast<std::size_t>(a) +
-                                    static_cast<std::size_t>(m_red) * static_cast<std::size_t>(b);
+            const std::size_t src = ia + m_full_sz * static_cast<std::size_t>(ind[static_cast<std::size_t>(b)]);
+            const std::size_t dst = a_sz + m_red_sz * static_cast<std::size_t>(b);
             cov_reduced.Qinv[dst] = cov.Qinv[src];
             if (!cov.Q.empty()) cov_reduced.Q[dst] = cov.Q[src];
         }
+    }
 }
 
 /// One popdrop row over the left rows in `surv` (the surviving sources, in source

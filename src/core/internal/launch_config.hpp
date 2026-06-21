@@ -144,11 +144,15 @@ inline constexpr unsigned kMaxGridZ = kMaxGridY;
 /// (vram_budget.hpp `max_blocks_per_chunk`), so this precondition always holds at
 /// the call site; the assert pins the invariant.
 [[nodiscard]] inline unsigned grid_z_extent(int n_in_group) noexcept {
-    STEPPE_ASSERT(n_in_group >= 1 && static_cast<unsigned>(n_in_group) <= kMaxGridZ,
+    // Widen once and reuse for both the assert bound and the return (DRY;
+    // NAMING-STYLE-STANDARD §2.5; findings group-7 7.3). The `n_in_group >= 1` lower
+    // bound stays on the signed input so a negative count is caught before the cast.
+    const unsigned z = static_cast<unsigned>(n_in_group);
+    STEPPE_ASSERT(n_in_group >= 1 && z <= kMaxGridZ,
                   "M4 batch count (gridDim.z = n_in_group) must be in [1, kMaxGridZ] "
                   "(architecture.md §7; cleanup X-7/B6) — the backend tiles the batch "
                   "so this holds");
-    return static_cast<unsigned>(n_in_group);
+    return z;
 }
 
 // ===========================================================================

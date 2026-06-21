@@ -21,6 +21,16 @@ namespace steppe::io {
 GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noexcept {
     GenoHeader h;
 
+    // Single malformed-header exit (cleanup eigenstrat_format 7.4): every failure
+    // path returns a format==Unknown header for the caller to fail loudly on. `h`
+    // defaults to Unknown, but the explicit set documents intent and keeps the two
+    // post-success-parse exits (overflow / got<kHeaderCounts) — which may run after
+    // h.format was set to Tgeno/Geno — correct in one place.
+    const auto fail = [&]() -> GenoHeader {
+        h.format = GenoFormat::Unknown;
+        return h;
+    };
+
     // The header is "<MAGIC> <n_ind> <n_snp> <hash> <hash>" NUL-padded to
     // kGenoHeaderBytes. Read up to the first NUL, then tokenize on whitespace.
     std::string text;
@@ -36,7 +46,7 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
     // against the known magics — so surrounding whitespace is tolerated while a magic
     // that merely contains "GENO" as a substring is NOT accepted.
     std::size_t pos = text.find_first_not_of(" \t");
-    if (pos == std::string::npos) return h;  // empty → Unknown
+    if (pos == std::string::npos) return fail();  // empty → Unknown
     const std::size_t magic_end = text.find_first_of(" \t", pos);
     const std::string magic = text.substr(pos, magic_end - pos);
     if (magic == kMagicTgeno) {
@@ -44,7 +54,7 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
     } else if (magic == kMagicGeno) {
         h.format = GenoFormat::Geno;
     } else {
-        return h;  // unrecognized magic → Unknown (caller fails loudly)
+        return fail();  // unrecognized magic → Unknown (caller fails loudly)
     }
 
     // Parse the first two decimal integers after the magic: n_ind, n_snp. The
@@ -85,14 +95,12 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
             ++i;
         }
         if (overflow) {  // an unrepresentable count is a malformed header → Unknown
-            h.format = GenoFormat::Unknown;
-            return h;
+            return fail();
         }
         if (any) counts[got++] = v;
     }
     if (got < kHeaderCounts) {  // could not read both counts → malformed header, route to Unknown
-        h.format = GenoFormat::Unknown;
-        return h;
+        return fail();
     }
 
     h.n_ind = counts[0];

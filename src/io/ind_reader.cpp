@@ -37,9 +37,16 @@ struct RawGroup {
 IndPartition read_ind(const std::string& path,
                       const PopSelection& sel,
                       std::size_t n_records_present) {
+    // Fold the shared "io::read_ind: " prefix and "+ path" suffix boilerplate
+    // (cleanup ind_reader 7.4): the three failure sites differ only by <msg>,
+    // which carries its own trailing separator before the path.
+    const auto throw_io_error = [&](const std::string& msg) {
+        throw std::runtime_error("io::read_ind: " + msg + path);
+    };
+
     std::ifstream in(path);
     if (!in) {
-        throw std::runtime_error("io::read_ind: cannot open .ind file: " + path);
+        throw_io_error("cannot open .ind file: ");
     }
 
     // Walk the .ind in row order, grouping individual-record indices by the
@@ -72,19 +79,26 @@ IndPartition read_ind(const std::string& path,
     part.n_individuals_total = row;  // total .ind rows seen (the individual axis)
 
     if (groups.empty()) {
-        throw std::runtime_error("io::read_ind: no individuals parsed from " + path);
+        throw_io_error("no individuals parsed from ");
     }
 
     // ---- Selection -----------------------------------------------------------
     std::vector<const RawGroup*> selected;
 
+    // The Explicit and MinN cases are the same predicate-filter over `groups`,
+    // differing only by the predicate; factor the shared loop (cleanup ind_reader
+    // 7.1). AutoTopK is a rank-then-take, not a filter, so it stays inline.
+    const auto filter_into = [&](auto pred) {
+        for (const auto& g : groups) {
+            if (pred(g)) selected.push_back(&g);
+        }
+    };
+
     switch (sel.mode) {
         case PopSelection::Mode::Explicit: {
             // Keep exactly the requested labels that are present.
             std::unordered_set<std::string> want(sel.labels.begin(), sel.labels.end());
-            for (const auto& g : groups) {
-                if (want.count(g.label)) selected.push_back(&g);
-            }
+            filter_into([&](const RawGroup& g) { return want.count(g.label) != 0; });
             break;
         }
         case PopSelection::Mode::AutoTopK: {
@@ -105,15 +119,13 @@ IndPartition read_ind(const std::string& path,
             break;
         }
         case PopSelection::Mode::MinN: {
-            for (const auto& g : groups) {
-                if (g.rows.size() >= sel.min_n) selected.push_back(&g);
-            }
+            filter_into([&](const RawGroup& g) { return g.rows.size() >= sel.min_n; });
             break;
         }
     }
 
     if (selected.empty()) {
-        throw std::runtime_error("io::read_ind: population selection is empty for " + path);
+        throw_io_error("population selection is empty for ");
     }
 
     // Final Q/V/N row order: sort the selected set ASCENDING by label (the

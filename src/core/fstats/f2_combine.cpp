@@ -99,9 +99,20 @@ F2BlockTensor combine_f2_partials_host(
         const std::size_t b0 = static_cast<std::size_t>(shards[g].b0);
         const std::size_t part_elems =
             slab * static_cast<std::size_t>(part.n_block);  // f2/vpair run length
-        // f2 + vpair: one contiguous copy of the device's owned slabs into place.
-        std::copy_n(part.f2.data(),    part_elems, out.f2.data()    + slab * b0);
-        std::copy_n(part.vpair.data(), part_elems, out.vpair.data() + slab * b0);
+        // Destination base of the device's owned slab range, computed ONCE per device
+        // and reused for both the f2 and the vpair placement ([7.2]: slab*b0 was
+        // recomputed in each copy_n — same operands, same iteration).
+        const std::size_t out_base = slab * b0;
+        // f2 + vpair: one contiguous copy of the device's owned slabs into place. The
+        // two placements differ ONLY by the member (f2 vs vpair); both share the same
+        // part_elems run and the same out_base offset, so they fold into a single
+        // local placement op called once per member ([7.1]: the copy-pasted copy_n
+        // pair). block_sizes (below) legitimately differs in count/offset and stays.
+        auto place = [&](const double* src, double* dst) {
+            std::copy_n(src, part_elems, dst + out_base);
+        };
+        place(part.f2.data(),    out.f2.data());
+        place(part.vpair.data(), out.vpair.data());
         // block_sizes: the backend computed each block's SNP count from its local
         // ranges (== the global block's count, design §2); copy them into place
         // (single-homed, no host recompute). Disjoint shards ⇒ a plain placement.

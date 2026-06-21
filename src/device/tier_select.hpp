@@ -98,9 +98,9 @@ inline constexpr const char* kForceTierTokenDisk     = "disk";      ///< -> Outp
 [[nodiscard]] inline std::size_t streamed_working_set_bytes(
         int P, long /*M*/, int max_tile, int max_nb, int max_s_pad) noexcept {
     if (P <= 0) return 0;
-    const std::size_t p = static_cast<std::size_t>(P);
-    const std::size_t max_tile_z = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
-    const std::size_t nb = static_cast<std::size_t>(max_nb < 0 ? 0 : max_nb);
+    const std::size_t p = nonneg(P);              // clamp-then-widen via the shared helper (7.4)
+    const std::size_t max_tile_z = nonneg(max_tile);  // (vram_budget.hpp)
+    const std::size_t nb = nonneg(max_nb);
     const std::size_t feeder =                                           // raw + tile feeder
         (kFeederRawBufsPerPop * p * max_tile_z + kFeederOutBufsPerPop * p * max_tile_z);  // (3+4)·P·tile, named in config.hpp
     const std::size_t slabs =                                            // gather/GEMM scratch
@@ -139,11 +139,11 @@ inline constexpr const char* kForceTierTokenDisk     = "disk";      ///< -> Outp
     if (P <= 0 || n_block <= 0) return OutputTier::Resident;  // degenerate empty -> existing no-op
     const std::size_t result_bytes = resident_tensor_bytes(P, n_block);  // 2·P²·n_block·8
     const std::size_t resident_need = result_bytes + resident_working_set_bytes(P, M);
-    const std::size_t vram_budget =
-        static_cast<std::size_t>(kResidentTierVramFraction * static_cast<double>(free_vram));
+    // floor(fraction·free) in size_t via the shared budget_bytes helper (vram_budget.hpp),
+    // so the Resident/HostRam thresholds and chunk_budget_bytes share ONE idiom (7.1).
+    const std::size_t vram_budget = budget_bytes(kResidentTierVramFraction, free_vram);
     if (resident_need <= vram_budget) return OutputTier::Resident;
-    const std::size_t host_budget =
-        static_cast<std::size_t>(kHostTierRamFraction * static_cast<double>(free_host_ram));
+    const std::size_t host_budget = budget_bytes(kHostTierRamFraction, free_host_ram);
     if (result_bytes <= host_budget) return OutputTier::HostRam;
     return OutputTier::Disk;
 }

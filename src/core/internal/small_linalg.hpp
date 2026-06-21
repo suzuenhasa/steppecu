@@ -30,6 +30,80 @@ struct LinAlgStatus {
     bool ok = true;
 };
 
+/// Flat column-major index of element (row `i`, col `j`) in a matrix with leading
+/// dimension `ld`: `i + ld·j`. The single home of the column-major addressing rule
+/// (BLAS/LAPACK/cuSOLVER layout, file header CONVENTIONS) so the three `at(i,j)`
+/// access lambdas and the open-coded `i + n*j` writes in lu_factor/solve/inverse/
+/// jacobi_svd cannot drift on the widening-cast pattern (DRY; NAMING-STYLE-STANDARD
+/// §2.5 single-source; findings group-7 7.1/7.3). All three operands widen to
+/// std::size_t before the multiply, matching the existing per-site casts exactly.
+[[nodiscard]] inline std::size_t cm_index(int i, int j, int ld) noexcept {
+    return static_cast<std::size_t>(i) +
+           static_cast<std::size_t>(ld) * static_cast<std::size_t>(j);
+}
+
+/// Apply one (c, s) plane rotation in place to the column pair (`x`, `y`) of length
+/// `len`: `x' = c·x − s·y`, `y' = s·x + c·y`. The single home of the Jacobi
+/// rotation-application loop, called twice by jacobi_svd (once for the W columns of
+/// length m, once for the V columns of length n) so the two identical loops cannot
+/// drift (DRY; NAMING-STYLE-STANDARD §2.5; findings group-7 7.1). Math unchanged:
+/// the temporaries `a`/`b` snapshot the pre-rotation values exactly as the inlined
+/// loops did, so the result is bit-identical.
+inline void apply_rotation(double* x, double* y, int len, double c, double s) noexcept {
+    for (int i = 0; i < len; ++i) {
+        const double a = x[i];
+        const double b = y[i];
+        x[i] = c * a - s * b;
+        y[i] = s * a + c * b;
+    }
+}
+
+/// Squared Euclidean norm Σ x[i]² of a length-`len` column. Single home of the
+/// squared-column-norm reduction used for the Jacobi `alpha`/`beta` accumulation
+/// and the final `sigma` pass (DRY; NAMING-STYLE-STANDARD §2.5; findings group-7
+/// 7.2). Same left-to-right accumulation order as the inlined loops, so bit-identical.
+[[nodiscard]] inline double col_sqnorm(const double* x, int len) noexcept {
+    double acc = 0.0;
+    for (int i = 0; i < len; ++i) acc += x[i] * x[i];
+    return acc;
+}
+
+/// Inner product Σ x[i]·y[i] of two length-`len` columns. Companion to col_sqnorm
+/// for the Jacobi (p,q) cross term `gamma` (DRY; NAMING-STYLE-STANDARD §2.5;
+/// findings group-7 7.2). Same left-to-right accumulation order, bit-identical.
+[[nodiscard]] inline double col_dot(const double* x, const double* y, int len) noexcept {
+    double acc = 0.0;
+    for (int i = 0; i < len; ++i) acc += x[i] * y[i];
+    return acc;
+}
+
+/// Solve one RHS through an already-LU-factored matrix accessed via `at(i,j)`
+/// (unit-lower L then upper U, both stored in `at`), reading the permuted RHS from
+/// `y` (overwritten by the forward-substitution result) and writing the solution to
+/// `out[out_offset + i*out_stride]`. The single home of the per-column triangular
+/// solve shared by solve (out = x, contiguous) and inverse (out = inv column,
+/// offset by n·col) — the forward-substitution block was identical and the
+/// back-substitution differed only by the write/read target (DRY;
+/// NAMING-STYLE-STANDARD §2.5; findings group-7 7.1). Math unchanged.
+template <typename At>
+inline void lu_solve_rhs(const At& at, int n, std::vector<double>& y,
+                         std::vector<double>& out, std::size_t out_offset,
+                         std::size_t out_stride) {
+    // Forward substitution (unit lower L).
+    for (int i = 0; i < n; ++i) {
+        double s = y[static_cast<std::size_t>(i)];
+        for (int j = 0; j < i; ++j) s -= at(i, j) * y[static_cast<std::size_t>(j)];
+        y[static_cast<std::size_t>(i)] = s;
+    }
+    // Back substitution (upper U) into out[out_offset + i*out_stride].
+    for (int i = n - 1; i >= 0; --i) {
+        double s = y[static_cast<std::size_t>(i)];
+        for (int j = i + 1; j < n; ++j)
+            s -= at(i, j) * out[out_offset + static_cast<std::size_t>(j) * out_stride];
+        out[out_offset + static_cast<std::size_t>(i) * out_stride] = s / at(i, i);
+    }
+}
+
 /// In-place LU factorization with partial pivoting of an n×n COLUMN-MAJOR matrix
 /// `a` (overwritten with L\U), recording the row permutation in `piv`. Returns
 /// ok=false if a pivot is ~0 (singular). Internal helper for solve/inverse.
@@ -37,10 +111,7 @@ struct LinAlgStatus {
                                             std::vector<int>& piv) {
     piv.resize(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) piv[static_cast<std::size_t>(i)] = i;
-    const auto at = [&](int i, int j) -> double& {
-        return a[static_cast<std::size_t>(i) + static_cast<std::size_t>(n) *
-                                                   static_cast<std::size_t>(j)];
-    };
+    const auto at = [&](int i, int j) -> double& { return a[cm_index(i, j, n)]; };
     for (int k = 0; k < n; ++k) {
         // Pivot: largest |a(i,k)| for i >= k.
         int p = k;
@@ -78,27 +149,14 @@ struct LinAlgStatus {
     std::vector<int> piv;
     const LinAlgStatus st = lu_factor(lu, n, piv);
     if (!st.ok) return st;
-    const auto at = [&](int i, int j) -> double {
-        return lu[static_cast<std::size_t>(i) + static_cast<std::size_t>(n) *
-                                                    static_cast<std::size_t>(j)];
-    };
+    const auto at = [&](int i, int j) -> double { return lu[cm_index(i, j, n)]; };
     // Apply the row permutation to b.
     std::vector<double> y(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i)
         y[static_cast<std::size_t>(i)] = b[static_cast<std::size_t>(piv[static_cast<std::size_t>(i)])];
-    // Forward substitution (unit lower L).
-    for (int i = 0; i < n; ++i) {
-        double s = y[static_cast<std::size_t>(i)];
-        for (int j = 0; j < i; ++j) s -= at(i, j) * y[static_cast<std::size_t>(j)];
-        y[static_cast<std::size_t>(i)] = s;
-    }
-    // Back substitution (upper U).
+    // Solve L·U·x = Py: forward then back substitution into the contiguous x.
     x.assign(static_cast<std::size_t>(n), 0.0);
-    for (int i = n - 1; i >= 0; --i) {
-        double s = y[static_cast<std::size_t>(i)];
-        for (int j = i + 1; j < n; ++j) s -= at(i, j) * x[static_cast<std::size_t>(j)];
-        x[static_cast<std::size_t>(i)] = s / at(i, i);
-    }
+    lu_solve_rhs(at, n, y, x, /*out_offset=*/0, /*out_stride=*/1);
     return {true};
 }
 
@@ -110,10 +168,7 @@ struct LinAlgStatus {
     std::vector<int> piv;
     const LinAlgStatus st = lu_factor(lu, n, piv);
     if (!st.ok) return st;
-    const auto at = [&](int i, int j) -> double {
-        return lu[static_cast<std::size_t>(i) + static_cast<std::size_t>(n) *
-                                                    static_cast<std::size_t>(j)];
-    };
+    const auto at = [&](int i, int j) -> double { return lu[cm_index(i, j, n)]; };
     inv.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
     std::vector<double> y(static_cast<std::size_t>(n));
     for (int col = 0; col < n; ++col) {
@@ -122,21 +177,8 @@ struct LinAlgStatus {
             const int src = piv[static_cast<std::size_t>(i)];
             y[static_cast<std::size_t>(i)] = (src == col) ? 1.0 : 0.0;
         }
-        // Forward substitution (unit lower L).
-        for (int i = 0; i < n; ++i) {
-            double s = y[static_cast<std::size_t>(i)];
-            for (int j = 0; j < i; ++j) s -= at(i, j) * y[static_cast<std::size_t>(j)];
-            y[static_cast<std::size_t>(i)] = s;
-        }
-        // Back substitution into inv(:, col).
-        for (int i = n - 1; i >= 0; --i) {
-            double s = y[static_cast<std::size_t>(i)];
-            for (int j = i + 1; j < n; ++j)
-                s -= at(i, j) * inv[static_cast<std::size_t>(j) +
-                                    static_cast<std::size_t>(n) * static_cast<std::size_t>(col)];
-            inv[static_cast<std::size_t>(i) +
-                static_cast<std::size_t>(n) * static_cast<std::size_t>(col)] = s / at(i, i);
-        }
+        // Forward then back substitution into inv(:, col) = inv[col*n + i].
+        lu_solve_rhs(at, n, y, inv, /*out_offset=*/cm_index(0, col, n), /*out_stride=*/1);
     }
     return {true};
 }
@@ -165,16 +207,10 @@ struct SvdResult {
     // the column norms become the singular values and the normalized columns are U.
     std::vector<double> W = A;
     std::vector<double> Vfull(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
-    for (int i = 0; i < n; ++i)
-        Vfull[static_cast<std::size_t>(i) + static_cast<std::size_t>(n) *
-                                                static_cast<std::size_t>(i)] = 1.0;
+    for (int i = 0; i < n; ++i) Vfull[cm_index(i, i, n)] = 1.0;
 
-    const auto Wcol = [&](int j) -> double* {
-        return &W[static_cast<std::size_t>(m) * static_cast<std::size_t>(j)];
-    };
-    const auto Vcol = [&](int j) -> double* {
-        return &Vfull[static_cast<std::size_t>(n) * static_cast<std::size_t>(j)];
-    };
+    const auto Wcol = [&](int j) -> double* { return &W[cm_index(0, j, m)]; };
+    const auto Vcol = [&](int j) -> double* { return &Vfull[cm_index(0, j, n)]; };
 
     constexpr double kTol = 1e-15;
     constexpr int kMaxSweeps = 60;
@@ -187,14 +223,9 @@ struct SvdResult {
             for (int q = p + 1; q < n; ++q) {
                 double* wp = Wcol(p);
                 double* wq = Wcol(q);
-                double alpha = 0.0, beta = 0.0, gamma = 0.0;
-                for (int i = 0; i < m; ++i) {
-                    const double a = wp[i];
-                    const double b = wq[i];
-                    alpha += a * a;
-                    beta += b * b;
-                    gamma += a * b;
-                }
+                const double alpha = col_sqnorm(wp, m);
+                const double beta = col_sqnorm(wq, m);
+                const double gamma = col_dot(wp, wq, m);
                 off += gamma * gamma;
                 if (std::fabs(gamma) <= kTol * std::sqrt(alpha * beta) || gamma == 0.0)
                     continue;
@@ -204,20 +235,10 @@ struct SvdResult {
                                  (std::fabs(zeta) + std::sqrt(1.0 + zeta * zeta));
                 const double c = 1.0 / std::sqrt(1.0 + t * t);
                 const double s = c * t;
-                for (int i = 0; i < m; ++i) {
-                    const double a = wp[i];
-                    const double b = wq[i];
-                    wp[i] = c * a - s * b;
-                    wq[i] = s * a + c * b;
-                }
-                double* vp = Vcol(p);
-                double* vq = Vcol(q);
-                for (int i = 0; i < n; ++i) {
-                    const double a = vp[i];
-                    const double b = vq[i];
-                    vp[i] = c * a - s * b;
-                    vq[i] = s * a + c * b;
-                }
+                // Apply the (c, s) rotation to the W column pair (length m) and the
+                // accumulated V column pair (length n).
+                apply_rotation(wp, wq, m, c, s);
+                apply_rotation(Vcol(p), Vcol(q), n, c, s);
             }
         }
         if (off < kOffDiagTol) break;
@@ -226,12 +247,8 @@ struct SvdResult {
     // Singular values = column norms of W; U columns = W columns normalized.
     const int k = (m < n) ? m : n;
     std::vector<double> sigma(static_cast<std::size_t>(n));
-    for (int j = 0; j < n; ++j) {
-        double nrm = 0.0;
-        const double* wj = Wcol(j);
-        for (int i = 0; i < m; ++i) nrm += wj[i] * wj[i];
-        sigma[static_cast<std::size_t>(j)] = std::sqrt(nrm);
-    }
+    for (int j = 0; j < n; ++j)
+        sigma[static_cast<std::size_t>(j)] = std::sqrt(col_sqnorm(Wcol(j), m));
     // Sort columns by descending singular value.
     std::vector<int> order(static_cast<std::size_t>(n));
     for (int j = 0; j < n; ++j) order[static_cast<std::size_t>(j)] = j;
@@ -254,17 +271,12 @@ struct SvdResult {
         const double sv = sigma[static_cast<std::size_t>(src)];
         out.S[static_cast<std::size_t>(jj)] = sv;
         // V column.
-        const double* vsrc = &Vfull[static_cast<std::size_t>(n) * static_cast<std::size_t>(src)];
-        for (int i = 0; i < n; ++i)
-            out.V[static_cast<std::size_t>(i) + static_cast<std::size_t>(n) *
-                                                    static_cast<std::size_t>(jj)] = vsrc[i];
+        const double* vsrc = &Vfull[cm_index(0, src, n)];
+        for (int i = 0; i < n; ++i) out.V[cm_index(i, jj, n)] = vsrc[i];
         // U column = W column / sigma (0 if degenerate).
-        const double* wsrc = &W[static_cast<std::size_t>(m) * static_cast<std::size_t>(src)];
+        const double* wsrc = &W[cm_index(0, src, m)];
         if (sv > 0.0) {
-            for (int i = 0; i < m; ++i)
-                out.U[static_cast<std::size_t>(i) + static_cast<std::size_t>(m) *
-                                                        static_cast<std::size_t>(jj)] =
-                    wsrc[i] / sv;
+            for (int i = 0; i < m; ++i) out.U[cm_index(i, jj, m)] = wsrc[i] / sv;
         }
     }
     return out;

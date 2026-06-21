@@ -54,8 +54,13 @@ BlockPartition assign_blocks(std::span<const int> chrom,
     long global = -1;  // global block counter; first SNP bumps it to 0.
 
     for (long s = 0; s < M; ++s) {
-        const int c = chrom[static_cast<std::size_t>(s)];
-        const int local = block_of(genpos_morgans[static_cast<std::size_t>(s)], block_size_morgans);
+        // The SNP column index, widened ONCE per iteration ([7.3] dedup): the three
+        // parallel-array subscripts below all index column s. idx() is the shared
+        // long→size_t cast helper (block_partition_rule.hpp), used here and in
+        // block_ranges so the boilerplate lives in one place.
+        const std::size_t us = idx(s);
+        const int c = chrom[us];
+        const int local = block_of(genpos_morgans[us], block_size_morgans);
 
         // Open a NEW global block on the first SNP, on a chromosome boundary, or
         // on a local-bin change; otherwise reuse the current global block.
@@ -67,7 +72,7 @@ BlockPartition assign_blocks(std::span<const int> chrom,
             ++global;
         }
 
-        out.block_id[static_cast<std::size_t>(s)] = static_cast<int>(global);
+        out.block_id[us] = static_cast<int>(global);
         prev_chrom = c;
         prev_local_bin = local;
     }

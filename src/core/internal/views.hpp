@@ -64,7 +64,10 @@ struct MatView {
     /// reference and the GPU feeder. No bounds check (hot path); callers respect
     /// 0 ≤ i < P and 0 ≤ s < M.
     [[nodiscard]] double element(int i, long s) const noexcept {
-        return data[static_cast<long>(i) + static_cast<long>(P) * s];
+        // `P * s` already promotes to `long` (`s` is `long`), so only `i` needs the
+        // explicit widening cast; the redundant `static_cast<long>(P)` is dropped
+        // (DRY; NAMING-STYLE-STANDARD §2.5; findings group-7 7.3). Value unchanged.
+        return data[static_cast<long>(i) + P * s];
     }
 };
 
