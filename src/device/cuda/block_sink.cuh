@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "device/cuda/pinned_buffer.cuh"  // PinnedBuffer<double> (persistent pinned staging)
+#include "device/cuda/stream.hpp"         // steppe::device::Event (move-only RAII CUDA event)
 #include "steppe/fstats.hpp"              // F2BlockTensor (HostRam destination)
 
 namespace steppe::device {
@@ -66,11 +67,16 @@ public:
 };
 
 // A pinned staging slot shared by both sinks: two P²-double pinned buffers (f2 + vpair),
-// a CUDA event recorded after the slot's D2H, and the destination block id.
+// a CUDA event recorded after the slot's D2H, and the destination block id. `done` is a
+// move-only RAII Event (16.1): it default-constructs a cudaEventDisableTiming event when the
+// slots_ vector is resize()'d in begin() (throws-on-create, exactly as the old hand-rolled
+// STEPPE_CUDA_CHECK(cudaEventCreateWithFlags) did) and self-frees in its warn-not-throw dtor.
+// Wrapping it also makes SinkSlot's implicit member-wise move correct (16.2): Event's move
+// std::exchanges the handle to null, so a moved-from slot no longer double-cudaEventDestroys.
 struct SinkSlot {
     PinnedBuffer<double> f2;
     PinnedBuffer<double> vpair;
-    cudaEvent_t done = nullptr;
+    Event done;
     int block = -1;
 };
 
@@ -101,6 +107,13 @@ class HostRamSink final : public BlockSink {
 public:
     explicit HostRamSink(F2BlockTensor& dst) noexcept : host_(dst) {}
     ~HostRamSink() override;
+    // Owns a writer thread + pinned ring; non-copyable AND non-movable (16.3 — make the
+    // ownership posture explicit, robust against a future member change silently re-enabling
+    // a wrong-shaped special member).
+    HostRamSink(const HostRamSink&) = delete;
+    HostRamSink& operator=(const HostRamSink&) = delete;
+    HostRamSink(HostRamSink&&) = delete;
+    HostRamSink& operator=(HostRamSink&&) = delete;
     void begin(int P, int n_block, const std::vector<int>& block_sizes) override;
     void spill_block(int b, const double* f2_dev, const double* vpair_dev,
                      std::size_t slab_elems, cudaStream_t stream) override;
@@ -142,6 +155,13 @@ class DiskSink final : public BlockSink {
 public:
     explicit DiskSink(std::string path) noexcept : path_(std::move(path)) {}
     ~DiskSink() override;
+    // Owns an fd + writer thread + pinned ring; non-copyable AND non-movable (16.3 — make the
+    // ownership posture explicit, robust against a future member change silently re-enabling
+    // a wrong-shaped special member).
+    DiskSink(const DiskSink&) = delete;
+    DiskSink& operator=(const DiskSink&) = delete;
+    DiskSink(DiskSink&&) = delete;
+    DiskSink& operator=(DiskSink&&) = delete;
     void begin(int P, int n_block, const std::vector<int>& block_sizes) override;
     void spill_block(int b, const double* f2_dev, const double* vpair_dev,
                      std::size_t slab_elems, cudaStream_t stream) override;

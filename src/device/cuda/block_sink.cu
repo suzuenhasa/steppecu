@@ -61,7 +61,8 @@ void HostRamSink::begin(int P, int n_block, const std::vector<int>& block_sizes)
     for (SinkSlot& s : slots_) {
         s.f2 = PinnedBuffer<double>(slab_);
         s.vpair = PinnedBuffer<double>(slab_);
-        STEPPE_CUDA_CHECK(cudaEventCreateWithFlags(&s.done, cudaEventDisableTiming));
+        // s.done is created by the SinkSlot's Event default-ctor (cudaEventDisableTiming,
+        // throws-on-failure) when slots_.resize() ran above — 16.1.
         s.block = -1;
     }
     stop_ = false;
@@ -97,7 +98,7 @@ void HostRamSink::writer_loop() {
             // the host reads it (sink_wait_slot_drained blocks ONLY on this slot's D2H and
             // FAIL-FASTS on a non-success sync — copying an undrained slot would silently
             // corrupt f2/vpair, a §12 parity violation; see block_sink.cuh).
-            sink_wait_slot_drained(s.done, "HostRamSink writer");
+            sink_wait_slot_drained(s.done.get(), "HostRamSink writer");
             const std::size_t dst = slab_ * static_cast<std::size_t>(s.block);
             std::memcpy(host_.f2.data() + dst, s.f2.data(), slab_ * sizeof(double));
             std::memcpy(host_.vpair.data() + dst, s.vpair.data(), slab_ * sizeof(double));
@@ -128,7 +129,9 @@ void HostRamSink::spill_block(int b, const double* f2_dev, const double* vpair_d
                                       cudaMemcpyDeviceToHost, stream));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(s.vpair.data(), vpair_dev, bytes,
                                       cudaMemcpyDeviceToHost, stream));
-    STEPPE_CUDA_CHECK(cudaEventRecord(s.done, stream));
+    // Raw cudaEventRecord on the wrapped handle: spill_block receives a raw cudaStream_t,
+    // but Event::record takes a Stream&, so record via .get() (16.1).
+    STEPPE_CUDA_CHECK(cudaEventRecord(s.done.get(), stream));
     {
         std::lock_guard<std::mutex> lk(mtx_);
         ready_.push(idx);
@@ -171,14 +174,10 @@ HostRamSink::~HostRamSink() {
             STEPPE_LOG_WARN("cudaDeviceSynchronize (HostRamSink teardown): %s",
                             cudaGetErrorString(e));
     }
-    for (SinkSlot& s : slots_) {
-        if (s.done) {
-            const cudaError_t e = cudaEventDestroy(s.done);
-            if (e != cudaSuccess)
-                STEPPE_LOG_WARN("cudaEventDestroy (HostRamSink): %s", cudaGetErrorString(e));
-            s.done = nullptr;
-        }
-    }
+    // slots_ (and thus each slot's RAII Event) destructs after this barrier — the Event's
+    // warn-not-throw dtor cudaEventDestroys it, so no hand-rolled teardown loop is needed
+    // (16.1). The barrier above MUST stay first so no orphaned in-flight D2H outlives the
+    // pinned ring (14.4).
 }
 
 // ===========================================================================
@@ -242,7 +241,8 @@ void DiskSink::begin(int P, int n_block, const std::vector<int>& block_sizes) {
     for (SinkSlot& s : slots_) {
         s.f2 = PinnedBuffer<double>(slab_);
         s.vpair = PinnedBuffer<double>(slab_);
-        STEPPE_CUDA_CHECK(cudaEventCreateWithFlags(&s.done, cudaEventDisableTiming));
+        // s.done is created by the SinkSlot's Event default-ctor (cudaEventDisableTiming,
+        // throws-on-failure) when slots_.resize() ran above — 16.1.
         s.block = -1;
     }
     stop_ = false;
@@ -276,7 +276,7 @@ void DiskSink::writer_loop() {
         try {
             // Per-slot happens-before + FAIL-FAST event wait (shared with HostRamSink so the
             // two tiers attribute the same failure identically; see block_sink.cuh).
-            sink_wait_slot_drained(s.done, "DiskSink writer");
+            sink_wait_slot_drained(s.done.get(), "DiskSink writer");
             pwrite_all(fd_, s.f2.data(), slab_bytes_,
                        f2_region_ + slab_bytes_ * static_cast<std::uint64_t>(s.block), "f2");
             pwrite_all(fd_, s.vpair.data(), slab_bytes_,
@@ -306,7 +306,9 @@ void DiskSink::spill_block(int b, const double* f2_dev, const double* vpair_dev,
                                       cudaMemcpyDeviceToHost, stream));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(s.vpair.data(), vpair_dev, slab_bytes_,
                                       cudaMemcpyDeviceToHost, stream));
-    STEPPE_CUDA_CHECK(cudaEventRecord(s.done, stream));
+    // Raw cudaEventRecord on the wrapped handle: spill_block receives a raw cudaStream_t,
+    // but Event::record takes a Stream&, so record via .get() (16.1).
+    STEPPE_CUDA_CHECK(cudaEventRecord(s.done.get(), stream));
     {
         std::lock_guard<std::mutex> lk(mtx_);
         ready_.push(idx);
@@ -374,14 +376,10 @@ DiskSink::~DiskSink() {
             STEPPE_LOG_WARN("cudaDeviceSynchronize (DiskSink teardown): %s",
                             cudaGetErrorString(e));
     }
-    for (SinkSlot& s : slots_) {
-        if (s.done) {
-            const cudaError_t e = cudaEventDestroy(s.done);
-            if (e != cudaSuccess)
-                STEPPE_LOG_WARN("cudaEventDestroy (DiskSink): %s", cudaGetErrorString(e));
-            s.done = nullptr;
-        }
-    }
+    // slots_ (and thus each slot's RAII Event) destructs after this barrier — the Event's
+    // warn-not-throw dtor cudaEventDestroys it, so no hand-rolled teardown loop is needed
+    // (16.1). The barrier above MUST stay first so no orphaned in-flight D2H outlives the
+    // pinned ring (14.4).
     if (read_handle_) { std::fclose(read_handle_); read_handle_ = nullptr; }
     if (fd_ >= 0) { ::close(fd_); fd_ = -1; }  // only if finish() didn't run (error path)
 }
