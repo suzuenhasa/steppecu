@@ -190,7 +190,7 @@ public:
         if (ptr == nullptr || bytes == 0) return;
         // cudaHostRegister takes void* (it page-locks, it does not write the
         // bytes), so a logically-const H2D source registers soundly via const_cast.
-        void* p = const_cast<void*>(ptr);
+        void* const p = const_cast<void*>(ptr);
         const cudaError_t s =  // ALLOWLISTED TU (non-throwing: graceful degrade)
             STEPPE_CUDA_WARN(cudaHostRegister(p, bytes, cudaHostRegisterDefault));
         if (s == cudaSuccess) {

@@ -71,7 +71,7 @@ namespace steppe::io::filter {
 /// Folded minor allele frequency of a POOLED reference-allele frequency:
 /// min(ref_af, 1 - ref_af). Pure helper used by snp_passes_maf and the
 /// monomorphic check so the folding lives once.
-[[nodiscard]] inline double folded_maf(double pooled_ref_af) noexcept {
+[[nodiscard]] inline constexpr double folded_maf(double pooled_ref_af) noexcept {
     const double q = pooled_ref_af;
     return (q < 1.0 - q) ? q : (1.0 - q);
 }
@@ -80,7 +80,7 @@ namespace steppe::io::filter {
 /// is already folded (min(q,1-q)); pass folded_maf(pooled_ref_af) for it.
 /// Inclusive `>=`: maf_min == 0 keeps every SNP (the no-op default), and a SNP
 /// whose folded MAF exactly equals the threshold is KEPT.
-[[nodiscard]] inline bool snp_passes_maf(double pooled_minor_af, double maf_min) noexcept {
+[[nodiscard]] inline constexpr bool snp_passes_maf(double pooled_minor_af, double maf_min) noexcept {
     return pooled_minor_af >= maf_min;
 }
 
@@ -89,16 +89,16 @@ namespace steppe::io::filter {
 /// see file header). Inclusive `<=`: geno_max_missing == 1 keeps every SNP (the
 /// no-op default), and a SNP whose missing fraction exactly equals the threshold
 /// is KEPT.
-[[nodiscard]] inline bool snp_passes_geno(double per_snp_missing_frac,
-                                          double geno_max_missing) noexcept {
+[[nodiscard]] inline constexpr bool snp_passes_geno(double per_snp_missing_frac,
+                                                    double geno_max_missing) noexcept {
     return per_snp_missing_frac <= geno_max_missing;
 }
 
 /// mind filter: keep a SAMPLE iff its per-sample missing fraction <=
 /// mind_max_missing. Inclusive `<=`: mind_max_missing == 1 keeps every sample
 /// (the no-op default). Decided in the conditional S-1 pre-pass (mind_prepass).
-[[nodiscard]] inline bool sample_passes_mind(double per_sample_missing_frac,
-                                             double mind_max_missing) noexcept {
+[[nodiscard]] inline constexpr bool sample_passes_mind(double per_sample_missing_frac,
+                                                       double mind_max_missing) noexcept {
     return per_sample_missing_frac <= mind_max_missing;
 }
 
@@ -120,7 +120,7 @@ namespace steppe::io::filter {
 /// path: a truly monomorphic site has each per-pop Q exactly 0.0 or 1.0, so Q·N is
 /// exact and the pooled ref-af is exactly 0.0 or 1.0 — do NOT change the upstream
 /// pooling to a mean-of-frequencies, which rounds and would break the exactness.
-[[nodiscard]] inline bool is_monomorphic(double pooled_ref_af) noexcept {
+[[nodiscard]] inline constexpr bool is_monomorphic(double pooled_ref_af) noexcept {
     return folded_maf(pooled_ref_af) == 0.0;
 }
 
@@ -227,7 +227,7 @@ namespace steppe::io::filter {
 /// this is the AT2-parity autosome set (X→23, Y→24, MT and other codes are NOT
 /// autosomes). Used by the autosomes_only flag. The range constants live in
 /// config.hpp (no bare 22 here).
-[[nodiscard]] inline bool is_autosome(int chrom) noexcept {
+[[nodiscard]] inline constexpr bool is_autosome(int chrom) noexcept {
     return chrom >= kAutosomeChromMin && chrom <= kAutosomeChromMax;
 }
 

@@ -20,12 +20,21 @@ namespace steppe::core::internal {
 
 /// Shared convergence knobs for BOTH incomplete-gamma tails — single-homed at
 /// namespace scope so the series and continued-fraction forms cannot drift apart
-/// (DRY; NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3). Compile-time
-/// constants, so `inline constexpr`, NOT `const` (standard §2.5 [MIXED Group 9.1]).
-/// `kPchisqMaxIter` = the iteration cap (1000); `kPchisqEps` = the relative
-/// convergence tolerance (1e-15). Loose-`p`-tier values (OQ-13), not parity-frozen.
+/// (DRY; NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3, group-9 9.2).
+/// Compile-time constants, so `inline constexpr`, NOT `const` (standard §2.5
+/// [MIXED Group 9.1]). `kPchisqMaxIter` = the iteration cap (1000); `kPchisqEps`
+/// = the relative convergence tolerance (1e-15). Loose-`p`-tier values (OQ-13),
+/// not parity-frozen.
 inline constexpr int    kPchisqMaxIter = 1000;
 inline constexpr double kPchisqEps     = 1e-15;
+
+/// FP underflow floor for the Lentz continued-fraction (`pchisq_gammq_cf`):
+/// rescales any numerator/denominator term that drops below it so the recurrence
+/// cannot divide by zero. Loose-`p`-tier value (OQ-13), not parity-frozen.
+/// Hoisted from a block-scope `const` local so all three tuning knobs are
+/// single-homed at namespace scope (standard §2.5 [MIXED Group 9.1] single-source,
+/// group-9 9.1/9.2).
+inline constexpr double kPchisqFpMin   = 1e-300;
 
 /// The regularized-incomplete-gamma normalizing prefactor
 /// `exp(-x + a·log(x) − lgamma(a))`, shared by BOTH the series (`pchisq_gammp_series`)
@@ -54,9 +63,8 @@ inline constexpr double kPchisqEps     = 1e-15;
 
 /// Regularized upper incomplete gamma Q(a, x) by continued fraction (x >= a+1).
 [[nodiscard]] inline double pchisq_gammq_cf(double a, double x) {
-    const double kFpMin = 1e-300;
     double b = x + 1.0 - a;
-    double c = 1.0 / kFpMin;
+    double c = 1.0 / kPchisqFpMin;
     double d = 1.0 / b;
     double h = d;
     for (int i = 1; i <= kPchisqMaxIter; ++i) {
@@ -64,9 +72,9 @@ inline constexpr double kPchisqEps     = 1e-15;
         const double an = -di * (di - a);
         b += 2.0;
         d = an * d + b;
-        if (std::fabs(d) < kFpMin) d = kFpMin;
+        if (std::fabs(d) < kPchisqFpMin) d = kPchisqFpMin;
         c = b + an / c;
-        if (std::fabs(c) < kFpMin) c = kFpMin;
+        if (std::fabs(c) < kPchisqFpMin) c = kPchisqFpMin;
         d = 1.0 / d;
         const double del = d * c;
         h *= del;

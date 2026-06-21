@@ -55,6 +55,21 @@ namespace steppe::core {
 
 namespace {
 
+// ---- Operator override env-var KEYS (single-home; 5.4/9.2) -------------------
+// The two tier/cache override hatches read by this TU. Homed TU-private here
+// (beside the tier-select includes; enumerated in the <cstdlib> include comment
+// at the top of this file) so the operator-facing key SPELLINGS live in exactly
+// one place: a typo now fails to compile instead of silently disabling the
+// override (NAMING-STYLE-STANDARD §2.5 named constant; §4 "Unnamed literal").
+// These are operator-facing key strings, NOT §3.2 protected parity vocabulary.
+
+/// std::getenv key for the tier override hatch (config.force_tier wins first,
+/// then this env key, then automatic). Read at the resolve_output_tier call.
+inline constexpr char kEnvForceTier[] = "STEPPE_FORCE_TIER";
+/// std::getenv key for the disk-cache path override (config.disk_cache_path wins
+/// first, then this env key, then kDefaultDiskCachePath). Read on the Disk tier.
+inline constexpr char kEnvF2CachePath[] = "STEPPE_F2_CACHE_PATH";
+
 // ---- Defensive non-negative clamp (single-home; [7.2] dedup) -----------------
 // The "treat a defensive negative as 0" rule for M / n_block was hand-written as
 // the `X < 0 ? 0 : X` ternary at ~8 sites (easy to copy with one operand wrong).
@@ -449,7 +464,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     const std::size_t free_vram_bytes = resources.gpus[0].caps.free_vram_bytes;
     const std::size_t free_host_bytes = steppe::device::free_host_ram_bytes();
     const steppe::device::OutputTier tier = steppe::device::resolve_output_tier(
-        resources.config.force_tier, std::getenv("STEPPE_FORCE_TIER"),
+        resources.config.force_tier, std::getenv(kEnvForceTier),
         P, M, n_block, free_vram_bytes, free_host_bytes);
 
     steppe::device::F2BlocksOut out;
@@ -511,7 +526,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             // (cleanup 5.4 / 9.2; NAMING-STYLE-STANDARD §2.5).
             std::string path = resources.config.disk_cache_path;
             if (path.empty()) {
-                const char* env = std::getenv("STEPPE_F2_CACHE_PATH");
+                const char* env = std::getenv(kEnvF2CachePath);
                 path = (env && env[0]) ? std::string(env)
                                        : std::string(steppe::kDefaultDiskCachePath);
             }
