@@ -20,6 +20,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "app/cmd_qpadm.hpp"
 #include "core/config/cli_args.hpp"
 #include "core/config/config_builder.hpp"
 #include "core/config/exit_code.hpp"
@@ -158,7 +159,10 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpadm_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            std::exit(run_not_yet_implemented("qpadm", *config));
+            // M(cli-1): the real GPU qpAdm fit (read dir -> resolve -> upload ->
+            // run_qpadm -> emit CSV/JSON). The other subcommands stay scaffold no-ops
+            // until their milestones (M(cli-2/3/4)).
+            std::exit(run_qpadm_command(*config));
         });
     }
 

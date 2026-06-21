@@ -25,7 +25,11 @@ endif()
 
 add_executable(steppe_app
     main.cpp
-    cli_parse.cpp)
+    cli_parse.cpp
+    cmd_qpadm.cpp     # M(cli-1): the qpAdm GPU fit command
+    f2_dir_io.cpp     # M(cli-1): the f2_blocks dir READER (f2.bin + pops.txt)
+    pop_resolver.cpp  # M(cli-1): name -> P-axis-index resolution against pops.txt
+    result_emit.cpp)  # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
 

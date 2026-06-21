@@ -1109,3 +1109,32 @@ target_link_libraries(test_filter_oracle
     PRIVATE steppe::io steppe::device steppe::core steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_filter_oracle PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME filter_oracle COMMAND test_filter_oracle "${STEPPE_AADR_ROOT}")
+
+# --- M(cli-1) `steppe qpadm` CLI acceptance gate (cli-bindings.md §7, §8) ---------
+# PLAIN C++ host TU (NO CUDA): writes the COMMITTED real-AADR golden f2 fixtures into a
+# temp f2-dir (f2.bin STPF2BK1 + pops.txt + meta.json) — exactly what a real <dir>
+# contains, NO SYNTHETIC DATA — then RUNS the BUILT `steppe qpadm` binary for the golden
+# model (target=England_BellBeaker, left=Czechia_EBA_CordedWare,Turkey_N, right=the 6
+# outgroups), parses its CSV + JSON output, and asserts weights/se/z/p/chisq/dof/
+# rankdrop/popdrop == golden_fit0.json + golden_fit1_NRBIG (the large nr=39 case) within
+# the SAME two tiers the fit parity test uses — RUNNING ON THE GPU (the steppe qpadm GPU
+# path). It SKIPs cleanly (exit 0) when no CUDA device is visible (CI-without-GPU), like
+# every reference test. The name->index resolution the parity test HARDCODES is here
+# exercised through the CLI's pops.txt — the gap the access layer closes (cli-bindings.md
+# §1). Only built behind STEPPE_BUILD_CLI (the CLI is additive; the default ctest is
+# unchanged). It links ONLY steppe::core_internal (the src/ include root resolving the
+# CUDA-FREE "device/f2_disk_format.hpp" header — the STPF2BK1 writer it shares with the
+# app reader) + steppe::api — NOT steppe::device, so this is a pure host TU that device-
+# links nothing (its CUDA-free host compile is itself a §4-layering proof); the GPU work
+# is in the spawned child. Depends on steppe_app so the binary exists; the binary path +
+# the golden dir are passed as argv. cli-bindings.md §4.3, §7, §8.
+if(STEPPE_BUILD_CLI)
+  add_executable(test_cli_qpadm cli/test_cli_qpadm.cpp)
+  target_link_libraries(test_cli_qpadm
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_qpadm steppe_app)
+  add_test(NAME cli_qpadm
+           COMMAND test_cli_qpadm
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+endif()
