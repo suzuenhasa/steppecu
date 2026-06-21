@@ -91,7 +91,13 @@ namespace {
 ///     maps to a single bank, eliminating the worst-case 32-way conflict). The
 ///     finalized per-element math and the written global addresses are IDENTICAL —
 ///     only the store ACCESS PATTERN changes (§12 parity unchanged).
-__global__ void decode_af_kernel(const std::uint8_t* __restrict__ packed,
+// [21.4] __launch_bounds__(kDecodeBlockX * kDecodeBlockY) == 32*8 = 256 pins the
+// register cap to the SOLE launch block (the fixed dim3(kDecodeBlockX, kDecodeBlockY),
+// launch_decode_af). Occupancy here is now multi-resource bounded (the three __shared__
+// transpose tiles tQ/tV/tN added by the group-20 coalescing fix), so the register pin is
+// a valid forward-compat guard; the fixed block never exceeds the bound (Prog Guide §5.4).
+__global__ void __launch_bounds__(kDecodeBlockX * kDecodeBlockY)
+decode_af_kernel(const std::uint8_t* __restrict__ packed,
                                  std::size_t bytes_per_record,
                                  const std::size_t* __restrict__ pop_offsets,
                                  int P, long M, int ploidy,

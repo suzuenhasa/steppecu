@@ -880,7 +880,11 @@ __global__ void weights_chisq_large_kernel(const double* __restrict__ dXmat,
 // large_int_scratch (max(t,nl) pivots). Writes UNSCALED w to dWmat (status!=0 ⇒ zeros,
 // matching the serial path's zero-init + status guard). One model here (n_models=1 for
 // NRBIG); the model axis is the S8 batching seam.
-__global__ void loo_large_batched_kernel(const double* __restrict__ dLoo,
+// [21.4] __launch_bounds__(64): SOLE launch block =64 (launch_loo_large_batched, grid-
+// stride). The VRAM-scratch design keeps the per-thread frame small (low register risk);
+// the bound is the forward-compat occupancy pin, never exceeded by the fixed block (§5.4).
+__global__ void __launch_bounds__(64)
+loo_large_batched_kernel(const double* __restrict__ dLoo,
                                          const double* __restrict__ dQinv,
                                          const double* __restrict__ dAseed,
                                          const double* __restrict__ dBseed,
@@ -970,7 +974,10 @@ __global__ void loo_large_batched_kernel(const double* __restrict__ dLoo,
 }
 
 // --- S7 batched LOO re-fits (one thread per replicate block) ---------------------
-__global__ void loo_batched_kernel(const double* __restrict__ dLoo,
+// [21.4] __launch_bounds__(64): SOLE launch block =64 (launch_qpadm_loo_batched); pins
+// registers to the occupancy target, never under-launched ⇒ no launch failure (§5.4).
+__global__ void __launch_bounds__(64)
+loo_batched_kernel(const double* __restrict__ dLoo,
                                    const double* __restrict__ dQinv,
                                    int nl, int nr, int r, double fudge, int als_iters,
                                    int nb, double* __restrict__ dWmat) {
@@ -1163,7 +1170,12 @@ __global__ void fill_identity_batched_kernel(double* __restrict__ dI, int m,
 // fixes (the dominant bandwidth) are applied; this large-arena-but-structural case is
 // the finding's documented-accepted-cost branch. If the S8 rotation ever profiles
 // this kernel as the wall, the SoA arena transpose is the indicated follow-up.
-__global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
+// [21.4] __launch_bounds__(64) pins the per-thread register cap to the SOLE launch
+// block (=64, launch_qpadm_fit_models_batched) — a forward-compat occupancy guard for
+// this high-frame kernel ([21.3]); never under-launched, so no launch-failure risk
+// (CUDA C++ Prog Guide §5.4: a kernel fails only if launched with MORE than the bound).
+__global__ void __launch_bounds__(64)
+qpadm_fit_models_kernel(const double* __restrict__ dTotal,
                                         const double* __restrict__ dQinv,
                                         const double* __restrict__ dLoo,
                                         const int* __restrict__ d_block_sizes,
@@ -1279,7 +1291,11 @@ __global__ void qpadm_fit_models_kernel(const double* __restrict__ dTotal,
 // m<=50) and the only remedy is the same STRUCTURAL block-minor arena relayout that
 // would ripple through every loo producer/consumer — out of scope for a local access
 // fix and tagged "optional" by the finding. Math/op-order unchanged (§12).
-__global__ void qpadm_loo_models_kernel(const double* __restrict__ dLoo,
+// [21.4] __launch_bounds__(128) matches the SOLE launch block (=128, grid-stride,
+// launch_qpadm_loo_models_batched) — register cap to the occupancy target; the grid-
+// stride loop means the bound is never exceeded (block is compile-time fixed, §5.4).
+__global__ void __launch_bounds__(128)
+qpadm_loo_models_kernel(const double* __restrict__ dLoo,
                                         const double* __restrict__ dQinv,
                                         int nl, int nr, int r_fit, double fudge,
                                         int als_iters, int nb, int n_models, double s,

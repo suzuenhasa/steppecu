@@ -66,7 +66,11 @@ namespace {
 //   dQg/dVg [P × s_pad × n]  : element (i, c, k) at i + P·c + P·s_pad·k
 //   dSg     [2P × s_pad × n] : element (i, c, k) at i + 2P·c + 2P·s_pad·k
 // =============================================================================
-__global__ void gather_group_kernel(const double* __restrict__ Q_all,
+// [21.4] __launch_bounds__(kCdivBlock * kCdivBlock) == 16*16 = 256 pins the register
+// cap to the SOLE launch block (the fixed dim3(kCdivBlock, kCdivBlock), launch_gather_
+// group); the fixed block never exceeds the bound ⇒ no launch failure (Prog Guide §5.4).
+__global__ void __launch_bounds__(steppe::kCdivBlock * steppe::kCdivBlock)
+gather_group_kernel(const double* __restrict__ Q_all,
                                     const double* __restrict__ V_all,
                                     const double* __restrict__ S_all,
                                     const int* __restrict__ block_ids_in_group,
@@ -144,7 +148,11 @@ __global__ void gather_group_kernel(const double* __restrict__ Q_all,
 // shared tile (finding's other option). The feeder/decode 20.1 fixes are applied;
 // this one is the finding's documented-accepted-cost branch.
 // =============================================================================
-__global__ void assemble_blocks_group_kernel(const double* __restrict__ Gg,
+// [21.4] __launch_bounds__(kCdivBlock * kCdivBlock) == 16*16 = 256: SOLE launch block is
+// the fixed dim3(kCdivBlock, kCdivBlock) (launch_assemble_blocks_group); register cap to
+// the occupancy target, never under-launched ⇒ no launch failure (Prog Guide §5.4).
+__global__ void __launch_bounds__(steppe::kCdivBlock * steppe::kCdivBlock)
+assemble_blocks_group_kernel(const double* __restrict__ Gg,
                                             const double* __restrict__ Vpairg,
                                             const double* __restrict__ Rg,
                                             const int* __restrict__ block_ids_in_group,
