@@ -105,19 +105,28 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 
 ---
 
-## ⏭️ Step 2 — Productization: CLI + Python bindings — **THE HONEST NEXT (does not exist yet)**
-*Refs: [`docs/research/desirable-features-survey.md`](research/desirable-features-survey.md); memory `build-sequence-backend-first`. CONFIRMED absent in git: no `app/` or `bindings/` dir, no nanobind/CLI11 wired in CMake (only `STEPPE_BUILD_PYTHON` as an OFF stub in `cmake/SteppeOptions.cmake`), no production `main()`. architecture.md keeps `app/` + standalone f3/f4/D-stat/qpDstat "(planned)".*
+## 🚨 GOLDEN INTEGRITY + I/O FORMATS — **BLOCKER (do FIRST; PROVEN 2026-06-21)**
+*Memory `aadr-tgeno-goldens-corrupt`; `docs/research/tgeno-at2-support.md`. PROVEN on box5090.*
+The AADR v66 `.geno` is **TGENO** (transposed/individual-major). **admixtools R v2.0.10 does NOT support TGENO — it silently MISREADS it** (the AADR README warns this). So **every committed golden + f2 fixture is CORRUPT** (all built by `extract_f2` on the raw v66 TGENO): `golden_fit0`/`rot`/`fit1_NRBIG`/`fitNA`/`qpwave` + `f2_*.bin`. **steppe's TGENO decode is CORRECT** — proven: `convertf` v8621 (DReichLab/AdmixTools) → PACKEDANCESTRYMAP → AT2 `extract_f2` gives **391,333 SNPs, [CW 0.869, Turkey_N 0.131]**, matching steppe to the SNP digit, vs the corrupt golden's 500,848 / [0.559,0.441]. The engine is sound; the GOLDEN REFERENCE was wrong. (The M(cli-4) "decode bug" verdict was wrong — it inverted cause/effect.)
+- [ ] **Regenerate ALL goldens** (unblocks M(cli-4) + re-validation + any real study): `convertf >=v8.0.0` TGENO→PACKEDANCESTRYMAP, then AT2 `extract_f2` on the converted prefix. Reproducible artifacts on the box: `/workspace/data/aadr/convertf_tgeno_to_pa.par`, `at2_on_converted.R`, convertf at `/workspace/AdmixTools_src/src/convertf`, converted prefix `/workspace/data/aadr/converted_pa/v66_HO_pa`. Regenerate the 5 goldens + the `f2_*.bin` fixtures; re-run the parity suite (steppe should MATCH the corrected goldens; the old corrupt ones will differ).
+- [ ] **Older `.GENO` reader support (USER ASK)** — steppe is currently **TGENO-ONLY** (`io::GenoReader::read_tile` requires TGENO). Add **classic PACKEDANCESTRYMAP ("GENO" magic, SNP-major) + EIGENSTRAT** readers so older AADR releases / other datasets work. v66 TGENO is priority but older GENO matters too (format-detect on the magic; dispatch).
+- [ ] **CI guard** — reject any golden built by AT2-R directly on a raw TGENO `.geno` (record the format in the golden metadata; fail if TGENO+AT2-R).
+- [ ] **Re-gate M(cli-4) `extract-f2`** against the corrected golden (steppe's 391,333 / [0.869,0.131] is the CORRECT answer — it now passes). Then re-run the studies (the earlier Yamnaya/Bell-Beaker numbers were on corrupt f2 — INVALID; redo on correct f2).
 
-**CLI** (new `app/`; pick the parser — CLI11 etc. — and wire it into CMake):
-- [ ] `extract-f2` — run the Phase-1 precompute, write the `f2_blocks` cache.
-- [ ] `qpadm` — run the fit on a saved/derived `f2_blocks` (left/right/target → weights/χ²/p).
-- [ ] `qpwave` — run the rank test (the first-class `run_qpwave` entry).
-- [ ] `qpadm-rotate` — the S8 model-space search / rotation.
-- [ ] CLI arg/IO contract: dataset paths, pop lists, `blgsize`/`boot`/seed, output format (JSON/CSV); `--dry-run` reports per-box P_max.
+## ⏭️ Step 2 — Productization: CLI + Python bindings
+*Refs: [`docs/design/cli-bindings.md`](design/cli-bindings.md) (the contract); `desirable-features-survey.md`; memory `build-sequence-backend-first`.*
 
-**Python bindings** (new `bindings/`; flip `STEPPE_BUILD_PYTHON`):
-- [ ] nanobind module exposing `extract_f2` / `run_qpadm` / `run_qpwave` / the rotation + the `QpAdmResult`/`Status` types.
-- [ ] scikit-build-core packaging → wheels (CMake wiring for the nanobind target).
+**CLI** (`src/app/`, CLI11 via CPM, GPU-only, app is a plain-CXX CUDA-free target):
+- [x] **M(cli-0)** scaffold + the CUDA-free `ConfigBuilder`/`RunConfig` precedence + Status→exit-code (`62253ab`).
+- [x] **M(cli-1)** `steppe qpadm` over an f2 dir (`f2.bin`+`pops.txt`+`meta.json` reader, name→index, GPU, tidy CSV/JSON) — golden-gated through the CLI (`67dc696`).
+- [ ] **M(cli-4)** `steppe extract-f2` (genotypes → f2 dir; STPF2BK1 writer w/ real vpair) — **BUILT but BLOCKED**: its golden gate fails only because the golden is corrupt (above). Re-gate after golden regen. *(Mechanically complete; verdict reverted it pending the corrected golden.)*
+- [ ] **M(cli-2)** `steppe qpwave` (the `run_qpwave` entry).
+- [ ] **M(cli-3)** `steppe qpadm-rotate` (S8 rotation; `--jackknife 0|1|2`).
+- [ ] CLI arg/IO contract: pop lists by name, `blgsize`/`maxmiss`/precision, CSV/JSON, `--dry-run` per-box P_max.
+
+**Python bindings** (new `bindings/`; flip `STEPPE_BUILD_PYTHON`) — *decisions made: nanobind (NOT PyCUDA, `docs/research/pycuda-cuda13-viability.md`) + a DLPack/CAI interop seam; use-cases in `docs/research/interop-usecases.md` (MUST = results→pandas + f2→numpy; the msprime power-analysis loop; GPU-only, fp64-enforced):*
+- [ ] **M(py-1)** nanobind module: `qpadm`/`qpwave`/`qpadm_rotate` from a dir → pandas; results→DataFrame + f2→numpy; status enum + NA sentinels.
+- [ ] **M(py-2)** `extract_f2` from Python; scikit-build-core wheel (GPU-only, one wheel).
 
 ## ⏭️ Step 3 — Standalone f-stats (each WITH its own CLI/bindings)
 *After step 2. Refs: architecture.md (the "(planned)" standalone tools); `desirable-features-survey.md`.*
