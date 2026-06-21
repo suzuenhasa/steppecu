@@ -1,5 +1,21 @@
 # Review — `core/domain/block_partition_rule` (`block_partition_rule.hpp` + `.cpp`)
 
+> **SUPERSEDED IN PART (AT2-walk reconciliation, `docs/research/block-partition-at2.md`).**
+> This review was written against the ORIGINAL fixed-grid floor-bin `assign_blocks`
+> (`block_of(genpos)=floor(genpos/blgsize)`, cut on every grid-line crossing). That
+> loop has since been replaced by the AT2 `setblocks` SNP-ANCHORED cumulative walk
+> (a new block opens on a chromosome change OR when the distance from the block's
+> FIRST SNP reaches blgsize, `>=` inclusive; the anchor re-sets to the opening SNP).
+> Consequences for this doc: (1) the `assign_blocks` loop no longer calls `block_of`
+> or casts a floored quotient to `int`, so the float→int-UB analysis below applies
+> only to the surviving `block_of` PRIMITIVE, not to the partition loop; the loop's
+> width guard now prevents a silent over-partition / whole-chrom-merge, not UB.
+> (2) The standing internal-consistency counts are now the WALK counts: full v66
+> (chr 1–24) = **748** (was 757), chr 1–23 = **747** (was 756), autosome chr 1–22 =
+> **711** (was 719); the AT2 cache parity target on the Haak polymorphic union is
+> **709**. The structural/layering findings (length seam, `block_ranges` contract,
+> single-home) are unchanged and still apply.
+
 Adversarial second pass. Unit under review: the single-source-of-truth SNP→block
 assignment rule (M3). Three entry points: the inline per-SNP `block_of`, the inline
 `block_size_cm_to_morgans` (the one cM↔Morgan site), and the out-of-line
@@ -77,9 +93,10 @@ in the inline math primitives, not in the (clean) `assign_blocks` loop.
 
 The whole-ordering pass is genuinely good: a single deterministic file-order loop, no
 allocation beyond the result, correct dense-renumber + per-chromosome-reset semantics,
-defensive length handling, and a real unit test pinning every documented property (gap
-absorption, chrom reset, negative bins, all-zero chromosome, empty input) plus a real-AADR
-internal-consistency check (757 blocks). It is *not* a trivial header — it carries domain
+defensive length handling, and a real unit test pinning every documented property (chrom
+reset, all-zero chromosome, empty input — and, post-reconciliation, the SNP-anchored cut +
+remainder-roll-forward) plus a real-AADR internal-consistency check (748 blocks under the
+AT2 walk; was 757). It is *not* a trivial header — it carries domain
 semantics three layers depend on bit-for-bit, and a device kernel dereferences its derived
 arrays (`f2_blocks_kernel.cu:88,96` index `block_sizes[id]`/`block_offsets[id]` *on-device*),
 so the bar is the full 9.5–10 and the review is correspondingly detailed. What keeps it off
@@ -424,8 +441,8 @@ at the call boundary, not as a per-call return.
 **10.1 — Strong `assign_blocks` coverage; the failure modes (the riskiest part) are untested (MED). CONFIRMED.**
 `test_block_partition.cpp` pins every documented happy-path property (one-bin, gap-absorption,
 two-chrom reset, all-zero chrom, negative bin, empty input), uses a `dense_and_nondecreasing`
-structural checker, and adds a real-AADR consistency check (757 blocks) gated on an argv path — the
-§13 + ROADMAP §6 internal-consistency gate. Missing, each tied to a finding:
+structural checker, and adds a real-AADR consistency check (748 blocks under the AT2 walk; was 757)
+gated on an argv path — the §13 + ROADMAP §6 internal-consistency gate. Missing, each tied to a finding:
   - no test that invalid `block_size_morgans` (`<= 0` / NaN) early-returns (1.1) — and the test
     *asserts* `block_size_cm_to_morgans(0.0) == 0.0` (test:55) without then checking what
     `block_of`/`assign_blocks` do with that zero, leaving the UB path untested;
@@ -455,7 +472,7 @@ and the *same* `block_id`/`block_offsets`/`block_sizes` must reach every device 
 uses an identical block layout (§11.4 host-side fixed-order combine relies on `n_block` and the ordering
 being identical across devices). There is no per-device recomputation today (good). The M4.5
 orchestrator (not this unit) should add an explicit, **logged** assertion that all devices share one
-`BlockPartition` (a one-line `STEPPE_LOG_INFO`, e.g. `[partition] n_block=757 shared across G=2 devices`)
+`BlockPartition` (a one-line `STEPPE_LOG_INFO`, e.g. `[partition] n_block=748 shared across G=2 devices`)
 so the parity precondition is observable on both tiers — the "runtime-detected + explicitly-logged
 degrade" discipline TODO.md (`wxz1fiiln`) asks for. The hook belongs in M4.5 (and depends on the
 not-yet-built `log.hpp`), not in `assign_blocks`. Severity **low**, effort **S**, before-M4.5? the log
@@ -579,10 +596,11 @@ failure-mode tests in, this is a clean 9.5–10/10 single-source domain rule.
 - **Order-as-given, allocation-light, single-pass `assign_blocks`** — `O(M)`, one `resize`, no intermediate
   materialization, runs once; robust even on interleaved/unsorted chromosomes (more blocks, never aliasing
   or OOB); the right shape for a precompute-once host stage.
-- **Correct, tested handling of the genuinely-tricky real-data edges** (negative chr17 positions → own bin;
-  all-zero chr24 → one block; interior empty-bin absorption; per-chromosome reset) with a
-  `dense_and_nondecreasing` structural checker and a real-AADR consistency gate (757 blocks; chr 1-23 →
-  756, chr 1-22 → 719 per ROADMAP M3) — exactly the ROADMAP §6 "property identities + internal-consistency
+- **Correct, tested handling of the genuinely-tricky real-data edges** (negative chr17 positions anchor the
+  first block; all-zero chr24 → one block; SNP-anchored cuts with the remainder rolling forward;
+  per-chromosome reset) with a `dense_and_nondecreasing` structural checker and a real-AADR consistency
+  gate (748 blocks under the AT2 walk; chr 1-23 → 747, chr 1-22 → 711; AT2 cache parity target 709 per
+  `docs/research/block-partition-at2.md`) — exactly the ROADMAP §6 "property identities + internal-consistency
   on real data, never synthetic" gate.
 - **Clean modern API**: `std::span<const T>` inputs, value-returned owning result, `[[nodiscard]]`
   everywhere, `noexcept` on the pure primitives and (correctly) not on the allocating pass; `constexpr` on

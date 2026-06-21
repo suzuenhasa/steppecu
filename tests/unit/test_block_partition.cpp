@@ -33,13 +33,12 @@
 #include <string>
 #include <vector>
 
-#include "core/domain/block_partition_rule.hpp"  // block_of, block_size_cm_to_morgans, assign_blocks, BlockPartition
+#include "core/domain/block_partition_rule.hpp"  // block_size_cm_to_morgans, assign_blocks, BlockPartition
 #include "steppe/config.hpp"                      // kDefaultBlockSizeCm, kCentimorgansPerMorgan
 
 namespace {
 
 using steppe::core::assign_blocks;
-using steppe::core::block_of;
 using steppe::core::block_size_cm_to_morgans;
 using steppe::core::BlockPartition;
 
@@ -77,8 +76,9 @@ const double kBs = block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
     return true;
 }
 
-// --- single chromosome, one bin → exactly one block ------------------------
-// All positions fall in local bin 0 (< 0.05 Morgans) on one chromosome.
+// --- single chromosome, one block → all within blgsize of the anchor --------
+// Every SNP is < 0.05 Morgans from the first SNP (the anchor at 0.0), so no
+// interior cut fires and the whole chromosome is one block.
 [[nodiscard]] bool test_single_chrom_one_bin() {
     const std::vector<int> chrom = {1, 1, 1, 1};
     const std::vector<double> gp = {0.0, 0.01, 0.02, 0.049};
@@ -87,21 +87,43 @@ const double kBs = block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
            bp.block_id == std::vector<int>{0, 0, 0, 0};
 }
 
-// --- single chromosome with a GAP → interior empty bin absorbed -------------
-// genpos 0.01,0.06,0.16 @ bs=0.05 → local bins 0,1,3 (bin 2 is EMPTY). The dense
-// rule collapses to global 0,1,2 (n_block=3): the empty interior bin is absorbed,
-// NOT reserved a slot. This is the 756-not-757-style policy in miniature.
-[[nodiscard]] bool test_single_chrom_gap_absorbs() {
+// --- single chromosome, SNP-anchored cuts; the >= boundary is INCLUSIVE -------
+// THE AT2 walk (NOT a fixed grid), with EXACTLY-blgsize gaps to pin the inclusive
+// `>=` (port of C `dis >= blocklen`). Positions 0.0, 0.05, 0.10 are chosen so the
+// distances are exact in binary double (0.05-0.0 and 0.10-0.05 are both EXACTLY
+// 0.05; verified) — a SNP exactly blgsize from the anchor CUTS:
+//   SNP0 → opens block 0, anchor = 0.00;
+//   SNP1: 0.05 - 0.00 = 0.05 >= 0.05 → CUT (inclusive) → block 1, anchor 0.05;
+//   SNP2: 0.10 - 0.05 = 0.05 >= 0.05 → CUT → block 2.
+// Result {0,1,2}. (NB: a naive {0.01,0.06,0.16} would NOT cut at SNP1 because
+// 0.06-0.01 == 0.04999999999999996 < 0.05 in double — the same FP knife-edge AT2
+// itself sees; the walk is exact-to-AT2, including this. The next case pins the
+// behaviour the grid CANNOT reproduce.)
+[[nodiscard]] bool test_single_chrom_walk_cuts() {
     const std::vector<int> chrom = {1, 1, 1};
-    const std::vector<double> gp = {0.01, 0.06, 0.16};
-    // Sanity-pin the local bins this case relies on (0,1,3) so the intent is
-    // explicit and survives any refactor of block_of.
-    if (block_of(0.01, kBs) != 0 || block_of(0.06, kBs) != 1 || block_of(0.16, kBs) != 3) {
-        return false;
-    }
+    const std::vector<double> gp = {0.00, 0.05, 0.10};
     const BlockPartition bp = assign_blocks(chrom, gp, kBs);
     return bp.n_block == 3 && dense_and_nondecreasing(bp) &&
            bp.block_id == std::vector<int>{0, 1, 2};
+}
+
+// --- the SNP-anchored re-anchor: remainder rolls FORWARD (grid CANNOT do this) -
+// THE load-bearing AT2 property a fixed k*0.05 grid gets wrong. genpos
+// 0.00, 0.04, 0.06, 0.10 @ bs=0.05 on one chrom:
+//   SNP0 → block 0, anchor = 0.00;
+//   SNP1: 0.04 - 0.00 = 0.04 < 0.05 → no cut → block 0;
+//   SNP2: 0.06 - 0.00 = 0.06 >= 0.05 → CUT → block 1, anchor RE-SET to 0.06
+//         (NOT to the grid line 0.05; the 0.01 remainder rolls forward);
+//   SNP3: 0.10 - 0.06 = 0.04 < 0.05 → no cut → block 1.
+// Result {0,0,1,1}, n_block=2. The OLD floor-grid rule would have cut SNP2 into
+// bin floor(0.06/0.05)=1 AND SNP3 stays in bin floor(0.10/0.05)=2 → {0,0,1,2},
+// n_block=3 — the extra split this fix removes (the 718→709 mechanism).
+[[nodiscard]] bool test_walk_reanchors_remainder_forward() {
+    const std::vector<int> chrom = {1, 1, 1, 1};
+    const std::vector<double> gp = {0.00, 0.04, 0.06, 0.10};
+    const BlockPartition bp = assign_blocks(chrom, gp, kBs);
+    return bp.n_block == 2 && dense_and_nondecreasing(bp) &&
+           bp.block_id == std::vector<int>{0, 0, 1, 1};
 }
 
 // --- two chromosomes each starting ~0 → chr2 gets a fresh id ----------------
@@ -128,20 +150,25 @@ const double kBs = block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
            bp.block_id == std::vector<int>{0, 0, 0, 0, 0};
 }
 
-// --- a negative position gets its OWN block, never aliasing bin 0 -----------
-// floor(-0.0002 / 0.05) = -1, a distinct local bin from bin 0. Layout mirrors the
-// real AADR chr17, which OPENS with two negative-genpos SNPs (bin -1) before
-// transitioning to bin 0: chrom boundary → bin -1 block → bin 0 block.
-[[nodiscard]] bool test_negative_position_own_block() {
-    // block_of must floor negatives correctly (own bin -1, not 0).
-    if (block_of(-0.000258, kBs) != -1 || block_of(-0.000238, kBs) != -1) return false;
+// --- negative chromosome-opening positions just anchor the first block ------
+// Real AADR chr17 OPENS with two negative-genpos SNPs before transitioning to
+// positive. Under the AT2 walk there is NO "negative bin" concept: the chromosome
+// boundary opens a new block and ANCHORS it at the first (negative) SNP; later
+// SNPs cut only when their distance FROM that anchor reaches blgsize. Layout
+// (chr16 tail then chr17 head):
+//   SNP0 chr16 1.340230            → block 0, anchor 1.340230;
+//   SNP1 chr17 -0.000258 (!=chrom) → CUT → block 1, anchor -0.000258;
+//   SNP2 chr17 -0.000238: dis = 0.000020 < 0.05 → block 1;
+//   SNP3 chr17  0.000249: dis = 0.000507 < 0.05 → block 1.
+// Result {0,1,1,1}, n_block=2. The negatives do NOT form a separate block — they
+// are simply the anchor and near-anchor SNPs of chr17's first block (the OLD
+// floor-grid rule gave them their own bin -1; the walk does not).
+[[nodiscard]] bool test_negative_chrom_open_anchors() {
     const std::vector<int> chrom = {16, 17, 17, 17};
     const std::vector<double> gp = {1.340230, -0.000258, -0.000238, 0.000249};
     const BlockPartition bp = assign_blocks(chrom, gp, kBs);
-    // chr16 last SNP → block 0; chr17 negatives (bin -1) → block 1; chr17 bin 0
-    // → block 2. The negatives form their own block and do not merge with bin 0.
-    return bp.n_block == 3 && dense_and_nondecreasing(bp) &&
-           bp.block_id == std::vector<int>{0, 1, 1, 2};
+    return bp.n_block == 2 && dense_and_nondecreasing(bp) &&
+           bp.block_id == std::vector<int>{0, 1, 1, 1};
 }
 
 // --- empty input → empty partition ------------------------------------------
@@ -150,16 +177,17 @@ const double kBs = block_size_cm_to_morgans(steppe::kDefaultBlockSizeCm);
     return bp.n_block == 0 && bp.block_id.empty() && dense_and_nondecreasing(bp);
 }
 
-// --- ILLEGAL block widths → DEFINED behavior (empty partition), NO UB --------
-// The B13 verdict gate (cleanup X-3/B13): block_of divides by the width and then
-// static_cast<int>s the floored quotient, so a non-positive or NaN width would
-// otherwise be:
-//   * 0.0       → genpos/0 = ±Inf (or NaN for 0/0); static_cast<int>(±Inf/NaN)
-//                 is UNDEFINED BEHAVIOR ([conv.fpint]);
-//   * negative  → floor of a negative quotient INVERTS the bin order — a silent
-//                 WRONG partition that still looks dense;
-//   * NaN       → genpos/NaN = NaN; static_cast<int>(NaN) is UB.
-// assign_blocks now guards with !(width > 0.0) and returns an EMPTY partition
+// --- ILLEGAL block widths → DEFINED behavior (empty partition) --------------
+// The B13 verdict gate (cleanup X-3/B13): the AT2 walk tests
+// `(pos - fpos) >= block_size_morgans`, so a non-positive or NaN width is a
+// silently WRONG partition (not the AT2-matching one):
+//   * 0.0       → a 0 gap satisfies `>=` on EVERY SNP → every SNP its own block
+//                 (a silent over-partition that still looks dense);
+//   * negative  → likewise: every SNP trips the threshold → every SNP its own
+//                 block (silent over-partition);
+//   * NaN       → `x >= NaN` is ALWAYS false → no interior cut fires → a whole
+//                 chromosome collapses to one block (silent merge).
+// assign_blocks guards with !(width > 0.0) and returns an EMPTY partition
 // (n_block == 0) for all three. These cases pass a NON-EMPTY (chrom, genpos) so
 // the guard is what produces the empty result — not the empty-input early-out —
 // proving the illegal width alone is rejected. dense_and_nondecreasing on an
@@ -205,15 +233,16 @@ struct Case {
 
 constexpr Case kCases[] = {
     {"block_size_cm_to_morgans(5)==0.05 exactly", test_cm_to_morgans_exact},
-    {"single chrom, one bin -> n_block=1", test_single_chrom_one_bin},
-    {"single chrom gap (0,1,3) -> dense 0,1,2 (interior empty absorbed)", test_single_chrom_gap_absorbs},
+    {"single chrom, one block (all within blgsize of anchor)", test_single_chrom_one_bin},
+    {"single chrom SNP-anchored cuts -> dense 0,1,2", test_single_chrom_walk_cuts},
+    {"AT2 walk re-anchors: remainder rolls forward (grid cannot)", test_walk_reanchors_remainder_forward},
     {"two chroms each ~0 -> per-chrom reset + fresh id", test_two_chroms_reset},
     {"all-zero chromosome -> one block", test_all_zero_chrom_one_block},
-    {"negative position -> own block, no alias of bin 0", test_negative_position_own_block},
+    {"negative chrom-open positions just anchor the first block", test_negative_chrom_open_anchors},
     {"empty input -> empty partition", test_empty_input},
-    {"block_size 0 -> empty partition (no float->int UB) [B13]", test_zero_block_size_empty},
-    {"block_size negative -> empty partition (no inverted bins) [B13]", test_negative_block_size_empty},
-    {"block_size NaN -> empty partition (no float->int UB) [B13]", test_nan_block_size_empty},
+    {"block_size 0 -> empty partition (no per-SNP over-partition) [B13]", test_zero_block_size_empty},
+    {"block_size negative -> empty partition (no per-SNP over-partition) [B13]", test_negative_block_size_empty},
+    {"block_size NaN -> empty partition (no silent whole-chrom merge) [B13]", test_nan_block_size_empty},
     {"block_size tiny-positive -> still partitions (guard not over-broad) [B13]", test_tiny_positive_block_size_ok},
 };
 
@@ -224,13 +253,15 @@ constexpr Case kCases[] = {
 // asserts the structural invariants. This is a CONSISTENCY check (counts +
 // ordering on real positions), NOT a statistic or precision claim (ROADMAP §0).
 //
-// MEASURED on the box's v66 AADR .snp (584131 SNPs, chr 1..24): n_block == 757.
-// The plan PREDICTED 756; the +1 is the Y chromosome (chr 24), whose 597 SNPs are
-// all at genpos 0 and form one block. Excluding chr 24 (as AT2 does — it operates
-// on chr 1..23) yields exactly 756. assign_blocks does NO chromosome filtering by
-// design (that is M2/M6 `io` territory), so over ALL 584131 SNPs it must report
-// 757. We assert the measured 757 and DO NOT force 756 (ROADMAP §6: report the
-// real number and explain it; do not fudge the assertion).
+// MEASURED on the box's v66 AADR .snp (584131 SNPs, chr 1..24) under the AT2
+// SNP-anchored walk (the current rule): n_block == kExpectedNBlock below. This
+// count is the walk's block count over ALL 584131 SNPs — assign_blocks does NO
+// chromosome filtering by design (that is M2/M6 `io` territory), so chr 24 (the Y,
+// 597 SNPs all at genpos 0) contributes one block here. The count differs from
+// the pre-fix floor-grid count (757) because the walk re-anchors at each cut
+// (remainder rolls forward) instead of pinning to k*0.05 grid lines — fewer
+// interior splits (see docs/research/block-partition-at2.md §3). We assert the
+// MEASURED walk count (ROADMAP §6: report the real number; do not fudge it).
 // ---------------------------------------------------------------------------
 [[nodiscard]] bool run_real_aadr_check(const std::string& snp_path) {
     std::FILE* f = std::fopen(snp_path.c_str(), "r");
@@ -279,8 +310,12 @@ constexpr Case kCases[] = {
 
     const bool dense_ok = dense_and_nondecreasing(bp);
 
-    // The MEASURED parity number on this dataset, fed all SNPs (no chrom filter).
-    constexpr int kExpectedNBlock = 757;
+    // The MEASURED walk count on this dataset, fed all SNPs (no chrom filter).
+    // Measured on the box's v66 .snp under the AT2 SNP-anchored walk this pass
+    // (584131 SNPs, chr 1..24): 748. The pre-fix floor-grid rule gave 757; the walk
+    // re-anchors at each cut (remainder rolls forward) instead of cutting on grid
+    // lines, removing 9 interior splits (see docs/research/block-partition-at2.md §3).
+    constexpr int kExpectedNBlock = 748;
     constexpr long kExpectedSnps = 584131;
 
     std::printf("\n");
@@ -289,7 +324,7 @@ constexpr Case kCases[] = {
     std::printf("  SNPs parsed       : %ld   (expected %ld)\n", m, kExpectedSnps);
     std::printf("  block_size        : %.5f Morgans  (= %.1f cM via the single conversion site)\n",
                 bs, steppe::kDefaultBlockSizeCm);
-    std::printf("  n_block           : %d   (expected %d — plan's 756 + Y chr 24; see test header)\n",
+    std::printf("  n_block           : %d   (expected %d — AT2 SNP-anchored walk count; see test header)\n",
                 bp.n_block, kExpectedNBlock);
     std::printf("  distinct chroms   : %d\n", distinct_chrom);
     std::printf("  chrom-boundary inc: %d   (= distinct_chrom - 1; %d transitions)\n",

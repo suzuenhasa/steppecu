@@ -18,11 +18,14 @@
 // conflate cM and Morgans.
 //
 // M3 status: the floor-of-position-over-block-size core (`block_of`) is the
-// stable __host__-shareable per-SNP primitive from M0. M3 adds the whole-ordering
-// assignment (`assign_blocks`) that turns the per-SNP local bins into the dense,
-// per-chromosome-reset, contiguous global block ids the jackknife consumes, plus
-// the ONE cM→Morgan conversion site (`block_size_cm_to_morgans`). All host-pure,
-// CUDA-free; the assignment loop lives in block_partition_rule.cpp.
+// stable __host__-shareable per-SNP primitive from M0; it survives as a valid
+// primitive but `assign_blocks` no longer calls it (the AT2 walk does not bin to
+// a fixed grid). M3 adds the whole-ordering assignment (`assign_blocks`) — the
+// AT2 SNP-anchored cumulative walk (`setblocks()`; see assign_blocks below) that
+// turns the per-SNP (chrom, genpos) into the dense, per-chromosome-reset,
+// contiguous global block ids the jackknife consumes — plus the ONE cM→Morgan
+// conversion site (`block_size_cm_to_morgans`). All host-pure, CUDA-free; the
+// assignment loop lives in block_partition_rule.cpp.
 #ifndef STEPPE_CORE_DOMAIN_BLOCK_PARTITION_RULE_HPP
 #define STEPPE_CORE_DOMAIN_BLOCK_PARTITION_RULE_HPP
 
@@ -116,17 +119,25 @@ struct BlockPartition {
 /// else is the named smell (architecture.md §2, §8). It lives in `core`, never in
 /// `io`.
 ///
-/// The rule: track the previous SNP's chromosome and its local floor-bin
-/// (`block_of`). A NEW global block opens when EITHER the chromosome changes OR
-/// the local bin changes from the previous SNP; otherwise the current global
-/// block is reused. Consequences, each a property the M3 tests pin:
+/// The rule (the AT2 `setblocks()` convention — ADMIXTOOLS DReichLab
+/// `qpsubs.c:1698-1759`, admixtools R 2.0.10 `get_block_lengths`; the bit-tight
+/// parity TARGET, docs/research/block-partition-at2.md): a SNP-ANCHORED
+/// cumulative walk. Carry the genetic position of the current block's FIRST SNP
+/// (the anchor). A NEW global block opens when EITHER the chromosome changes OR
+/// the cumulative distance from the anchor reaches `block_size_morgans` (`>=`,
+/// inclusive — porting C `dis >= blocklen`); on a cut the anchor RE-SETS to the
+/// SNP that opens the block, so the sub-width remainder rolls FORWARD. Blocks are
+/// anchored at actual SNP positions, NEVER at fixed grid multiples
+/// `k*block_size_morgans` — that re-anchoring is the difference from a floor-bin
+/// grid. Consequences, each a property the M3 tests pin:
 ///   * per-chromosome reset — a chromosome boundary ALWAYS forces a fresh block,
-///     so blocks never straddle chromosomes (the local bin is per-chromosome);
-///   * interior empty bins are ABSORBED — a gap in the local bins (e.g. bins
-///     0,1,3) yields dense global ids (0,1,2), not a reserved slot for the empty
-///     bin (this is what makes the count the genome's *occupied*-block count);
-///   * negative positions (`std::floor` → -1) get their own block and never alias
-///     bin 0 — they form a distinct local bin like any other.
+///     so blocks never straddle chromosomes (the cut test includes `c != prev`);
+///   * a block spans `>= block_size_morgans` (it can be WIDER, since the SNP that
+///     trips the threshold may overshoot it) EXCEPT the trailing/short-chrom
+///     remnant, which is kept as-is — matching AT2's tiny chr-end blocks;
+///   * the count is the genome's SNP-anchored walk count, NOT the occupied-grid
+///     count: a wide SNP-sparse stretch is ONE block, not one block per empty
+///     grid cell.
 ///
 /// Inputs are parallel arrays of the SAME length M (one entry per SNP, file
 /// order). M can be ~584k (whole-genome AADR), so the loop index is `long` to

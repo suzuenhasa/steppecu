@@ -55,30 +55,30 @@ constexpr std::size_t kDbl = sizeof(double);  // 8
 // resident footprint is 2× the single-tensor term. A helper that counts one
 // under-budgets by 2× and OOMs mid-stream.
 [[nodiscard]] bool test_resident_counts_both_tensors() {
-    const int P = 768, nb = 757;  // the real-AADR M4 scale (ROADMAP §0)
+    const int P = 768, nb = 748;  // the real-AADR M4 scale (ROADMAP §0)
     const std::size_t one = one_tensor_bytes(P, nb);
     const std::size_t two = resident_tensor_bytes(P, nb);
     // Exactly 2× one tensor — the f2 + vpair pair.
     if (two != 2u * one) return false;
     // Sanity at a second scale.
-    const std::size_t one2 = one_tensor_bytes(4266, 757);  // §0 top end
-    if (resident_tensor_bytes(4266, 757) != 2u * one2) return false;
+    const std::size_t one2 = one_tensor_bytes(4266, 748);  // §0 top end
+    if (resident_tensor_bytes(4266, 748) != 2u * one2) return false;
     // Degenerate inputs are well-defined 0 (no wrap on negatives).
-    if (resident_tensor_bytes(0, 757) != 0u) return false;
+    if (resident_tensor_bytes(0, 748) != 0u) return false;
     if (resident_tensor_bytes(768, 0) != 0u) return false;
-    if (resident_tensor_bytes(-1, 757) != 0u) return false;
+    if (resident_tensor_bytes(-1, 748) != 0u) return false;
     return true;
 }
 
 // --- B26: the 2× term does NOT overflow size_t at the §0 top end -------------
-// At P=4266, n_block=757: one tensor ≈ 110 GB, the pair ≈ 220 GB — large, but
+// At P=4266, n_block=748: one tensor ≈ 110 GB, the pair ≈ 220 GB — large, but
 // the cast-before-multiply keeps it inside 64 bits (≈2.2e11 « 1.8e19), so the
 // budget arithmetic stays sound rather than wrapping.
 [[nodiscard]] bool test_resident_no_overflow_top_end() {
-    const std::size_t two = resident_tensor_bytes(4266, 757);
+    const std::size_t two = resident_tensor_bytes(4266, 748);
     // ~220 GB, comfortably inside size_t; just assert it is the exact 2× value
     // and is far below SIZE_MAX (a wrap would make it tiny or absurd).
-    const std::size_t one = one_tensor_bytes(4266, 757);
+    const std::size_t one = one_tensor_bytes(4266, 748);
     return two == 2u * one && two > (200ull * 1024ull * 1024ull * 1024ull) &&
            two < std::numeric_limits<std::size_t>::max() / 2u;
 }
@@ -88,7 +88,7 @@ constexpr std::size_t kDbl = sizeof(double);  // 8
 // of the free VRAM that REMAINS after the resident pair AND the cuBLAS workspace
 // are reserved — never the gross free figure.
 [[nodiscard]] bool test_chunk_budget_reserves_both_and_workspace() {
-    const int P = 768, nb = 757;
+    const int P = 768, nb = 748;
     const std::size_t resident = resident_tensor_bytes(P, nb);  // 2× tensors
     const std::size_t free = resident + kCublasWorkspaceBytes +
                              (8ull * 1024ull * 1024ull * 1024ull);  // 8 GB headroom
@@ -111,7 +111,7 @@ constexpr std::size_t kDbl = sizeof(double);  // 8
 // is 0 (fail-fast: max_blocks then clamps to 1 and OOMs cleanly rather than
 // silently sizing a chunk against a wrapped negative).
 [[nodiscard]] bool test_chunk_budget_saturates_to_zero() {
-    const int P = 768, nb = 757;
+    const int P = 768, nb = 748;
     const std::size_t resident = resident_tensor_bytes(P, nb);
     // free is LESS than the reserve → net would underflow; helper saturates to 0.
     if (chunk_budget_bytes(resident, P, nb) != 0u) return false;          // missing the workspace
@@ -150,7 +150,7 @@ constexpr std::size_t kDbl = sizeof(double);  // 8
 
 // --- max_blocks is floored at 1 and never exceeds nb_total -------------------
 [[nodiscard]] bool test_max_blocks_floor_and_cap() {
-    const int P = 768, nb = 757, s_pad = 2048;
+    const int P = 768, nb = 748, s_pad = 2048;
     // Zero free → budget 0 → quotient 0 → floored to 1 (a single block always
     // attempted; it then OOMs cleanly if it truly cannot fit).
     if (max_blocks_per_chunk(0, P, nb, s_pad, 10) != 1) return false;
@@ -172,7 +172,7 @@ constexpr std::size_t kDbl = sizeof(double);  // 8
 // resident chunk never overshoots the utilization fraction. (Floored-to-1 is the
 // sole documented exception: a single block is always attempted.)
 [[nodiscard]] bool test_chunk_never_exceeds_fraction() {
-    const int P = 768, nb = 757, s_pad = 1024;
+    const int P = 768, nb = 748, s_pad = 1024;
     const std::size_t resident = resident_tensor_bytes(P, nb);
     const std::size_t per_block = per_block_chunk_bytes(P, s_pad);
     const int nb_total = 4096;  // a large bucket

@@ -176,7 +176,7 @@ static_assert(steppe::core::kMaxGridX == 2147483647u, "x grid axis reaches 2^31 
 [[nodiscard]] bool test_chunk_tiling_small_bucket_unaffected() {
     using steppe::device::max_blocks_per_chunk;
     constexpr std::size_t kHugeFree = static_cast<std::size_t>(1) << 60;
-    const int mb = max_blocks_per_chunk(kHugeFree, 768, 757, 2048, 40);  // spike shape
+    const int mb = max_blocks_per_chunk(kHugeFree, 768, 748, 2048, 40);  // spike shape
     return mb == 40 && static_cast<unsigned>(mb) <= kMaxGridZ;  // bucket fits, no tiling
 }
 

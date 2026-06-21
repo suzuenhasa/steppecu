@@ -447,8 +447,8 @@ int main(int argc, char** argv) {
             only_auto ? "PASS" : "FAIL");
         std::fprintf(stderr,
             "    [e note] AT2 extract_f2 default auto_only=TRUE = chr 1-22; on the 100k prefix this\n"
-            "             reports the autosome block count above. (Full v66 .snp: chr1-24=>757 blocks,\n"
-            "             chr1-23=>756, chr1-22=>autosome count; AT2 parity = chr 1-22.)\n");
+            "             reports the autosome block count above. (Full v66 .snp, AT2 SNP-anchored\n"
+            "             walk: chr1-24=>748 blocks, chr1-23=>747, chr1-22=>711; AT2 parity = chr 1-22.)\n");
     }
 
     // ===== (f) STRAND-AMBIGUOUS / transversion class present + Q untouched =====

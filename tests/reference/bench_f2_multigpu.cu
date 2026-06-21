@@ -8,7 +8,7 @@
 //       lives in HOST RAM — the path that scales furthest)
 //
 // WHY A SWEEP, NOT A BENCH (the memory reality): the f2/Vpair result is
-// [P^2 * n_block] FP64 EACH; n_block ~ 757 (full autosome). result_GB grows as P^2, so:
+// [P^2 * n_block] FP64 EACH; n_block ~ 748 (full v66, AT2 walk). result_GB grows as P^2, so:
 //   * single-GPU needs the full result (~76 GB @ P=2500) + inputs on ONE device ⇒ OOM > 96 GB;
 //   * the device-resident combine has the ROOT hold the full result + its own resident
 //     partial ⇒ OOM at the root (tops out ~P2000);

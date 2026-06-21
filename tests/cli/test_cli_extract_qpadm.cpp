@@ -30,11 +30,12 @@
 //         * weights within rtol 5e-3 of the corrected golden [0.868751, 0.131249];
 //         * feasibility + f4rank + dof match; model NOT rejected (p > 0.05);
 //         * AND decisively NOT the corrupt 500848-SNP / [0.5589,0.4411] result.
-//       THE 5e-3 WEIGHT TIER covers the residual block-partition difference: steppe and
-//       AT2 both build f2 on the SAME 351539 polymorphic SNPs and at the SAME blgsize 0.05
-//       Morgans, so the partitions agree closely (the prior 719-vs-710 residual, when steppe
-//       still kept the monomorphic SNPs, shrinks once both engines partition the identical
-//       poly subset). chisq is REPORTED (block-partition-sensitive), not gated;
+//       THE 5e-3 WEIGHT TIER is a numerical-tolerance band, not a partition-mismatch band:
+//       steppe and AT2 both build f2 on the SAME 351539 polymorphic SNPs at the SAME blgsize
+//       0.05 Morgans, and steppe now uses the AT2 SNP-anchored block walk (setblocks; see
+//       docs/research/block-partition-at2.md), so the partitions agree element-wise (the
+//       prior 719-vs-710 residual was the OLD floor-grid rule plus kept monomorphic SNPs;
+//       both causes are now fixed). chisq is REPORTED (block-partition-sensitive), not gated;
 //       dof/f4rank/feasibility/SNP-count/not-corrupt ARE gated.
 //
 // UNITS: --blgsize is MORGANS (AT2 convention; 0.05 == 5 cM). The cases pass 0.05 Morgans,

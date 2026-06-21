@@ -18,20 +18,20 @@ BlockPartition assign_blocks(std::span<const int> chrom,
     BlockPartition out;
 
     // FAIL-FAST guard on the block width (architecture.md §2; cleanup X-3/B13).
-    // block_of divides by block_size_morgans, so a non-positive width is a hard
-    // contract violation: 0.0 makes the quotient ±Inf (or NaN for 0/0) and a
-    // negative width silently INVERTS the bin order (floor of a negative
-    // quotient) — both then reach static_cast<int>(...) in block_of, which for
-    // ±Inf / NaN is UNDEFINED BEHAVIOR ([conv.fpint]: "if the truncated value
-    // cannot be represented in the destination type, the behavior is
-    // undefined"), and for a negative width is a silent WRONG partition that
-    // still LOOKS dense — defeating the single-source rule that must match AT2.
-    // The !(x > 0.0) form rejects 0.0, every negative, AND NaN in one test
-    // (NaN > 0.0 is false, so its complement is true), closing the float→int UB
-    // and the silent-inversion path here, the only enforceable site today (the
-    // ConfigBuilder::build() that would normally validate this does not exist
-    // yet). The illegal width yields an empty partition (n_block == 0), the same
-    // defined, harmless result as empty input.
+    // The AT2 walk compares `(pos - fpos) >= block_size_morgans`, so a
+    // non-positive or NaN width is a hard contract violation that produces a
+    // SILENTLY WRONG partition rather than the AT2-matching one:
+    //   * 0.0 / negative → the threshold trips on EVERY SNP within a chromosome
+    //     (a 0 or negative gap always satisfies `>=`), so every SNP becomes its
+    //     own block — a silent over-partition that still LOOKS dense;
+    //   * NaN → `(pos - fpos) >= NaN` is ALWAYS false, so NO interior cut ever
+    //     fires and a whole chromosome collapses to one block — silently merged.
+    // Either defeats the single-source rule that must match AT2. The !(x > 0.0)
+    // form rejects 0.0, every negative, AND NaN in one test (NaN > 0.0 is false,
+    // so its complement is true), closing all three silent-wrong paths here — the
+    // only enforceable site today (the ConfigBuilder::build() that would normally
+    // validate this does not exist yet). The illegal width yields an empty
+    // partition (n_block == 0), the same defined, harmless result as empty input.
     if (!(block_size_morgans > 0.0)) {
         return out;  // 0 / negative / NaN width → empty block_id, n_block == 0.
     }
@@ -49,32 +49,46 @@ BlockPartition assign_blocks(std::span<const int> chrom,
 
     // Single deterministic pass in file order (architecture.md §12: the block id
     // is a pure, launch-order-independent function of (chrom, genpos)).
-    int prev_chrom = 0;
-    int prev_local_bin = 0;
-    long global = -1;  // global block counter; first SNP bumps it to 0.
+    //
+    // THE AT2 setblocks() convention (ADMIXTOOLS DReichLab qpsubs.c:1698-1759;
+    // admixtools R 2.0.10 get_block_lengths, R/resampling.R:278-300; the bit-tight
+    // parity TARGET — docs/research/block-partition-at2.md): a SNP-ANCHORED
+    // cumulative walk. A new block opens on a chromosome change OR when the
+    // cumulative genetic distance FROM THE BLOCK'S FIRST SNP reaches
+    // block_size_morgans; on a cut the anchor RE-SETS to the SNP that opens the
+    // block, so the sub-blgsize remainder rolls FORWARD into the next block. This
+    // is NOT a fixed-grid floor-bin: blocks are anchored at actual SNP positions,
+    // never at grid multiples k*block_size_morgans, and a block spans
+    // >= block_size_morgans (can be wider) except the trailing/short-chrom remnant.
+    double fpos = -1.0e20;  // genpos of the current block's first SNP; the AT2
+                            // sentinel forces the first real SNP to open block 0.
+    int prev_chrom = -1;    // sentinel: any real chrom (steppe codes are 1..24)
+                            // differs from -1, so the first SNP opens block 0.
+    long global = -1;       // dense 0-based block counter; first SNP bumps it to 0.
 
     for (long s = 0; s < M; ++s) {
-        // The SNP column index, widened ONCE per iteration ([7.3] dedup): the three
-        // parallel-array subscripts below all index column s. idx() is the shared
+        // The SNP column index, widened ONCE per iteration ([7.3] dedup): the two
+        // parallel-array subscripts below both index column s. idx() is the shared
         // long→size_t cast helper (block_partition_rule.hpp), used here and in
         // block_ranges so the boilerplate lives in one place.
         const std::size_t us = idx(s);
         const int c = chrom[us];
-        const int local = block_of(genpos_morgans[us], block_size_morgans);
+        const double pos = genpos_morgans[us];
 
-        // Open a NEW global block on the first SNP, on a chromosome boundary, or
-        // on a local-bin change; otherwise reuse the current global block.
-        // Interior empty local bins are absorbed (the dense-id policy); a
-        // chromosome boundary always forces a fresh block; a negative-position
-        // bin (floor → -1) is just another local bin and never aliases bin 0.
-        const bool open_new = (s == 0) || (c != prev_chrom) || (local != prev_local_bin);
-        if (open_new) {
+        // CUT on a chromosome change OR when the cumulative distance from the
+        // anchor reaches block_size_morgans. The >= is INCLUSIVE — it ports the
+        // AT2 C `dis >= blocklen` and R `dis >= blgsize` verbatim (a SNP exactly
+        // block_size_morgans from the anchor cuts). On a cut, re-anchor to THIS
+        // SNP's position (NOT to fpos + width and NOT to a grid line) so the
+        // remainder rolls forward — that re-anchoring is the whole difference from
+        // the old floor-bin rule. The -1e20/-1 sentinels make the first SNP cut.
+        if (c != prev_chrom || (pos - fpos) >= block_size_morgans) {
             ++global;
+            fpos = pos;
+            prev_chrom = c;
         }
 
         out.block_id[us] = static_cast<int>(global);
-        prev_chrom = c;
-        prev_local_bin = local;
     }
 
     out.n_block = static_cast<int>(global) + 1;  // dense 0..n_block-1.
