@@ -151,8 +151,9 @@ struct QpAdmResult {
     std::vector<double>      popdrop_chisq, popdrop_p;
     std::vector<char>        popdrop_feasible;  ///< char (0/1) to keep the value-type CUDA-free + vector<bool>-free.
 
-    /// PER-MODEL outcome (Ok/RankDeficient/NonSpdCovariance); NEVER an exception
-    /// for a domain outcome (architecture.md §10).
+    /// PER-MODEL outcome (Ok/RankDeficient/NonSpdCovariance/ChisqUndefined);
+    /// NEVER an exception for a domain outcome (architecture.md §10). ChisqUndefined
+    /// ⇒ dof<=0, so `p` is the NaN sentinel — filter on status, not on p.
     Status status = Status::Ok;
 
     /// Which arithmetic produced this. M(fit-1) is always Fp64.

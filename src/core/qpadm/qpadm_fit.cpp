@@ -94,7 +94,11 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     res.chisq = gw.chisq;
 
     // p of the fitted rank (loose tier, OQ-13). Computed BEFORE the SE so the
-    // FeasibleOnly p-gate can consult it (a cheap-pass output).
+    // FeasibleOnly p-gate can consult it (a cheap-pass output). For dof<=0 the
+    // chi-squared tail-p is undefined and pchisq_upper returns NaN (pchisq.hpp);
+    // an over-parameterized model is a DOMAIN OUTCOME, not a fault — flagged
+    // below as Status::ChisqUndefined so a consumer filtering on status==Ok does
+    // not silently accept a NaN p (architecture.md §10 STEPPE_ERR_CHISQ_UNDEFINED).
     res.p = pchisq_upper(res.chisq, res.dof);
 
     // ---- S7 SE policy (the host-oracle mirror of the GPU two-pass; fit-engine.md §M(fit-3))
@@ -185,7 +189,12 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
         // rankdrop/popdrop fields remain empty; the single-rank fit is unaffected.
     }
 
-    res.status = Status::Ok;
+    // dof<=0 ⇒ ChisqUndefined (architecture.md §10). The fit itself succeeded
+    // (weights/chisq/rank-sweep are populated, identical to before), but the
+    // tail-p is undefined — surface that as the per-model status VALUE so the
+    // rotation/CLI records-and-continues rather than treating a NaN-p model as Ok.
+    // Behavior-neutral for normal models (dof>0 ⇒ Ok, goldens unchanged).
+    res.status = (res.dof <= 0) ? Status::ChisqUndefined : Status::Ok;
     return res;
 }
 

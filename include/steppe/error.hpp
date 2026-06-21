@@ -8,10 +8,11 @@
 // strongly-typed C++ subset the early layers need so they can return outcomes
 // without dragging in the whole ABI. CUDA-free; standard-library-free.
 //
-// The two DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance) are
-// *expected* results of fitting some models in a large search — surfaced as
-// ordinary statuses, never exceptions or aborts (architecture.md §10). Faults
-// (e.g. InvalidConfig at build time) are fail-fast.
+// The three DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance,
+// ChisqUndefined) are *expected* results of fitting some models in a large
+// search — surfaced as ordinary statuses, never exceptions or aborts
+// (architecture.md §10). Faults (e.g. InvalidConfig at build time) are
+// fail-fast.
 #ifndef STEPPE_ERROR_HPP
 #define STEPPE_ERROR_HPP
 
@@ -34,6 +35,13 @@ enum class Status {
     /// Domain outcome (recoverable): the covariance `Q` is not SPD; Cholesky
     /// failed. A degenerate/collinear model, not a bug.
     NonSpdCovariance,
+
+    /// Domain outcome (recoverable): dof ≤ 0 (or χ² not computable) for this
+    /// model — the chi-squared tail-p is undefined, so `p` is left at its NaN
+    /// sentinel rather than reported as a real value (architecture.md §10,
+    /// STEPPE_ERR_CHISQ_UNDEFINED). A statistical result of an over-parameterized
+    /// model (e.g. nl-1 sources span all nr columns ⇒ dof=0), not a bug.
+    ChisqUndefined,
 
     /// Configuration failed `ConfigBuilder::build()` validation (bad arch list,
     /// conflicting flags, over-budget VRAM, unhonorable precision). Fail-fast.

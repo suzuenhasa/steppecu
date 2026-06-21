@@ -2730,6 +2730,10 @@ private:
                     (se[i] > 0.0) ? weight[i] / se[i] : 0.0;
         }
         res.chisq = chisq;
+        // For dof<=0 pchisq_upper returns NaN (the tail-p is undefined); flagged
+        // below as Status::ChisqUndefined so the batched rotation surfaces the
+        // same domain outcome the single-model host path does (qpadm_fit.cpp;
+        // architecture.md §10 STEPPE_ERR_CHISQ_UNDEFINED), not a NaN-p with Ok.
         res.p = core::internal::pchisq_upper(chisq, res.dof);
         res.rank_p.assign(static_cast<std::size_t>(r_fit) + 1, 0.0);
         if (r_fit >= 0 && static_cast<std::size_t>(r_fit) < res.rank_p.size())
@@ -2810,7 +2814,11 @@ private:
                 }
             }
         }
-        res.status = Status::Ok;
+        // dof<=0 ⇒ ChisqUndefined (the per-model status VALUE; CPU-then-GPU
+        // completeness — the batched rotation must return it too). The fit
+        // populated normally; only the undefined tail-p is flagged. Behavior-
+        // neutral for normal models (dof>0 ⇒ Ok; goldens unchanged).
+        res.status = (res.dof <= 0) ? Status::ChisqUndefined : Status::Ok;
     }
 
 private:
