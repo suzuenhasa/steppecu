@@ -56,6 +56,20 @@ namespace steppe::device {
 /// double-buffered pinned pipeline (architecture.md §11.1). Hands out a raw host
 /// pointer via `data()`; never copies. Follows the §7 RAII shape exactly
 /// (move-construct + move-assign + dtor->destroy()-with-debug-log, never throws).
+///
+/// PRECONDITION — DESTRUCTION vs IN-FLIGHT COPY (17.4): the destructor (and a
+/// freeing move-assign) runs `cudaFreeHost(ptr_)` SYNCHRONOUSLY with NO stream sync
+/// in this unit. `cudaFreeHost` frees the page-locked slot (CUDA 13.x Runtime API,
+/// `cudaFreeHost`: "Frees the memory space pointed to by `hostPtr`, which must have
+/// been returned by a previous call to `cudaMallocHost()` or `cudaHostAlloc()`"); a
+/// `cudaMemcpyAsync` into/out of this slot that is still in flight at destruction is
+/// then a true USE-AFTER-FREE of pinned memory. Destroying (or move-assigning over)
+/// a PinnedBuffer must therefore NOT precede completion of any async copy touching
+/// the owned slot — the CALLER syncs the stream / gates reuse via a `cudaEvent`
+/// first. This is the same destruction-mid-flight contract noted on the eviction
+/// path under 14.4 (`PinnedRegistryCache::ensure`); the dtor deliberately adds no
+/// hidden sync (that would serialize the hot copy path). Latent in steady state:
+/// these owners are long-lived backend members and the staging buffer grows once.
 template <class T>
 class PinnedBuffer {
 public:
@@ -149,6 +163,22 @@ private:
 /// a `const_cast` to `void*` — `cudaHostRegister` does not modify the bytes, it
 /// only changes the page state, so registering a logically-const source is sound
 /// (the API takes `void*` for both read and write ranges).
+///
+/// PRECONDITION — DESTRUCTION vs IN-FLIGHT COPY (17.4): the destructor (and a
+/// freeing move-assign) runs `cudaHostUnregister(ptr_)` SYNCHRONOUSLY with NO stream
+/// sync in this unit. `cudaHostUnregister` unmaps the range and reverts it to
+/// PAGEABLE (CUDA 13.x Runtime API, `cudaHostUnregister`: "Unregisters a memory
+/// range that was registered with `cudaHostRegister`"); a `cudaMemcpyAsync` over
+/// this range that is still in flight at destruction would then DMA from pageable
+/// memory — a silent revert-to-pageable mid-DMA, the exact unsafe overlap this guard
+/// exists to prevent. Destroying (or move-assigning over) a RegisteredHostRegion
+/// must therefore NOT precede completion of any async copy touching the registered
+/// range — the CALLER syncs the stream / gates reuse via a `cudaEvent` first. This
+/// is the same precondition the eviction path states under 14.4
+/// (`PinnedRegistryCache::ensure`, which destroys an evicted region's registration);
+/// the dtor deliberately adds no hidden sync (that would serialize the hot copy
+/// path). Latent in steady state: these guards are long-lived (the registry's
+/// `kSlots == 3` never self-evicts), so the unregister never fires mid-flight.
 class RegisteredHostRegion {
 public:
     RegisteredHostRegion() = default;

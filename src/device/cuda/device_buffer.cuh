@@ -110,12 +110,47 @@ public:
 private:
     void reset() noexcept {
         if (ptr_) {
+            // DEVICE-AGNOSTIC FREE — THE single-home deleter for the M4.5 multi-GPU
+            // escape design (architecture.md §7, §11.4; cleanup 17.5). This owner
+            // records ONLY ptr_/size_, NOT the device ordinal that was current at
+            // cudaMalloc, and reset() issues a BARE cudaFree with NO record-and-
+            // restore cudaSetDevice — INTENTIONALLY. The M4.5 design deliberately
+            // lets a buffer ESCAPE its device-guarded producer (it moves into a
+            // DeviceF2Blocks/DevicePartial and is freed LATER by the host-side
+            // combine under a possibly-different — typically entry/device-0 —
+            // ambient device). That cross-device free is SOUND because cudaFree is
+            // POINTER-DEVICE-AWARE: it frees the allocation regardless of which
+            // device is current. VERIFIED against the CUDA 13.x Runtime API
+            // (CUDART_MEMORY): the cudaFree description is SILENT on the current
+            // device — it neither requires nor forbids the alloc device be current —
+            // so this is an unspecified-but-relied-on invariant, pinned here as the
+            // single home (this is also the [17.5] note for DevicePartial /
+            // DeviceF2Blocks, satisfied by this comment — no separate edit there).
+            // Adding cudaSetDevice here is barred by design (no hidden global state
+            // in the owner — that is the caller's / Resources' job), and would be
+            // wrong for the escape path anyway.
+            //
+            // RE-TRIGGER WARNING: a future switch to cudaMallocAsync / a per-device
+            // memory pool makes the free DEVICE-CURRENT-SENSITIVE — cudaFreeAsync is
+            // stream/pool-ordered and tied to a device's memory pool (CUDA 13.x
+            // CUDART_MEMORY) — so that change RE-IMPOSES a record-and-restore
+            // requirement HERE (record the alloc device in the ctor, set+restore it
+            // around the free), invalidating the device-agnostic premise above.
+            //
             // Destructor never throws (architecture.md §7); a nonzero teardown
             // status is reported to the debug-only warning sink (the §7
             // teardown-warning behavior — fail-fast must not become fail-silent),
             // never thrown. cudaFree(nullptr) is a no-op, hence the guard.
             const cudaError_t e = cudaFree(ptr_);  // ALLOWLISTED TU
-            if (e != cudaSuccess) {
+            // At static-destruction / atexit the CUDA primary context may already be
+            // torn down, in which case cudaFree returns cudaErrorCudartUnloading (or
+            // cudaErrorContextIsDestroyed) for memory the OS reclaims regardless —
+            // a non-real "leak". Treat those two teardown-order codes as BENIGN
+            // (skip the warn) so a clean process exit does not emit a spurious
+            // teardown WARN (cleanup [17.1]). steppe's DeviceBuffers are normally
+            // backend-owned (not file-scope statics), so this rarely fires.
+            if (e != cudaSuccess && e != cudaErrorCudartUnloading &&
+                e != cudaErrorContextIsDestroyed) {
                 STEPPE_LOG_WARN("cudaFree at DeviceBuffer teardown: %s",
                                 cudaGetErrorString(e));
             }

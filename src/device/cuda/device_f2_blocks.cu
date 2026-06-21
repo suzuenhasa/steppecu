@@ -18,6 +18,13 @@
 namespace steppe::device {
 
 DeviceF2Blocks::DeviceF2Blocks() = default;
+// Defaulted dtor -> ~unique_ptr<Impl> -> ~DeviceBuffer<double>'s bare cudaFree. The
+// resident f2/vpair were cudaMalloc'd on device_id under the upload prologue's
+// set+restore guard (:80-83), but this free is INTENTIONALLY device-agnostic and
+// symmetric to that alloc guard only on the alloc side: cudaFree carries the
+// pointer's device, so the cross-device combine free is sound and no record-and-
+// restore cudaSetDevice is needed here (single home: device_buffer.cuh::reset; the
+// escape contract is documented at device_f2_blocks.hpp:26-29; cleanup [17.5]).
 DeviceF2Blocks::~DeviceF2Blocks() = default;
 DeviceF2Blocks::DeviceF2Blocks(DeviceF2Blocks&&) noexcept = default;
 DeviceF2Blocks& DeviceF2Blocks::operator=(DeviceF2Blocks&&) noexcept = default;

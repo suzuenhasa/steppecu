@@ -32,6 +32,24 @@
 //     CPU oracle, so CPU and GPU cannot diverge (architecture.md §13).
 //   * Every capability lever is PARITY-NEUTRAL (data-movement / observability only),
 //     so §12 parity holds identically on both tiers (architecture.md §11.4, §12).
+//   * DEVICE-AGNOSTIC FREE (the M4.5 escape invariant; cleanup [17.5]). Every
+//     compute entry runs `guard_device()` so allocations land on `device_id_`, but
+//     teardown — `~CudaBackend`'s member RAII (there is NO explicit `~CudaBackend`),
+//     the per-call DeviceBuffer/RingGuard scope-exit frees, and CRITICALLY the
+//     resident `rb.f2`/`rb.vpair` that MOVE OUT into a DeviceF2Blocks/DevicePartial
+//     and are freed LATER by the host-side combine under a possibly-device-0 ambient
+//     — runs under whatever device is current, and NONE of these free sites
+//     re-selects `device_id_`. This is SOUND BY DESIGN: cudaFree / cudaStreamDestroy
+//     / cudaEventDestroy / cublasDestroy / cusolverDnDestroy are all DEVICE-
+//     ASSOCIATION-AGNOSTIC — the pointer/object carries its own device/context, so
+//     the free works regardless of the current device (cudaFree VERIFIED silent on
+//     the current device, CUDA 13.x Runtime API CUDART_MEMORY — it neither requires
+//     nor forbids the alloc device be current). The RAII wrappers therefore
+//     INTENTIONALLY omit a record-and-restore cudaSetDevice (the design bars hidden
+//     global state in the owner — selecting the device is the caller's / `Resources`'
+//     job, architecture.md §7). The single-home statement + the cudaMallocAsync
+//     re-trigger warning live on DeviceBuffer::reset (device_buffer.cuh); this is the
+//     backend-side restatement so the multi-GPU escape seam is self-documenting.
 //
 // This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It is the only
 // place a host caller meets the GPU f2 path; `core` reaches it solely through the
@@ -301,7 +319,14 @@ public:
         h.block_sizes = std::move(rb.block_sizes);
         if (h.n_block > 0 && h.P > 0) {
             h.impl = std::make_unique<DeviceF2Blocks::Impl>();
-            h.impl->f2 = std::move(rb.f2);        // buffers ESCAPE: ownership -> handle
+            // Buffers ESCAPE: ownership -> handle. They were cudaMalloc'd on
+            // device_id_ (guard_device) but free LATER, in DeviceF2Blocks's dtor run
+            // by the host-side combine under a possibly-different (device-0) ambient
+            // device. That cross-device free is SOUND because cudaFree is device-
+            // agnostic (it carries the pointer's device), so the wrappers omit a
+            // record-and-restore cudaSetDevice by design (cleanup [17.5]; STANDARDS
+            // block above; single home device_buffer.cuh).
+            h.impl->f2 = std::move(rb.f2);
             h.impl->vpair = std::move(rb.vpair);
         }
         return h;  // NO D2H, NO free — the result STAYS in VRAM
@@ -323,8 +348,14 @@ public:
         h.block_sizes = std::move(rb.block_sizes);
         if (h.n_block_local > 0) {
             h.impl = std::make_unique<DevicePartial::Impl>();
-            h.impl->f2 = std::move(rb.f2);        // buffers ESCAPE: ownership -> handle
-            h.impl->vpair = std::move(rb.vpair);  // survives the jthread join (§7)
+            // Buffers ESCAPE: ownership -> handle; they survive the jthread join and
+            // free only AFTER the combine consumed them (§7). The free runs in
+            // DevicePartial's dtor under a possibly-device-0 ambient device, NOT
+            // device_id_ — SOUND because cudaFree is device-agnostic (carries the
+            // pointer's device), so the owner omits a record-and-restore cudaSetDevice
+            // by design (cleanup [17.5]; STANDARDS block above).
+            h.impl->f2 = std::move(rb.f2);
+            h.impl->vpair = std::move(rb.vpair);
         }
         return h;  // NO D2H, NO free — the cure (doc §4 Item 1)
     }

@@ -191,6 +191,19 @@ private:
     }
 
     void destroy() noexcept {
+        // Debug-only record-and-ASSERT that the creation device is current at
+        // teardown too (cleanup [17.5]) — consistent with set_workspace/set_stream,
+        // which guard every OTHER cuBLAS-context mutation. cuBLAS couples the context
+        // to the device current at cublasCreate (cuBLAS §2.1.2); on the box today
+        // cublasDestroy carries its own context device and tolerates a different
+        // current device, but the M4.5 multi-GPU teardown runs under whatever device
+        // is ambient (the owning backend has no ~CudaBackend that re-selects
+        // device_id_, and guard_device() runs only on compute entries), so a future
+        // toolkit that minds the current device at Destroy is caught here in debug.
+        // This stays cudaSetDevice-FREE by design (no hidden global state in the
+        // wrapper, architecture.md §7); it is parity-NEUTRAL (§12 observability-only,
+        // compiled out under NDEBUG via STEPPE_DEBUG_ONLY inside the helper).
+        assert_on_creation_device();
         // Destructor never throws (architecture.md §7); a nonzero destroy status
         // is reported to the debug-only warning sink (the §7 teardown-warning
         // behavior — fail-fast must not become fail-silent), never thrown.
@@ -290,7 +303,14 @@ private:
         h_ = nullptr;
     }
 
-    cublasHandle_t h_ = nullptr;  // non-owning: the CublasHandle owns the context
+    // Non-owning: the CublasHandle owns the context. SAFE under the documented
+    // STACK-SCOPED usage (this scope is constructed strictly inside a live owning
+    // handle's lifetime and always destructs before it, so restore() never touches a
+    // destroyed context; cleanup [17.1]). RE-AUDIT if this scope is ever PROMOTED to
+    // a long-lived member / moved-out-and-held: then the owning handle must be proven
+    // to outlive it, else restore() runs on a torn-down context (correctly swallowed
+    // to a WARN, but wrong-context).
+    cublasHandle_t h_ = nullptr;
     cublasMath_t prev_ = CUBLAS_DEFAULT_MATH;  // captured mode to restore (defensive default)
 };
 
@@ -357,6 +377,16 @@ private:
                           "cuBLAS §2.1.2; architecture.md §11.4)"));
     }
     void destroy() noexcept {
+        // Debug-only record-and-ASSERT that the creation device is current at
+        // teardown too (cleanup [17.5]) — consistent with set_stream, which guards
+        // the OTHER cuSOLVER-context mutation. cuSOLVER binds the context to the
+        // device current at cusolverDnCreate (like cuBLAS §2.1.2); cusolverDnDestroy
+        // carries its own context device today, but the M4.5 multi-GPU teardown runs
+        // under whatever device is ambient (no ~CudaBackend re-selects device_id_),
+        // so a future toolkit that minds the current device at Destroy is caught here
+        // in debug. Stays cudaSetDevice-FREE by design (architecture.md §7);
+        // parity-NEUTRAL (§12 observability-only, compiled out under NDEBUG).
+        assert_on_creation_device();
         if (h_) {
             const cusolverStatus_t s = cusolverDnDestroy(h_);
             if (s != CUSOLVER_STATUS_SUCCESS) {
@@ -574,7 +604,12 @@ private:
         h_ = nullptr;
     }
 
-    cusolverDnHandle_t h_ = nullptr;  // non-owning: CusolverDnHandle owns the context
+    // Non-owning: CusolverDnHandle owns the context. SAFE under the documented
+    // STACK-SCOPED usage (constructed inside a live owning handle's lifetime, always
+    // destructs before it; cleanup [17.1]). RE-AUDIT if ever promoted to a long-lived
+    // member / moved-out-and-held — the owning handle must then be proven to outlive
+    // it, else restore() runs on a torn-down context (swallowed to a WARN, but wrong).
+    cusolverDnHandle_t h_ = nullptr;
     cusolverMathMode_t prev_ = CUSOLVER_DEFAULT_MATH;  // captured mode to restore
     bool promoted_ = false;            // did we actually engage the emulated mode?
 };

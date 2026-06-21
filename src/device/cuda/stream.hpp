@@ -82,8 +82,12 @@ public:
 
 private:
     void destroy() noexcept {
-        // Destructor never throws (architecture.md §7); a nonzero destroy status
-        // is reported to the debug-only warning sink, never thrown.
+        // No create-device record/restore: unlike a raw cudaFree pointer, the runtime
+        // resolves a STREAM's own device association on destroy, so destroying under a
+        // different current device than the create device neither leaks nor UAFs
+        // (cleanup [17.5]; matches the device-agnostic-free invariant in
+        // device_buffer.cuh). Destructor never throws (architecture.md §7); a nonzero
+        // destroy status is reported to the debug-only warning sink, never thrown.
         if (s_) {
             const cudaError_t e = cudaStreamDestroy(s_);
             if (e != cudaSuccess) {
@@ -154,8 +158,12 @@ public:
 
 private:
     void destroy() noexcept {
-        // Destructor never throws (architecture.md §7); a nonzero destroy status
-        // is reported to the debug-only warning sink, never thrown.
+        // No create-device record/restore: the runtime resolves an EVENT's own device
+        // association on destroy, so destroying under a different current device than
+        // the create device is safe (no leak, no UAF) — this is also what covers the
+        // per-slot block_sink events now that they are owned by this RAII Event
+        // (cleanup [17.5]). Destructor never throws (architecture.md §7); a nonzero
+        // destroy status is reported to the debug-only warning sink, never thrown.
         if (e_) {
             const cudaError_t err = cudaEventDestroy(e_);
             if (err != cudaSuccess) {
