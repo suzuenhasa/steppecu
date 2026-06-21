@@ -264,14 +264,14 @@ steppe extract-f2  --geno/--snp/--ind PREFIX   (or --geno F --snp F --ind F)
                    [--auto-only --drop-mono --transversions]      # FilterConfig flags
                    [--extract F --exclude F --prune-in F]         # FilterConfig id sets
                    [--precision emu40|emu32|fp64|tf32]            # Precision
-                   [--device auto|cpu|0,1]                        # DeviceConfig.devices
+                   [--device auto|0,1]                            # DeviceConfig.devices (GPU only)
                    [--dry-run]                                    # T_max / tiles / largest-fitting
 
 steppe qpadm       --f2-dir DIR  --target T  --left a,b  --right r0,r1,…
                    [--rank -1 --fudge 1e-4 --als-iters 20 --rank-alpha 0.05
                     --allow-neg/--no-allow-neg]
                    [--out FILE --format csv|tsv|json]
-                   [--device auto|cpu|0,1 --precision …]
+                   [--device auto|0,1 --precision …]
 
 steppe qpwave      --f2-dir DIR  --left a,b,c  --right r0,…       # NO target; left[0]=ref
                    [--rank-alpha --fudge … --out --format …]
@@ -287,7 +287,7 @@ steppe qpadm-rotate --f2-dir DIR  --target T  --pool a,b,c,…  --right r0,…
 | Command | Real entry | Notes |
 |---|---|---|
 | `extract-f2` | `read_ind`/`read_snp`/`GenoReader` → `decode_af` → `assign_blocks` → `compute_f2_blocks_multigpu_device` (or `_tiered` for huge P) → write `<dir>` | the only `io`→compute wiring; §2.6 chain |
-| `qpadm` | `upload_f2_blocks_to_device` → `run_qpadm` (or host overload for `--device cpu`) | names resolved against `<dir>/pops.txt` |
+| `qpadm` | `upload_f2_blocks_to_device` → `run_qpadm` (GPU) | names resolved against `<dir>/pops.txt` |
 | `qpwave` | `run_qpwave(left, right, …)` | `--left` is the full left set, `left[0]` is the reference; no target |
 | `qpadm-rotate` | app builds `vector<QpAdmModel>` (pool subset enumeration) → `run_qpadm_search` | one row per model, **input order** via `model_index` |
 
@@ -299,7 +299,7 @@ overrides**. `--jackknife` on `qpadm`/`qpwave` is accepted but documented as **i
 
 All three fit commands resolve input two ways: `--f2-dir DIR` reads the cache (§4.3) and
 uploads via `upload_f2_blocks_to_device` for the GPU entry (or stages `F2BlockTensor` for
-`--device cpu`); OR raw `--geno/--snp/--ind` runs `extract-f2` in-process first
+GPU device); OR raw `--geno/--snp/--ind` runs `extract-f2` in-process first
 (extract-then-fit). An unknown pop name is `Status::InvalidConfig` fail-fast with the
 offending label.
 
@@ -375,7 +375,7 @@ in pure-Python `bindings/steppe/__init__.py` (so the compiled module has no pand
 ### 5.1 Functions (mirror the C++ entries 1:1)
 
 ```python
-import steppe   # must work GPU-FREE (CpuBackend always exists; backend_factory.hpp:35)
+import steppe   # GPU product: import is light, but the ops require a CUDA device
 
 f2 = steppe.extract_f2(prefix="v66.1_HO", pops=None, out="my_f2/",
                        blgsize=5.0, maf=0.0, maxmiss=0.0, auto_only=True,
@@ -425,18 +425,18 @@ the zero-D2H precompute-once/fit-many win is preserved (`to_host()` is "THE ONLY
 - *Deferred:* an on-device DLPack / `nb::device::cuda` export (cuPy/torch/JAX zero-copy) is
   the nanobind payoff but not needed for step-2 parity.
 
-### 5.4 GPU-optional
+### 5.4 GPU-only (CPU is dev/test-only — RESOLVED)
 
-`import steppe` does no CUDA calls (CUDA is PRIVATE to `steppe_device`, resolved lazily;
-`CpuBackend` always exists, `backend_factory.hpp:35`). At call time with `devices=None`
-and no device present, the binding builds a CPU-backed `Resources` and uses the
-host-oracle overloads (`run_qpadm(const F2BlockTensor&, …)`, `qpadm.hpp:178`). Provide
-`steppe.has_gpu()` / `steppe.devices()` probes.
-
-**Honest caveat:** CPU-only `extract_f2` (precompute on `CpuBackend`) is unverified — the
-precompute is GPU-oriented (sharded GEMMs). The fit entries have first-class host-oracle
-overloads, so CPU `qpadm`/`qpwave`/`qpadm_rotate` *from a precomputed dir* are solid; CPU
-*precompute* must be checked before promised. State the limitation; do not over-claim.
+**steppe is a GPU product. There is NO user-facing CPU runtime.** (User decision
+2026-06-21, memory `cpu-is-test-only`: *"the whole point of this isn't for CPU. we don't
+really have anything to do with the CPU except for testing purposes during development."*)
+The `CpuBackend` is the dev/test parity ORACLE only (golden-diffed under `STEPPE_THOROUGH`),
+NEVER a deliverable runtime. So the bindings target the GPU; `steppe.qpadm/qpwave/
+qpadm_rotate/extract_f2` use the device path. NO CPU fallback at the API, NO `devices=None`
+CPU-oracle path, NO `has_gpu()` graceful-degrade as a feature. A machine without a
+CUDA-capable GPU is simply not a target; a GPU op invoked with no device surfaces a clear
+"no CUDA device" error. (The host-oracle `run_qpadm(const F2BlockTensor&, …)` overloads stay
+in the C++ test harness as the parity oracle — never exposed as a Python runtime mode.)
 
 ---
 
@@ -495,9 +495,9 @@ Root `pyproject.toml` per architecture §15: `scikit-build-core >= 0.10` +
 `wheel.packages = ["bindings/steppe"]`, `build.targets = ["steppe._core"]`. Wheels use the
 CUDA-13 **redistributable** model (architecture §14): do NOT bundle the CUDA runtime;
 declare unsuffixed `nvidia-cuda-runtime/cublas/cusolver/curand >=13,<14` deps;
-`auditwheel repair --exclude libcublas.so.13 …`. **Two variants** (architecture §15): a
-GPU wheel with the `nvidia-*` deps, and a CPU-only wheel that omits them (so
-`import steppe` + pytest run on GPU-less CI). The binding installs the spdlog→Python
+`auditwheel repair --exclude libcublas.so.13 …`. **ONE GPU wheel** (the `nvidia-*` deps) —
+steppe is a GPU product, so there is NO CPU-only wheel variant (memory `cpu-is-test-only`;
+the earlier "two variants" idea is dropped). The binding installs the spdlog→Python
 `logging` sink.
 
 ---
@@ -520,8 +520,8 @@ names are exactly what a `<dir>` contains — so the CLI/py tests reuse them wit
 | `tests/python/test_py_qpadm.py` | `steppe.qpadm(...)` → DataFrame | `golden_fit0`/`_qpwave`/`_rot` | DataFrame values == golden; GPU-vs-CPU equality where a device is present; `import steppe` succeeds GPU-free |
 
 Wiring mirrors the fit tests: `add_test` gated by `STEPPE_BUILD_CLI`; pytest under
-`STEPPE_BUILD_PYTHON`. CLI tests run CpuBackend GPU-free (the §4 + no-GPU-CI proof) and the
-CudaBackend when a device is visible, with a clean SKIP otherwise — identical to every
+`STEPPE_BUILD_PYTHON`. CLI tests run on the CudaBackend (GPU) against the real-AADR goldens, with a clean SKIP
+when no device is visible — identical to every
 existing reference test. The `extract-f2` end-to-end test needs the real AADR genotype
 triple (`STEPPE_AADR_ROOT` cache var already exists) and skips cleanly when absent, like
 `f2_blocks_equivalence`. The two NEW failure surfaces the access layer introduces —
@@ -539,13 +539,13 @@ precompute-once/fit-many).
 
 | Milestone | Deliverable | New plumbing it must build | Golden gate |
 |---|---|---|---|
-| **M(cli-0)** scaffold + config | `steppe` skeleton: CLI11 parse, `--version`/`--help`, subcommand stubs, the minimal `ConfigBuilder`/`RunConfig`/`CliArgs` (compiled<TOML<env<CLI), `build()` validation, `--device cpu\|0,1`, `--precision`, `Status`→exit-code map. **No compute.** Wire `src/app` behind `STEPPE_BUILD_CLI`. | `ConfigBuilder`/`RunConfig`/`CliArgs` (§9.1) | unit: precedence order + `build()` rejects (reuse the `test_config` pattern); arch-grep still passes |
-| **M(cli-1)** `qpadm` on a dir | `steppe qpadm` over an existing f2_blocks dir: read dir, resolve names→indices via `pops.txt`, `upload_f2_blocks_to_device` (or host overload for `--device cpu`), `run_qpadm`, tidy CSV/JSON. | `f2_dir_io` reader + `pop_resolver` + CSV/JSON emitter + `run_metadata` | `golden_fit0` + `golden_fit1_NRBIG` reproduced THROUGH the CLI |
+| **M(cli-0)** scaffold + config | `steppe` skeleton: CLI11 parse, `--version`/`--help`, subcommand stubs, the minimal `ConfigBuilder`/`RunConfig`/`CliArgs` (compiled<TOML<env<CLI), `build()` validation, `--device 0,1`, `--precision`, `Status`→exit-code map. **No compute.** Wire `src/app` behind `STEPPE_BUILD_CLI`. | `ConfigBuilder`/`RunConfig`/`CliArgs` (§9.1) | unit: precedence order + `build()` rejects (reuse the `test_config` pattern); arch-grep still passes |
+| **M(cli-1)** `qpadm` on a dir | `steppe qpadm` over an existing f2_blocks dir: read dir, resolve names→indices via `pops.txt`, `upload_f2_blocks_to_device`, `run_qpadm` (GPU), tidy CSV/JSON. | `f2_dir_io` reader + `pop_resolver` + CSV/JSON emitter + `run_metadata` | `golden_fit0` + `golden_fit1_NRBIG` reproduced THROUGH the CLI |
 | **M(cli-2)** `qpwave` | `steppe qpwave` (no target, `left[0]`=ref) + `--rank` surface, same dir input. | rankdrop CSV emitter | `golden_qpwave` through the CLI |
 | **M(cli-3)** `qpadm-rotate` | `steppe qpadm-rotate`: pool→`vector<QpAdmModel>` enumeration, `--jackknife 0\|1\|2`, single-GPU default + ≥2-device warning. | models-pool enumerator + search CSV emitter | `golden_rot` (84 models) through the CLI, input order |
 | **M(cli-4)** `extract-f2` + cache | `steppe extract-f2`: `io`→`decode_af`→`assign_blocks`→`compute_f2_blocks_multigpu_device`/`_tiered`→write `<dir>`; filters; `--dry-run`. **Builds the standalone STPF2BK1 write/read round-trip (the missing M7 piece) + the pops/meta sidecars.** Produces the dir the earlier milestones consumed. | EIGENSTRAT→f2 wiring + the f2-dir WRITER + filter wiring | `golden_fitNA` end-to-end (`extract-f2` then `qpadm`); cache round-trip byte-identical to `to_host()` |
 | **M(py-1)** bindings (fit) | nanobind `steppe._core` + `steppe/__init__.py`: `qpadm`/`qpwave`/`qpadm_rotate` from a dir/handle → pandas frames; status enum + NA sentinels; numpy f2 view; log sink; `pyproject.toml`. | `bindings/module.cpp`, pure-Python sugar, wheel CI | pytest reproduces `golden_fit0`/`_qpwave`/`_rot`; GPU-vs-CPU where a device is present; `import steppe` GPU-free |
-| **M(py-2)** bindings (extract) | `steppe.extract_f2(...)` from Python; verify the CPU-vs-GPU precompute story (§5.4). | extract binding | `golden_fitNA` end-to-end from Python |
+| **M(py-2)** bindings (extract) | `steppe.extract_f2(...)` from Python; (§5.4: GPU only). | extract binding | `golden_fitNA` end-to-end from Python |
 | **M(abi-1)** *(optional, defer)* C ABI | The installed cross-toolchain `steppe_c.h` opaque-handle shim (`steppe_*_t`, `steppe_status_t`) for `find_package(steppe)` from Rust/Julia. **Not needed for step 2** (CLI + nanobind both link in-process). | the C ABI surface (ADR-0008, architecture §16) | go/no-go decision; not gated on a golden |
 
 Largest single piece is **M(cli-4)** (it pulls in the `io` leaf, filters, VRAM tiering,
@@ -586,12 +586,12 @@ are frozen by M(cli-1..3).
    accept: the Python ABI is not the SemVer-frozen surface §16 promises for the C boundary
    (fine and intended, §16). **Approve the deferral?**
 
-5. **GPU-optional wheel policy.** Recommend **two wheel variants** (GPU with `nvidia-*`
-   deps; CPU-only without) so `import steppe` + pytest run GPU-free. Honest caveat: CPU
-   `qpadm`/`qpwave`/`qpadm_rotate` *from a dir* are solid (host-oracle overloads), but
-   **CPU-only `extract_f2` (precompute) is unverified** and may require a GPU or a slow CPU
-   path. **Confirm: ship the CPU-only wheel as fit-from-dir only until CPU precompute is
-   verified?**
+5. **GPU-only wheel — RESOLVED (user, 2026-06-21).** steppe is a GPU product; the CpuBackend
+   is the dev/test parity oracle ONLY, never a user-facing runtime (memory
+   `cpu-is-test-only`). **ONE GPU wheel** (requires CUDA); NO CPU-only variant, NO
+   `--device cpu` supported mode, NO `has_gpu()` CPU graceful-degrade. (The CLI/bindings
+   target the GPU; a no-GPU box is not a target.) The §4/§5/§6 text above is updated to
+   match. *No further decision needed.*
 
 6. **`qpadm-rotate` pool-enumeration semantics.** Scoped a generic subset-of-pool
    enumerator (`--min/max-sources`). AT2's `qpadm_rotate` has specific left/right
