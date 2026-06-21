@@ -99,6 +99,43 @@ namespace {
     return pairwise_sum(a, h) + pairwise_sum(a + h, n - h);
 }
 
+/// The per-pair f2 ORACLE body — the cancellation-free long-double reference for ONE
+/// (i, j) population pair over the SNP range [s0, s1). The SINGLE source shared by
+/// compute_f2 (range [0, M)) and compute_f2_blocks (per-block range [begin, end)) so
+/// the validity check / het correction / unbiased summand / long-double pairwise
+/// accumulation / finalize CANNOT drift between the whole-tensor oracle and the
+/// per-block oracle ([7.1] dedup; the header @12-21 promises they can't diverge).
+///
+/// PARITY (load-bearing, architecture.md §12/§13): the accumulation is byte-identical
+/// to the two former inline copies — the SAME jointly-valid filter (V.element != 0 in
+/// BOTH i and j), the SAME SHARED het_correction / f2_term primitives, the SAME
+/// long-double `terms` fill in SNP order, and the SAME long-double pairwise_sum
+/// numerator over `count` summands. `terms` is the caller's scratch (sized to the SNP
+/// count / largest block) so no [P×P×M] intermediate is materialized. Returns
+/// {f2_ij, vpair}; the caller does the symmetric column-major mirror-write.
+struct F2Pair { double f2 = 0.0; double vpair = 0.0; };
+
+[[nodiscard]] F2Pair f2_pair_over_range(const core::MatView& Q, const core::MatView& V,
+                                        const core::MatView& N, int i, int j,
+                                        long s0, long s1, long double* terms) {
+    long count = 0;  // pairwise-valid SNP count == Vpair(i, j)
+    for (long s = s0; s < s1; ++s) {
+        const bool vi = V.element(i, s) != 0.0;
+        const bool vj = V.element(j, s) != 0.0;
+        if (!vi || !vj) continue;  // not jointly valid: contributes nothing
+        const double p_i = Q.element(i, s);
+        const double p_j = Q.element(j, s);
+        const double hc_i = core::het_correction(p_i, N.element(i, s), true);
+        const double hc_j = core::het_correction(p_j, N.element(j, s), true);
+        terms[static_cast<std::size_t>(count)] =
+            static_cast<long double>(core::f2_term(p_i, p_j, hc_i, hc_j));
+        ++count;
+    }
+    const long double numerator = pairwise_sum(terms, static_cast<std::size_t>(count));
+    const double vpair = static_cast<double>(count);
+    return F2Pair{core::finalize_f2(static_cast<double>(numerator), vpair), vpair};
+}
+
 /// The CPU reference backend: the scalar / long-double correctness oracle.
 ///
 /// One method (`compute_f2`); later milestones add decode / gemm / jackknife /
@@ -151,54 +188,23 @@ public:
         // simply "valid in i").
         for (int i = 0; i < P; ++i) {
             for (int j = i; j < P; ++j) {
-                long count = 0;  // pairwise-valid SNP count == Vpair(i, j)
-
-                for (long s = 0; s < M; ++s) {
-                    const bool vi = V.element(i, s) != 0.0;
-                    const bool vj = V.element(j, s) != 0.0;
-                    if (!vi || !vj) continue;  // not jointly valid: contributes nothing
-
-                    const double p_i = Q.element(i, s);
-                    const double p_j = Q.element(j, s);
-
-                    // Het bias correction per population, via the SHARED primitive
-                    // (q(1-q)/max(N-1, kHetCorrDenomFloor)). N is the non-missing
-                    // HAPLOID count from the Q/V/N contract (2 × diploids, or
-                    // 1 × pseudo-haploids for ancient DNA). Both entries are valid
-                    // here, so `valid = true`.
-                    const double hc_i = core::het_correction(p_i, N.element(i, s), true);
-                    const double hc_j = core::het_correction(p_j, N.element(j, s), true);
-
-                    // The unbiased per-SNP f2 summand (p_i - p_j)² - hc_i - hc_j,
-                    // via the SHARED primitive in its cancellation-free form (it
-                    // forms the difference and squares it directly). Accumulate in
-                    // LONG DOUBLE: the summand is small, and the cross-SNP sum is
-                    // where oracle accuracy is won (see file header).
-                    terms[static_cast<std::size_t>(count)] =
-                        static_cast<long double>(core::f2_term(p_i, p_j, hc_i, hc_j));
-                    ++count;
-                }
-
-                // Cancellation-free cross-SNP accumulation, then the shared
-                // finalize (numerator / Vpair with the Vpair==0 ⇒ 0 guard). The
-                // numerator is held wider than native here (long double) — the CPU
-                // analogue of the GPU's native-FP64 numerator/divide step
-                // (architecture.md §12).
-                const long double numerator =
-                    pairwise_sum(terms.data(), static_cast<std::size_t>(count));
-                const double vpair = static_cast<double>(count);
-                const double f2_ij =
-                    core::finalize_f2(static_cast<double>(numerator), vpair);
+                // The cancellation-free per-pair oracle over the whole tensor's SNP
+                // range [0, M) — the SHARED f2_pair_over_range body (het correction,
+                // unbiased summand, long-double pairwise accumulation, finalize with the
+                // Vpair==0 ⇒ 0 guard; [7.1] dedup). The numerator is held wider than
+                // native (long double) — the CPU analogue of the GPU's native-FP64
+                // numerator/divide step (architecture.md §12).
+                const F2Pair pr = f2_pair_over_range(Q, V, N, i, j, 0, M, terms.data());
 
                 // Mirror into both triangles of the symmetric column-major outputs.
                 const std::size_t ij =
                     static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(j);
                 const std::size_t ji =
                     static_cast<std::size_t>(j) + static_cast<std::size_t>(P) * static_cast<std::size_t>(i);
-                out.f2[ij] = f2_ij;
-                out.f2[ji] = f2_ij;
-                out.vpair[ij] = vpair;
-                out.vpair[ji] = vpair;
+                out.f2[ij] = pr.f2;
+                out.f2[ji] = pr.f2;
+                out.vpair[ij] = pr.vpair;
+                out.vpair[ji] = pr.vpair;
             }
         }
 
@@ -271,32 +277,20 @@ public:
             const std::size_t base = slab * static_cast<std::size_t>(b);
             for (int i = 0; i < P; ++i) {
                 for (int j = i; j < P; ++j) {
-                    long count = 0;
-                    for (long s = s0; s < s1; ++s) {
-                        const bool vi = V.element(i, s) != 0.0;
-                        const bool vj = V.element(j, s) != 0.0;
-                        if (!vi || !vj) continue;
-                        const double p_i = Q.element(i, s);
-                        const double p_j = Q.element(j, s);
-                        const double hc_i = core::het_correction(p_i, N.element(i, s), true);
-                        const double hc_j = core::het_correction(p_j, N.element(j, s), true);
-                        terms[static_cast<std::size_t>(count)] =
-                            static_cast<long double>(core::f2_term(p_i, p_j, hc_i, hc_j));
-                        ++count;
-                    }
-                    const long double numerator =
-                        pairwise_sum(terms.data(), static_cast<std::size_t>(count));
-                    const double vpair = static_cast<double>(count);
-                    const double f2_ij =
-                        core::finalize_f2(static_cast<double>(numerator), vpair);
+                    // The SAME cancellation-free per-pair oracle as compute_f2, here over
+                    // this block's SNP range [s0, s1) — the SHARED f2_pair_over_range body
+                    // ([7.1] dedup), so the per-block oracle cannot drift from the
+                    // whole-tensor oracle on the formula or accumulation order (§12/§13).
+                    // Only the SNP range and the slab base offset differ.
+                    const F2Pair pr = f2_pair_over_range(Q, V, N, i, j, s0, s1, terms.data());
                     const std::size_t ij = base +
                         static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(j);
                     const std::size_t ji = base +
                         static_cast<std::size_t>(j) + static_cast<std::size_t>(P) * static_cast<std::size_t>(i);
-                    out.f2[ij] = f2_ij;
-                    out.f2[ji] = f2_ij;
-                    out.vpair[ij] = vpair;
-                    out.vpair[ji] = vpair;
+                    out.f2[ij] = pr.f2;
+                    out.f2[ji] = pr.f2;
+                    out.vpair[ij] = pr.vpair;
+                    out.vpair[ji] = pr.vpair;
                 }
             }
         }

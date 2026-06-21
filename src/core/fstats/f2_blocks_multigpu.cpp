@@ -32,6 +32,7 @@
 #include <cstdlib>   // std::getenv (STEPPE_FORCE_TIER / STEPPE_F2_CACHE_PATH)
 #include <span>
 #include <stdexcept>
+#include <string>    // std::string (the shared device fail-fast message)
 #include <vector>
 
 #include "core/fstats/f2_blocks_multigpu_core.hpp"  // plan_multigpu_shards, compute_multigpu_partials[_resident|_into] (host-pure, P2P-free)
@@ -91,6 +92,59 @@ namespace {
     return requested_p2p_combine(resources, G) && resources.gpus[0].caps.can_access_peer;
 }
 
+// ---- Shared entry-contract guards (single-home; [7.1] dedup) ----------------
+// Every multi-GPU entry (host, device, tiered) opens with the SAME shared contract
+// fail-fast + the SAME at-least-one-device fail-fast (they only differed by the
+// fn-name string in each message). They are single-homed here so a guard add/edit
+// is one site that cannot drift the three entries apart (architecture.md §2, §8).
+
+/// Shared debug fail-fast: Q/V/N agree on P/M and are non-negative; the partition
+/// describes exactly the M columns (block_id length == M). Mirrors
+/// f2_from_blocks.cpp's validate_qvn / validate_partition; the per-device
+/// compute_f2_blocks the orchestrator drives ALSO validates each sub-view's
+/// partition via core::block_ranges (the single-source inverse), so a malformed
+/// global partition is caught here AND defensively at the seam.
+///
+/// NDEBUG: every body statement is a STEPPE_ASSERT, which compiles out under -DNDEBUG
+/// (the Release gate). EVERY parameter is therefore unused on Release — mark them all
+/// [[maybe_unused]] so -Werror=unused-parameter does not break the Release build
+/// (group-7 NDEBUG pitfall). `fn` is a [[maybe_unused]] STEPPE_ASSERT-only param too:
+/// STEPPE_ASSERT is `assert((cond) && (msg))`, so `msg` must stay a `const char*`
+/// literal (a runtime std::string is NOT contextually convertible to bool) — the
+/// caller's fn-name therefore identifies the call site through the helper name in the
+/// literals below rather than being spliced into the runtime message. The drift the
+/// dedup kills was only the cosmetic fn-prefix in the abort message; the four checks
+/// themselves are byte-identical across the three entries.
+void validate_multigpu_inputs([[maybe_unused]] const MatView& Q,
+                              [[maybe_unused]] const MatView& V,
+                              [[maybe_unused]] const MatView& N,
+                              [[maybe_unused]] const BlockPartition& partition,
+                              [[maybe_unused]] long M,
+                              [[maybe_unused]] const char* fn) {
+    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
+                  "validate_multigpu_inputs: Q/V/N disagree on P");
+    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
+                  "validate_multigpu_inputs: Q/V/N disagree on M");
+    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
+                  "validate_multigpu_inputs: negative P or M (uninitialized MatView)");
+    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+                  "validate_multigpu_inputs: block_id length != M");
+}
+
+/// Shared fail-fast: at least one device (architecture.md §2, §9). Returns the
+/// device count G (always >= 1 on return). This one THROWS (not an assert), so its
+/// params ARE used on Release — no [[maybe_unused]] needed (group-7 NDEBUG note).
+[[nodiscard]] std::size_t require_at_least_one_device(
+    const steppe::device::Resources& resources, const char* fn) {
+    const std::size_t G = resources.device_count();
+    if (G < 1) {
+        throw std::runtime_error(
+            std::string("steppe::core::") + fn + ": Resources has 0 devices — "
+            "the SPMG precompute requires at least one (architecture.md §9)");
+    }
+    return G;
+}
+
 }  // namespace
 
 F2BlockTensor compute_f2_blocks_multigpu(
@@ -102,29 +156,9 @@ F2BlockTensor compute_f2_blocks_multigpu(
     const long M = Q.M;
     const int  n_block = partition.n_block;
 
-    // ---- Shared contract (debug fail-fast; same guards as f2_from_blocks) ----
-    // Q/V/N agree on P/M and are non-negative; the partition describes exactly the
-    // M columns (block_id length == M, dense/non-decreasing in [0, n_block)). These
-    // mirror f2_from_blocks.cpp's validate_qvn / validate_partition; the per-device
-    // compute_f2_blocks the orchestrator drives also validates each sub-view's
-    // partition via core::block_ranges (the single-source inverse), so a malformed
-    // global partition is caught here AND defensively at the seam.
-    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
-                  "compute_f2_blocks_multigpu: Q/V/N disagree on P");
-    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
-                  "compute_f2_blocks_multigpu: Q/V/N disagree on M");
-    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
-                  "compute_f2_blocks_multigpu: negative P or M (uninitialized MatView)");
-    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
-                  "compute_f2_blocks_multigpu: block_id length != M");
-
-    // ---- Fail-fast: at least one device (architecture.md §2) -----------------
-    const std::size_t G = resources.device_count();
-    if (G < 1) {
-        throw std::runtime_error(
-            "steppe::core::compute_f2_blocks_multigpu: Resources has 0 devices — "
-            "the SPMG precompute requires at least one (architecture.md §9)");
-    }
+    // ---- Shared contract + at-least-one-device fail-fast (single-homed; [7.1]) ----
+    validate_multigpu_inputs(Q, V, N, partition, M, "compute_f2_blocks_multigpu");
+    const std::size_t G = require_at_least_one_device(resources, "compute_f2_blocks_multigpu");
 
     // ---- G == 1: the EXACT single-GPU path (zero behavior change) ------------
     // No shard, no combine: drive the one backend over the FULL Q/V/N + partition
@@ -211,20 +245,19 @@ F2BlockTensor compute_f2_blocks_multigpu(
 
     if (use_p2p) {
         // ---- RESIDENT fan-out -> device-resident combine (the M4.5 cure) ------
-        // Each device computes its partial and LEAVES it RESIDENT (no D2H, no free);
-        // the combine pulls each peer's resident partial straight into one full device
-        // result via cudaMemcpyPeerAsync (root's own via D2D), then ONE final D2H. The
-        // handles free HERE, AFTER the combine consumed them (§7).
-        std::vector<steppe::device::DevicePartial> partials =
-            core::compute_multigpu_partials_resident(resources, Q, V, N, partition,
-                                                     shards_span, precision);
-        resources.last_combine_path = steppe::device::CombinePath::P2pDeviceResident;
-        // Share the new no-final-D2H device-resident assembly, then materialize ONCE
-        // (.to_host()) for this host-returning entry. Bit-identical to the prior
-        // host-returning combine_f2_partials_resident (same bytes, same placement; §12).
-        return steppe::device::combine_f2_partials_resident_device(
-            std::span<steppe::device::DevicePartial>(partials.data(), partials.size()),
-            shards_span, P, n_block, resources.gpus[0].device_id).to_host();
+        // DELEGATE the resident arm to compute_f2_blocks_multigpu_device — its
+        // use_p2p branch runs the EXACT resident fan-out + device-resident combine
+        // (compute_multigpu_partials_resident -> combine_f2_partials_resident_device,
+        // setting last_combine_path = P2pDeviceResident) — and materialize ONCE here
+        // with .to_host() for this host-returning entry. Single-homing the resident
+        // body in the device entry kills the [7.1] copy-paste twin (it was byte-
+        // identical bar the trailing .to_host()); the no-peer arm of the device entry
+        // already delegates the OTHER direction to THIS function, and the two
+        // delegations are on disjoint branches (P2P vs no-peer) so there is no
+        // recursion. Bit-identical to the prior inline arm (same bytes, same
+        // placement, ONE final D2H via .to_host(); §12).
+        return compute_f2_blocks_multigpu_device(resources, Q, V, N, partition, precision)
+            .to_host();
     }
 
     // ---- Host-staged DIRECT path — pinned, sharded D2H into ONE shared result ----
@@ -282,23 +315,9 @@ steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
     const long M = Q.M;
     const int  n_block = partition.n_block;
 
-    // ---- Shared contract (debug fail-fast; identical to the host entry) -------
-    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
-                  "compute_f2_blocks_multigpu_device: Q/V/N disagree on P");
-    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
-                  "compute_f2_blocks_multigpu_device: Q/V/N disagree on M");
-    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
-                  "compute_f2_blocks_multigpu_device: negative P or M (uninitialized MatView)");
-    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
-                  "compute_f2_blocks_multigpu_device: block_id length != M");
-
-    // ---- Fail-fast: at least one device (architecture.md §2) -----------------
-    const std::size_t G = resources.device_count();
-    if (G < 1) {
-        throw std::runtime_error(
-            "steppe::core::compute_f2_blocks_multigpu_device: Resources has 0 devices — "
-            "the SPMG precompute requires at least one (architecture.md §9)");
-    }
+    // ---- Shared contract + at-least-one-device fail-fast (single-homed; [7.1]) ----
+    validate_multigpu_inputs(Q, V, N, partition, M, "compute_f2_blocks_multigpu_device");
+    const std::size_t G = require_at_least_one_device(resources, "compute_f2_blocks_multigpu_device");
 
     // ---- G == 1: the HEADLINE WIN — the result is already on the one GPU after the
     //      GEMM; KEEP it resident and return the handle. NO D2H AT ALL. ------------
@@ -367,22 +386,13 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     const long M = Q.M;
     const int  n_block = partition.n_block;
 
-    // ---- Shared contract (debug fail-fast; identical to the other entries) -----
-    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
-                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on P");
-    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
-                  "compute_f2_blocks_multigpu_tiered: Q/V/N disagree on M");
-    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
-                  "compute_f2_blocks_multigpu_tiered: negative P or M (uninitialized MatView)");
-    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
-                  "compute_f2_blocks_multigpu_tiered: block_id length != M");
-
-    const std::size_t G = resources.device_count();
-    if (G < 1) {
-        throw std::runtime_error(
-            "steppe::core::compute_f2_blocks_multigpu_tiered: Resources has 0 devices — "
-            "the SPMG precompute requires at least one (architecture.md §9)");
-    }
+    // ---- Shared contract + at-least-one-device fail-fast (single-homed; [7.1]) ----
+    validate_multigpu_inputs(Q, V, N, partition, M, "compute_f2_blocks_multigpu_tiered");
+    // This tiered path is single-GPU — it always drives gpus[0] regardless of G (see the
+    // TIER SELECT note below), so the device count is not needed here. Call the fail-fast
+    // for its THROWING side effect only; discard the [[nodiscard]] count (it would be an
+    // unused variable under the Release -Werror=unused-variable; [7.1] dedup).
+    (void)require_at_least_one_device(resources, "compute_f2_blocks_multigpu_tiered");
 
     // ---- TIER SELECT (runtime probes; never hardcoded) -----------------------
     // Free VRAM is the per-device probe captured ONCE at build_resources

@@ -31,6 +31,21 @@ std::vector<int> left_with_target(const QpAdmModel& model) {
     return left_idx;
 }
 
+// HONEST precision_tag (architecture.md §9, §12; fit-engine.md §1.4). Report what
+// ACTUALLY ran on the covariance SYRK, not what was requested: EmulatedFp64 iff the
+// request is emulated AND the backend can honor it (the SAME `emulated_fp64_honorable`
+// capability the f2 path consults via `emulation_honorable`), else native Fp64. The
+// CpuBackend (the native oracle) reports the all-false default ⇒ Fp64; a CUDA build
+// without the fixed-slice tuning degrades to native ⇒ Fp64 — never tag a run
+// EmulatedFp64 that silently ran native. Single-homed here so run_impl and
+// run_qpwave_impl cannot drift their tag derivation apart ([7.1] dedup, §8).
+Precision::Kind honored_tag(const Precision& prec, ComputeBackend& be) {
+    return (prec.kind == Precision::Kind::EmulatedFp64 &&
+            be.capabilities().emulated_fp64_honorable)
+               ? Precision::Kind::EmulatedFp64
+               : Precision::Kind::Fp64;
+}
+
 QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> block_sizes,
                      const QpAdmModel& model, const QpAdmOptions& opts) {
     QpAdmResult res;
@@ -54,17 +69,9 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     // gated on a future FP64-emulated cuSOLVER mode the toolkit does not yet expose).
     const Precision prec{Precision::Kind::EmulatedFp64, steppe::kDefaultMantissaBits};
 
-    // HONEST precision_tag (architecture.md §9, §12; fit-engine.md §1.4). Report what
-    // ACTUALLY ran on the SYRK, not what was requested: EmulatedFp64 iff the request
-    // is emulated AND the backend can honor it (the SAME `emulated_fp64_honorable`
-    // capability the f2 path consults via `emulation_honorable`), else native Fp64.
-    // The CpuBackend (the native oracle) reports the all-false default ⇒ Fp64; a CUDA
-    // build without the fixed-slice tuning degrades to native ⇒ Fp64 — never tag a
-    // run EmulatedFp64 that silently ran native.
-    res.precision_tag = (prec.kind == Precision::Kind::EmulatedFp64 &&
-                         be.capabilities().emulated_fp64_honorable)
-                            ? Precision::Kind::EmulatedFp64
-                            : Precision::Kind::Fp64;
+    // HONEST precision_tag — what ACTUALLY ran on the covariance SYRK (single-homed in
+    // honored_tag so run_impl + run_qpwave_impl cannot drift; [7.1] dedup, §9/§12).
+    res.precision_tag = honored_tag(prec, be);
 
     // S4 — covariance (OQ-3: weight by block_sizes, NOT vpair).
     JackknifeCov cov = jackknife_cov(be, X, block_sizes, opts.fudge, prec);
@@ -260,10 +267,8 @@ QpWaveResult run_qpwave_impl(ComputeBackend& be, const F2Src& f2,
     F4Blocks X = core::qpadm::assemble_f4(be, f2, left, right, prec);
     const JackknifeCov cov =
         core::qpadm::jackknife_cov(be, X, std::span<const int>(f2.block_sizes), opts.fudge, prec);
-    const Precision::Kind tag = (prec.kind == Precision::Kind::EmulatedFp64 &&
-                                 be.capabilities().emulated_fp64_honorable)
-                                    ? Precision::Kind::EmulatedFp64
-                                    : Precision::Kind::Fp64;
+    // HONEST precision_tag — single-homed in honored_tag ([7.1] dedup, §9/§12).
+    const Precision::Kind tag = core::qpadm::honored_tag(prec, be);
     if (cov.status != Status::Ok) {
         QpWaveResult qw; qw.status = cov.status; qw.precision_tag = tag; return qw;
     }

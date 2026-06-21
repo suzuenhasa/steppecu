@@ -40,6 +40,45 @@ namespace steppe::device {
 /// octal literal at the open() call (group-5 5.1).
 namespace { constexpr int kCacheFileMode = 0644; }
 
+namespace {
+
+// ---- Shared writer-ring primitives ([7.1] dedup) ----------------------------
+// HostRamSink and DiskSink hold BYTE-IDENTICAL ring plumbing (mtx_/cv_free_/cv_work_/
+// free_/stop_/writer_) and used BYTE-IDENTICAL acquire_slot() bodies + BYTE-IDENTICAL
+// writer stop-and-join (finish() + dtor, 4 copies). These free helpers take the members
+// by reference so the two sinks share ONE implementation with ZERO behavior change and
+// NO virtual dispatch (the conservative [7.1] partial; the full StagingRing CRTP hoist
+// is out of the risk budget for this pass on the f2_multigpu_parity hot path).
+
+/// Claim a free ring slot, blocking under backpressure until one returns to the free
+/// pool. Returns the slot index (free_[idx] set false under the lock). Byte-identical
+/// to the two former acquire_slot() member bodies.
+[[nodiscard]] int ring_acquire_slot(std::mutex& mtx, std::condition_variable& cv_free,
+                                    std::vector<bool>& free_slots) {
+    std::unique_lock<std::mutex> lk(mtx);
+    int idx = -1;
+    cv_free.wait(lk, [&] {
+        for (int i = 0; i < static_cast<int>(free_slots.size()); ++i)
+            if (free_slots[static_cast<std::size_t>(i)]) { idx = i; return true; }
+        return false;
+    });
+    free_slots[static_cast<std::size_t>(idx)] = false;
+    return idx;
+}
+
+/// Signal stop + wake the writer + join it (if joinable). Byte-identical to the four
+/// former finish()/dtor stop-and-join copies. Idempotent: a no-op once the writer is
+/// already joined (writer.joinable() == false).
+void ring_stop_and_join_writer(std::mutex& mtx, std::condition_variable& cv_work,
+                               bool& stop, std::thread& writer) {
+    if (!writer.joinable()) return;
+    { std::lock_guard<std::mutex> lk(mtx); stop = true; }
+    cv_work.notify_all();
+    writer.join();
+}
+
+}  // namespace
+
 // ===========================================================================
 // HostRamSink (TIER 1)
 // ===========================================================================
@@ -71,15 +110,7 @@ void HostRamSink::begin(int P, int n_block, const std::vector<int>& block_sizes)
 }
 
 int HostRamSink::acquire_slot() {
-    std::unique_lock<std::mutex> lk(mtx_);
-    int idx = -1;
-    cv_free_.wait(lk, [&] {
-        for (int i = 0; i < static_cast<int>(free_.size()); ++i)
-            if (free_[static_cast<std::size_t>(i)]) { idx = i; return true; }
-        return false;
-    });
-    free_[static_cast<std::size_t>(idx)] = false;
-    return idx;
+    return ring_acquire_slot(mtx_, cv_free_, free_);  // shared ring primitive ([7.1])
 }
 
 void HostRamSink::writer_loop() {
@@ -141,22 +172,13 @@ void HostRamSink::spill_block(int b, const double* f2_dev, const double* vpair_d
 
 void HostRamSink::finish() {
     if (!writer_.joinable()) return;
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        stop_ = true;
-    }
-    cv_work_.notify_all();
-    writer_.join();
+    ring_stop_and_join_writer(mtx_, cv_work_, stop_, writer_);  // shared ([7.1])
     if (writer_failed_)
         throw std::runtime_error("HostRamSink: background writer failed: " + writer_error_);
 }
 
 HostRamSink::~HostRamSink() {
-    if (writer_.joinable()) {
-        { std::lock_guard<std::mutex> lk(mtx_); stop_ = true; }
-        cv_work_.notify_all();
-        writer_.join();
-    }
+    ring_stop_and_join_writer(mtx_, cv_work_, stop_, writer_);  // shared ([7.1])
     // DEFENSIVE TEARDOWN BARRIER (14.4): the writer's per-ENQUEUED-slot event sync is the
     // sole D2H-completion guarantee — but if spill_block faulted mid-issue (the 2nd
     // cudaMemcpyAsync or the cudaEventRecord threw via STEPPE_CUDA_CHECK) the FIRST D2H is
@@ -251,15 +273,7 @@ void DiskSink::begin(int P, int n_block, const std::vector<int>& block_sizes) {
 }
 
 int DiskSink::acquire_slot() {
-    std::unique_lock<std::mutex> lk(mtx_);
-    int idx = -1;
-    cv_free_.wait(lk, [&] {
-        for (int i = 0; i < static_cast<int>(free_.size()); ++i)
-            if (free_[static_cast<std::size_t>(i)]) { idx = i; return true; }
-        return false;
-    });
-    free_[static_cast<std::size_t>(idx)] = false;
-    return idx;
+    return ring_acquire_slot(mtx_, cv_free_, free_);  // shared ring primitive ([7.1])
 }
 
 void DiskSink::writer_loop() {
@@ -318,11 +332,7 @@ void DiskSink::spill_block(int b, const double* f2_dev, const double* vpair_dev,
 
 void DiskSink::finish() {
     if (finalized_) return;
-    if (writer_.joinable()) {
-        { std::lock_guard<std::mutex> lk(mtx_); stop_ = true; }
-        cv_work_.notify_all();
-        writer_.join();
-    }
+    ring_stop_and_join_writer(mtx_, cv_work_, stop_, writer_);  // shared ([7.1])
     if (writer_failed_)
         throw std::runtime_error("DiskSink: background writer failed: " + writer_error_);
 
@@ -358,11 +368,7 @@ void DiskSink::take_descriptor(DiskF2Blocks& out) {
 }
 
 DiskSink::~DiskSink() {
-    if (writer_.joinable()) {
-        { std::lock_guard<std::mutex> lk(mtx_); stop_ = true; }
-        cv_work_.notify_all();
-        writer_.join();
-    }
+    ring_stop_and_join_writer(mtx_, cv_work_, stop_, writer_);  // shared ([7.1])
     // DEFENSIVE TEARDOWN BARRIER (14.4): identical rationale to HostRamSink — if spill_block
     // faulted mid-issue the first D2H is left in flight on `stream` with its slot never
     // enqueued, so the writer never synchronized it. cudaDeviceSynchronize drains any such

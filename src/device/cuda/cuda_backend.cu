@@ -99,6 +99,117 @@
 
 namespace steppe::device {
 
+namespace {
+
+// ---- Shared f2-blocks layout + size-bucketing prologue ([7.1] dedup) --------
+// run_f2_blocks_resident and stream_f2_blocks_impl opened with a BYTE-IDENTICAL
+// block-layout derivation (core::block_ranges -> per-block begin/size) and a
+// BYTE-IDENTICAL size-bucketing pass (ceil-pow{kBlockGroupPadBase}(size) ->
+// Bucket{s_pad, blocks}, sorted by s_pad). The 744/761 comments literally read
+// "IDENTICAL to run_f2_blocks_resident". Single-homed here so a layout/bucket-rule
+// change is one edit that cannot drift the resident and streamed paths apart (§8).
+// PARITY-NEUTRAL (§12): pure host index math, no device work, byte-identical to the
+// two former inline copies.
+
+/// A size bucket: all blocks padded to the SAME ceil-pow{kBlockGroupPadBase} width
+/// `s_pad`, fed as ONE strided-batched call padded only to that width. Hoisted to a
+/// file-local struct (was a method-local definition in each of the two paths).
+struct Bucket { int s_pad = 0; std::vector<int> blocks; };
+
+/// The per-block layout from block_id (contiguous in file order). The SINGLE-SOURCE
+/// inverse of assign_blocks: block_ranges validates the partition contract ONCE
+/// (0 <= id < n_block, non-decreasing, block_id long enough) and returns each block's
+/// half-open column range [begin, end). Fills block_offsets[b] = begin and
+/// block_sizes[b] = size (the S4 F2BlockTensor metadata / weighting denominator base).
+struct BlockLayout {
+    std::vector<long> block_offsets;  ///< each block's first SNP column (= range.begin)
+    std::vector<int>  block_sizes;    ///< each block's SNP count (= range.size())
+};
+
+[[nodiscard]] BlockLayout compute_block_layout(const int* block_id, long M, int n_block) {
+    BlockLayout out;
+    out.block_offsets.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+    out.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
+    const std::vector<core::BlockRange> ranges =
+        core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                           M, n_block);
+    for (int b = 0; b < n_block; ++b) {
+        out.block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
+        out.block_sizes[static_cast<std::size_t>(b)] =
+            static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+    }
+    return out;
+}
+
+/// Group blocks by ceil-pow{kBlockGroupPadBase}(size) (the spike rule): one
+/// strided-batched call per bucket, padded only to the bucket width; bounds pad waste
+/// < base× WITHIN a bucket while keeping the call count O(log max_size). Buckets sorted
+/// by width (cosmetic / smallest first). Byte-identical to the two former inline copies.
+[[nodiscard]] std::vector<Bucket> size_buckets(const std::vector<int>& block_sizes,
+                                               int n_block) {
+    auto ceil_bucket = [](int x) {
+        int p = 1;
+        while (p < x) p *= steppe::kBlockGroupPadBase;
+        return p;
+    };
+    std::vector<Bucket> buckets;
+    for (int b = 0; b < n_block; ++b) {
+        const int sp = ceil_bucket(block_sizes[static_cast<std::size_t>(b)]);
+        int gi = -1;
+        for (std::size_t k = 0; k < buckets.size(); ++k)
+            if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
+        if (gi < 0) { gi = static_cast<int>(buckets.size()); buckets.push_back({sp, {}}); }
+        buckets[static_cast<std::size_t>(gi)].blocks.push_back(b);
+    }
+    std::sort(buckets.begin(), buckets.end(),
+              [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
+    return buckets;
+}
+
+// ---- Shared AT2 res$rankdrop nested-table fill ([7.1] dedup) -----------------
+// rank_sweep (writing rs.rd_*) and assemble_result (writing res.rankdrop_*) built the
+// nested table with the SAME descending r=rmax-k loop, the SAME dof/chisq nested diff +
+// pchisq_upper(cd, dd), and the SAME INT_MIN / quiet_NaN NA tail for the last row (rank
+// 0). They differed ONLY by destination field names + the source arrays. Single-homed
+// here so the AT2 ranktest.cpp mirror cannot drift between the single-model sweep and
+// the batched assemble. The per-rank source arrays `dof`/`chisq`/`p` are indexed by
+// rank r in [0, rmax]; the out arrays are written by ROW k in [0, n) (n = rmax+1, the
+// row for rank rmax-k). PARITY: byte-identical to the two former inline copies — same
+// loop order, same INT subtraction, same double subtraction, same pchisq_upper call.
+void fill_rankdrop(int rmax,
+                   const std::vector<int>& dof, const std::vector<double>& chisq,
+                   const std::vector<double>& p,
+                   std::vector<int>& rd_f4rank, std::vector<int>& rd_dof,
+                   std::vector<int>& rd_dofdiff, std::vector<double>& rd_chisq,
+                   std::vector<double>& rd_p, std::vector<double>& rd_chisqdiff,
+                   std::vector<double>& rd_p_nested) {
+    const std::size_t n = static_cast<std::size_t>(rmax) + 1;
+    rd_f4rank.resize(n); rd_dof.resize(n); rd_chisq.resize(n);
+    rd_p.resize(n); rd_dofdiff.resize(n);
+    rd_chisqdiff.resize(n); rd_p_nested.resize(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        const int r = rmax - static_cast<int>(k);  // this row's rank (descending)
+        rd_f4rank[k] = r;
+        rd_dof[k] = dof[static_cast<std::size_t>(r)];
+        rd_chisq[k] = chisq[static_cast<std::size_t>(r)];
+        rd_p[k] = p[static_cast<std::size_t>(r)];
+        if (r - 1 >= 0) {  // nested diff to the next-lower rank (r-1) — NATIVE
+            const int dd = dof[static_cast<std::size_t>(r - 1)] - dof[static_cast<std::size_t>(r)];
+            const double cd = chisq[static_cast<std::size_t>(r - 1)] -
+                              chisq[static_cast<std::size_t>(r)];
+            rd_dofdiff[k] = dd;
+            rd_chisqdiff[k] = cd;
+            rd_p_nested[k] = core::internal::pchisq_upper(cd, dd);
+        } else {  // the last row (rank 0): NA
+            rd_dofdiff[k] = INT_MIN;
+            rd_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
+            rd_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+}
+
+}  // namespace
+
 /// GPU compute backend. The 3-GEMM f2 reformulation; one CublasHandle created
 /// once (architecture.md §7) and reused, with its workspace set for emulated-FP64
 /// determinism. Move-only via the ComputeBackend base (architecture.md §8).
@@ -480,46 +591,18 @@ public:
         rb.block_sizes.assign(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
         if (P <= 0 || M <= 0 || n_block <= 0) return rb;
 
-        // ---- Block layout from block_id (contiguous in file order) -----------
-        // The SINGLE-SOURCE inverse of assign_blocks: block_ranges validates the
-        // partition contract ONCE (0 <= id < n_block, non-decreasing, block_id
-        // long enough) and returns each block's half-open column range
-        // [begin, end) — closing the OOB write/read this scan used to risk on a
-        // malformed partition (cleanup X-3/B3). The device wants block_offsets
-        // (= each range's begin) it copies to dOffsets and the kernel dereferences
-        // (f2_blocks_kernel.cu), plus block_sizes (= each range's size, the S4
-        // F2BlockTensor metadata / weighting denominator base).
-        const std::vector<core::BlockRange> ranges =
-            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
-                               M, n_block);
-        std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
-        for (int b = 0; b < n_block; ++b) {
-            block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
-            rb.block_sizes[static_cast<std::size_t>(b)] =
-                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
-        }
-
-        // ---- Group blocks by ceil-pow{kBlockGroupPadBase}(size) (the spike rule).
-        // One strided-batched call per bucket, padded only to the bucket width;
-        // bounds pad waste < base× WITHIN a bucket while keeping the call count
-        // O(log max_size). Buckets sorted by width (cosmetic / smallest first).
-        auto ceil_bucket = [](int x) {
-            int p = 1;
-            while (p < x) p *= steppe::kBlockGroupPadBase;
-            return p;
-        };
-        struct Bucket { int s_pad = 0; std::vector<int> blocks; };
-        std::vector<Bucket> buckets;
-        for (int b = 0; b < n_block; ++b) {
-            const int sp = ceil_bucket(rb.block_sizes[static_cast<std::size_t>(b)]);
-            int gi = -1;
-            for (std::size_t k = 0; k < buckets.size(); ++k)
-                if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
-            if (gi < 0) { gi = static_cast<int>(buckets.size()); buckets.push_back({sp, {}}); }
-            buckets[static_cast<std::size_t>(gi)].blocks.push_back(b);
-        }
-        std::sort(buckets.begin(), buckets.end(),
-                  [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
+        // ---- Block layout + size-bucketing (shared prologue; [7.1] dedup) ----
+        // compute_block_layout is the SINGLE-SOURCE inverse of assign_blocks (validates
+        // the partition contract ONCE, closing the OOB write/read this scan used to risk
+        // on a malformed partition — cleanup X-3/B3) returning block_offsets (= each
+        // range's begin, copied to dOffsets + dereferenced by f2_blocks_kernel.cu) and
+        // block_sizes (= each range's size, the S4 metadata / weighting denominator
+        // base). size_buckets then groups into the strided-batched buckets. Both are
+        // shared verbatim with stream_f2_blocks_impl so the two paths cannot drift (§8).
+        const BlockLayout layout = compute_block_layout(block_id, M, n_block);
+        const std::vector<long>& block_offsets = layout.block_offsets;
+        rb.block_sizes = layout.block_sizes;
+        const std::vector<Bucket> buckets = size_buckets(rb.block_sizes, n_block);
 
         // ---- VRAM budget for one strided-batched chunk (architecture.md §11.2).
         // Query free VRAM BEFORE committing the resident set, so the budget helper
@@ -741,41 +824,21 @@ public:
         const long M = Q.M;
         const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
 
-        // ---- Block layout (IDENTICAL to run_f2_blocks_resident) ------------------
+        // ---- Block layout + size-bucketing (shared prologue; [7.1] dedup) --------
+        // The SAME compute_block_layout + size_buckets prologue as run_f2_blocks_resident
+        // (single-homed above so the resident and streamed paths cannot drift; §8). The
+        // degenerate empty-result early-return below predates the layout and uses the
+        // all-zeros block_sizes, so it stays before the layout build.
         std::vector<int> block_sizes(static_cast<std::size_t>(n_block < 0 ? 0 : n_block), 0);
         if (P <= 0 || M <= 0 || n_block <= 0) {
             sink.begin(P, n_block, block_sizes);  // degenerate empty result -> empty tier
             sink.finish();
             return;
         }
-        const std::vector<core::BlockRange> ranges =
-            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
-                               M, n_block);
-        std::vector<long> block_offsets(static_cast<std::size_t>(n_block), 0);
-        for (int b = 0; b < n_block; ++b) {
-            block_offsets[static_cast<std::size_t>(b)] = ranges[static_cast<std::size_t>(b)].begin;
-            block_sizes[static_cast<std::size_t>(b)] =
-                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
-        }
-
-        // ---- Size-bucketing (IDENTICAL to run_f2_blocks_resident) ----------------
-        auto ceil_bucket = [](int x) {
-            int p = 1;
-            while (p < x) p *= steppe::kBlockGroupPadBase;
-            return p;
-        };
-        struct Bucket { int s_pad = 0; std::vector<int> blocks; };
-        std::vector<Bucket> buckets;
-        for (int b = 0; b < n_block; ++b) {
-            const int sp = ceil_bucket(block_sizes[static_cast<std::size_t>(b)]);
-            int gi = -1;
-            for (std::size_t k = 0; k < buckets.size(); ++k)
-                if (buckets[k].s_pad == sp) { gi = static_cast<int>(k); break; }
-            if (gi < 0) { gi = static_cast<int>(buckets.size()); buckets.push_back({sp, {}}); }
-            buckets[static_cast<std::size_t>(gi)].blocks.push_back(b);
-        }
-        std::sort(buckets.begin(), buckets.end(),
-                  [](const Bucket& a, const Bucket& c) { return a.s_pad < c.s_pad; });
+        const BlockLayout layout = compute_block_layout(block_id, M, n_block);
+        const std::vector<long>& block_offsets = layout.block_offsets;
+        block_sizes = layout.block_sizes;
+        const std::vector<Bucket> buckets = size_buckets(block_sizes, n_block);
 
         // The sink allocates the tier destination + its persistent pinned staging ONCE.
         sink.begin(P, n_block, block_sizes);
@@ -1946,29 +2009,11 @@ public:
         }
 
         // ---- AT2 res$rankdrop nested table (rows: rank rmax, rmax-1, ..., 0) ----
-        rs.rd_f4rank.resize(n); rs.rd_dof.resize(n); rs.rd_chisq.resize(n);
-        rs.rd_p.resize(n); rs.rd_dofdiff.resize(n);
-        rs.rd_chisqdiff.resize(n); rs.rd_p_nested.resize(n);
-        for (std::size_t k = 0; k < n; ++k) {
-            const int r = rmax - static_cast<int>(k);  // this row's rank (descending)
-            rs.rd_f4rank[k] = r;
-            rs.rd_dof[k] = rs.dof[static_cast<std::size_t>(r)];
-            rs.rd_chisq[k] = rs.chisq[static_cast<std::size_t>(r)];
-            rs.rd_p[k] = rs.p[static_cast<std::size_t>(r)];
-            if (r - 1 >= 0) {  // nested diff to the next-lower rank (r-1) — NATIVE
-                const int dd = rs.dof[static_cast<std::size_t>(r - 1)] -
-                               rs.dof[static_cast<std::size_t>(r)];
-                const double cd = rs.chisq[static_cast<std::size_t>(r - 1)] -
-                                  rs.chisq[static_cast<std::size_t>(r)];
-                rs.rd_dofdiff[k] = dd;
-                rs.rd_chisqdiff[k] = cd;
-                rs.rd_p_nested[k] = core::internal::pchisq_upper(cd, dd);
-            } else {  // the last row (rank 0): NA
-                rs.rd_dofdiff[k] = INT_MIN;
-                rs.rd_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
-                rs.rd_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
-            }
-        }
+        // Shared fill_rankdrop ([7.1] dedup): source = the per-rank rs.dof/chisq/p; dest
+        // = the rs.rd_* field set. Byte-identical to the former inline copy (§12).
+        fill_rankdrop(rmax, rs.dof, rs.chisq, rs.p,
+                      rs.rd_f4rank, rs.rd_dof, rs.rd_dofdiff, rs.rd_chisq,
+                      rs.rd_p, rs.rd_chisqdiff, rs.rd_p_nested);
 
         // ---- f4rank: the smallest non-rejected rank (p(r) > alpha, ASCENDING) ----
         rs.f4rank = rmax;  // fallback: the highest rank if all rejected
@@ -2692,31 +2737,15 @@ private:
         for (int rr = 0; rr <= rmax; ++rr)
             if (rankp[static_cast<std::size_t>(rr)] > rank_alpha) { res.f4rank = rr; break; }
 
-        // AT2 res$rankdrop nested table (rows rank rmax..0; the nested diff).
-        res.rankdrop_f4rank.resize(nrk); res.rankdrop_dof.resize(nrk);
-        res.rankdrop_dofdiff.resize(nrk); res.rankdrop_chisq.resize(nrk);
-        res.rankdrop_p.resize(nrk); res.rankdrop_chisqdiff.resize(nrk);
-        res.rankdrop_p_nested.resize(nrk);
-        for (std::size_t k = 0; k < nrk; ++k) {
-            const int rr = rmax - static_cast<int>(k);
-            res.rankdrop_f4rank[k] = rr;
-            res.rankdrop_dof[k] = res.rank_dof[static_cast<std::size_t>(rr)];
-            res.rankdrop_chisq[k] = res.rank_chisq[static_cast<std::size_t>(rr)];
-            res.rankdrop_p[k] = rankp[static_cast<std::size_t>(rr)];
-            if (rr - 1 >= 0) {
-                const int dd = res.rank_dof[static_cast<std::size_t>(rr - 1)] -
-                               res.rank_dof[static_cast<std::size_t>(rr)];
-                const double cd = res.rank_chisq[static_cast<std::size_t>(rr - 1)] -
-                                  res.rank_chisq[static_cast<std::size_t>(rr)];
-                res.rankdrop_dofdiff[k] = dd;
-                res.rankdrop_chisqdiff[k] = cd;
-                res.rankdrop_p_nested[k] = core::internal::pchisq_upper(cd, dd);
-            } else {
-                res.rankdrop_dofdiff[k] = INT_MIN;
-                res.rankdrop_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
-                res.rankdrop_p_nested[k] = std::numeric_limits<double>::quiet_NaN();
-            }
-        }
+        // AT2 res$rankdrop nested table (rows rank rmax..0; the nested diff). Shared
+        // fill_rankdrop ([7.1] dedup): source = res.rank_dof/res.rank_chisq + the local
+        // rankp (assemble_result re-derives rankp; the single-model sweep pre-stored
+        // rs.rd_p — that re-derivation is preserved by passing rankp as the p source).
+        // Byte-identical to the former inline copy (§12).
+        fill_rankdrop(rmax, res.rank_dof, res.rank_chisq, rankp,
+                      res.rankdrop_f4rank, res.rankdrop_dof, res.rankdrop_dofdiff,
+                      res.rankdrop_chisq, res.rankdrop_p, res.rankdrop_chisqdiff,
+                      res.rankdrop_p_nested);
 
         // AT2 res$popdrop: the full row (all sources) then each single-source drop.
         // Row 0 = full model (pattern "0..0"), fitted rank nl-1, weights pop_wfull

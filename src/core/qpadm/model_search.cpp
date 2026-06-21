@@ -171,29 +171,54 @@ struct F2Replication {
     std::vector<device::DeviceF2Blocks> owned;              // the fresh uploads (RAII)
 };
 
+/// Scatter a worker's batch into the pre-sized result slots by model_index ([7.1]
+/// dedup). The pre-sized-slot write IS the deterministic re-sort: each model_index in
+/// [0,n) is written EXACTLY once (run_qpadm_search sets model_index = i on the input).
+/// FAIL-FAST on an out-of-range index (the determinism invariant the re-sort rests on)
+/// — single-homed here so the G==1 fast path and the G>=2 worker enforce it IDENTICALLY
+/// rather than from two divergent inline copies (the host-oracle overload keeps its own
+/// loop-index FALLBACK because its semantics genuinely differ — it does not fail-fast).
+void scatter_into_slots(std::vector<QpAdmResult>& results,
+                        std::vector<QpAdmResult>& batch, std::size_t n) {
+    for (QpAdmResult& r : batch) {
+        const int mi = r.model_index;
+        if (mi < 0 || static_cast<std::size_t>(mi) >= n)
+            throw std::runtime_error("run_qpadm_search: model_index out of range "
+                                     "(must be 0..n-1 for the deterministic re-sort)");
+        results[static_cast<std::size_t>(mi)] = std::move(r);
+    }
+}
+
 F2Replication replicate_f2(const device::DeviceF2Blocks& f2, device::Resources& resources) {
     const std::size_t G = resources.device_count();
     F2Replication rep;
     rep.per_device.assign(G, nullptr);
-    // Materialize the host tensor ONCE only if at least one device needs a copy.
-    bool need_host = false;
-    for (std::size_t g = 0; g < G; ++g) {
-        if (resources.gpus[g].device_id != f2.device_id) { need_host = true; break; }
-    }
-    F2BlockTensor host;
-    if (need_host) host = f2.to_host();
-    // Reserve so the upload loop does not reallocate the owned vector (move-only).
+    // Classify per-g residency ONCE ([7.2] dedup): the residency rule
+    // `gpus[g].device_id != f2.device_id` is the single per-device "needs an upload"
+    // predicate; this one pre-pass records it per g and counts the uploads, so the rule
+    // has ONE expression. The host tensor is then materialized iff n_owned > 0 (any
+    // non-resident device) — replacing the three loops that each re-tested the predicate
+    // and could drift if someone edited only one of them.
+    std::vector<bool> needs_upload(G, false);
     std::size_t n_owned = 0;
-    for (std::size_t g = 0; g < G; ++g)
-        if (resources.gpus[g].device_id != f2.device_id) ++n_owned;
+    for (std::size_t g = 0; g < G; ++g) {
+        if (resources.gpus[g].device_id != f2.device_id) {
+            needs_upload[g] = true;
+            ++n_owned;
+        }
+    }
+    // Materialize the host tensor ONCE only if at least one device needs a copy.
+    F2BlockTensor host;
+    if (n_owned > 0) host = f2.to_host();
+    // Reserve so the upload loop does not reallocate the owned vector (move-only).
     rep.owned.reserve(n_owned);
     for (std::size_t g = 0; g < G; ++g) {
-        const int dev = resources.gpus[g].device_id;
-        if (dev == f2.device_id) {
-            rep.per_device[g] = &f2;  // reuse the existing resident handle
-        } else {
-            rep.owned.push_back(device::upload_f2_blocks_to_device(host, dev));
+        if (needs_upload[g]) {
+            rep.owned.push_back(
+                device::upload_f2_blocks_to_device(host, resources.gpus[g].device_id));
             rep.per_device[g] = &rep.owned.back();
+        } else {
+            rep.per_device[g] = &f2;  // reuse the existing resident handle
         }
     }
     return rep;
@@ -223,13 +248,7 @@ std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
         ComputeBackend& be = *resources.gpus[0].backend;
         std::vector<QpAdmResult> batch =
             core::qpadm::fit_shard(be, f2, models, opts);
-        for (QpAdmResult& r : batch) {
-            const int mi = r.model_index;
-            if (mi < 0 || static_cast<std::size_t>(mi) >= n)
-                throw std::runtime_error("run_qpadm_search: model_index out of range "
-                                         "(must be 0..n-1 for the deterministic re-sort)");
-            results[static_cast<std::size_t>(mi)] = std::move(r);
-        }
+        scatter_into_slots(results, batch, n);  // pre-sized-slot write = the re-sort ([7.1])
         return results;
     }
 
@@ -261,15 +280,10 @@ std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
                     std::vector<QpAdmResult> batch =
                         core::qpadm::fit_shard(be, f2_g, sub, opts);
                     // Write each result into ITS model_index slot — distinct across
-                    // shards (contiguous, non-overlapping), so no two workers touch
-                    // the same slot (race-free without a lock).
-                    for (QpAdmResult& r : batch) {
-                        const int mi = r.model_index;
-                        if (mi < 0 || static_cast<std::size_t>(mi) >= n)
-                            throw std::runtime_error(
-                                "run_qpadm_search: model_index out of range");
-                        results[static_cast<std::size_t>(mi)] = std::move(r);
-                    }
+                    // shards (contiguous, non-overlapping), so no two workers touch the
+                    // same slot (race-free without a lock). The bounds-check + slot-write
+                    // rule is single-homed in scatter_into_slots ([7.1] dedup).
+                    scatter_into_slots(results, batch, n);
                 } catch (...) {
                     worker_errors[g] = std::current_exception();  // surface on join
                 }
