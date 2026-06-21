@@ -51,9 +51,9 @@ IndPartition read_ind(const std::string& path,
     std::size_t row = 0;
     std::string line;
     while (std::getline(in, line)) {
-        std::istringstream ls(line);
+        std::istringstream line_stream(line);
         std::string id, sex, pop;
-        if (!(ls >> id >> sex >> pop)) continue;  // skip blank/short lines
+        if (!(line_stream >> id >> sex >> pop)) continue;  // skip blank/short lines
         if (row >= n_records_present) {
             ++row;
             continue;  // beyond the present genotype records (partial-file cap)

@@ -8,7 +8,7 @@
 // f2_estimator.hpp where they had de-facto landed while this file was still a
 // phantom the spec cited — cleanup X-4):
 //
-//   cdiv(n, b)        — ceiling division, the launch-grid building block, in an
+//   cdiv(n, block)    — ceiling division, the launch-grid building block, in an
 //                       `int` overload and a `long` overload (the SNP/`M` axis
 //                       exceeds 2^31, so it must use the `long` form — views.hpp).
 //   kMaxGridX/Y/Z     — the hardware grid-dimension limits (architecture.md §7;
@@ -79,18 +79,18 @@ inline constexpr unsigned kMaxGridZ = kMaxGridY;
 // Ceiling division — the launch-grid building block.
 // ===========================================================================
 
-/// Ceiling division `ceil(n / b)`. `b` must be > 0 (a block dimension) and `n`
-/// non-negative (a count/dimension). Replaces the spike's open-coded
-/// `(n + b - 1) / b` (architecture.md §2 "one cdiv()").
-[[nodiscard]] STEPPE_HD constexpr int cdiv(int n, int b) noexcept {
-    return (n + b - 1) / b;
+/// Ceiling division `ceil(n / block)`. `block` must be > 0 (a block dimension)
+/// and `n` non-negative (a count/dimension). Replaces the spike's open-coded
+/// `(n + block - 1) / block` (architecture.md §2 "one cdiv()").
+[[nodiscard]] STEPPE_HD constexpr int cdiv(int n, int block) noexcept {
+    return (n + block - 1) / block;
 }
 
 /// Long overload of `cdiv` for SNP-count-scale dimensions (`M` can exceed 2^31;
 /// views.hpp documents the SNP axis as `long`). The decode/feeder SNP axis MUST
 /// route through this overload, never the `int` one.
-[[nodiscard]] STEPPE_HD constexpr long cdiv(long n, long b) noexcept {
-    return (n + b - 1) / b;
+[[nodiscard]] STEPPE_HD constexpr long cdiv(long n, long block) noexcept {
+    return (n + block - 1) / block;
 }
 
 // ===========================================================================

@@ -97,11 +97,11 @@ F2BlockTensor combine_f2_partials_host(
         const F2BlockTensor& part = partials[g];
         if (part.n_block <= 0) continue;  // empty shard owns nothing (b0 == b1)
         const std::size_t b0 = static_cast<std::size_t>(shards[g].b0);
-        const std::size_t part_slabs =
+        const std::size_t part_elems =
             slab * static_cast<std::size_t>(part.n_block);  // f2/vpair run length
         // f2 + vpair: one contiguous copy of the device's owned slabs into place.
-        std::copy_n(part.f2.data(),    part_slabs, out.f2.data()    + slab * b0);
-        std::copy_n(part.vpair.data(), part_slabs, out.vpair.data() + slab * b0);
+        std::copy_n(part.f2.data(),    part_elems, out.f2.data()    + slab * b0);
+        std::copy_n(part.vpair.data(), part_elems, out.vpair.data() + slab * b0);
         // block_sizes: the backend computed each block's SNP count from its local
         // ranges (== the global block's count, design §2); copy them into place
         // (single-homed, no host recompute). Disjoint shards ⇒ a plain placement.

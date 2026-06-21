@@ -129,12 +129,12 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         throw std::runtime_error("io::read_snp: cannot open .snp file: " + path);
     }
 
-    SnpTable t;
+    SnpTable table;
     std::map<std::string, int> other_codes;
     int next_other = kFirstOtherChromCode;  // distinct negative codes, decrementing
     std::string line;
     std::size_t line_no = 0;  // 1-based, counts EVERY physical line for diagnostics
-    while (t.count < max_snps && std::getline(in, line)) {
+    while (table.count < max_snps && std::getline(in, line)) {
         ++line_no;
         const std::vector<std::string> fields = split_ws(line);
 
@@ -177,14 +177,14 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         const char alt =
             has_alleles && !fields[kAltAlleleCol].empty() ? fields[kAltAlleleCol][0] : kMissingAllele;
 
-        t.id.push_back(id);
-        t.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
-        t.genpos_morgans.push_back(genpos);
-        t.ref.push_back(ref);
-        t.alt.push_back(alt);
-        ++t.count;
+        table.id.push_back(id);
+        table.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
+        table.genpos_morgans.push_back(genpos);
+        table.ref.push_back(ref);
+        table.alt.push_back(alt);
+        ++table.count;
     }
-    return t;
+    return table;
 }
 
 }  // namespace steppe::io

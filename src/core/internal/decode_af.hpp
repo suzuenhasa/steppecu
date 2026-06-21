@@ -139,7 +139,8 @@ struct AfResult {
 /// contract: this device-side per-element primitive — which has no throw path on
 /// the GPU and no `ConfigBuilder::build()`-time validation (ploidy lives on the
 /// per-call DecodeTileView, not RunConfig) — masks out; the host filter throws.
-[[nodiscard]] STEPPE_HD inline AfResult finalize_af(long ac, long an, int ploidy) noexcept {
+[[nodiscard]] STEPPE_HD inline AfResult finalize_af(std::int64_t ac, std::int64_t an,
+                                                    int ploidy) noexcept {
     AfResult r;
     if (an > 0 && ploidy > 0) {
         const double n = static_cast<double>(ploidy) * static_cast<double>(an);

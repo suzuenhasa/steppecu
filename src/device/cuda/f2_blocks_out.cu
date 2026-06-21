@@ -46,16 +46,16 @@ DiskF2Blocks& DiskF2Blocks::operator=(DiskF2Blocks&& o) noexcept {
 namespace {
 // pread the whole slab at offset, looping over partial reads. Throws on short read.
 void pread_all(std::FILE* f, void* buf, std::size_t bytes, std::uint64_t offset,
-               const char* what) {
+               const char* region) {
     // 64-bit file offsets: `long` is 64-bit on the LP64 Linux/CUDA target, so
     // std::fseek covers the multi-GB f2/vpair regions. A static_assert pins the
     // assumption (a 32-bit long would silently wrap a large offset).
     static_assert(sizeof(long) >= 8, "F2BlocksOut(Disk) needs 64-bit file offsets");
     if (std::fseek(f, static_cast<long>(offset), SEEK_SET) != 0)
-        throw std::runtime_error(std::string("F2BlocksOut(Disk): fseek(") + what + ") failed");
+        throw std::runtime_error(std::string("F2BlocksOut(Disk): fseek(") + region + ") failed");
     const std::size_t got = std::fread(buf, 1, bytes, f);
     if (got != bytes)
-        throw std::runtime_error(std::string("F2BlocksOut(Disk): short read(") + what + ")");
+        throw std::runtime_error(std::string("F2BlocksOut(Disk): short read(") + region + ")");
 }
 
 // Reconstruct the disk header from the descriptor's shape (the on-disk layout is fully
@@ -86,8 +86,8 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
     switch (tier) {
         case OutputTier::Resident: {
             const double* f2_dev = resident.f2_device();
-            const double* vp_dev = resident.vpair_device();
-            if (!f2_dev || !vp_dev) return;
+            const double* vpair_dev = resident.vpair_device();
+            if (!f2_dev || !vpair_dev) return;
             int prev = 0;
             STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
             // Dtor-must-not-throw, so the restore can't go through the throwing
@@ -96,7 +96,7 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             // status instead of vanishing — cudaSetDevice can surface a prior async
             // launch error (CUDA-13 Device-Management). The [[nodiscard]] return is
             // (void)-discarded for the -Werror build; happy path is byte-identical.
-            struct G { int d; ~G() { (void)STEPPE_CUDA_WARN(cudaSetDevice(d)); } } restore{prev};
+            struct DeviceGuard { int dev; ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); } } restore{prev};
             STEPPE_CUDA_CHECK(cudaSetDevice(resident.device_id));
             const std::size_t off = slab * static_cast<std::size_t>(b);
             // PIN the caller's pageable D2H destinations for the copy window
@@ -113,7 +113,7 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             RegisteredHostRegion pin_vp(vpair_slab_out, bytes);
             STEPPE_CUDA_CHECK(cudaMemcpy(f2_slab_out, f2_dev + off, bytes,
                                          cudaMemcpyDeviceToHost));
-            STEPPE_CUDA_CHECK(cudaMemcpy(vpair_slab_out, vp_dev + off, bytes,
+            STEPPE_CUDA_CHECK(cudaMemcpy(vpair_slab_out, vpair_dev + off, bytes,
                                          cudaMemcpyDeviceToHost));
             break;
         }

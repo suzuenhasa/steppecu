@@ -39,13 +39,13 @@ BlockPartition assign_blocks(std::span<const int> chrom,
     // Parallel arrays, one entry per SNP: a length mismatch is a programming
     // error upstream. Be defensive against it (use the shorter extent) rather
     // than reading out of bounds; an honest caller always passes equal lengths.
-    const long m = static_cast<long>(
+    const long M = static_cast<long>(
         chrom.size() < genpos_morgans.size() ? chrom.size() : genpos_morgans.size());
-    if (m <= 0) {
+    if (M <= 0) {
         return out;  // empty input → empty block_id, n_block == 0.
     }
 
-    out.block_id.resize(static_cast<std::size_t>(m));
+    out.block_id.resize(static_cast<std::size_t>(M));
 
     // Single deterministic pass in file order (architecture.md §12: the block id
     // is a pure, launch-order-independent function of (chrom, genpos)).
@@ -53,7 +53,7 @@ BlockPartition assign_blocks(std::span<const int> chrom,
     int prev_local_bin = 0;
     long global = -1;  // global block counter; first SNP bumps it to 0.
 
-    for (long s = 0; s < m; ++s) {
+    for (long s = 0; s < M; ++s) {
         const int c = chrom[static_cast<std::size_t>(s)];
         const int local = block_of(genpos_morgans[static_cast<std::size_t>(s)], block_size_morgans);
 

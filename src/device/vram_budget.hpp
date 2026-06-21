@@ -134,7 +134,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// the budget tier the VRAM quotient is far below that, but on the high-VRAM tier
 /// (PRO-6000 96 GB ⇒ larger `n_block`/smaller per-block footprint) the quotient can
 /// exceed 65 535 — the latent launch failure that fires only on the capable box.
-/// Capping `fit` at `kMaxGridZ` HERE makes the existing per-bucket chunk loop tile
+/// Capping `fit_blocks` at `kMaxGridZ` HERE makes the existing per-bucket chunk loop tile
 /// the batch over z (no new loop): a bucket with more than `kMaxGridZ` blocks is
 /// processed in ≤ kMaxGridZ-block chunks, so the launch is correct on BOTH tiers.
 ///
@@ -151,11 +151,11 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
     const std::size_t per_block = per_block_chunk_bytes(P, s_pad);
     // per_block ≥ 4·sizeof(double) > 0 whenever P > 0 (the caller's guard); guard
     // the divide anyway so the helper is total on any input.
-    const std::size_t fit = (per_block > 0u) ? (budget / per_block) : 0u;
+    const std::size_t fit_blocks = (per_block > 0u) ? (budget / per_block) : 0u;
     // Clamp the quotient against nb_total AND the hardware grid-z limit IN size_t,
     // THEN narrow — the X-5/F9 wrap fix folded with the X-7/B6 grid-z tiling cap.
     const std::size_t capped =
-        std::min({fit, static_cast<std::size_t>(nb_total),
+        std::min({fit_blocks, static_cast<std::size_t>(nb_total),
                   static_cast<std::size_t>(core::kMaxGridZ)});
     // A single block must always be attempted even if the budget says zero (it
     // then OOMs cleanly mid-chunk rather than silently producing nothing).

@@ -64,7 +64,7 @@ namespace {
 /// FIXED-ORDER g = 0 .. G-1 placement of each device's resident partial into the
 /// DISJOINT slice [slab·b0, slab·(b0+nb)) of ONE root-resident full result, the SINGLE
 /// home of the placement loop the two combine entries used to copy-paste verbatim
-/// (they differed ONLY by their dst base pointers — local dResult_* vs the
+/// (they differed ONLY by their dst base pointers — local result_* vs the
 /// DeviceF2Blocks::Impl raw pointers; [7.1] dedup). Also fills out_block_sizes[b0+lb]
 /// host-side in the same fixed g order (int, no device math). The caller has already
 /// bound the root device + created root_stream and drains it ONCE after this returns.
@@ -83,7 +83,7 @@ namespace {
 /// STEPPE_CUDA_CHECK on the copy. NO per-peer sync here: the resident peer buffers are
 /// NOT freed mid-loop (they live on the DevicePartial until the caller frees them AFTER
 /// the combine, §7), so there is nothing to fence against; ONE drain below covers all.
-void place_partials_into(double* dst_f2_base, double* dst_vp_base,
+void place_partials_into(double* dst_f2_base, double* dst_vpair_base,
                          std::span<DevicePartial> partials, std::size_t slab,
                          int root_device_id, cudaStream_t root_stream,
                          std::vector<int>& out_block_sizes) {
@@ -104,15 +104,15 @@ void place_partials_into(double* dst_f2_base, double* dst_vp_base,
         const std::size_t dst_off = slab * static_cast<std::size_t>(part.b0);  // disjoint slice base
 
         double* dst_f2 = dst_f2_base + dst_off;
-        double* dst_vp = dst_vp_base + dst_off;
+        double* dst_vpair = dst_vpair_base + dst_off;
         const double* src_f2 = part.impl->f2.data();      // resident on part.device_id
-        const double* src_vp = part.impl->vpair.data();
+        const double* src_vpair = part.impl->vpair.data();
 
         if (part.device_id == root_device_id) {
             // ROOT's own resident partial: D2D copy into its disjoint slice (no peer hop).
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst_f2, src_f2, part_bytes,
                                               cudaMemcpyDeviceToDevice, root_stream));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst_vp, src_vp, part_bytes,
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst_vpair, src_vpair, part_bytes,
                                               cudaMemcpyDeviceToDevice, root_stream));
         } else {
             // PEER's resident partial: enable peer access root<-device_id. The enable is
@@ -128,8 +128,8 @@ void place_partials_into(double* dst_f2_base, double* dst_vp_base,
             // peer-reachable surfaces here via the throwing STEPPE_CUDA_CHECK.
             STEPPE_CUDA_CHECK(cudaMemcpyPeerAsync(dst_f2, root_device_id,
                                                   src_f2, part.device_id, part_bytes, root_stream));
-            STEPPE_CUDA_CHECK(cudaMemcpyPeerAsync(dst_vp, root_device_id,
-                                                  src_vp, part.device_id, part_bytes, root_stream));
+            STEPPE_CUDA_CHECK(cudaMemcpyPeerAsync(dst_vpair, root_device_id,
+                                                  src_vpair, part.device_id, part_bytes, root_stream));
         }
         // NO per-peer cudaDeviceSynchronize here (Item 2): the resident peer buffers are
         // NOT freed mid-loop (they live on the DevicePartial until the caller frees them
@@ -184,8 +184,8 @@ F2BlockTensor combine_f2_partials_resident(
     // D2D/peer copy into the disjoint slice IS the byte-faithful placement (it
     // reproduces −0.0 exactly, like the host std::copy_n; a memset+`+=` would have
     // flipped −0.0 to +0.0 — cleanup B7). NO place-add kernel, NO accumulator zeroing.
-    DeviceBuffer<double> dResult_f2(total);
-    DeviceBuffer<double> dResult_vp(total);
+    DeviceBuffer<double> result_f2(total);
+    DeviceBuffer<double> result_vpair(total);
 
     // ---- The combined result (host) ------------------------------------------
     // f2/vpair are resized, NOT zero-assigned: the single final D2H overwrites every
@@ -201,8 +201,8 @@ F2BlockTensor combine_f2_partials_resident(
 
     // ---- FIXED-ORDER g = 0 .. G-1 placement into DISJOINT result slices ------
     // Single-homed in place_partials_into (the [7.1] dedup); the dst base is the local
-    // dResult_* buffers for this host-returning entry. The final D2H follows below.
-    place_partials_into(dResult_f2.data(), dResult_vp.data(), partials, slab,
+    // result_* buffers for this host-returning entry. The final D2H follows below.
+    place_partials_into(result_f2.data(), result_vpair.data(), partials, slab,
                         root_device_id, root_stream, out.block_sizes);
 
     // ---- ONE sync, then the SINGLE final D2H of the full result (the only D2H) ----
@@ -215,10 +215,10 @@ F2BlockTensor combine_f2_partials_resident(
     if (total > 0) {
         const std::size_t bytes = total * sizeof(double);
         RegisteredHostRegion pin_f2(out.f2.data(), bytes);   // pinned D2H (graceful degrade)
-        RegisteredHostRegion pin_vp(out.vpair.data(), bytes);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dResult_f2.data(),
+        RegisteredHostRegion pin_vpair(out.vpair.data(), bytes);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), result_f2.data(),
                                           bytes, cudaMemcpyDeviceToHost, root_stream));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dResult_vp.data(),
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), result_vpair.data(),
                                           bytes, cudaMemcpyDeviceToHost, root_stream));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(root_stream));
     }
@@ -231,7 +231,7 @@ F2BlockTensor combine_f2_partials_resident(
 // root's own partial, cudaMemcpyPeerAsync for each peer's), same single drain — but it
 // builds the full result directly into a DeviceF2Blocks::Impl on the root and OMITS the
 // final D2H. The ONLY difference at the placement call is the dst base pointers
-// (out.impl->f2/vpair raw vs the host sibling's local dResult_*). The assembled tensor
+// (out.impl->f2/vpair raw vs the host sibling's local result_*). The assembled tensor
 // is bit-identical to the host-returning combine's result (same bytes, same placement,
 // raw copy preserving −0.0; §12); the ONLY difference is it stays RESIDENT in VRAM.
 DeviceF2Blocks combine_f2_partials_resident_device(
@@ -263,7 +263,7 @@ DeviceF2Blocks combine_f2_partials_resident_device(
 
     // ---- The DEVICE-RESIDENT full result (NO host F2BlockTensor, NO final D2H) ----
     // ONE full-shape device RESULT on the root, allocated as the DeviceF2Blocks::Impl
-    // buffers (REPLACING the host-returning sibling's local dResult_f2/dResult_vp): the
+    // buffers (REPLACING the host-returning sibling's local result_f2/result_vpair): the
     // peer/D2D copies write DIRECTLY into out.impl->f2/out.impl->vpair. NO memset (the
     // disjoint tiling covers every slab exactly once). block_sizes placed host-side in
     // the fixed g order (int; identical to the host baseline).
@@ -276,13 +276,13 @@ DeviceF2Blocks combine_f2_partials_resident_device(
     out.impl->f2 = DeviceBuffer<double>(total);
     out.impl->vpair = DeviceBuffer<double>(total);
     double* result_f2 = out.impl->f2.data();
-    double* result_vp = out.impl->vpair.data();
+    double* result_vpair = out.impl->vpair.data();
 
     // ---- FIXED-ORDER g = 0 .. G-1 placement into DISJOINT result slices ------
     // Single-homed in place_partials_into (the [7.1] dedup); the dst base is the
     // DeviceF2Blocks::Impl raw pointers for this device-resident entry — the ONLY
-    // difference from the host-returning sibling (which passes its local dResult_*).
-    place_partials_into(result_f2, result_vp, partials, slab,
+    // difference from the host-returning sibling (which passes its local result_*).
+    place_partials_into(result_f2, result_vpair, partials, slab,
                         root_device_id, root_stream, out.block_sizes);
 
     // ---- ONE sync, then RETURN the device-resident result (NO final D2H) ----------

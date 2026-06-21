@@ -132,7 +132,7 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
 
     const long Pl = static_cast<long>(P);
     const long idx = i + Pl * s;            // (i,s) in a [P  × M] matrix
-    const long sidx = i + (kF2StackedBlocks * Pl) * s;  // (i,s) in the [2P × M] stacked S
+    const long stack_idx = i + (kF2StackedBlocks * Pl) * s;  // (i,s) in the [2P × M] stacked S
 
     const bool valid = (V_raw[idx] != 0.0);
     // Hoist the single raw-Q load (20.3/LOW): Q_raw[idx] feeds BOTH the masked q
@@ -151,8 +151,8 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
 
     Q_masked[idx] = q;
     V_out[idx] = valid ? 1.0 : 0.0;
-    S[sidx] = q * q;             // Qsq block (rows 0..P-1)
-    S[Pl + sidx] = hc;           // Hc  block (rows P..2P-1)
+    S[stack_idx] = q * q;        // Qsq block (rows 0..P-1)
+    S[Pl + stack_idx] = hc;      // Hc  block (rows P..2P-1)
 }
 
 // =============================================================================
@@ -188,21 +188,21 @@ __global__ void assemble_f2_kernel(const double* __restrict__ G,
     const int j = blockIdx.y * blockDim.y + threadIdx.y;  // col
     if (i >= P || j >= P) return;
 
-    const size_t Pp = static_cast<size_t>(P);
-    const size_t twoP = kF2StackedBlocks * Pp;
+    const size_t Pz = static_cast<size_t>(P);
+    const size_t twoP = kF2StackedBlocks * Pz;
     const size_t si = static_cast<size_t>(i);
     const size_t sj = static_cast<size_t>(j);
 
-    const double Gij = G[si + sj * Pp];
-    const double vp = Vpair[si + sj * Pp];
+    const double Gij = G[si + sj * Pz];
+    const double vp = Vpair[si + sj * Pz];
     const double sumsq_i = R[si + sj * twoP];          // R(i,   j)
     const double sumsq_j = R[sj + si * twoP];          // R(j,   i)
-    const double hsum_i = R[(Pp + si) + sj * twoP];    // R(P+i, j)
-    const double hsum_j = R[(Pp + sj) + si * twoP];    // R(P+j, i)
+    const double hsum_i = R[(Pz + si) + sj * twoP];    // R(P+i, j)
+    const double hsum_j = R[(Pz + sj) + si * twoP];    // R(P+j, i)
 
     const double num =
         assemble_f2_numerator(sumsq_i, sumsq_j, Gij, hsum_i, hsum_j);
-    f2[si + sj * Pp] = finalize_f2(num, vp);
+    f2[si + sj * Pz] = finalize_f2(num, vp);
 }
 
 }  // namespace

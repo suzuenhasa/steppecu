@@ -235,13 +235,13 @@ struct SvdResult {
     // Sort columns by descending singular value.
     std::vector<int> order(static_cast<std::size_t>(n));
     for (int j = 0; j < n; ++j) order[static_cast<std::size_t>(j)] = j;
-    for (int a = 0; a < n - 1; ++a)
-        for (int b = a + 1; b < n; ++b)
-            if (sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(b)])] >
-                sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(a)])]) {
-                int t = order[static_cast<std::size_t>(a)];
-                order[static_cast<std::size_t>(a)] = order[static_cast<std::size_t>(b)];
-                order[static_cast<std::size_t>(b)] = t;
+    for (int i = 0; i < n - 1; ++i)
+        for (int j = i + 1; j < n; ++j)
+            if (sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(j)])] >
+                sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])]) {
+                int tmp_idx = order[static_cast<std::size_t>(i)];
+                order[static_cast<std::size_t>(i)] = order[static_cast<std::size_t>(j)];
+                order[static_cast<std::size_t>(j)] = tmp_idx;
             }
 
     SvdResult out;

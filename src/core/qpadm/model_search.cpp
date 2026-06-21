@@ -105,22 +105,22 @@ std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blo
     }
 
     if (!small.empty()) {
-        std::vector<QpAdmResult> sr;
+        std::vector<QpAdmResult> small_results;
         try {
-            sr = be.fit_models_batched(f2, std::span<const QpAdmModel>(small), opts, prec);
+            small_results = be.fit_models_batched(f2, std::span<const QpAdmModel>(small), opts, prec);
         } catch (const std::runtime_error&) {
             // No batched override on this backend (the CpuBackend oracle sentinel) —
             // route the small-path models through the per-model default too.
-            sr = fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
+            small_results = fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
         }
-        for (std::size_t k = 0; k < sr.size() && k < small_pos.size(); ++k)
-            out[small_pos[k]] = std::move(sr[k]);
+        for (std::size_t k = 0; k < small_results.size() && k < small_pos.size(); ++k)
+            out[small_pos[k]] = std::move(small_results[k]);
     }
     if (!large.empty()) {
-        std::vector<QpAdmResult> lr =
+        std::vector<QpAdmResult> large_results =
             fit_models_batched_default(be, f2, std::span<const QpAdmModel>(large), opts);
-        for (std::size_t k = 0; k < lr.size() && k < large_pos.size(); ++k)
-            out[large_pos[k]] = std::move(lr[k]);
+        for (std::size_t k = 0; k < large_results.size() && k < large_pos.size(); ++k)
+            out[large_pos[k]] = std::move(large_results[k]);
     }
     return out;
 }

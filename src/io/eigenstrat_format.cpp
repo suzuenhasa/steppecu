@@ -53,7 +53,7 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
     // the loop bound would be an out-of-bounds write (DRY; NAMING-STYLE-STANDARD
     // §2.5 single-source; group-5 5.3).
     constexpr int kHeaderCounts = 2;  // # decimal counts after the magic (n_ind, n_snp)
-    std::size_t ints[kHeaderCounts] = {0, 0};
+    std::size_t counts[kHeaderCounts] = {0, 0};
     int got = 0;
     std::size_t i = magic_end;
     while (i < text.size() && got < kHeaderCounts) {
@@ -88,15 +88,15 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
             h.format = GenoFormat::Unknown;
             return h;
         }
-        if (any) ints[got++] = v;
+        if (any) counts[got++] = v;
     }
     if (got < kHeaderCounts) {  // could not read both counts → malformed header, route to Unknown
         h.format = GenoFormat::Unknown;
         return h;
     }
 
-    h.n_ind = ints[0];
-    h.n_snp = ints[1];
+    h.n_ind = counts[0];
+    h.n_snp = counts[1];
     h.header_bytes = kGenoHeaderBytes;
 
     if (h.format == GenoFormat::Tgeno) {

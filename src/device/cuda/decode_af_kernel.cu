@@ -122,14 +122,14 @@ decode_af_kernel(const std::uint8_t* __restrict__ packed,
     if (s < M && i < P) {
         const std::size_t seg_begin = pop_offsets[static_cast<std::size_t>(i)];
         const std::size_t seg_end = pop_offsets[static_cast<std::size_t>(i) + 1];
-        const std::size_t byte_in_rec =
+        const std::size_t byte_in_record =
             static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
         const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
 
         std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
         std::int64_t an = 0;  // count of non-missing individuals
         for (std::size_t g = seg_begin; g < seg_end; ++g) {
-            const std::uint8_t byte = packed[g * bytes_per_record + byte_in_rec];
+            const std::uint8_t byte = packed[g * bytes_per_record + byte_in_record];
             const std::uint8_t code = genotype_code(byte, pos_in_byte);
             accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
         }

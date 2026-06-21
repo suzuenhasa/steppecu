@@ -89,10 +89,10 @@ private:
         // device_buffer.cuh). Destructor never throws (architecture.md §7); a nonzero
         // destroy status is reported to the debug-only warning sink, never thrown.
         if (s_) {
-            const cudaError_t e = cudaStreamDestroy(s_);
-            if (e != cudaSuccess) {
+            const cudaError_t err = cudaStreamDestroy(s_);
+            if (err != cudaSuccess) {
                 STEPPE_LOG_WARN("cudaStreamDestroy at teardown: %s",
-                                cudaGetErrorString(e));
+                                cudaGetErrorString(err));
             }
         }
         s_ = nullptr;

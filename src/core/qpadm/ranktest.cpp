@@ -21,13 +21,13 @@
 namespace steppe::core::qpadm {
 
 bool popdrop_feasible(const std::vector<double>& weights) {
-    bool any = false;
+    bool has_surviving = false;
     for (double w : weights) {
         if (std::isnan(w)) continue;  // a dropped slot — not a constraint
-        any = true;
+        has_surviving = true;
         if (w < 0.0 || w > 1.0) return false;
     }
-    return any;  // at least one surviving weight, all in [0,1]
+    return has_surviving;  // at least one surviving weight, all in [0,1]
 }
 
 namespace {
@@ -37,20 +37,20 @@ namespace {
 /// qinv[ind,ind] with ind = the row-major block indices (surv_row*nr + j). The Q
 /// sub-block is carried for rank_Q observability. x_total is row-major k = j+nr*i.
 void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
-                 const std::vector<int>& surv, F4Blocks& xr, JackknifeCov& cr) {
+                 const std::vector<int>& surv, F4Blocks& x_reduced, JackknifeCov& cov_reduced) {
     const int nr = x.nr;
     const int nl_red = static_cast<int>(surv.size());
     const int m_full = x.nl * nr;  // read below as the full-vec stride in the Qinv gather
     const int m_red = nl_red * nr;
 
-    xr.nl = nl_red;
-    xr.nr = nr;
-    xr.n_block = x.n_block;
-    xr.x_total.assign(static_cast<std::size_t>(m_red), 0.0);
+    x_reduced.nl = nl_red;
+    x_reduced.nr = nr;
+    x_reduced.n_block = x.n_block;
+    x_reduced.x_total.assign(static_cast<std::size_t>(m_red), 0.0);
     for (int ii = 0; ii < nl_red; ++ii) {
         const int i = surv[static_cast<std::size_t>(ii)];
         for (int j = 0; j < nr; ++j)
-            xr.x_total[static_cast<std::size_t>(j + nr * ii)] =
+            x_reduced.x_total[static_cast<std::size_t>(j + nr * ii)] =
                 x.x_total[static_cast<std::size_t>(j + nr * i)];
     }
 
@@ -61,10 +61,10 @@ void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
         for (int j = 0; j < nr; ++j)
             ind[static_cast<std::size_t>(j + nr * ii)] = j + nr * i;
     }
-    cr.m = m_red;
-    cr.status = cov.status;
-    cr.Qinv.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
-    cr.Q.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
+    cov_reduced.m = m_red;
+    cov_reduced.status = cov.status;
+    cov_reduced.Qinv.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
+    cov_reduced.Q.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
     for (int a = 0; a < m_red; ++a)
         for (int b = 0; b < m_red; ++b) {
             const std::size_t src = static_cast<std::size_t>(ind[static_cast<std::size_t>(a)]) +
@@ -72,8 +72,8 @@ void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
                                         static_cast<std::size_t>(ind[static_cast<std::size_t>(b)]);
             const std::size_t dst = static_cast<std::size_t>(a) +
                                     static_cast<std::size_t>(m_red) * static_cast<std::size_t>(b);
-            cr.Qinv[dst] = cov.Qinv[src];
-            if (!cov.Q.empty()) cr.Q[dst] = cov.Q[src];
+            cov_reduced.Qinv[dst] = cov.Qinv[src];
+            if (!cov.Q.empty()) cov_reduced.Q[dst] = cov.Q[src];
         }
 }
 
@@ -87,8 +87,8 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
     if (drop >= 0) row.pat[static_cast<std::size_t>(drop)] = '1';
     row.wt = (drop >= 0) ? 1 : 0;
 
-    F4Blocks xr; JackknifeCov cr;
-    reduce_rows(x, cov, surv, xr, cr);
+    F4Blocks x_reduced; JackknifeCov cov_reduced;
+    reduce_rows(x, cov, surv, x_reduced, cov_reduced);
     const int nl_red = static_cast<int>(surv.size());
 
     // AT2 res$popdrop fits EACH (sub-)model at its FULL rank f4rank = len(surv)-1 (the
@@ -104,10 +104,10 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
     // still issued (its chisq/dof/p at r=nl_red-1 are the reported row values; the
     // f4rank column is the fitted rank).
     const int r_fit = nl_red - 1;
-    const RankSweep rs = run_rank_sweep(be, xr, cr, opts.rank_alpha, opts, precision);
+    const RankSweep rs = run_rank_sweep(be, x_reduced, cov_reduced, opts.rank_alpha, opts, precision);
     const std::size_t ri = static_cast<std::size_t>(r_fit < 0 ? 0 : r_fit);
     row.f4rank = r_fit;
-    row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : qpadm_dof(xr.nl, xr.nr, r_fit);
+    row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : qpadm_dof(x_reduced.nl, x_reduced.nr, r_fit);
     row.chisq = (ri < rs.chisq.size()) ? rs.chisq[ri] : 0.0;
     row.p = (ri < rs.p.size()) ? rs.p[ri] : 0.0;
     row.status = rs.status;
@@ -115,7 +115,7 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
     // Per-source weights at the FITTED rank (length nl_full; NaN for dropped slots).
     row.weight.assign(static_cast<std::size_t>(nl_full),
                       std::numeric_limits<double>::quiet_NaN());
-    const GlsWeights gw = gls_weights(be, xr, cr, r_fit, opts, precision);
+    const GlsWeights gw = gls_weights(be, x_reduced, cov_reduced, r_fit, opts, precision);
     if (gw.status == Status::Ok && gw.w.size() == surv.size()) {
         for (std::size_t s = 0; s < surv.size(); ++s)
             row.weight[static_cast<std::size_t>(surv[s])] = gw.w[s];

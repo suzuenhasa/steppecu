@@ -96,23 +96,23 @@ gather_group_kernel(const double* __restrict__ Q_all,
 
     // Destination (i, c) within slab k.
     const long dQidx = static_cast<long>(i) + Pl * c + Psp * k;
-    const long dSqsq = static_cast<long>(i) + twoP * c + twoPsp * k;
-    const long dShc = (Pl + static_cast<long>(i)) + twoP * c + twoPsp * k;
+    const long dst_sumsq_row = static_cast<long>(i) + twoP * c + twoPsp * k;
+    const long dst_hc_row = (Pl + static_cast<long>(i)) + twoP * c + twoPsp * k;
 
     if (c < sz) {
         const long src = block_offsets[id] + c;              // contiguous feeder column
         const long sQ = static_cast<long>(i) + Pl * src;     // (i, src) in [P × M]
-        const long sSqsq = static_cast<long>(i) + twoP * src;        // Qsq row
-        const long sShc = (Pl + static_cast<long>(i)) + twoP * src;  // Hc row
+        const long src_sumsq_row = static_cast<long>(i) + twoP * src;        // Qsq row
+        const long src_hc_row = (Pl + static_cast<long>(i)) + twoP * src;    // Hc row
         Qg[dQidx] = Q_all[sQ];
         Vg[dQidx] = V_all[sQ];
-        Sg[dSqsq] = S_all[sSqsq];
-        Sg[dShc] = S_all[sShc];
+        Sg[dst_sumsq_row] = S_all[src_sumsq_row];
+        Sg[dst_hc_row] = S_all[src_hc_row];
     } else {
         Qg[dQidx] = 0.0;
         Vg[dQidx] = 0.0;
-        Sg[dSqsq] = 0.0;
-        Sg[dShc] = 0.0;
+        Sg[dst_sumsq_row] = 0.0;
+        Sg[dst_hc_row] = 0.0;
     }
 }
 
@@ -165,29 +165,29 @@ assemble_blocks_group_kernel(const double* __restrict__ Gg,
     const int k = blockIdx.z;                             // group slab
     if (i >= P || j >= P || k >= n_in_group) return;
 
-    const size_t Pp = static_cast<size_t>(P);
-    const size_t twoP = kF2StackedBlocks * Pp;
+    const size_t Pz = static_cast<size_t>(P);
+    const size_t twoP = kF2StackedBlocks * Pz;
     const size_t si = static_cast<size_t>(i);
     const size_t sj = static_cast<size_t>(j);
 
-    const size_t gSlab = Pp * Pp * static_cast<size_t>(k);          // [P×P] slab base
-    const size_t rSlab = twoP * Pp * static_cast<size_t>(k);        // [2P×P] slab base
-    const size_t ppOff = si + sj * Pp;                             // (i,j) in the [P×P] slab (20.3/LOW hoist)
+    const size_t g_slab = Pz * Pz * static_cast<size_t>(k);         // [P×P] slab base
+    const size_t r_slab = twoP * Pz * static_cast<size_t>(k);       // [2P×P] slab base
+    const size_t pp_off = si + sj * Pz;                            // (i,j) in the [P×P] slab (20.3/LOW hoist)
 
-    const double Gij = Gg[gSlab + ppOff];
-    const double vp = Vpairg[gSlab + ppOff];
-    const double sumsq_i = Rg[rSlab + si + sj * twoP];          // Rg(i,   j)
-    const double sumsq_j = Rg[rSlab + sj + si * twoP];          // Rg(j,   i)
-    const double hsum_i = Rg[rSlab + (Pp + si) + sj * twoP];    // Rg(P+i, j)
-    const double hsum_j = Rg[rSlab + (Pp + sj) + si * twoP];    // Rg(P+j, i)
+    const double Gij = Gg[g_slab + pp_off];
+    const double vp = Vpairg[g_slab + pp_off];
+    const double sumsq_i = Rg[r_slab + si + sj * twoP];         // Rg(i,   j)
+    const double sumsq_j = Rg[r_slab + sj + si * twoP];         // Rg(j,   i)
+    const double hsum_i = Rg[r_slab + (Pz + si) + sj * twoP];   // Rg(P+i, j)
+    const double hsum_j = Rg[r_slab + (Pz + sj) + si * twoP];   // Rg(P+j, i)
 
     const double num =
         assemble_f2_numerator(sumsq_i, sumsq_j, Gij, hsum_i, hsum_j);
 
     const int id = block_ids_in_group[k];
-    const size_t dstSlab = Pp * Pp * static_cast<size_t>(id);   // resident [P×P×n_block] slab
-    f2_all[dstSlab + ppOff] = finalize_f2(num, vp);
-    vpair_all[dstSlab + ppOff] = vp;
+    const size_t dst_slab = Pz * Pz * static_cast<size_t>(id);  // resident [P×P×n_block] slab
+    f2_all[dst_slab + pp_off] = finalize_f2(num, vp);
+    vpair_all[dst_slab + pp_off] = vp;
 }
 
 }  // namespace

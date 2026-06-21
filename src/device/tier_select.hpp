@@ -99,10 +99,10 @@ inline constexpr const char* kForceTierTokenDisk     = "disk";      ///< -> Outp
         int P, long /*M*/, int max_tile, int max_nb, int max_s_pad) noexcept {
     if (P <= 0) return 0;
     const std::size_t p = static_cast<std::size_t>(P);
-    const std::size_t t = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
+    const std::size_t max_tile_z = static_cast<std::size_t>(max_tile < 0 ? 0 : max_tile);
     const std::size_t nb = static_cast<std::size_t>(max_nb < 0 ? 0 : max_nb);
     const std::size_t feeder =                                           // raw + tile feeder
-        (kFeederRawBufsPerPop * p * t + kFeederOutBufsPerPop * p * t);    // (3+4)·P·tile, named in config.hpp
+        (kFeederRawBufsPerPop * p * max_tile_z + kFeederOutBufsPerPop * p * max_tile_z);  // (3+4)·P·tile, named in config.hpp
     const std::size_t slabs =                                            // gather/GEMM scratch
         per_block_chunk_elems(P, max_s_pad) * nb;                        // single-source coeffs (vram_budget.hpp)
     const std::size_t ring =                                             // §5 device ring

@@ -75,14 +75,15 @@ public:
         }
     }
 
-    DeviceBuffer(DeviceBuffer&& o) noexcept
-        : ptr_(std::exchange(o.ptr_, nullptr)), size_(std::exchange(o.size_, 0)) {}
+    DeviceBuffer(DeviceBuffer&& other) noexcept
+        : ptr_(std::exchange(other.ptr_, nullptr)),
+          size_(std::exchange(other.size_, 0)) {}
 
-    DeviceBuffer& operator=(DeviceBuffer&& o) noexcept {
-        if (this != &o) {
+    DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+        if (this != &other) {
             reset();
-            ptr_ = std::exchange(o.ptr_, nullptr);
-            size_ = std::exchange(o.size_, 0);
+            ptr_ = std::exchange(other.ptr_, nullptr);
+            size_ = std::exchange(other.size_, 0);
         }
         return *this;
     }

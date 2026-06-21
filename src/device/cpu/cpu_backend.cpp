@@ -442,34 +442,37 @@ public:
         for (int b = 0; b < nb; ++b) n_ld += static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
         const double n = static_cast<double>(n_ld);
 
-        const std::size_t M = static_cast<std::size_t>(m);
-        std::vector<double> xtau(M * static_cast<std::size_t>(nb), 0.0);
+        // m_sz: the flattened model dim (nl*nr) widened for indexing. Capital M is
+        // reserved for the SNP axis file-wide ([6.3]; standard §4 row 2); this alias
+        // names the model-dim widening so the two never read as the same letter.
+        const std::size_t m_sz = static_cast<std::size_t>(m);
+        std::vector<double> xtau(m_sz * static_cast<std::size_t>(nb), 0.0);
         for (int b = 0; b < nb; ++b) {
             const double bl = static_cast<double>(block_sizes[static_cast<std::size_t>(b)]);
             const double h = n / bl;
-            const double sh = std::sqrt(h - 1.0);
+            const double sqrt_h_minus_1 = std::sqrt(h - 1.0);
             for (int k = 0; k < m; ++k) {
-                const double loo = x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
+                const double loo = x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)];
                 const double est = x.x_total[static_cast<std::size_t>(k)];
                 const double totline = tot_line_[static_cast<std::size_t>(k)];
-                xtau[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)] =
-                    (est * h - loo * (h - 1.0) - totline) / sh;
+                xtau[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)] =
+                    (est * h - loo * (h - 1.0) - totline) / sqrt_h_minus_1;
             }
         }
         // Q = xtau · xtauᵀ / numblocks  (m×m, symmetric, column-major).
-        out.Q.assign(M * M, 0.0);
+        out.Q.assign(m_sz * m_sz, 0.0);
         for (int kk = 0; kk < m; ++kk) {
             for (int ll = kk; ll < m; ++ll) {
                 long double acc = 0.0L;
                 for (int b = 0; b < nb; ++b) {
                     acc += static_cast<long double>(
-                               xtau[static_cast<std::size_t>(kk) + M * static_cast<std::size_t>(b)]) *
+                               xtau[static_cast<std::size_t>(kk) + m_sz * static_cast<std::size_t>(b)]) *
                            static_cast<long double>(
-                               xtau[static_cast<std::size_t>(ll) + M * static_cast<std::size_t>(b)]);
+                               xtau[static_cast<std::size_t>(ll) + m_sz * static_cast<std::size_t>(b)]);
                 }
                 const double v = static_cast<double>(acc / static_cast<long double>(nb));
-                out.Q[static_cast<std::size_t>(kk) + M * static_cast<std::size_t>(ll)] = v;
-                out.Q[static_cast<std::size_t>(ll) + M * static_cast<std::size_t>(kk)] = v;
+                out.Q[static_cast<std::size_t>(kk) + m_sz * static_cast<std::size_t>(ll)] = v;
+                out.Q[static_cast<std::size_t>(ll) + m_sz * static_cast<std::size_t>(kk)] = v;
             }
         }
         // Fudge (OQ-4): Qf = Q; diag(Qf) += fudge * tr(Q); Qinv = inverse(Qf).
@@ -561,13 +564,13 @@ public:
             rs.rd_chisq[k] = rs.chisq[static_cast<std::size_t>(r)];
             rs.rd_p[k] = rs.p[static_cast<std::size_t>(r)];
             if (r - 1 >= 0) {  // nested diff to the next-lower rank (r-1)
-                const int dd = rs.dof[static_cast<std::size_t>(r - 1)] -
-                               rs.dof[static_cast<std::size_t>(r)];
-                const double cd = rs.chisq[static_cast<std::size_t>(r - 1)] -
-                                  rs.chisq[static_cast<std::size_t>(r)];
-                rs.rd_dofdiff[k] = dd;
-                rs.rd_chisqdiff[k] = cd;
-                rs.rd_p_nested[k] = core::internal::pchisq_upper(cd, dd);
+                const int dof_diff = rs.dof[static_cast<std::size_t>(r - 1)] -
+                                     rs.dof[static_cast<std::size_t>(r)];
+                const double chisq_diff = rs.chisq[static_cast<std::size_t>(r - 1)] -
+                                          rs.chisq[static_cast<std::size_t>(r)];
+                rs.rd_dofdiff[k] = dof_diff;
+                rs.rd_chisqdiff[k] = chisq_diff;
+                rs.rd_p_nested[k] = core::internal::pchisq_upper(chisq_diff, dof_diff);
             } else {  // the last row (rank 0): NA
                 rs.rd_dofdiff[k] = INT_MIN;
                 rs.rd_chisqdiff[k] = std::numeric_limits<double>::quiet_NaN();
@@ -635,7 +638,9 @@ public:
         const QpAdmOptions& opts, const Precision& precision) override {
         const int nl = x.nl, nr = x.nr, nb = x.n_block;
         const int m = nl * nr;
-        const std::size_t M = static_cast<std::size_t>(m);
+        // m_sz: the flattened model dim (nl*nr) widened for indexing; capital M is
+        // reserved for the SNP axis file-wide ([6.3]; standard §4 row 2).
+        const std::size_t m_sz = static_cast<std::size_t>(m);
         std::vector<double> wmat(static_cast<std::size_t>(nb < 0 ? 0 : nb) *
                                  static_cast<std::size_t>(nl), 0.0);
         if (m <= 0 || nb <= 0 || nl <= 0) return wmat;
@@ -644,10 +649,10 @@ public:
             rep.nl = nl;
             rep.nr = nr;
             rep.n_block = 1;
-            rep.x_total.assign(M, 0.0);
+            rep.x_total.assign(m_sz, 0.0);
             for (int k = 0; k < m; ++k)
                 rep.x_total[static_cast<std::size_t>(k)] =
-                    x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
+                    x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)];
             const GlsWeights gw = gls_weights(rep, cov, r, opts, precision);
             for (int i = 0; i < nl; ++i)
                 wmat[static_cast<std::size_t>(b) * static_cast<std::size_t>(nl) +
@@ -679,10 +684,12 @@ private:
     void compute_loo_and_total(F4Blocks& x, const std::vector<int>& block_sizes) {
         const int nl = x.nl, nr = x.nr, nb = x.n_block;
         const int m = nl * nr;
-        const std::size_t M = static_cast<std::size_t>(m);
-        x.x_loo.assign(M * static_cast<std::size_t>(nb), 0.0);
-        x.x_total.assign(M, 0.0);
-        tot_line_.assign(M, 0.0);
+        // m_sz: the flattened model dim (nl*nr) widened for indexing; capital M is
+        // reserved for the SNP axis file-wide ([6.3]; standard §4 row 2).
+        const std::size_t m_sz = static_cast<std::size_t>(m);
+        x.x_loo.assign(m_sz * static_cast<std::size_t>(nb), 0.0);
+        x.x_total.assign(m_sz, 0.0);
+        tot_line_.assign(m_sz, 0.0);
         if (m <= 0 || nb <= 0) return;
 
         long double n_ld = 0.0L;
@@ -693,7 +700,7 @@ private:
             // tot_ij = weighted.mean(X[k,:], bl) = Σ X*bl / Σ bl
             long double num = 0.0L;
             for (int b = 0; b < nb; ++b) {
-                num += static_cast<long double>(x.x_blocks[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
+                num += static_cast<long double>(x.x_blocks[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)]) *
                        static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
             }
             const double tot_ij = static_cast<double>(num / n_ld);
@@ -701,33 +708,33 @@ private:
             for (int b = 0; b < nb; ++b) {
                 const double bl = static_cast<double>(block_sizes[static_cast<std::size_t>(b)]);
                 const double rel = bl / n;
-                const double xv = x.x_blocks[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)];
-                x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)] =
+                const double xv = x.x_blocks[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)];
+                x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)] =
                     (tot_ij - xv * rel) / (1.0 - rel);
             }
             // tot_line[k] = weighted.mean(loo[k,:], 1 - bl/n)
-            long double wln = 0.0L, wld = 0.0L;
+            long double wmean_num = 0.0L, wmean_den = 0.0L;
             for (int b = 0; b < nb; ++b) {
                 const double w = 1.0 - static_cast<double>(block_sizes[static_cast<std::size_t>(b)]) / n;
-                wln += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
-                       static_cast<long double>(w);
-                wld += static_cast<long double>(w);
+                wmean_num += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)]) *
+                             static_cast<long double>(w);
+                wmean_den += static_cast<long double>(w);
             }
-            tot_line_[static_cast<std::size_t>(k)] = static_cast<double>(wln / wld);
+            tot_line_[static_cast<std::size_t>(k)] = static_cast<double>(wmean_num / wmean_den);
             // est[k] = mean(tot_line - loo)*nb + weighted.mean(loo, bl)
             long double diffsum = 0.0L;
             for (int b = 0; b < nb; ++b) {
                 diffsum += static_cast<long double>(tot_line_[static_cast<std::size_t>(k)]) -
-                           static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]);
+                           static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)]);
             }
             const double term1 = static_cast<double>(diffsum / static_cast<long double>(nb)) *
                                  static_cast<double>(nb);
-            long double wbn = 0.0L;
+            long double wmean_bl_num = 0.0L;
             for (int b = 0; b < nb; ++b) {
-                wbn += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + M * static_cast<std::size_t>(b)]) *
-                       static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+                wmean_bl_num += static_cast<long double>(x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)]) *
+                                static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
             }
-            const double term2 = static_cast<double>(wbn / n_ld);
+            const double term2 = static_cast<double>(wmean_bl_num / n_ld);
             x.x_total[static_cast<std::size_t>(k)] = term1 + term2;
         }
     }

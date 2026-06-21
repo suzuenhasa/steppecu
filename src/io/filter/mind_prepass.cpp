@@ -44,9 +44,9 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
         // sample. Same bit extraction as the decode front-end (io::code_in_byte,
         // MSB-first) and the same missing sentinel (io::kMissingCode == code 3), so
         // "non-missing" here is identical to the decode's notion.
-        for (std::size_t g = 0; g < n_ind; ++g) {
-            const std::uint8_t* rec = in.packed + g * in.bytes_per_record;
-            std::size_t nm = 0;
+        for (std::size_t ind = 0; ind < n_ind; ++ind) {
+            const std::uint8_t* rec = in.packed + ind * in.bytes_per_record;
+            std::size_t nonmissing_count = 0;
             for (std::size_t s = 0; s < n_snp; ++s) {
                 // Byte index s/kCodesPerByte and in-byte position s%kCodesPerByte:
                 // the packing radix is single-homed in io::kCodesPerByte (the same 4
@@ -55,11 +55,12 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
                 const std::uint8_t byte = rec[s / kPerByte];
                 const std::uint8_t code =
                     code_in_byte(byte, static_cast<int>(s % kPerByte));
-                if (code != kMissingCode) ++nm;
+                if (code != kMissingCode) ++nonmissing_count;
             }
-            out.nonmissing[g] = nm;
-            out.missing_frac[g] =
-                1.0 - static_cast<double>(nm) / static_cast<double>(n_snp);
+            out.nonmissing[ind] = nonmissing_count;
+            out.missing_frac[ind] =
+                1.0 - static_cast<double>(nonmissing_count) /
+                          static_cast<double>(n_snp);
         }
     } else {
         // No SNPs (or no data): the missing fraction is UNDEFINED. We treat every
@@ -76,10 +77,10 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
     // Resolve the kept-sample set via the shared predicate. At the no-op default
     // (not active) every sample passes (missing_frac <= 1.0 always); when active,
     // a sample is dropped iff its missing fraction exceeds the threshold.
-    for (std::size_t g = 0; g < n_ind; ++g) {
-        const double frac = active ? out.missing_frac[g] : kNoMissingFrac;
+    for (std::size_t ind = 0; ind < n_ind; ++ind) {
+        const double frac = active ? out.missing_frac[ind] : kNoMissingFrac;
         if (sample_passes_mind(frac, cfg.mind_max_missing)) {
-            out.kept.push_back(g);
+            out.kept.push_back(ind);
         }
     }
     return out;

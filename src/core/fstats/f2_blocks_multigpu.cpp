@@ -401,11 +401,11 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     // resolved by the frozen helper. The tier is gated on gpus[0].caps.free_vram_bytes
     // (the ROOT device only) because this tiered path is single-GPU — it always drives
     // gpus[0] regardless of G (multi-GPU tiered sharding is the follow-on).
-    const std::size_t free_vram = resources.gpus[0].caps.free_vram_bytes;
-    const std::size_t free_host = steppe::device::free_host_ram_bytes();
+    const std::size_t free_vram_bytes = resources.gpus[0].caps.free_vram_bytes;
+    const std::size_t free_host_bytes = steppe::device::free_host_ram_bytes();
     const steppe::device::OutputTier tier = steppe::device::resolve_output_tier(
         resources.config.force_tier, std::getenv("STEPPE_FORCE_TIER"),
-        P, M, n_block, free_vram, free_host);
+        P, M, n_block, free_vram_bytes, free_host_bytes);
 
     steppe::device::F2BlocksOut out;
     // out.P is NOT pre-set here: every switch arm below overwrites it unconditionally
