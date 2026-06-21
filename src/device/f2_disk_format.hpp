@@ -4,12 +4,12 @@
 // block-major: a fixed 64-byte header, then the f2 region (all blocks' [P²] slabs
 // contiguous, block-major), then the vpair region (same), then the block_sizes
 // trailer. The within-block layout is column-major i+P·j and the block axis is outer,
-// so it is BYTE-IDENTICAL to F2BlockTensor's i + P·j + P·P·b (fstats.hpp:38-46) and to
+// so it is BYTE-IDENTICAL to F2BlockTensor's i + P·j + P·P·b (include/steppe/fstats.hpp:37-46) and to
 // the resident tensor — a whole-file read is a single memcpy-equivalent into an
 // F2BlockTensor, and the fit preads block b's f2 slab at a computed offset without
 // scanning. AT2-compat is a GOAL: the [P²]-slab-per-block block-major layout matches
 // AT2's on-disk f2_blocks ordering; the steppe header is a fixed 64-byte prefix the M7
-// reader strips. Storage is FP64 in EVERY precision mode (fstats.hpp:18) -> dtype fixed.
+// reader strips. Storage is FP64 in EVERY precision mode (include/steppe/fstats.hpp:17) -> dtype fixed.
 #ifndef STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 #define STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 
@@ -20,7 +20,7 @@ namespace steppe::device {
 
 inline constexpr char     kF2DiskMagic[8]   = {'S','T','P','F','2','B','K','1'};  // "STPF2BK1"
 inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // on-disk format version (the writer stamps this; a future M7 reader checks it — single home so the two cannot drift, group-5 5.3)
-inline constexpr std::uint32_t kF2DiskDtypeFp64 = 1u;  // FP64 little-endian (storage is FP64 in every precision mode, fstats.hpp:18)
+inline constexpr std::uint32_t kF2DiskDtypeFp64 = 1u;  // FP64 little-endian (storage is FP64 in every precision mode, include/steppe/fstats.hpp:17)
 
 /// 64-byte fixed header at file offset 0 (little-endian, packed). The remainder:
 ///   header[64] | f2[P²·n_block doubles] | vpair[P²·n_block doubles] | block_sizes[n_block int32]

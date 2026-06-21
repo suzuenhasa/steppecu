@@ -16,7 +16,7 @@
 // PRECISION POLICY IS THE LAW (MEASURED on real AADR v66, 2× RTX 5090, CUDA 13 --
 // never on synthetic data; ROADMAP §0 cautionary tale). The matmul-heavy f2
 // GEMMs default to FIXED-slice Ozaki emulation at mantissa_bits = 40 (≈ native
-// FP64 accuracy, 7–13× faster). 32 bits is the faster, 8.6e-9-worst-case option.
+// FP64 accuracy, 7–17× faster). 32 bits is the faster, 8.6e-9-worst-case option.
 // Native FP64 is the oracle / fallback. DYNAMIC mantissa control is the rejected
 // parity trap (it overshoots to ~60 bits on real data and collapses to native
 // speed for no win) and is INTENTIONALLY NOT OFFERED by this type.

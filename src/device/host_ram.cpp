@@ -16,7 +16,14 @@ namespace steppe::device {
 std::size_t free_host_ram_bytes() noexcept {
     struct sysinfo si{};
     if (sysinfo(&si) != 0) return 0;
+    // mem_unit==0 is the legacy (pre-2.3.23 kernel) convention where the size fields
+    // are already in bytes (no unit field), so the 1u branch is NOT dead — it scales by
+    // one on those kernels. On modern kernels the fields are multiples of mem_unit bytes.
     const std::size_t unit = si.mem_unit ? si.mem_unit : 1u;
+    // Count the reclaimable buffer cache as free: bufferram is reclaimable under memory
+    // pressure, so it is available to the host-RAM tier. Other reclaimable fields
+    // (sharedram, the page cache not exposed here) are deliberately omitted — freeram +
+    // bufferram is the conservative sysinfo(2) lower bound the tier is gated on.
     return (static_cast<std::size_t>(si.freeram) +
             static_cast<std::size_t>(si.bufferram)) * unit;
 }

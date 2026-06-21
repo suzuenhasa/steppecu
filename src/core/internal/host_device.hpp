@@ -57,8 +57,10 @@
 //
 // Mirrors the NDEBUG contract of <cassert>: NDEBUG ⇒ release ⇒ the body is
 // removed entirely (and, like `assert`, its argument is NOT evaluated, so it
-// must be free of needed side effects). The trailing `(void)0` keeps the macro
-// usable as a statement (it expects a terminating `;` at the call site).
+// must be free of needed side effects). Either way the call site supplies the
+// terminating `;`, so the expansion is always a well-formed statement: under
+// NDEBUG it is the release no-op `(void)0` (below), and in debug builds it is
+// the argument itself (`__VA_ARGS__`).
 // ---------------------------------------------------------------------------
 #if defined(NDEBUG)
 #  define STEPPE_DEBUG_ONLY(...) ((void)0)

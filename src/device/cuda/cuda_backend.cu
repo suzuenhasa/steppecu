@@ -2049,7 +2049,8 @@ public:
     }
 
     /// S6 — GLS weights via AT2 ALS on the GPU (the FROZEN CONTRACT §2d). xmat from
-    /// x_total → on-device SVD seed → 20 ALS opt_A/opt_B iters → constrained weight
+    /// x_total → on-device SVD seed → opts.als_iterations (default 20) ALS opt_A/opt_B
+    /// iters → constrained weight
     /// solve → normalize Σw=1 → chisq. All on-device, native FP64.
     [[nodiscard]] GlsWeights gls_weights(const F4Blocks& x,
                                          const JackknifeCov& cov,

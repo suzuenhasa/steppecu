@@ -213,6 +213,9 @@ struct SvdResult {
     const auto Vcol = [&](int j) -> double* { return &Vfull[cm_index(0, j, n)]; };
 
     constexpr double kTol = 1e-15;
+    // Convergence safety cap, NOT load-bearing: one-sided Jacobi converges in far
+    // fewer sweeps for these small (≤ a few dozen) shapes; 60 only bounds a pathological
+    // non-converging input so the loop cannot spin.
     constexpr int kMaxSweeps = 60;
     // PARITY-FROZEN (§3.2/§12): the Jacobi off-diagonal convergence floor. Name only —
     // the magnitude 1e-30 is oracle-diffable against the AT2/cuSOLVER SVD and must not change.

@@ -52,7 +52,7 @@ struct SnpTable {
 /// Chromosome codes are parsed as integers when numeric (via std::from_chars, so
 /// the parse itself never throws); the common non-numeric/sex labels (X, Y, MT)
 /// are mapped to the EIGENSTRAT codes single-homed in eigenstrat_format.hpp
-/// (kChromCodeX=23, kChromCodeY=24, kChromCodeMt=90) so adjacent-equality (all the
+/// (kChromCodeX / kChromCodeY / kChromCodeMt) so adjacent-equality (all the
 /// block rule needs) is well-defined. Any other non-numeric code — and an all-digit code
 /// too large for int (overflow) — maps to a stable negative sentinel per distinct
 /// label, never an uncaught throw (only adjacent-equality matters to the block

@@ -345,8 +345,9 @@ void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* 
     // `cdiv(long,long)` overload — x is the only axis that reaches 2^31−1, so M
     // (which `MatView::M`'s `long` type permits past 2^31, and which exceeds the
     // 65 535 y/z cap already at M > ~1.05M SNPs) MUST ride it. P rides gridDim.y
-    // through `grid_for`, whose y/z-cap assert applies (P ≤ ~4266 ≪ 65 535, so it is
-    // always satisfied). The block is SQUARE (16×16), so the in-block thread→element
+    // through `grid_for`, whose y/z-cap assert applies (P ≤ a few thousand ≪ the
+    // 65 535 y/z cap, so it is always satisfied). The block is SQUARE (16×16), so
+    // the in-block thread→element
     // map is transposed INSIDE the kernel (threadIdx.x→pop, threadIdx.y→SNP) for
     // coalesced column-major access (cleanup 20.1/MED) WITHOUT moving M off gridDim.x
     // — the grid orientation here is unchanged.
@@ -409,7 +410,9 @@ void run_f2_gemms(cublasHandle_t handle, const Precision& precision,
 void launch_assemble_f2(const double* dG, const double* dVpair, const double* dR,
                         double* dF2, int P, cudaStream_t stream) {
     // 2-D block over the [P × P] output; grid math from the one launch-config home
-    // (replaces the spike's dim3 block(16,16), ROADMAP §4).
+    // (replaces the spike's dim3 block(16,16), ROADMAP §4). P rides BOTH axes via
+    // grid_for; as in launch_f2_feeder, grid_for's y/z-cap assert is what enforces
+    // `P fits gridDim.y` (P ≤ a few thousand ≪ the 65 535 y/z cap, always satisfied).
     const dim3 block(steppe::kCdivBlock, steppe::kCdivBlock);
     const dim3 grid(static_cast<unsigned>(core::grid_for(P)),
                     static_cast<unsigned>(core::grid_for(P)));

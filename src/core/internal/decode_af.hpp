@@ -111,7 +111,7 @@ STEPPE_HD inline void accumulate_genotype(std::uint8_t code,
 struct AfResult {
     double q = 0.0;  ///< ref-allele frequency in [0,1] (0 where an == 0)
     double n = 0.0;  ///< non-missing haploid count = ploidy * an
-    double v = 0.0;  ///< validity mask: 1.0 if an > 0, else 0.0
+    double v = 0.0;  ///< validity mask: 1.0 if an > 0 && ploidy > 0, else 0.0
 };
 
 /// Finalize Q/V/N for one (population, SNP) from the integer accumulators:

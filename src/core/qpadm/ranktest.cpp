@@ -92,6 +92,7 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
     PopDropRow row;
     row.pat.assign(static_cast<std::size_t>(nl_full), '0');
     if (drop >= 0) row.pat[static_cast<std::size_t>(drop)] = '1';
+    // AT2 popdrop "weight" column = number of dropped sources (0/1), NOT mixture weight
     row.wt = (drop >= 0) ? 1 : 0;
 
     F4Blocks x_reduced; JackknifeCov cov_reduced;

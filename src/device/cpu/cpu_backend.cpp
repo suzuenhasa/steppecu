@@ -138,9 +138,10 @@ struct F2Pair { double f2 = 0.0; double vpair = 0.0; };
 
 /// The CPU reference backend: the scalar / long-double correctness oracle.
 ///
-/// One method (`compute_f2`); later milestones add decode / gemm / jackknife /
-/// svd here alongside the GPU backend. Move-only ownership via the base class's
-/// deleted copy/move (architecture.md §9).
+/// Implements the full S0–S7 oracle surface against which the GPU backend is
+/// diffed: compute_f2 / compute_f2_blocks, decode_af, assemble_f4, jackknife_cov,
+/// rank_test, rank_sweep, gls_weights, and gls_weights_loo_batched. Move-only
+/// ownership via the base class's deleted copy/move (architecture.md §9).
 class CpuBackend final : public ComputeBackend {
 public:
     [[nodiscard]] F2Result compute_f2(const core::MatView& Q,
@@ -533,6 +534,8 @@ public:
         const int rmax = (nl < nr ? nl : nr) - 1;
         if (rmax < 0) {  // a degenerate (0-row/0-col) model — no candidate rank
             rs.status = Status::RankDeficient;
+            // SVD dispatch report (1=gesvdjBatched, 2=per-model gesvd); see the
+            // full normal-path note below for the kGesvdjMaxDim crossover.
             rs.svd_path = (nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim) ? 1 : 2;
             return rs;
         }
@@ -633,6 +636,11 @@ public:
     /// x_total is the LOO replicate slice loo[:,:,b] (gls_weights reads x_total →
     /// xmat), REUSING cov.Qinv unchanged (the AT2 parity pin). Returns wmat[nb*nl]
     /// row-major (b*nl + i). Native FP64.
+    ///
+    /// The per-block AT2 ALS is shared with S7: this seam reuses gls_weights per LOO
+    /// block (design §3 nested_models), so no extra ALS virtual is needed — the S7
+    /// driver in core/qpadm reaches the same solve through gls_weights with a
+    /// one-block F4Blocks.
     [[nodiscard]] std::vector<double> gls_weights_loo_batched(
         const F4Blocks& x, const JackknifeCov& cov, int r,
         const QpAdmOptions& opts, const Precision& precision) override {
@@ -661,11 +669,6 @@ public:
         }
         return wmat;
     }
-
-    // ---- AT2 ALS shared with S7 (a public-on-the-class entry for the LOO re-fit;
-    //      design §3 nested_models reuses gls_weights per LOO block). The S7
-    //      driver in core/qpadm calls gls_weights with a one-block F4Blocks, so no
-    //      extra virtual is needed.
 
 private:
     // tot_line_ caches the AT2 weighted.mean(loo, 1 - bl/n) line vector (length m)

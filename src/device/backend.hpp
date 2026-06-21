@@ -165,7 +165,7 @@ struct RankSweep {
     /// DISPATCH report (SPEC §5:231; observability only). 0 = on-device Jacobi
     /// (the path EXECUTED at these sizes by M(fit-4)); 1 = gesvdjBatched WOULD be
     /// selected (nl,nr<=32); 2 = per-model gesvd WOULD be selected (else). The
-    /// executed SVD is the deterministic on-device Jacobi at all sizes in M(fit-2);
+    /// executed SVD is the deterministic on-device Jacobi at all sizes in M(fit-4);
     /// the cuSOLVER routing is the documented PENDING seam (fit-engine.md §1.4).
     int svd_path = 0;
 

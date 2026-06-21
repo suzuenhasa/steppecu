@@ -50,13 +50,13 @@ namespace steppe::core {
 namespace {
 
 // Enforce the SHARED Q/V/N precondition the backend documents but assumes
-// (backend.hpp:144 "Q, V, N share the same P and M"): the three views must agree
-// on P and M, and both extents must be non-negative (a negative P/M is an
-// uninitialized/garbage view that would cast to a colossal size_t in the backend
-// allocation). Debug-only — under NDEBUG STEPPE_ASSERT is a no-op, so the hot
-// path is unchanged and the parameters are then unreferenced (hence
-// [[maybe_unused]], so warnings-as-errors holds on a Release build); in debug it
-// aborts with file/line rather than reading past a short view's storage
+// (backend.hpp compute_f2 preconditions: "Q, V, N share the same P and M"): the
+// three views must agree on P and M, and both extents must be non-negative (a
+// negative P/M is an uninitialized/garbage view that would cast to a colossal
+// size_t in the backend allocation). Debug-only — under NDEBUG STEPPE_ASSERT is
+// a no-op, so the hot path is unchanged and the parameters are then unreferenced
+// (hence [[maybe_unused]], so warnings-as-errors holds on a Release build); in
+// debug it aborts with file/line rather than reading past a short view's storage
 // (views.hpp::element does no bounds check). One home for both the M0 and M4
 // entry points so they cannot diverge (§8 DRY). Cleanup B11 / F-2 / F-3.
 void validate_qvn([[maybe_unused]] const MatView& Q, [[maybe_unused]] const MatView& V,

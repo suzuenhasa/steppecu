@@ -60,7 +60,7 @@ using core::AfResult;
 using core::finalize_af;
 using core::genotype_code;
 using core::kDecodeBlockX;  // SNP axis (32 = one warp, warp-aligned for coalescing)
-using core::kDecodeBlockY;  // population axis (32*8 = 256 threads/block)
+using core::kDecodeBlockY;  // population axis (8; block is 32x8 = 256 threads)
 
 namespace {
 

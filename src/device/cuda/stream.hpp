@@ -3,8 +3,8 @@
 // RAII Stream / Event wrappers (architecture.md §2 RAII, §7, §8; ROADMAP §5).
 //
 // Replaces the spike's bare `cudaEventCreate`/`cudaEventDestroy` pairs (one per
-// timed GEMM in f2_emu_spike.cu:267-323, f2_prec_acc.cu, f2_timing.cu — ROADMAP
-// §1 "no RAII"), where every `exit()` error path leaked the events. Here lifetime
+// timed GEMM in f2_emu_spike.cu, f2_prec_acc.cu, f2_timing.cu — ROADMAP §1
+// "no RAII"), where every `exit()` error path leaked the events. Here lifetime
 // is tied to scope and destroyed exactly once.
 //
 // Shape (architecture.md §7): both types are fully move-only — move-construct AND

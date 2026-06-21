@@ -30,8 +30,8 @@ struct SeResult {
 
 /// Compute weight SEs over the n_block leave-one-out replicates (AT2
 /// get_weights_covariance). For each block b: build the nl×nr xmat from
-/// x.x_loo[:,:,b] and re-solve the weights via `be.gls_weights`, reusing
-/// `cov.Qinv`. Then scale wmat by (numreps-1)/sqrt(numreps) (the !boot branch)
+/// x.x_loo[:,:,b] and re-solve the weights via `be.gls_weights_loo_batched`,
+/// reusing `cov.Qinv`. Then scale wmat by (numreps-1)/sqrt(numreps) (the !boot branch)
 /// and take se = sqrt(diag(cov(wmat))), z = weight/se. `weight` is the full-data
 /// weight vector (for z). Native FP64.
 [[nodiscard]] SeResult se_from_loo(ComputeBackend& be, const F4Blocks& x,

@@ -8,9 +8,10 @@
 // fast-path). The combine fork — and ONLY it — references the CUDA-RDC device symbol
 // combine_f2_partials_p2p (device/p2p_combine.hpp), so it stays in the entry-point TU.
 //
-// WHY THIS SPLIT EXISTS (cleanup D1/T1, B9). These two steps — the block-aligned
-// shard PLAN and the per-device concurrent FAN-OUT that produces each device's
-// compact partial — are the host-pure heart of the multi-GPU algorithm: the
+// WHY THIS SPLIT EXISTS (cleanup D1/T1, B9). The shard plan plus the three fan-out
+// variants (the block-aligned shard PLAN and the host-staged / device-resident /
+// direct per-device concurrent FAN-OUT entries that produce each device's compact
+// partial) are the host-pure heart of the multi-GPU algorithm: the
 // sub-view / dense-local-block-id transform, the std::jthread fan-out, the
 // exception-ptr rethrow, the empty-/n_block<G-shard handling. They depend ONLY on
 // the CUDA-free ComputeBackend seam (Resources::gpus[g].backend->compute_f2_blocks),

@@ -32,6 +32,8 @@ namespace {
     std::vector<double> diag(nc, 0.0);
     for (int c = 0; c < ncols; ++c) {
         const double mc = mean[static_cast<std::size_t>(c)];  // loop-invariant w.r.t. inner i
+        // long double accumulator: extra precision for the sum-of-squares to match AT2 cov()
+        // (§3.3 never narrow accumulators — keep long double, the rest is double-by-design).
         long double acc = 0.0L;
         for (int i = 0; i < nrows; ++i) {
             const double d = row_major_at(i, c) - mc;

@@ -21,7 +21,10 @@
 // EXPECTED capability-degrade (P2P canAccessPeer="no", or
 // cudaErrorPeerAccessAlreadyEnabled) tags-and-degrades rather than faulting. The
 // fault checks above are for unrecoverable calls; the statistic path uses only
-// those, so §12 parity is identical on both capability tiers (TODO M4.5).
+// those, so §12 parity is identical on both capability tiers.
+// TODO(M4.5): exercise this two-tier (CAP-1/CAP-2) §12 parity claim in CI — run
+// the goldens on both a P2P-enabled and a P2P-disabled tier so the "identical on
+// both" assertion is gated, not just asserted in prose (architecture.md §11.4).
 //
 // This is a CUDA header (`.cuh`): it includes <cuda_runtime.h>/<cublas_v2.h> and
 // is therefore PRIVATE to steppe_device (architecture.md §4 layering, §8 link

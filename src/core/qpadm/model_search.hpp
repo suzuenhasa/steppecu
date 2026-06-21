@@ -24,7 +24,8 @@ namespace steppe::core::qpadm {
 /// popdrop), for ONE model, on `be`'s device. Both the CudaBackend (device-resident
 /// batched kernels) and the CpuBackend (the scalar oracle) reach it through the SAME
 /// five virtuals run_qpadm uses, so the device batched path and the host oracle are
-/// bit-comparable per model. `feasible` is the popdrop full-model row's feasible flag.
+/// bit-comparable per model. The popdrop full-model row's feasibility rides
+/// QpAdmResult::popdrop_feasible (qpadm.hpp), not a parameter here.
 [[nodiscard]] QpAdmResult fit_one_model_device(ComputeBackend& be,
                                                const device::DeviceF2Blocks& f2,
                                                const QpAdmModel& model,

@@ -1,8 +1,11 @@
 // src/core/fstats/f2_blocks_multigpu_core.cpp
 //
 // The HOST-PURE, CUDA-FREE, P2P-FREE core of the SPMG precompute orchestrator
-// (f2_blocks_multigpu_core.hpp): the block-aligned shard PLAN and the per-device
-// concurrent FAN-OUT that produces each device's compact partial. References ONLY
+// (f2_blocks_multigpu_core.hpp): the block-aligned shard PLAN (plan_multigpu_shards)
+// and THREE per-device concurrent FAN-OUT entries that produce each device's compact
+// partial, all over one shared fan_out_shards helper — compute_multigpu_partials
+// (host-staged), compute_multigpu_partials_resident (device-resident), and
+// compute_multigpu_partials_into (direct into a caller buffer). References ONLY
 // the CUDA-free ComputeBackend seam, the CUDA-free plan_block_shards, and
 // core::block_ranges — NEVER the device-RDC P2P symbol — so a GPU-free host test can
 // link it without device-linking the CUDA backend (cleanup D1/T1, B9).
@@ -88,7 +91,9 @@ void fan_out_shards(const MatView& Q, const MatView& V, const MatView& N,
                     // Zero-copy column sub-views (data + P*s0). For an empty shard
                     // M_local == 0 and the offset is harmless (the backend early-
                     // returns before any deref). The same s0/s1 for Q, V, N (they
-                    // share P/M).
+                    // share P/M). The `s0 < 0 ? 0` clamp is belt-and-suspenders against
+                    // a malformed negative range so the unsigned col_off cannot wrap
+                    // (well-formed block-aligned shards tile [0, n_block) non-negative).
                     const std::size_t col_off =
                         static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
                     const MatView Qg{Q.data + col_off, P, M_local};
@@ -97,7 +102,9 @@ void fan_out_shards(const MatView& Q, const MatView& V, const MatView& N,
 
                     // Dense, zero-based LOCAL block_id of length M_local. Built in the
                     // worker (off the issue-critical path; owns its own slice):
-                    // block_id_local[k] = global block_id[s0+k] - sh.b0.
+                    // block_id_local[k] = global block_id[s0+k] - sh.b0. The
+                    // `M_local < 0 ? 0` clamp likewise guards a malformed negative range
+                    // so the unsigned vector length cannot wrap (empty shard ⇒ M_local==0).
                     std::vector<int> block_id_local(
                         static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
                     for (long k = 0; k < M_local; ++k) {
