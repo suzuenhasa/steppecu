@@ -5,7 +5,6 @@
 #ifndef STEPPE_DEVICE_DEVICE_PARTIAL_HPP
 #define STEPPE_DEVICE_DEVICE_PARTIAL_HPP
 
-#include <cstddef>
 #include <memory>
 #include <vector>
 

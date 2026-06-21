@@ -9,7 +9,6 @@
 #include "device/tier_select.hpp"
 
 #include <cctype>
-#include <cstring>
 #include <sys/sysinfo.h>
 
 namespace steppe::device {

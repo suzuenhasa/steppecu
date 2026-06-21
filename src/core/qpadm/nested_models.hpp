@@ -7,9 +7,10 @@
 // (the AT2 parity pin — AT2 does NOT re-invert per replicate), then forms the
 // delete-1 jackknife covariance of the weight replicates → se, z.
 //
-// In M(fit-1) this is an n_block host loop over gls_weights (correctness first,
-// design §2); the batched device S7 is M(fit-3). No new backend virtual is added —
-// the batched-capable seam stays clean.
+// The per-LOO-block re-fits run through the batched-capable backend seam
+// gls_weights_loo_batched (design §2): the CUDA backend runs all n_block on-device
+// in one batched launch; the CpuBackend overrides it with the oracle host loop. No
+// new backend virtual is added — the batched-capable seam stays clean.
 #ifndef STEPPE_CORE_QPADM_NESTED_MODELS_HPP
 #define STEPPE_CORE_QPADM_NESTED_MODELS_HPP
 

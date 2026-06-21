@@ -1764,6 +1764,10 @@ public:
         DeviceBuffer<double> dU(sz.u);
         DeviceBuffer<double> dVt(sz.vt);
         DeviceBuffer<double> dA2(sz.a2);          // 0 ⇒ no alloc (nr>=nl); else nl*nr
+        // dInfo: REQUIRED non-null device out-arg for cusolverDnDgesvd/Dgesvdj (info<0 =
+        // bad param; gesvdj info>0 = non-converged Jacobi). INTENTIONAL DISCARD on this
+        // off-bit-parity large (NRBIG) path — not D2H-copied/checked; a non-converged SVD
+        // would flow into seed/ALS. Cannot drop the arg. (Cholesky dInfo IS checked; [3.4])
         DeviceBuffer<int>    dInfo(sz.info);
         DeviceBuffer<double> dWork(static_cast<std::size_t>(sz.lwork));
         large_svd_V(dXmat, nl, nr, r, dVout, dXt,
@@ -2206,6 +2210,10 @@ public:
                 DeviceBuffer<double> dSvdU(sz.u);
                 DeviceBuffer<double> dSvdVt(sz.vt);
                 DeviceBuffer<double> dSvdA2(sz.a2);  // 0 ⇒ no alloc (nr>=nl)
+                // dSvdInfo: REQUIRED non-null device out-arg for cusolverDnDgesvd/Dgesvdj
+                // (info<0 = bad param; gesvdj info>0 = non-converged Jacobi). INTENTIONAL
+                // DISCARD on this off-bit-parity large (NRBIG) Stage-A LOO sweep — never
+                // D2H-copied/checked across the nb blocks. Cannot drop the arg. [3.4]
                 DeviceBuffer<int>    dSvdInfo(sz.info);
                 DeviceBuffer<double> dSvdWork(static_cast<std::size_t>(sz.lwork));
                 const int svd_lwork = sz.lwork;
@@ -2488,6 +2496,10 @@ private:
             static_cast<std::size_t>(m) * B * sizeof(double*), cudaMemcpyHostToDevice,
             stream_.get()));
         for (int c = 0; c < m; ++c) {
+            // solve_info: REQUIRED non-null HOST out-arg for cusolverDnDpotrsBatched
+            // (reports parameter validity: info<0 ⇒ i-th arg invalid — NOT per-system SPD
+            // status). INTENTIONAL DISCARD: per-column SPD status is already gated by the
+            // potrfBatched dInfo array checked above. Cannot drop the arg. [3.4]
             int solve_info = 0;
             CUSOLVER_CHECK(cusolverDnDpotrsBatched(
                 solver_.get(), CUBLAS_FILL_MODE_LOWER, m, 1 /*nrhs*/, dAptr.data(), m,

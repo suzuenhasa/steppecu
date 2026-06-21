@@ -13,7 +13,6 @@
 #ifndef STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 #define STEPPE_DEVICE_F2_DISK_FORMAT_HPP
 
-#include <cstddef>
 #include <cstdint>
 
 namespace steppe::device {

@@ -62,10 +62,9 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
         // fail-safe is keep-all, never drop-all: with zero SNPs there is no evidence
         // to drop a sample on. This is the OPPOSITE of snp_filter's empty-denominator
         // convention (frac 1.0 ⇒ drop) and the divergence is intentional (the header
-        // documents why). `nonmissing` stays 0 (already assigned) and `missing_frac`
-        // is the default 0.0 (already assigned), so this loop is a no-op kept only as
-        // an explicit statement of the convention.
-        for (std::size_t g = 0; g < n_ind; ++g) out.missing_frac[g] = 0.0;
+        // documents why). No write is needed here: `nonmissing` is already 0 and
+        // `missing_frac` is already the default 0.0 from the assign() above — the
+        // keep-all convention is carried entirely by those defaults. [3.4]
     }
 
     // Resolve the kept-sample set via the shared predicate. At the no-op default

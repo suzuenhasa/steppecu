@@ -40,9 +40,8 @@ void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
                  const std::vector<int>& surv, F4Blocks& xr, JackknifeCov& cr) {
     const int nr = x.nr;
     const int nl_red = static_cast<int>(surv.size());
-    const int m_full = x.nl * nr;
+    const int m_full = x.nl * nr;  // read below as the full-vec stride in the Qinv gather
     const int m_red = nl_red * nr;
-    (void)m_full;
 
     xr.nl = nl_red;
     xr.nr = nr;

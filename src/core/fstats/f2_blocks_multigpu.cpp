@@ -408,7 +408,11 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
         P, M, n_block, free_vram, free_host);
 
     steppe::device::F2BlocksOut out;
-    out.P = P;
+    // out.P is NOT pre-set here: every switch arm below overwrites it unconditionally
+    // from its tier handle (Resident out.P=out.resident.P, HostRam out.P=out.host.P,
+    // Disk out.P=out.disk.P) before any read, and the block_sizes derivation reads only
+    // partition.block_id/M. (Contrast the non-tiered compute_f2_blocks_multigpu, where
+    // out.P = P IS a live parity init mirroring combine_f2_partials_host, §12.) [3.4]
     out.n_block = (n_block < 0 ? 0 : n_block);
 
     // Block_sizes are needed on the result for every tier (the S4 jackknife metadata).

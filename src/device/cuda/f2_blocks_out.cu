@@ -15,12 +15,10 @@
 #include <stdexcept>
 #include <utility>
 
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
-#include "device/cuda/device_buffer.cuh"    // (Impl uses DeviceBuffer; via device_f2_blocks_impl)
-#include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers)
+#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_WARN (device-restore guard)
+#include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers; pulls device_buffer.cuh)
 #include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
 #include "device/f2_disk_format.hpp"        // F2DiskHeader, offsets
-#include "core/internal/log.hpp"            // STEPPE_LOG_WARN (the device-restore guard's STEPPE_CUDA_WARN)
 
 namespace steppe::device {
 
