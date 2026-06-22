@@ -264,6 +264,17 @@ int run_cli(int argc, char** argv) {
                     "--ploidy", "must be auto, 1 (pseudo-haploid), or 2 (diploid); got '" + v + "'");
             },
             "Ploidy policy: auto (AT2 adjust_pseudohaploid, default) | 1 (pseudo-haploid) | 2 (diploid)");
+        // --tier auto|resident|host|disk: the M5 f2_blocks OUTPUT-tier override. auto
+        // (default) = the runtime select_output_tier policy; resident = the device-
+        // resident path (the small-input path, byte-identical to today); host/disk =
+        // the SNP-tile input-streaming tiers that keep the GPU peak independent of M so
+        // high-P full-autosome runs that OOM the resident feeder complete. The raw token
+        // is carried; ConfigBuilder maps it to DeviceConfig::force_tier (unknown token =
+        // InvalidConfig). STEPPE_FORCE_TIER stays the lower-precedence env fallback.
+        sub->add_option_function<std::string>(
+            "--tier", [&](const std::string& v) { extract_args.tier = v; },
+            "f2_blocks output tier: auto | resident | host | disk (default auto; "
+            "host/disk stream the SNP-tile input so high-P runs that OOM resident complete)");
         sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
         // --hash / --no-hash: source-provenance SHA-256 opt-in. DEFAULT OFF — the whole-
         // .geno SHA is a ~tens-of-seconds whole-file read+compress that dominated extract-f2

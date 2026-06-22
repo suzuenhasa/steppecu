@@ -154,39 +154,68 @@ then the limit is **memory, not time**:
 
 | P | filter | SNPs kept | wall | peak VRAM (dev0) | result |
 |---:|---|---:|---:|---:|---|
-| 250 | `--maxmiss 0.5` | 1,104,231 | 17.1 s | ~16–31 GiB* | rc=0, f2.bin 713 MB |
-| 500 | `--maxmiss 0.5` |   (full)  | 26.2 s | 17,544 MiB | **OOM (RC=5)** |
-| 700 | `--maxmiss 0.5` |   (full)  | 37.1 s | 24,518 MiB | **OOM (RC=5)** |
+| 250 | `--maxmiss 0.5` | 1,104,231 | 17.1 s | ~16–31 GiB* | rc=0, f2.bin 713 MB (RESIDENT) |
+| 500 | `--maxmiss 0.5` |   (full)  | 26.2 s | 17,544 MiB | OOM (RC=5) on the OLD RESIDENT-only path |
+| 700 | `--maxmiss 0.5` |   (full)  | 37.1 s | 24,518 MiB | OOM (RC=5) on the OLD RESIDENT-only path |
 
-The OOMs are `cudaErrorMemoryAllocation` on a `DeviceBuffer<double>` AFTER decode:
-the packed genotype matrix frees first (VRAM drops), then the FP64 feeder/raw
-working buffers (~8·P·M doubles) fail to allocate. So with a real (non-collapsed)
-~1.1 M-SNP set, single-GPU extract-f2 **tops out between 250 and 500 pops**; 500
-and 700 both OOM on one 32 GB 5090. This matches the `cuda_backend.cu` budget
-comment ("at P=768/M=584k the raw (10.8 GB) + feeder outputs (17.9 GB) + resident
-f2/Vpair (7.1 GB) sum to 35.8 GB > 32 GB and OOM"). Reaching 700 pops with a real
-SNP set needs multi-GPU (parked) or M-tiling/streaming of the FP64 feeder buffers.
+**SUPERSEDED (ROADMAP §6, the M5 streamed-tier wiring).** The 500/700-pop OOMs
+above were the **un-streamed RESIDENT path** — `extract-f2` called the
+resident-only entry (`compute_f2_blocks_multigpu_device`), whose `7·P·M`-double
+FP64 feeder does not fit a 32 GB 5090 once P passes ~250 at a full ~1.1 M-SNP set.
+That entry's budget wall is real (`cuda_backend.cu`: at P=768/M=584k the raw
+10.8 GB + feeder 17.9 GB + resident f2/Vpair 7.1 GB = 35.8 GB > 32 GB → OOM).
+
+**With the adaptive tiered/streamed path wired in (`extract-f2` now calls the
+UNIFIED `compute_f2_blocks_multigpu_tiered`), single-GPU extract-f2 COMPLETES 700
+pops on 1240K.** The streamed SNP-tile INPUT path keeps the GPU peak independent of
+M, so the resident feeder OOM no longer binds. Re-measured on box5090 (1x RTX 5090,
+`--device 0`, Release, REAL 1240K, `--auto-top-k 700 --maxmiss 0.5`):
+
+| P | filter | tier | SNPs kept | blocks | wall | peak VRAM (dev0) | f2.bin | result |
+|---:|---|---|---:|---:|---:|---:|---:|---|
+| 700 | `--maxmiss 0.5` | **host** (auto-selected) | 1,133,249 | 713 | **57.6 s** | **25,368 MiB** | 5,589,922,916 B (5.59 GB) | **rc=0 — COMPLETES (was OOM)** |
+| 700 | `--maxmiss 0.5` | **disk** (`--tier disk`) | 1,133,249 | 713 | 68.5 s | ~25 GiB (compute phase) | 5,589,922,916 B (5.59 GB) | rc=0 — COMPLETES |
+
+The auto verdict picks **host** (result 5,630 MiB > the resident `7·P·M` feeder
+envelope → stream); `--tier disk` pins the disk-staged variant. **The two 5.59 GB
+`f2.bin` files are BYTE-FOR-BYTE IDENTICAL** (`cmp` clean, identical SHA-256
+`714e6edc5461ef6251c061820593bbd07b647c8b2a1e85bf7cd07ce940828d05`) — the
+streamed==resident guarantee (architecture.md §12) holds at 700-pop production
+scale, not just the 9-pop golden. Peak VRAM ~25 GiB is INDEPENDENT of M (matches
+the c65179f single-GPU evidence: full-autosome `derived_2500` M=584,131 completed
+at P=1000/1500/2000/2500 single-GPU at a flat ~26 GB GPU peak where the resident
+feeder OOMd at P>=768). So single-GPU extract-f2 no longer "tops out between 250
+and 500 pops" — it completes 700 today and scales toward ~2500 via auto-select or
+`--tier disk`; multi-GPU tiered sharding remains the follow-on (parked).
 
 \*The 250-pop maxmiss-0.5 run succeeds (rc=0) but is already near the 32 GB wall;
 peak VRAM was sampled at ~16 GiB by the original sweep and ~31 GiB on the verifier
 re-run (finer sampling caught a higher transient allocation spike) — either way it
 confirms P=250 with a full SNP set is the practical single-GPU ceiling.
 
-**Peak VRAM vs 32 GiB.** Heaviest measured run = 700p decode at **24,518 MiB of
-32,607 (~75 %)** — the in-VRAM packed genotype matrix for 14,057 individuals ×
-1.23 M SNPs (same decode peak for maxmiss 0 and 0.5). Idle baseline 2 MiB.
-The maxmiss-0 sweep peaks well under 32 GB at every P (the SNP collapse keeps the
-feeder buffers tiny); the 32 GB limit binds ONLY when a full SNP set is retained
-(relaxed filter) AND P is large.
+**Peak VRAM vs 32 GiB.** Heaviest measured run = the 700-pop STREAMED (tier=host)
+maxmiss-0.5 run at **25,368 MiB of 32,607 (~78 %)** — and crucially this peak is
+INDEPENDENT of M (the SNP-tile input streaming holds the GPU footprint flat as M
+and P grow). The OLD resident-only path's 24,518 MiB at the 700p decode was the
+in-VRAM packed genotype matrix for 14,057 individuals × 1.23 M SNPs, after which
+its `7·P·M` FP64 feeder OOMd; the streamed path never allocates that feeder.
+Idle baseline 2 MiB. The maxmiss-0 sweep peaks well under 32 GB at every P (the SNP
+collapse keeps the feeder buffers tiny); the OLD 32 GB feeder wall bound only the
+resident path with a full SNP set at large P — and is now lifted by streaming.
 
 *Independently verified on box5090 (1x RTX 5090, sm_120, `--device 0`), Release
 (`build-rel`), REAL 1240K, no-hash. Spot re-runs reproduced exactly: P=250 maxmiss
 0 (10.61 s, 8,557 SNPs, 645 blocks, f2.bin 645,002,644 B, `source_hash_computed:
 false`), P=500 maxmiss 0 (16.71 s, 3 SNPs, f2.bin 12,000,076 B), P=700 maxmiss 0
 (RC=2 filter-empty, 22.60 s, peak 24,518 MiB), P=250 maxmiss 0.5 (rc=0, 17.07 s,
-1,104,231 SNPs), P=500 maxmiss 0.5 (RC=5 OOM, 26.29 s, 17,544 MiB). The only
-deviation from the sweep agent's report is the P=250 maxmiss-0.5 peak-VRAM sample
-(noted above); all rc/SNP/blocks/f2.bin/wall figures matched within noise.*
+1,104,231 SNPs), P=500 maxmiss 0.5 (RC=5 OOM on the OLD resident-only path,
+26.29 s, 17,544 MiB). The only deviation from the sweep agent's report is the
+P=250 maxmiss-0.5 peak-VRAM sample (noted above); all rc/SNP/blocks/f2.bin/wall
+figures matched within noise. NOTE (ROADMAP §6): those P>=500 maxmiss-0.5 OOMs were
+on the un-streamed RESIDENT entry; with the M5 tiered/streamed path now wired into
+`extract-f2`, P=700 maxmiss-0.5 COMPLETES single-GPU (tier=host auto, 57.6 s, peak
+25,368 MiB, f2.bin 5.59 GB; `--tier disk` byte-identical) — see the streamed-tier
+table above.*
 
 ---
 
@@ -345,8 +374,13 @@ buffers, still far under the wall.
 
 ## Limits / failures
 
-- **NO failures, NO OOM** at full 1240K size. Every extract, fit, and the
-  781-model batched rotation exited rc=0 with sensible results.
+- **NO failures, NO OOM** at full 1240K size in the original sweep set. The OLD
+  resident-only extract-f2 DID OOM at P>=500 with a full ~1.1 M-SNP set (the
+  `7·P·M` FP64 feeder exceeded 32 GB); **with the M5 tiered/streamed path wired in
+  (ROADMAP §6), single-GPU extract-f2 now COMPLETES 700 pops** (tier=host
+  auto-selected, 57.6 s, peak 25,368 MiB, f2.bin 5.59 GB; `--tier disk`
+  byte-identical) and scales toward ~2500 (c65179f). Every fit and the 781-model
+  batched rotation exited rc=0 with sensible results.
 - **No silently-dropped coverage** beyond the intended `--maxmiss 0` joint-
   completeness filter (SNPs-kept correctly shrinks as pops are added).
 - **Only the CLI `qpadm-rotate` subcommand is a scaffold** (M(cli-0)); the batched

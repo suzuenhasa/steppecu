@@ -50,6 +50,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>   // std::memcmp (the streamed==resident f2.bin bit-identity gate)
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -193,6 +194,15 @@ bool f2bin_vpair_nonzero(const std::filesystem::path& bin) {
     return false;
 }
 
+// Read a whole file into a byte buffer (binary). Empty vector on open failure.
+std::vector<char> read_file_bytes(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream ss; ss << f.rdbuf();
+    const std::string s = ss.str();
+    return std::vector<char>(s.begin(), s.end());
+}
+
 // ---- The golden expected values (committed golden_fit0.json / golden_fitNA.json). --
 struct Golden {
     std::string name;
@@ -225,6 +235,60 @@ long meta_n_snp_kept(const std::filesystem::path& dir) {
     const auto colon = js.find(':', pos);
     if (colon == std::string::npos) return -1;
     return std::strtol(js.c_str() + colon + 1, nullptr, 10);
+}
+
+// ---- THE STREAMED==RESIDENT BIT-IDENTITY GATE (extract-f2-specific) -----------------
+// The M5 streamed tiers (HostRam/Disk; SNP-tile INPUT streaming) are memcmp BIT-IDENTICAL
+// to the device-resident reference at the library level (test_f2_multigpu_parity). This
+// gate proves the GUARANTEE HOLDS THROUGH THE extract-f2 CLI: run extract-f2 on a SMALL
+// real pop set TWICE — once with the DEFAULT tier (auto -> Resident at this tiny P) and
+// once with --tier disk (forces the streamed SNP-tile input path) — and assert the
+// written f2.bin is BYTE-FOR-BYTE identical (std::memcmp the whole file). f2.bin is fully
+// deterministic from the shape + values (STPF2BK1 header = magic/version/dtype/P/n_block/
+// offsets, all derived from shape; no timestamps), so an identical f2.bin is the
+// end-to-end proof that --tier disk on extract-f2 moves bytes to a different store WITHOUT
+// changing a single computed bit (architecture.md §12 PARITY LAW). HARD-gated (g_failures).
+void run_tier_identity_case(const std::string& bin, const std::string& prefix,
+                            const std::filesystem::path& tmp, const Golden& g) {
+    std::printf("\n========== extract-f2 streamed==resident bit-identity: %s ==========\n",
+                g.name.c_str());
+    const std::filesystem::path dir_default = tmp / (g.name + "_tier_default");
+    const std::filesystem::path dir_disk    = tmp / (g.name + "_tier_disk");
+
+    // DEFAULT (no --tier): auto-select; at this tiny 9-pop P it resolves to Resident.
+    const RunResult ex0 = run_steppe(bin,
+        {"extract-f2", "--prefix", prefix, "--pops", join(g.pops),
+         "--blgsize", std::to_string(g.blgsize_morgans), "--maxmiss", std::to_string(g.maxmiss),
+         "--out", dir_default.string()},
+        tmp, "tier_default_" + g.name);
+    // --tier disk: PIN the streamed disk tier (config.force_tier=Disk -> the SNP-tile
+    // input-streaming path), exercising the streamed compute at small P (auto would not).
+    const RunResult ex1 = run_steppe(bin,
+        {"extract-f2", "--prefix", prefix, "--pops", join(g.pops),
+         "--blgsize", std::to_string(g.blgsize_morgans), "--maxmiss", std::to_string(g.maxmiss),
+         "--tier", "disk", "--out", dir_disk.string()},
+        tmp, "tier_disk_" + g.name);
+
+    check_eq_int("extract-f2 (default tier) exit == 0", ex0.exit_code, 0);
+    check_eq_int("extract-f2 (--tier disk) exit == 0", ex1.exit_code, 0);
+    if (ex0.exit_code != 0 || ex1.exit_code != 0) {
+        std::printf("  default output:\n%s\n  --tier disk output:\n%s\n",
+                    ex0.text.c_str(), ex1.text.c_str());
+        return;
+    }
+    // The --tier disk run must REPORT it chose the disk tier (the override was honored).
+    check_true("--tier disk run reports tier = disk",
+               ex1.text.find("tier = disk") != std::string::npos);
+
+    const std::vector<char> b0 = read_file_bytes(dir_default / "f2.bin");
+    const std::vector<char> b1 = read_file_bytes(dir_disk / "f2.bin");
+    check_true("both f2.bin non-empty", !b0.empty() && !b1.empty());
+    check_true("f2.bin sizes equal", b0.size() == b1.size());
+    const bool identical = (b0.size() == b1.size()) && !b0.empty() &&
+                           std::memcmp(b0.data(), b1.data(), b0.size()) == 0;
+    std::printf("  [%s] f2.bin BIT-IDENTICAL (memcmp): default(%zu B) vs --tier disk(%zu B)\n",
+                identical ? "PASS" : "FAIL", b0.size(), b1.size());
+    if (!identical) ++g_failures;
 }
 
 // Run extract-f2 then qpadm. (A) HARD-gate the mechanical contract; (B) REPORT the AT2
@@ -434,6 +498,9 @@ int main(int argc, char** argv) {
 
     const bool ran0 = run_case(bin, prefix, tmp, fit0);
     if (ran0) run_case(bin, prefix, tmp, fitNA);
+    // The streamed==resident bit-identity gate for extract-f2 (re-uses the small fit0 pop
+    // set): --tier disk f2.bin MUST be byte-identical to the default/Resident f2.bin.
+    if (ran0) run_tier_identity_case(bin, prefix, tmp, fit0);
 
     std::filesystem::remove_all(tmp, ec);
 

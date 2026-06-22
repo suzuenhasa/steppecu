@@ -141,6 +141,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.snp,         args.snp);
     take(merged_.ind,         args.ind);
     take(merged_.out_dir,     args.out_dir);
+    take(merged_.tier,        args.tier);
 
     if (!args.left.empty())  merged_.left  = args.left;
     if (!args.right.empty()) merged_.right = args.right;
@@ -259,6 +260,33 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
         } else {
             return fail("--precision '" + *merged_.precision +
                         "' is unknown (use emu40 | emu32 | fp64 | tf32)");
+        }
+    }
+
+    // ---- --tier auto|resident|host|disk -> DeviceConfig::force_tier (M5) ---------
+    // The f2_blocks OUTPUT-tier override (cli-bindings.md §4.1). This is the SINGLE,
+    // VALIDATED merge site that sets DeviceConfig::force_tier (it had no setter before —
+    // the field defaulted to Auto and only the STEPPE_FORCE_TIER env / the test-set
+    // config field reached resolve_output_tier). Mapped here so the precedence is the
+    // §9 chain: a --tier on the CLI wins, else force_tier stays Auto and
+    // resolve_output_tier falls back to the STEPPE_FORCE_TIER env, then the automatic
+    // select_output_tier policy. The CLI token spellings (resident/host/disk) mirror the
+    // STEPPE_FORCE_TIER env tokens (tier_select.hpp kForceTierToken*); they are repeated
+    // here as plain literals to keep this CUDA-free config layer free of the device
+    // header (architecture.md §4). An unknown token is InvalidConfig (never coerced).
+    if (merged_.tier.has_value()) {
+        const std::string t = to_lower(trim(*merged_.tier));
+        if (t == "auto") {
+            cfg.device_.force_tier = DeviceConfig::ForceTier::Auto;
+        } else if (t == "resident") {
+            cfg.device_.force_tier = DeviceConfig::ForceTier::Resident;
+        } else if (t == "host") {
+            cfg.device_.force_tier = DeviceConfig::ForceTier::HostRam;
+        } else if (t == "disk") {
+            cfg.device_.force_tier = DeviceConfig::ForceTier::Disk;
+        } else {
+            return fail("--tier '" + *merged_.tier +
+                        "' is unknown (use auto | resident | host | disk)");
         }
     }
 

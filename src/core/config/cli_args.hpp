@@ -131,6 +131,14 @@ struct CliArgs {
     std::optional<bool>   transversions_only; ///< --transversions
 
     // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
+    /// --tier auto|resident|host|disk (the M5 f2_blocks OUTPUT-tier override). Raw,
+    /// UNPARSED token; ConfigBuilder maps it to DeviceConfig::force_tier at the single
+    /// merge site (an unknown token is InvalidConfig). `auto` (the default) = the
+    /// select_output_tier runtime policy; resident/host/disk PIN the tier. It is the
+    /// higher-precedence twin of STEPPE_FORCE_TIER (the config field wins; the env stays
+    /// the fallback resolve_output_tier honors). PARITY-NEUTRAL (the tier moves bytes to
+    /// a different store, never a reported number; architecture.md §12).
+    std::optional<std::string> tier;
     std::optional<bool>   dry_run;          ///< --dry-run (report tiers/sizes, no compute)
     /// --hash (default OFF): compute the source-dataset provenance SHA-256s
     /// (geno/snp/ind). OFF by default because the whole-.geno SHA is a ~tens-of-seconds

@@ -194,8 +194,13 @@ CLI's `extract-f2` must wire (today only in reference tests, never a shipped dri
 5. `backend->decode_af(DecodeTileView)` → `DecodeResult{q,v,n,P,M}` (the device decodes).
 6. `core::assign_blocks(chrom, genpos_morgans, block_size_morgans)` → `BlockPartition`
    (cM→Morgan via `kDefaultBlockSizeCm` / `kCentimorgansPerMorgan`).
-7. `compute_f2_blocks_multigpu_device(resources, Q,V,N, partition, precision)` →
-   `DeviceF2Blocks` (or the tiered/disk variant for huge P).
+7. `compute_f2_blocks_multigpu_tiered(resources, Q,V,N, partition, precision)` →
+   `F2BlocksOut` (the UNIFIED entry `extract-f2` now calls: Resident is the
+   device-resident path unchanged — byte-identical to the small goldens — while
+   HostRam/Disk stream the SNP-tile input so high-P full-autosome runs that OOM the
+   resident `7·P·M` feeder complete; the tier is auto-selected from the runtime free
+   VRAM/RAM probes or pinned by `--tier`/`force_tier`/`STEPPE_FORCE_TIER`), then
+   `F2BlocksOut::to_host()` → `F2BlockTensor` for the writer.
 
 **Gap to flag:** there is no single host function that does steps 1-7; the reference tests
 wire it ad hoc. `extract-f2` IS that orchestration and belongs in `app/` (the §4 rule).
@@ -265,7 +270,8 @@ steppe extract-f2  --geno/--snp/--ind PREFIX   (or --geno F --snp F --ind F)
                    [--extract F --exclude F --prune-in F]         # FilterConfig id sets
                    [--precision emu40|emu32|fp64|tf32]            # Precision
                    [--device auto|0,1]                            # DeviceConfig.devices (GPU only)
-                   [--dry-run]                                    # T_max / tiles / largest-fitting
+                   [--tier auto|resident|host|disk]               # DeviceConfig.force_tier (default auto; host/disk stream the SNP-tile input so high-P runs that OOM resident complete). Higher-precedence twin of STEPPE_FORCE_TIER.
+                   [--dry-run]                                    # T_max / tiles / largest-fitting + the SAME resolve_output_tier verdict the run will use
                    [--hash | --no-hash]                           # source-provenance SHA-256 (default OFF; see §4.3)
 
 steppe qpadm       --f2-dir DIR  --target T  --left a,b  --right r0,r1,…
@@ -287,7 +293,7 @@ steppe qpadm-rotate --f2-dir DIR  --target T  --pool a,b,c,…  --right r0,…
 
 | Command | Real entry | Notes |
 |---|---|---|
-| `extract-f2` | `read_ind`/`read_snp`/`GenoReader` → `decode_af` → `assign_blocks` → `compute_f2_blocks_multigpu_device` (or `_tiered` for huge P) → write `<dir>` | the only `io`→compute wiring; §2.6 chain |
+| `extract-f2` | `read_ind`/`read_snp`/`GenoReader` → `decode_af` → `assign_blocks` → `compute_f2_blocks_multigpu_tiered` (the UNIFIED entry: Resident is the device-resident path unchanged; HostRam/Disk stream the SNP-tile input, auto-selected or pinned by `--tier`) → `F2BlocksOut::to_host()` → write `<dir>` | the only `io`→compute wiring; §2.6 chain |
 | `qpadm` | `upload_f2_blocks_to_device` → `run_qpadm` (GPU) | names resolved against `<dir>/pops.txt` |
 | `qpwave` | `run_qpwave(left, right, …)` | `--left` is the full left set, `left[0]` is the reference; no target |
 | `qpadm-rotate` | app builds `vector<QpAdmModel>` (pool subset enumeration) → `run_qpadm_search` | one row per model, **input order** via `model_index` |
@@ -557,7 +563,7 @@ precompute-once/fit-many).
 | **M(cli-1)** `qpadm` on a dir | `steppe qpadm` over an existing f2_blocks dir: read dir, resolve names→indices via `pops.txt`, `upload_f2_blocks_to_device`, `run_qpadm` (GPU), tidy CSV/JSON. | `f2_dir_io` reader + `pop_resolver` + CSV/JSON emitter + `run_metadata` | `golden_fit0` + `golden_fit1_NRBIG` reproduced THROUGH the CLI |
 | **M(cli-2)** `qpwave` | `steppe qpwave` (no target, `left[0]`=ref) + `--rank` surface, same dir input. | rankdrop CSV emitter | `golden_qpwave` through the CLI |
 | **M(cli-3)** `qpadm-rotate` | `steppe qpadm-rotate`: pool→`vector<QpAdmModel>` enumeration, `--jackknife 0\|1\|2`, single-GPU default + ≥2-device warning. | models-pool enumerator + search CSV emitter | `golden_rot` (84 models) through the CLI, input order |
-| **M(cli-4)** `extract-f2` + cache | `steppe extract-f2`: `io`→`decode_af`→`assign_blocks`→`compute_f2_blocks_multigpu_device`/`_tiered`→write `<dir>`; filters; `--dry-run`. **Builds the standalone STPF2BK1 write/read round-trip (the missing M7 piece) + the pops/meta sidecars.** Produces the dir the earlier milestones consumed. | EIGENSTRAT→f2 wiring + the f2-dir WRITER + filter wiring | `golden_fitNA` end-to-end (`extract-f2` then `qpadm`); cache round-trip byte-identical to `to_host()` |
+| **M(cli-4)** `extract-f2` + cache | `steppe extract-f2`: `io`→`decode_af`→`assign_blocks`→`compute_f2_blocks_multigpu_tiered` (the UNIFIED entry: Resident unchanged; HostRam/Disk stream the SNP-tile input, auto-selected or pinned by `--tier auto\|resident\|host\|disk`)→`F2BlocksOut::to_host()`→write `<dir>`; filters; `--dry-run` (the SAME `resolve_output_tier` verdict the run uses). **Builds the standalone STPF2BK1 write/read round-trip (the missing M7 piece) + the pops/meta sidecars.** Produces the dir the earlier milestones consumed. | EIGENSTRAT→f2 wiring + the f2-dir WRITER + filter wiring + the `--tier` plumbing (`force_tier` setter at the single `ConfigBuilder` merge site) | `golden_fitNA` end-to-end (`extract-f2` then `qpadm`); **`--tier disk` f2.bin memcmp BIT-IDENTICAL to the default/Resident f2.bin** (the streamed==resident guarantee through the CLI) |
 | **M(py-1)** bindings (fit) | nanobind `steppe._core` + `steppe/__init__.py`: `qpadm`/`qpwave`/`qpadm_rotate` from a dir/handle → pandas frames; status enum + NA sentinels; numpy f2 view; log sink; `pyproject.toml`. | `bindings/module.cpp`, pure-Python sugar, wheel CI | pytest reproduces `golden_fit0`/`_qpwave`/`_rot`; GPU-vs-CPU where a device is present; `import steppe` GPU-free |
 | **M(py-2)** bindings (extract) | `steppe.extract_f2(...)` from Python; (§5.4: GPU only). | extract binding | `golden_fitNA` end-to-end from Python |
 | **M(abi-1)** *(optional, defer)* C ABI | The installed cross-toolchain `steppe_c.h` opaque-handle shim (`steppe_*_t`, `steppe_status_t`) for `find_package(steppe)` from Rust/Julia. **Not needed for step 2** (CLI + nanobind both link in-process). | the C ABI surface (ADR-0008, architecture §16) | go/no-go decision; not gated on a golden |

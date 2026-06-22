@@ -15,14 +15,19 @@
 //   5. backend->decode_af(view)      -> DecodeResult Q/V/N [P x M] (the GPU decodes)
 //   6. filters (when non-default)    -> per-SNP keep mask, subset Q/V/N + snptab axis
 //   7. assign_blocks(chrom,genpos,blgsize) -> BlockPartition
-//   8. compute_f2_blocks_multigpu_device(resources, Q,V,N, partition, precision)
-//      -> DeviceF2Blocks (resident) -> to_host() -> F2BlockTensor (REAL f2 + vpair)
+//   8. compute_f2_blocks_multigpu_tiered(resources, Q,V,N, partition, precision)
+//      -> F2BlocksOut (the UNIFIED adaptive entry: Resident is the device-resident path
+//      UNCHANGED — byte-identical to the small goldens — while HostRam/Disk stream the
+//      SNP-tile input so high-P full-autosome runs that OOMd the resident feeder
+//      complete; the tier is auto-selected from runtime free VRAM/RAM, or pinned by
+//      --tier / config.force_tier / STEPPE_FORCE_TIER) -> to_host() -> F2BlockTensor
 //   9. write_f2_dir(out, tensor, labels, meta)  -> f2.bin (REAL vpair) + pops.txt + meta.json
 #include "app/cmd_extract_f2.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>   // std::getenv (STEPPE_FORCE_TIER, the --dry-run tier estimate)
 #include <exception>
 #include <filesystem>
 #include <span>
@@ -33,12 +38,12 @@
 #include "app/f2_dir_writer.hpp"
 #include "core/config/exit_code.hpp"
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
-#include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_device (CUDA-FREE)
+#include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_tiered (CUDA-FREE)
 #include "core/internal/views.hpp"                // steppe::core::MatView
 #include "device/backend.hpp"                     // DecodeTileView, DecodeResult, BackendCapabilities (CUDA-FREE)
-#include "device/device_f2_blocks.hpp"            // DeviceF2Blocks (CUDA-FREE)
+#include "device/f2_blocks_out.hpp"               // F2BlocksOut (the unified tiered result; CUDA-FREE)
 #include "device/resources.hpp"                   // Resources, build_resources (CUDA-FREE)
-#include "device/tier_select.hpp"                 // select_output_tier, free_host_ram_bytes (CUDA-FREE, --dry-run)
+#include "device/tier_select.hpp"                 // resolve_output_tier, OutputTier, free_host_ram_bytes (CUDA-FREE, --dry-run)
 #include "steppe/config.hpp"                      // Precision, FilterConfig, kCentimorgansPerMorgan
 #include "steppe/error.hpp"                       // steppe::Status
 
@@ -73,6 +78,19 @@ constexpr int kPloidyDiploid = 2;
         case Precision::Kind::Fp64:         return "fp64";
     }
     return "fp64";
+}
+
+// A human label for an OutputTier (echoed in the --dry-run plan and the post-run
+// summary so the operator sees WHICH tier was selected — Resident is the existing
+// device-resident path; HostRam/Disk are the M5 SNP-tile input-streaming tiers that
+// keep the GPU peak independent of M; cli-bindings.md §4.3, §4.5).
+[[nodiscard]] const char* tier_label(device::OutputTier t) {
+    switch (t) {
+        case device::OutputTier::Resident: return "resident";
+        case device::OutputTier::HostRam:  return "host";
+        case device::OutputTier::Disk:     return "disk";
+    }
+    return "resident";
 }
 
 // A human echo of the pop selection request (the resolved labels live in pops.txt;
@@ -213,44 +231,63 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     const Precision precision = config.device().precision;
     const FilterConfig& filter = config.filter();
 
-    // ---- DRY RUN: report sizes / tier / precision, NO compute ---------------------
-    // The tier estimate uses the CUDA-free vram-budget seam (select_output_tier); the
-    // free-VRAM probe routes through build_resources' BackendCapabilities (no direct
-    // CUDA call). On a no-GPU box this still reports the static shape and skips the
-    // tier (the §4.5 dry-run is a planning aid).
+    // ---- DRY RUN: report sizes / tier / precision, NO GPU compute -----------------
+    // The tier estimate routes through the SAME resolve_output_tier the real run uses
+    // (f2_blocks_multigpu_tiered), with the SAME precedence (config.force_tier from
+    // --tier > STEPPE_FORCE_TIER env > auto select_output_tier), so a --tier X verdict
+    // here is EXACT and the auto verdict uses the identical policy. The block count
+    // n_block is computed from assign_blocks over the FULL .snp axis (CUDA-free, cheap),
+    // and the SNP count uses the FULL M — both UPPER BOUNDS (filtering only drops SNPs,
+    // so M_kept <= M and the real-run n_block <= this), which keeps the auto verdict
+    // CONSERVATIVE toward Resident: if it says streaming here it will stream for real,
+    // and a Resident verdict at full M still fits at the (smaller) kept M. The free-VRAM
+    // probe routes through build_resources' BackendCapabilities (no direct CUDA call);
+    // on a no-GPU box the tier estimate is skipped (the §4.5 dry-run is a planning aid).
     if (config.dry_run()) {
+        // n_block over the full .snp axis (the same assign_blocks rule the real run uses).
+        const double bs_morgans_dry =
+            steppe::core::block_size_cm_to_morgans(config.blgsize_cm());
+        const steppe::core::BlockPartition dry_partition = steppe::core::assign_blocks(
+            std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
+            std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
+            bs_morgans_dry);
+        const int n_block_dry = dry_partition.n_block;
+
         std::printf("steppe extract-f2 --dry-run:\n");
         std::printf("  geno:       %s\n", config.geno().c_str());
         std::printf("  snp:        %s (%ld SNPs read)\n", config.snp().c_str(), M);
         std::printf("  ind:        %s (%zu records present)\n", config.ind().c_str(), n_present);
         std::printf("  selection:  %s -> P = %d populations\n", pop_selection_str(sel).c_str(), P);
         std::printf("  precision:  %s (mantissa_bits=%d)\n", precision_label(precision), precision.mantissa_bits);
-        std::printf("  blgsize:    %.4g Morgans (%.4g cM)\n",
-                    config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());
+        std::printf("  blgsize:    %.4g Morgans (%.4g cM) -> %d blocks (over the full .snp axis)\n",
+                    config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm(), n_block_dry);
         std::printf("  filters:    maf>=%.4g maxmiss<=%.4g autosomes_only=%d drop_mono=%d transversions_only=%d\n",
                     filter.maf_min, filter.geno_max_missing,
                     filter.autosomes_only ? 1 : 0, filter.drop_monomorphic ? 1 : 0,
                     filter.transversions_only ? 1 : 0);
-        // Tier estimate at the FULL M (an upper bound; the kept-M after filtering is
-        // <= M, so the resident tier verdict here is conservative).
         try {
             device::Resources resources = device::build_resources(config.device());
             if (!resources.gpus.empty()) {
                 const auto& caps = resources.gpus.front().caps;
-                // n_block upper bound is unknown without assign_blocks; report the
-                // resident result bytes at the full M's worst-case (P*P*n_block*16);
-                // we approximate n_block via assign_blocks below the dry-run only if
-                // cheap — here we report VRAM + the per-block slab cost so the user
-                // sees the envelope.
+                const std::size_t free_host_bytes = device::free_host_ram_bytes();
+                // The SAME resolver the tiered entry calls — same precedence, same shape
+                // inputs (full-M upper bound). --tier X is exact here; auto matches the run.
+                const device::OutputTier dry_tier = device::resolve_output_tier(
+                    config.device().force_tier, std::getenv("STEPPE_FORCE_TIER"),
+                    P, M, n_block_dry, caps.free_vram_bytes, free_host_bytes);
                 const std::size_t slab_bytes =
                     static_cast<std::size_t>(P) * static_cast<std::size_t>(P) * 2u * sizeof(double);
-                std::printf("  device:     GPU %d, free VRAM = %zu MiB, total = %zu MiB\n",
+                std::printf("  device:     GPU %d, free VRAM = %zu MiB, total = %zu MiB; free host RAM = %zu MiB\n",
                             resources.gpus.front().device_id,
-                            caps.free_vram_bytes >> 20, caps.total_vram_bytes >> 20);
-                std::printf("  f2 slab:    %zu bytes / block (f2 + vpair, FP64); resident if "
-                            "P*P*n_block*16 fits ~70%% of free VRAM\n", slab_bytes);
+                            caps.free_vram_bytes >> 20, caps.total_vram_bytes >> 20,
+                            free_host_bytes >> 20);
+                std::printf("  f2 slab:    %zu bytes / block (f2 + vpair, FP64); result = %zu MiB at %d blocks\n",
+                            slab_bytes, (slab_bytes * static_cast<std::size_t>(n_block_dry < 0 ? 0 : n_block_dry)) >> 20,
+                            n_block_dry);
+                std::printf("  tier:       %s (the result tier the run will use; auto verdict at the "
+                            "full-M upper bound is conservative toward resident)\n", tier_label(dry_tier));
             } else {
-                std::printf("  device:     (no CUDA device visible)\n");
+                std::printf("  device:     (no CUDA device visible — tier estimate skipped)\n");
             }
         } catch (const std::exception& e) {
             std::printf("  device:     probe failed: %s\n", e.what());
@@ -284,13 +321,14 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     } geno_hash_joiner{geno_hash_thread};
 
     // ---- 5. Decode the tile on the GPU backend -> Q/V/N [P x M] -------------------
-    device::DeviceF2Blocks dev_f2;
+    device::F2BlocksOut dev_f2;      // the UNIFIED tiered result (Resident / HostRam / Disk)
     std::vector<double> Qk, Vk, Nk;  // the (possibly filtered) Q/V/N (own storage)
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
     long M_kept = 0;
     std::size_t n_kept = 0;
     Precision engaged = precision;
+    device::OutputTier chosen_tier = device::OutputTier::Resident;  // overwritten by the tiered entry
     try {
         device::Resources resources = device::build_resources(config.device());
         if (resources.gpus.empty()) {
@@ -422,13 +460,22 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
             return cfg::kExitInvalidConfig;
         }
 
-        // ---- 8. compute_f2_blocks_multigpu_device (GPU, resident) -----------------
+        // ---- 8. compute_f2_blocks_multigpu_tiered (GPU; the UNIFIED adaptive entry) -
+        // ONE seam for every input size — NO if-big-else-small branch here. The tiered
+        // entry resolve_output_tier()s (config.force_tier from --tier > STEPPE_FORCE_TIER
+        // env > auto from the runtime free-VRAM/RAM probes) then: Resident -> the EXISTING
+        // device-resident compute UNCHANGED (so the small goldens stay byte-identical),
+        // HostRam/Disk -> the streamed SNP-tile input path (GPU peak independent of M, so
+        // high-P full-autosome runs that OOMd the resident 7·P·M feeder COMPLETE). The
+        // result lands in exactly one tier; .to_host() below is bit-identical across all
+        // three (architecture.md §12 PARITY LAW).
         const MatView Q{Qk.data(), P, M_kept};
         const MatView V{Vk.data(), P, M_kept};
         const MatView N{Nk.data(), P, M_kept};
-        dev_f2 = steppe::core::compute_f2_blocks_multigpu_device(
+        dev_f2 = steppe::core::compute_f2_blocks_multigpu_tiered(
             resources, Q, V, N, partition, precision);
-        // The engaged precision reflects what the backend HONORED (the resident path
+        chosen_tier = dev_f2.tier;
+        // The engaged precision reflects what the backend HONORED (the compute path
         // downgrades emu -> native if emulation is not honorable on this build/device).
         engaged = precision;
         (void)engaged;
@@ -437,12 +484,16 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitRuntimeError;
     }
 
-    // ---- 8b. Materialize (the ONE D2H) -> host tensor with REAL f2 + vpair --------
+    // ---- 8b. Materialize -> host tensor with REAL f2 + vpair (tier-agnostic) -------
+    // F2BlocksOut::to_host() is bit-identical across all three tiers (architecture.md
+    // §12): Resident -> the ONE device-resident D2H; HostRam -> a copy of the streamed
+    // host tensor; Disk -> a pread of every block back from the cache file. The writer
+    // hand-off below is unchanged — it consumes the F2BlockTensor exactly as before.
     F2BlockTensor host_f2;
     try {
         host_f2 = dev_f2.to_host();
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe extract-f2: materialize (D2H) failed: %s\n", e.what());
+        std::fprintf(stderr, "steppe extract-f2: materialize (read-back) failed: %s\n", e.what());
         return cfg::kExitRuntimeError;
     }
 
@@ -492,6 +543,8 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     std::printf("steppe extract-f2: wrote %s\n", config.out_dir().c_str());
     std::printf("  P = %d populations, %d blocks, %ld of %ld SNPs kept\n",
                 host_f2.P, host_f2.n_block, M_kept, M);
+    std::printf("  tier = %s (the f2_blocks result tier; resident = device-resident, "
+                "host/disk = SNP-tile input-streaming)\n", tier_label(chosen_tier));
     std::printf("  precision = %s, blgsize = %.4g Morgans (%.4g cM)\n",
                 precision_label(engaged),
                 config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());
