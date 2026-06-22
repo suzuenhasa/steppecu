@@ -105,13 +105,19 @@ Living, checkable companion to [`ROADMAP.md`](ROADMAP.md) (the **order & rationa
 
 ---
 
-## 🚨 GOLDEN INTEGRITY + I/O FORMATS — **BLOCKER (do FIRST; PROVEN 2026-06-21)**
-*Memory `aadr-tgeno-goldens-corrupt`; `docs/research/tgeno-at2-support.md`. PROVEN on box5090.*
-The AADR v66 `.geno` is **TGENO** (transposed/individual-major). **admixtools R v2.0.10 does NOT support TGENO — it silently MISREADS it** (the AADR README warns this). So **every committed golden + f2 fixture is CORRUPT** (all built by `extract_f2` on the raw v66 TGENO): `golden_fit0`/`rot`/`fit1_NRBIG`/`fitNA`/`qpwave` + `f2_*.bin`. **steppe's TGENO decode is CORRECT** — proven: `convertf` v8621 (DReichLab/AdmixTools) → PACKEDANCESTRYMAP → AT2 `extract_f2` gives **391,333 SNPs, [CW 0.869, Turkey_N 0.131]**, matching steppe to the SNP digit, vs the corrupt golden's 500,848 / [0.559,0.441]. The engine is sound; the GOLDEN REFERENCE was wrong. (The M(cli-4) "decode bug" verdict was wrong — it inverted cause/effect.)
-- [ ] **Regenerate ALL goldens** (unblocks M(cli-4) + re-validation + any real study): `convertf >=v8.0.0` TGENO→PACKEDANCESTRYMAP, then AT2 `extract_f2` on the converted prefix. Reproducible artifacts on the box: `/workspace/data/aadr/convertf_tgeno_to_pa.par`, `at2_on_converted.R`, convertf at `/workspace/AdmixTools_src/src/convertf`, converted prefix `/workspace/data/aadr/converted_pa/v66_HO_pa`. Regenerate the 5 goldens + the `f2_*.bin` fixtures; re-run the parity suite (steppe should MATCH the corrected goldens; the old corrupt ones will differ).
-- [ ] **Older `.GENO` reader support (USER ASK)** — steppe is currently **TGENO-ONLY** (`io::GenoReader::read_tile` requires TGENO). Add **classic PACKEDANCESTRYMAP ("GENO" magic, SNP-major) + EIGENSTRAT** readers so older AADR releases / other datasets work. v66 TGENO is priority but older GENO matters too (format-detect on the magic; dispatch).
-- [ ] **CI guard** — reject any golden built by AT2-R directly on a raw TGENO `.geno` (record the format in the golden metadata; fail if TGENO+AT2-R).
-- [ ] **Re-gate M(cli-4) `extract-f2`** against the corrected golden (steppe's 391,333 / [0.869,0.131] is the CORRECT answer — it now passes). Then re-run the studies (the earlier Yamnaya/Bell-Beaker numbers were on corrupt f2 — INVALID; redo on correct f2).
+## ✅ AT2 PARITY + GOLDEN INTEGRITY — **RESOLVED (the big arc; 2026-06-21)**
+*Memory `aadr-tgeno-goldens-corrupt`; `docs/research/{tgeno-at2-support,block-partition-at2,f2-estimator-at2}.md`; `docs/studies/haak2015.md`. PROVEN on box5090.*
+The AADR v66 `.geno` is **TGENO** (transposed); **admixtools R v2.0.10 silently MISREADS it**, so the original committed goldens were CORRUPT (AT2's misread) — **steppe's decode was the correct one** (proven via `convertf` v8621 → PACKEDANCESTRYMAP, which AT2 reads). steppe now matches AT2 **end-to-end on real v66** (raw → decode → f2 → qpAdm), diploid + pseudo-haploid, to the emulated-FP64 floor. The 4-fix chain (all on main, golden-gated):
+- [x] **golden_fit0 regenerated** from convertf-PA (`74c3c71`) — corrupt 500848/[0.559,0.441] → correct 391333/[0.869,0.131].
+- [x] **`--blgsize` = Morgans (like AT2) + monomorphic-SNP drop** (`d5fcbcc`) — SNP count exact (264544 on Haak), blocks 718.
+- [x] **`assign_blocks` → AT2 SNP-anchored block convention** (`a5781dd`) — `block_sizes` element-wise == AT2 (709 on Haak); the ~0.3% block-boundary residual RESOLVED.
+- [x] **per-sample pseudo-haploid auto-detection (`adjust_pseudohaploid`)** (`bc0b773`) — steppe hard-coded ploidy=2 → up to **230% wrong on pseudo-haploid f2**; now per-sample, f2 EXACT vs AT2 across regimes. M1 decode oracle (`build_tgeno_matrix.py`) updated to match.
+- [x] **Haak 2015 reproduced** (`docs/studies/haak2015.md`) — Corded Ware ~74% Yamnaya, Sardinian mostly-EEF, matching AT2-on-convertf.
+- [~] **Regenerate the remaining goldens** (`golden_rot`/`fit1_NRBIG`/`fitNA`) from convertf-PA — workflow `agentscripts/regen-goldens-convertf.js` (run `wm9bhrf3m`), IN FLIGHT / verify committed; fit0+qpwave already correct. After this, all 5 goldens correct.
+- [ ] **Older `.GENO` reader support (USER ASK)** — steppe is **TGENO-ONLY** (`io::GenoReader::read_tile`). Add classic PACKEDANCESTRYMAP (`GENO` magic, SNP-major) + EIGENSTRAT readers (format-detect on the magic) for older AADR / other datasets.
+- [ ] **CI guard** — reject any golden built by AT2-R directly on a raw TGENO `.geno` (record format in golden metadata; fail if TGENO+AT2-R).
+- [x] **M(cli-4) `extract-f2` re-gated** against the corrected golden (`74c3c71`) — the study flow works; the earlier Yamnaya numbers from the corrupt f2_rot fixture were INVALID and have been superseded by the correct Haak run.
+The reusable convertf pipeline is on the box: `/workspace/AdmixTools_src/src/convertf` (v8621), `/workspace/data/aadr/convertf_tgeno_to_pa.par`, `/workspace/data/aadr/converted_pa/v66_HO_pa`.
 
 ## ⏭️ Step 2 — Productization: CLI + Python bindings
 *Refs: [`docs/design/cli-bindings.md`](design/cli-bindings.md) (the contract); `desirable-features-survey.md`; memory `build-sequence-backend-first`.*
