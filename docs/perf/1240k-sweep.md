@@ -403,3 +403,155 @@ is real and golden-gated, the REAL single-GPU batched throughput is ~2866
 models/sec (point estimate) / ~1247 models/sec (full LOO SE), and the ~1/sec was a
 CLI process-spawn artifact. extract-f2 is re-reported single-GPU (43.2 s) as the
 supported path.*
+
+---
+
+## qpadm-rotate scaling vs pool size (single-GPU)
+
+**What this measures.** How the wired `qpadm-rotate` CLI (→ the batched
+`run_qpadm_search` engine, `src/app/cmd_rotate.cpp:184`) scales as the **candidate
+pool grows**, holding the target, the right set, and the subset sizes fixed. A
+pool of `N` pops swept over subset sizes `[1,3]` enumerates
+
+```
+#models = N + C(N,2) + C(N,3)     (C(N,3) dominates at scale)
+```
+
+This was VERIFIED EXACT at every measured N (2625, 20875, 166750, 562625,
+1333500 — matched bit-for-bit by the emitted CSV row counts).
+
+**Fixed shape for the whole sweep.** Target = `England_BellBeaker` (28 ind);
+right(6) = `Mbuti, Israel_Natufian, Iran_GanjDareh_N, Han, Papuan, Karitiana`
+(all exact-label-matched, all >=5 ind); subsets `[1,3]`; `blgsize 0.05`;
+`--maxmiss 0.5`; **713 jackknife blocks**; `--precision emu40` (default,
+40-mantissa-bit emulated FP64). Pools are **nested name-sorted prefixes** of the
+**919** candidate pops (the 926 pops with >=5 ind, minus target + 6 right), so
+every smaller pool is a prefix of the larger — a clean monotone sweep.
+
+**Two passes.** `--jackknife 0` = the raw point estimate (memory-light, scales to
+the largest pools). `--jackknife 1` = the feasible-only LOO-SE pass-2 (much
+hungrier — see the VRAM note). Per-model cost is **shape-bound** (n-left x n-right
+x blocks), not pool-size-bound; pool size only sets the model *count*.
+
+### Measured — jackknife 0 (point estimate)
+
+REAL v66 1240K, single-GPU `--device 0`, Release. `models/sec = #models / wall`.
+
+| pool N | #models | (N + C(N,2) + C(N,3)) | wall | models/sec | feasible |
+|---:|---:|---|---:|---:|---:|
+| 25  | 2,625      | 25 + 300 + 2,300       | 1.078 s | 2,436  | 440     |
+| 50  | 20,875     | 50 + 1,225 + 19,600    | 1.201 s | 17,386 | 6,571   |
+| 100 | 166,750    | 100 + 4,950 + 161,700  | 3.631 s | 45,922 | 47,386  |
+| 150 | 562,625    | 150 + 11,175 + 551,300 | 9.816 s | 57,319 | 112,385 |
+| 200 | 1,333,500  | 200 + 19,900 + 1,313,400 | 22.14 s | 60,226 | 241,922 |
+
+### Measured — jackknife 1 (feasible-only SE pass-2)
+
+| pool N | #models | wall | models/sec | feasible | note |
+|---:|---:|---:|---:|---:|---|
+| 25 | 2,625   | 1.158 s | 2,267 | 440   | ok |
+| 50 | 20,875  | 2.314 s | 9,022 | 6,571 | ok (peak 29,148 MiB) |
+| 60 | 36,050  | — | — | — | **OOM** (cudaMalloc) |
+| 75 | 70,525  | — | — | — | **OOM** |
+| 100 | 166,750 | — | — | — | **OOM** (jk0 at the same N succeeds) |
+
+**The jk1 single-GPU wall lands between N=50 and N=60** — a VRAM ceiling (32 GB),
+NOT the 5–8 min time wall. The SE pass-2 (LOO over survivors) allocates a second
+arena set while the pass-1 buffers are still live, and the per-model VRAM budgeter
+in `cuda_backend.cu` `fit_one_bucket` does **not** account for that pass-2
+footprint. **Real, reproducible single-GPU finding** worth a follow-up (chunk the
+SE pass-2, or budget it). jk0 at the same N=60/75/100/150/200 all succeed.
+
+### The rate does NOT hold flat — it RISES then CONVERGES
+
+Contrary to the "rate is shape-bound so it holds across pool size" prior, the
+small-pool rate is **fixed-per-dispatch-overhead-bound**: a few thousand models
+cannot amortize the kernel-launch / H2D / cuSOLVER-batched-setup cost, so the rate
+climbs steeply with N and **plateaus** in the large-N limit:
+
+```
+jk0:  N=25  -> 2,436 /s
+      N=50  -> 17,386 /s
+      N=100 -> 45,922 /s
+      N=150 -> 57,319 /s      \  plateau: N=150 vs N=200
+      N=200 -> 60,226 /s      /  differ only ~5% -> CONVERGED
+```
+
+**Converged jk0 rate ≈ 57,000–60,000 models/sec.** Extrapolate with the
+*converged* rate (`#models / 60k`), NOT the small-pool rate — using a small-pool
+rate would over-estimate the wall by >20x. The converged jk1 rate is lower
+(9,022 /s at N=50) but is **moot for large pools — jk1 OOMs single-GPU before
+they are reached.**
+
+### f2-build cost (the f2 cache, separate from the rotation)
+
+`extract-f2 --device 0 --blgsize 0.05 --maxmiss 0.5 --auto-only` over
+{target + pool + 6 right}. **All tiers = RESIDENT** — the streamed host/disk tier
+did NOT auto-engage even at 207 pops (still fits resident in 32 GB). Build time is
+~linear in P (input-pass bound); `f2.bin` grows ~P^2 (16,384 B per block per
+pop-pair slab).
+
+| pool N | P = N+7 | SNPs kept | extract-f2 wall | f2.bin |
+|---:|---:|---:|---:|---:|
+| 25  | 32  | 1,089,721 | 3.80 s  | 11.7 MB  |
+| 50  | 57  | 1,103,077 | 5.36 s  | 37.1 MB  |
+| 100 | 107 | 1,118,938 | 8.53 s  | 130.6 MB |
+| 150 | 157 | 1,118,608 | 11.34 s | 281.2 MB |
+| 200 | 207 | 1,123,319 | 14.44 s | 488.8 MB |
+
+The `f2.bin` pairs-quadratic model (`#pairs = P(P+1)/2`) reproduces the measured
+sizes to <2.6% across the whole range (P^2 confirmed).
+
+### Peak VRAM (single-GPU, 32,607 MiB ceiling)
+
+- **jk0 pool_200** (largest, 1.33M models): **PEAK 31,578 MiB = 96.8%** of the
+  32 GB ceiling. pool_200 is essentially the largest jk0 pool that fits resident:
+  resident f2 (467 MB) + per-chunk arenas (`dX/dLoo/dXtau ≈ 3·B·m·nb`) brush the
+  ceiling. The `fit_one_bucket` budgeter *does* chunk the bucket for jk0.
+- **jk1 pool_50**: PEAK 29,148 MiB; **pool_60 jk1 OOMs** (the uncounted pass-2 SE
+  arenas, above).
+- **No VRAM leak** — both 5090s returned to 2 MiB after every run.
+
+### Extrapolation to pool = 500 / 1000 / whole-set
+
+Using the **measured converged jk0 rate** (bracket 57,319–60,226 /s; headline
+figure quotes the N=200 plateau, 60,226 /s). The extract-f2 build time is the
+linear-in-P fit `t ≈ 0.060·P + 1.9 s`; the `f2.bin` size is the P^2 model.
+
+| pool N | #models | jk0 rotation wall | extract-f2 build | f2.bin / tier |
+|---:|---:|---:|---:|---|
+| 500 | 20,833,750 | **~5.8–6.1 min** | ~33 s | ~2.9 GB (resident) |
+| 1000 | 166,667,500 | **~46–48 min** | ~63 s | ~11.5 GB (resident borderline → host/streamed tier) |
+| whole-set (919) | 129,359,359 | **~36–38 min** | ~58 s | ~9.8 GB (resident borderline → host/streamed tier) |
+
+(whole-set pool = 919 = the 926 pops with >=5 ind, minus target + 6 right;
+`C(919,3)` dominates.)
+
+**HONESTY — these are capability / stress projections, NOT a typical analysis.**
+Real qpAdm rotations curate the pool to **dozens** of pops (subset `[1,3]` over a
+hand-picked source set), which lands in the **seconds** regime (N=25 = 1.1 s,
+N=50 = 1.2 s above). The 500/1000/whole-set numbers project what the *engine* can
+chew (10^7–10^8 models, tens of minutes single-GPU) if you point it at the entire
+panel — a throughput-ceiling stress test, not a research workflow. Both regimes
+are real; quote the one that matches the question.
+
+**Caveats carried forward.** (1) jk1 (SE) OOMs single-GPU above ~pool_50 — the
+binding limit there is VRAM, not time; the pass-2 SE footprint is uncounted by the
+chunk budgeter (follow-up filed above). (2) The projections assume the f2 stays
+resident; at pool≈1000 the ~11.5 GB `f2.bin` is near the point where the
+host/streamed f2 tier engages, which adds I/O the resident-only measurements don't
+include. (3) Single-GPU only; multi-GPU is PARKED.
+
+---
+
+*Independently verified (this doc, this section) on box5090 (2x RTX 5090 sm_120;
+SINGLE-GPU `--device 0`, the 2nd GPU PARKED), Release build (`build-rel`,
+`CMAKE_BUILD_TYPE:STRING=Release`, `-DSTEPPE_BUILD_CLI=ON`, Ninja), REAL AADR v66
+1240K panel (1,233,013 SNPs / 23,089 ind / 926 pops >=5 ind — re-counted). The
+`qpadm-rotate` CLI is wired to the real batched `run_qpadm_search` engine (NOT a
+scaffold). Model-count formula `N + C(N,2) + C(N,3)` verified exact at every N.
+Two pool points were RE-RUN fresh for this verification — pool_25 jk0 (1.047 s,
+2,625 models, feasible 440) and pool_50 jk0 (1.364 s, 20,875 models, feasible
+6,571) — reproducing the reported rate regime and bit-identical feasible counts.
+The converged jk0 rate is ~57–60k models/sec; the small-pool rate is dispatch-
+overhead-bound and must NOT be used for extrapolation. NO code changes were made.*
