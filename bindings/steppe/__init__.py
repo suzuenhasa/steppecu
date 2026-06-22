@@ -23,9 +23,11 @@ __all__ = [
     "F2Blocks",
     "QpAdmResult",
     "QpWaveResult",
+    "F4Result",
     "read_f2",
     "qpadm",
     "qpwave",
+    "f4",
     "qpadm_search",
 ]
 
@@ -205,6 +207,47 @@ class QpWaveResult:
         )
 
 
+class F4Result:
+    """A standalone f4 result table (one row per quartet), pandas-shaped. Built from the
+    flat dict of parallel arrays the compiled layer returns; ``.table`` is a tidy DataFrame
+    with the golden columns pop1,pop2,pop3,pop4,est,se,z,p (admixtools::f4 parity)."""
+
+    def __init__(self, d: dict):
+        self._d = d
+        self.pop1: list[str] = list(d["pop1"])
+        self.pop2: list[str] = list(d["pop2"])
+        self.pop3: list[str] = list(d["pop3"])
+        self.pop4: list[str] = list(d["pop4"])
+        self.est: list[float] = list(d["est"])
+        self.se: list[float] = list(d["se"])
+        self.z: list[float] = list(d["z"])
+        self.p: list[float] = list(d["p"])
+        self.status: Status = Status._from(d["status"])
+        self.precision: str = d["precision"]
+
+    @property
+    def table(self):  # -> pandas.DataFrame [pop1, pop2, pop3, pop4, est, se, z, p]
+        pd = _require_pandas()
+        return pd.DataFrame(
+            {
+                "pop1": list(self.pop1),
+                "pop2": list(self.pop2),
+                "pop3": list(self.pop3),
+                "pop4": list(self.pop4),
+                "est": list(self.est),
+                "se": list(self.se),
+                "z": list(self.z),
+                "p": list(self.p),
+            }
+        )
+
+    def __len__(self) -> int:
+        return len(self.est)
+
+    def __repr__(self) -> str:
+        return f"F4Result(n_quartets={len(self.est)}, status={self.status.name})"
+
+
 class F2Blocks:
     """An opaque f2-dir handle: the host f2 tensor + the P pop labels (P-axis order).
     Wraps the compiled ``_core.F2Handle``; build_resources is cached on the handle so the
@@ -294,6 +337,32 @@ def qpwave(
     there is NO target argument (the distinguishing qpWave invocation)."""
     d = _core.run_qpwave(f2._h, list(left), list(right), fudge, rank_alpha)
     return QpWaveResult(d, left=left)
+
+
+def f4(
+    f2: F2Blocks,
+    quartets: list[Any],
+    *,
+    as_dataframe: bool = False,
+):
+    """Standalone f4(p1,p2;p3,p4) statistic on the GPU — est/se/z/p per quartet (NO ALS /
+    NO rank; the AT2 weighted block-jackknife f4 + the jackknife-diagonal SE).
+
+    ``quartets`` is a list where each entry is a ``(p1, p2, p3, p4)`` name tuple/list (or a
+    ``{"pop1":..,"pop2":..,"pop3":..,"pop4":..}`` dict). Returns an ``F4Result`` (or, when
+    ``as_dataframe=True``, the tidy ``F4Result.table`` DataFrame: pop1,pop2,pop3,pop4,
+    est,se,z,p). Unknown pop names raise a clean KeyError."""
+    quads: list[tuple[str, str, str, str]] = []
+    for q in quartets:
+        if isinstance(q, dict):
+            quads.append((q["pop1"], q["pop2"], q["pop3"], q["pop4"]))
+        else:
+            p1, p2, p3, p4 = q  # exactly 4 names (raises on a malformed tuple)
+            quads.append((p1, p2, p3, p4))
+
+    d = _core.run_f4(f2._h, quads)
+    res = F4Result(d)
+    return res.table if as_dataframe else res
 
 
 def qpadm_search(

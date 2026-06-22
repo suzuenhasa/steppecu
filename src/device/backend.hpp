@@ -624,6 +624,41 @@ public:
             "ComputeBackend::assemble_f4(host): not implemented by this backend");
     }
 
+    /// STANDALONE f4 (the run_f4 seam; fit-engine §6) — assemble ONE F4Blocks whose m
+    /// axis is the N input QUARTETS (heterogeneous (L0,R0) per column, unlike assemble_f4
+    /// above whose single (L0,R0) yields an nl×nr grid). For quartet k = (p1,p2,p3,p4),
+    /// per block b:
+    ///   X[k,b] = 0.5*( f2(p2,p3,b) + f2(p1,p4,b) - f2(p1,p3,b) - f2(p2,p4,b) )
+    /// i.e. the SAME four-slab AT2 identity specialized to left={p1,p2}, right={p3,p4},
+    /// nl=1, nr=1 — ZERO new math. The returned F4Blocks sets nl = N, nr = 1 (so m =
+    /// nl*nr = N), and carries x_blocks / x_loo / x_total / block_sizes EXACTLY like
+    /// assemble_f4, so jackknife_cov (S4) consumes the whole m-batch with NO change and
+    /// se[k] = sqrt(Q[k + m*k]). Native FP64 (the cancellation carve-out, OQ-5; the
+    /// `precision` argument is acknowledged but the 4-slab diff stays native). The GPU
+    /// backend overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides the
+    /// host F2BlockTensor form (the oracle door). `quartets` is the flattened P-axis index
+    /// quad array (length 4*N, quad k at [4*k .. 4*k+3] = {p1,p2,p3,p4}).
+    [[nodiscard]] virtual F4Blocks assemble_f4_quartets(
+        const steppe::device::DeviceF2Blocks& f2,
+        std::span<const int> quartets,
+        const Precision& precision) {
+        (void)f2; (void)quartets; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f4_quartets: not implemented by this backend");
+    }
+
+    /// STANDALONE f4 host-oracle overload — the SAME per-quartet four-slab combine reading
+    /// a host F2BlockTensor (the CpuBackend oracle door; sibling of assemble_f4(host)).
+    /// Identical math to the DeviceF2Blocks overload; only the f2 storage differs.
+    [[nodiscard]] virtual F4Blocks assemble_f4_quartets(
+        const F2BlockTensor& f2,
+        std::span<const int> quartets,
+        const Precision& precision) {
+        (void)f2; (void)quartets; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f4_quartets(host): not implemented by this backend");
+    }
+
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
     /// the per-block jackknife WEIGHTS. OQ-3 RESOLVED: the weight is block_sizes[b]
     /// (AT2 block_lengths, the per-block SNP count) — NOT Vpair. Pipeline (AT2

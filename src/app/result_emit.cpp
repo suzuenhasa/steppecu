@@ -455,6 +455,58 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "}\n";
 }
 
+// ---- STANDALONE f4 (the `steppe f4` command) ----------------------------------
+// ONE ROW PER QUARTET in input order, exactly the regenerated golden schema
+// (golden_fit0_f4_readf2.csv): pop1,pop2,pop3,pop4,est,se,z,p. REUSES the file-static
+// format primitives verbatim (fmt_double/json_double/csv_quote/json_quote), so a NaN est/
+// se/z/p (a degenerate quartet) emits the SAME NA/null sentinel the qpadm/qpwave emitters
+// use. No `# section:` prefix — the f4 output is a single flat table (the golden has the
+// bare header + data rows), so a row-for-row CSV diff against the golden is direct.
+void emit_f4_csv(std::ostream& os, const F4Result& r,
+                 const std::vector<std::string>& p1, const std::vector<std::string>& p2,
+                 const std::vector<std::string>& p3, const std::vector<std::string>& p4,
+                 char sep) {
+    os << "\"pop1\"" << sep << "\"pop2\"" << sep << "\"pop3\"" << sep << "\"pop4\""
+       << sep << "\"est\"" << sep << "\"se\"" << sep << "\"z\"" << sep << "\"p\"\n";
+    for (std::size_t k = 0; k < r.est.size(); ++k) {
+        const auto at = [k](const std::vector<std::string>& v) {
+            return k < v.size() ? v[k] : std::string();
+        };
+        os << csv_quote(at(p1)) << sep << csv_quote(at(p2)) << sep
+           << csv_quote(at(p3)) << sep << csv_quote(at(p4)) << sep
+           << fmt_double(r.est[k]) << sep << fmt_double(r.se[k]) << sep
+           << fmt_double(r.z[k]) << sep << fmt_double(r.p[k]) << "\n";
+    }
+}
+
+void emit_f4_json(std::ostream& os, const F4Result& r,
+                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
+                  const std::vector<std::string>& p3, const std::vector<std::string>& p4) {
+    os << "{\n";
+    os << "  \"quartets\": [\n";
+    for (std::size_t k = 0; k < r.est.size(); ++k) {
+        const auto at = [k](const std::vector<std::string>& v) {
+            return k < v.size() ? v[k] : std::string();
+        };
+        os << "    { \"pop1\": " << json_quote(at(p1))
+           << ", \"pop2\": " << json_quote(at(p2))
+           << ", \"pop3\": " << json_quote(at(p3))
+           << ", \"pop4\": " << json_quote(at(p4))
+           << ", \"est\": " << json_double(r.est[k])
+           << ", \"se\": " << json_double(r.se[k])
+           << ", \"z\": " << json_double(r.z[k])
+           << ", \"p\": " << json_double(r.p[k]) << " }"
+           << (k + 1 < r.est.size() ? ",\n" : "\n");
+    }
+    os << "  ],\n";
+    os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
+    os << "  \"precision\": " << json_quote(
+        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
+        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
+                                                          : "fp64") << "\n";
+    os << "}\n";
+}
+
 }  // namespace
 
 bool parse_output_format(const std::string& token, OutputFormat& out) {
@@ -501,6 +553,25 @@ void emit_qpwave_result(std::ostream& os, OutputFormat fmt,
         case OutputFormat::Csv:  emit_qpwave_csv(os, result, left_labels, right_n, ','); break;
         case OutputFormat::Tsv:  emit_qpwave_csv(os, result, left_labels, right_n, '\t'); break;
         case OutputFormat::Json: emit_qpwave_json(os, result, left_labels, right_n); break;
+    }
+}
+
+void emit_f4_result(std::ostream& os, OutputFormat fmt,
+                    const F4Result& result,
+                    const std::vector<std::string>& p1_labels,
+                    const std::vector<std::string>& p2_labels,
+                    const std::vector<std::string>& p3_labels,
+                    const std::vector<std::string>& p4_labels) {
+    switch (fmt) {
+        case OutputFormat::Csv:
+            emit_f4_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, ',');
+            break;
+        case OutputFormat::Tsv:
+            emit_f4_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, '\t');
+            break;
+        case OutputFormat::Json:
+            emit_f4_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels);
+            break;
     }
 }
 

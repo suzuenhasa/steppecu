@@ -77,6 +77,9 @@ add_library(steppe_core STATIC
     qpadm/qpadm_fit.cpp
     qpadm/ranktest.cpp
     qpadm/nested_models.cpp
+    # Standalone f4 statistic (run_f4): the SIBLING of run_qpwave — REUSES
+    # assemble_f4_quartets + jackknife_cov (fit-engine §6), no ALS/rank, ZERO new math.
+    qpadm/f4.cpp
     # M(fit-6) S8 ROTATION: the model-space search orchestrator (run_qpadm_search +
     # the base fit_models_batched default) + the GPU-free model->device shard planner.
     qpadm/model_search.cpp

@@ -37,6 +37,7 @@ enum class Command {
     QpAdm,
     QpWave,
     QpAdmRotate,
+    F4,
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
@@ -93,6 +94,14 @@ struct CliArgs {
 
     /// `--pool a,b,c,...` (qpadm-rotate) source pool the app enumerates subsets of.
     std::vector<std::string> pool;
+
+    /// `--pop1`/`--pop2`/`--pop3`/`--pop4` (the `f4` command) — ROW-ALIGNED quartet
+    /// columns (admixtools::f4 comb=FALSE): quartet k = (pop1[k], pop2[k], pop3[k],
+    /// pop4[k]). All four must have the same length (the app validates). The single-
+    /// quartet convenience `--pops A,B,C,D` (a 4-name --pops) is ALSO accepted by the f4
+    /// command (it reuses the `pops` field below, read in groups of 4), so a one-line f4
+    /// needs no four flags.
+    std::vector<std::string> pop1, pop2, pop3, pop4;
 
     // ---- QpAdmOptions overrides (default to the struct defaults; cli-bindings.md
     // §4.1 — flag names mirror QpAdmOptions so a bare invocation reproduces goldens).

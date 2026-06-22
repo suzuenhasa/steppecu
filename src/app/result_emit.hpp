@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "steppe/f4.hpp"     // steppe::F4Result (the standalone-f4 emitter)
 #include "steppe/qpadm.hpp"  // steppe::QpAdmResult
 
 namespace steppe::app {
@@ -90,6 +91,22 @@ void emit_qpwave_result(std::ostream& os, OutputFormat fmt,
                         const QpWaveResult& result,
                         const std::vector<std::string>& left_labels,
                         int right_n);
+
+/// Serialize a STANDALONE f4 result table (the `steppe f4` command) to `os` in `fmt` —
+/// ONE ROW PER QUARTET, in input order, exactly the regenerated golden schema
+/// (golden_fit0_f4_readf2.csv): columns pop1,pop2,pop3,pop4,est,se,z,p so the parity test
+/// diffs row-for-row. `p1..p4 labels` are the resolved population names of each quartet
+/// (len == result.est; the result carries the indices, the app resolves them back to
+/// names). This REUSES the SAME OutputFormat / fmt_double / json_double / csv_quote /
+/// json_quote / status_str format primitives emit_qpwave_result reuses (no compute / no
+/// format duplicated). Total: a domain-outcome row (NaN est/se) emits NA/null sentinels,
+/// never throws.
+void emit_f4_result(std::ostream& os, OutputFormat fmt,
+                    const F4Result& result,
+                    const std::vector<std::string>& p1_labels,
+                    const std::vector<std::string>& p2_labels,
+                    const std::vector<std::string>& p3_labels,
+                    const std::vector<std::string>& p4_labels);
 
 }  // namespace steppe::app
 

@@ -37,6 +37,13 @@ namespace steppe::core::qpadm {
 /// the loose tier; an own incomplete-gamma is acceptable). dof <= 0 ⇒ NaN.
 [[nodiscard]] double pchisq_upper(double x, int dof);
 
+/// HONEST precision_tag (architecture.md §9, §12): report what ACTUALLY ran on the
+/// covariance SYRK — EmulatedFp64 iff the request is emulated AND the backend can honor
+/// it, else native Fp64 (never tag a run EmulatedFp64 that silently ran native). Single-
+/// homed so run_impl / run_qpwave_impl / run_f4_impl cannot drift their tag derivation
+/// ([7.1] dedup). Declared here so the standalone-f4 TU (f4.cpp) reuses the ONE source.
+[[nodiscard]] Precision::Kind honored_tag(const Precision& prec, ComputeBackend& be);
+
 /// [target] ++ model.left (the AT2 left = c(target, sources) convention).
 [[nodiscard]] std::vector<int> left_with_target(const QpAdmModel& model);
 

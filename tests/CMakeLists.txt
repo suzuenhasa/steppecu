@@ -1186,6 +1186,24 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+  # --- `steppe f4` standalone-f4 golden gate (fit-engine §6) ---------------------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe f4` over the COMMITTED real-AADR
+  # 9-pop f2 fixture (fixtures/f2_fit0_9pop.bin) for ALL 60 quartets of the REGENERATED,
+  # fixture-matched golden (csv/golden_fit0_f4_readf2.csv) and diffs the est/se/z/p table
+  # row-for-row at rtol 1e-6 — RUNNING ON THE GPU. Also exercises the single-quartet --pops
+  # convenience. The CLI counterpart of the standalone-f4 entry. SKIPs cleanly (exit 0)
+  # when no CUDA device is visible. Links the CUDA-FREE f2_disk_format header (via
+  # core_internal) + the standard host warnings; the GPU work is in the spawned child.
+  # Depends on steppe_app so the binary exists; the binary path + the golden dir are argv.
+  add_executable(test_cli_f4 cli/test_cli_f4.cpp)
+  target_link_libraries(test_cli_f4
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_f4 steppe_app)
+  add_test(NAME cli_f4
+           COMMAND test_cli_f4
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
   # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
   # triple (STEPPE_AADR_ROOT/raw/<prefix>.{geno,snp,ind}) for the golden pop sets, then

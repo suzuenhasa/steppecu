@@ -604,6 +604,36 @@ __global__ void assemble_f4_gather_kernel(const double* __restrict__ f2, int P,
     }
 }
 
+// --- STANDALONE f4 quartet-gather kernel -----------------------------------------
+// One thread per (k, bs), k in 0..N-1 (the quartet/m index), bs in 0..nb-1 (the
+// SURVIVOR block index). Each quartet has its OWN (p1,p2,p3,p4) from d_quartets (the
+// flattened 4*N quad array). Writes the dense compacted dX[k + N*bs] reading the
+// resident f2 at the ORIGINAL block b = d_surv[bs] (d_surv==nullptr ⇒ identity). Native
+// FP64; the 4-slab subtraction is the cancellation-sensitive f-stat difference (§12).
+//   dX[k + N*bs] = 0.5*( f2(p2,p3,b) + f2(p1,p4,b) - f2(p1,p3,b) - f2(p2,p4,b) )
+__global__ void assemble_f4_quartets_gather_kernel(const double* __restrict__ f2, int P,
+                                                   const int* __restrict__ d_quartets,
+                                                   int N, int nb,
+                                                   const int* __restrict__ d_surv,
+                                                   double* __restrict__ dX) {
+    const long total = static_cast<long>(N) * static_cast<long>(nb);
+    for (long idx = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int k  = static_cast<int>(idx % N);            // quartet (m) index
+        const int bs = static_cast<int>(idx / N);            // compacted survivor index
+        const int b  = d_surv ? d_surv[bs] : bs;             // original resident block id
+        const int p1 = d_quartets[4 * k + 0];
+        const int p2 = d_quartets[4 * k + 1];
+        const int p3 = d_quartets[4 * k + 2];
+        const int p4 = d_quartets[4 * k + 3];
+        const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
+        const auto at = [&](int a, int c) -> double {
+            return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
+        };
+        dX[idx] = 0.5 * (at(p2, p3) + at(p1, p4) - at(p1, p3) - at(p2, p4));
+    }
+}
+
 // F1 / OQ-12 keep-mask: one thread per resident block b scans the [P×P] Vpair slab and
 // writes d_keep[b] = 0 iff the block is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair
 // Vpair>0) — AT2 read_f2's `!is.finite` drop. A fully-zero slab is the "no Vpair info"
@@ -1517,6 +1547,19 @@ void launch_assemble_f4_gather(const double* f2, int P,
     const int grid = static_cast<int>((total + block - 1) / block);
     assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(f2, P, d_left, d_right,
                                                           nl, nr, nb, d_surv, dX);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_assemble_f4_quartets_gather(const double* f2, int P,
+                                        const int* d_quartets, int N, int nb,
+                                        const int* d_surv,
+                                        double* dX, cudaStream_t stream) {
+    const long total = static_cast<long>(N) * nb;
+    if (total <= 0) return;
+    const int block = 256;
+    const int grid = static_cast<int>((total + block - 1) / block);
+    assemble_f4_quartets_gather_kernel<<<grid, block, 0, stream>>>(
+        f2, P, d_quartets, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

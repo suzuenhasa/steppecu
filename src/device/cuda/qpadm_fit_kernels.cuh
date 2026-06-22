@@ -39,6 +39,22 @@ void launch_assemble_f4_gather(const double* f2, int P,
                                int nl, int nr, int nb, const int* d_surv,
                                double* dX, cudaStream_t stream);
 
+/// STANDALONE f4 quartet-gather (the run_f4 seam; fit-engine §6). Build the per-block f4
+/// matrix dX[k + N*b] whose m axis is the N QUARTETS — each quartet k has its OWN
+/// (p1,p2,p3,p4), unlike launch_assemble_f4_gather whose single (L0,R0) spans an nl×nr
+/// grid. `d_quartets` is the H2D'd flattened index quad array (length 4*N, quad k at
+/// [4*k .. 4*k+3] = {p1,p2,p3,p4}). Per (k, b):
+///   dX[k + N*b] = 0.5*( f2(p2,p3,b) + f2(p1,p4,b) - f2(p1,p3,b) - f2(p2,p4,b) )
+/// the SAME four-slab AT2 identity specialized to nl=1,nr=1 — ZERO new math, just a
+/// per-column quad instead of the shared (L0,R0). Reads the RESIDENT f2 (column-major
+/// i + P*j + P*P*b) — NO D2H. Native FP64 (the cancellation carve-out). F1/OQ-12 SURVIVOR
+/// COMPACTION: `nb` is the SURVIVOR block count and `d_surv` (length nb, ASCENDING) maps a
+/// compacted survivor index to its ORIGINAL resident block id; d_surv==nullptr ⇒ identity.
+void launch_assemble_f4_quartets_gather(const double* f2, int P,
+                                        const int* d_quartets, int N, int nb,
+                                        const int* d_surv,
+                                        double* dX, cudaStream_t stream);
+
 /// F1 / OQ-12 keep-mask: one thread per resident block writes d_keep[b]=0 iff block b
 /// is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair Vpair>0 — AT2 read_f2's
 /// `!is.finite` drop), else 1. A fully-zero slab is the "no Vpair info" sentinel (the

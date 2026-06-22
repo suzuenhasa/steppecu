@@ -21,6 +21,7 @@
 #include <CLI/CLI.hpp>
 
 #include "app/cmd_extract_f2.hpp"
+#include "app/cmd_f4.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpwave.hpp"
 #include "app/cmd_rotate.hpp"
@@ -157,6 +158,34 @@ void add_left_flag(CLI::App* sub, CliArgs& a, const char* help) {
         ->delimiter(',');
 }
 
+// Bind the `f4` quartet flags: the ROW-ALIGNED --pop1/--pop2/--pop3/--pop4 columns
+// (admixtools::f4 comb=FALSE — quartet k = (pop1[k],pop2[k],pop3[k],pop4[k])) AND the
+// single-/multi-quartet --pops convenience (names in groups of 4). All comma/space
+// delimited. f4 has NO target/left/right (it is a bare quartet stat), so this is the ONE
+// new flag helper the command needs (cli-bindings.md §4.1; the rest is reused).
+void add_f4_quartet_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
+            "Quartet column 1 (p1, the f4 target/first pop), row-aligned with --pop2/3/4")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
+            "Quartet column 2 (p2)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
+            "Quartet column 3 (p3, the f4 R0)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop4", [&a](const std::vector<std::string>& v) { a.pop4 = v; },
+            "Quartet column 4 (p4, the f4 R1)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
+            "Quartet(s) as names in groups of 4: p1,p2,p3,p4[,p1,p2,p3,p4,...]")
+        ->delimiter(',');
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -171,6 +200,7 @@ int run_cli(int argc, char** argv) {
     CliArgs qpwave_args;
     CliArgs rotate_args;
     CliArgs extract_args;
+    CliArgs f4_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -212,6 +242,26 @@ int run_cli(int argc, char** argv) {
             // NO target, left[0]=reference -> upload -> run_qpwave -> emit the rank-sweep
             // table). Mirrors how `qpadm` dispatches.
             std::exit(run_qpwave_command(*config));
+        });
+    }
+
+    // ---- f4 (standalone f4 statistic; fit-engine §6) ----------------------------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "f4", "Standalone f4(p1,p2;p3,p4) statistic (est/se/z/p per quartet)");
+        f4_args.command = Command::F4;
+        add_f2_dir_flag(sub, f4_args, "The f2_blocks directory");
+        // f4 takes QUARTETS, not target/left/right: the row-aligned --pop1..--pop4 columns
+        // OR the --pops 4-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
+        add_f4_quartet_flags(sub, f4_args);
+        add_output_flags(sub, f4_args);
+        add_common_flags(sub, f4_args);
+        sub->callback([&]() {
+            auto config = build_config(f4_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The real GPU f4 (read dir -> resolve quartets -> upload -> run_f4 -> emit the
+            // pop1,pop2,pop3,pop4,est,se,z,p table). Mirrors how `qpadm`/`qpwave` dispatch.
+            std::exit(run_f4_command(*config));
         });
     }
 

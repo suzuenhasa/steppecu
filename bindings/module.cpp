@@ -19,6 +19,7 @@
 //      to_numpy exports `double` -> numpy float64. No GPU export, no float32 footgun.
 //   #4 column-major layout: the tensor is i + P*j + P*P*b (fstats.hpp); to_numpy exports
 //      F-contiguous (P, P, n_block) so arr[:,:,b] is slab b with no silent transpose.
+#include <array>
 #include <cstddef>
 #include <exception>
 #include <memory>
@@ -29,6 +30,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -39,6 +41,7 @@
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/config.hpp"            // steppe::DeviceConfig
 #include "steppe/error.hpp"             // steppe::Status
+#include "steppe/f4.hpp"                // run_f4 + F4Result (the standalone-f4 binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
 
@@ -212,6 +215,34 @@ nb::dict qpwave_to_dict(const steppe::QpWaveResult& r) {
     return d;
 }
 
+// F4Result -> a Python dict of parallel arrays {pop1,pop2,pop3,pop4 (names),est,se,z,p}.
+// The result carries P-axis INDICES; `pops` is the handle's name<->index map so the
+// binding resolves them back to NAMES (the facade reshapes to a DataFrame). NaN est/se/z/p
+// (a degenerate quartet) ride through as numpy NaN — the honest sentinel, never a fake 0.
+nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& pops) {
+    nb::dict d;
+    const auto names = [&pops](const std::vector<int>& idx) {
+        std::vector<std::string> out;
+        out.reserve(idx.size());
+        for (int i : idx)
+            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
+                              ? pops[static_cast<std::size_t>(i)]
+                              : std::string());
+        return out;
+    };
+    d["pop1"] = names(r.p1);
+    d["pop2"] = names(r.p2);
+    d["pop3"] = names(r.p3);
+    d["pop4"] = names(r.p4);
+    d["est"] = r.est;
+    d["se"] = r.se;
+    d["z"] = r.z;
+    d["p"] = r.p;
+    d["status"] = status_str(r.status);
+    d["precision"] = precision_str(r.precision_tag);
+    return d;
+}
+
 // ---- read_f2: the f2-dir loader -> the opaque F2Handle ----------------------------
 // Returns a raw heap pointer; the binding uses rv_policy::take_ownership so Python owns
 // the F2Handle and frees it (with its cached Resources) at GC. (F2Handle is move-only via
@@ -298,6 +329,45 @@ nb::dict run_qpwave_py(F2Handle& h, const std::vector<std::string>& left,
         raise_value(std::string("device error: ") + e.what());
     }
     return qpwave_to_dict(result);
+}
+
+// run_f4: a list of (p1,p2,p3,p4) quartet NAME tuples against the SAME resident f2,
+// computed BATCHED (run_f4). Returns ONE dict of parallel arrays {pop1..pop4,est,se,z,p}
+// in input order. Mirrors run_qpwave_py exactly: resolve names against pops.txt, build
+// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives
+// only here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+nb::dict run_f4_py(F2Handle& h,
+                   const std::vector<std::array<std::string, 4>>& quartets) {
+    if (quartets.empty()) raise_value("f4: needs at least one (p1,p2,p3,p4) quartet");
+
+    const sa::PopResolver resolver(h.pops);
+    if (!resolver.valid()) raise_value(resolver.error());
+
+    std::vector<std::array<int, 4>> idx_quartets;
+    idx_quartets.reserve(quartets.size());
+    for (const std::array<std::string, 4>& q : quartets) {
+        std::array<int, 4> qi{};
+        for (int c = 0; c < 4; ++c) {
+            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
+            if (!rr.ok) throw nb::key_error(("quartet pop: " + rr.error).c_str());
+            qi[static_cast<std::size_t>(c)] = rr.index;
+        }
+        idx_quartets.push_back(qi);
+    }
+
+    steppe::QpAdmOptions opts;  // f4 uses fudge=0 internally (run_f4); opts is the default.
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::F4Result result;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        result = steppe::run_f4(
+            dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
+    return f4_to_dict(result, h.pops);
 }
 
 // qpadm_search: a list of explicit (left, right) models against the SAME resident f2,
@@ -411,6 +481,10 @@ NB_MODULE(_core, m) {
     m.def("run_qpwave", &run_qpwave_py, "f2"_a, "left"_a, "right"_a, "fudge"_a = 1e-4,
           "rank_alpha"_a = 0.05,
           "qpWave rank-sufficiency sweep (GPU; left[0] is the reference). Flat dict.");
+
+    m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
+          "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "
+          "tuples; returns a dict of parallel arrays {pop1,pop2,pop3,pop4,est,se,z,p}.");
 
     m.def("run_qpadm_search", &run_qpadm_search_py, "f2"_a, "target"_a, "lefts"_a,
           "right"_a, "rank"_a = -1, "fudge"_a = 1e-4, "als_iterations"_a = 20,

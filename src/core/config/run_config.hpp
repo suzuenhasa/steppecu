@@ -68,6 +68,17 @@ public:
     [[nodiscard]] const std::vector<std::string>& left()  const noexcept { return left_; }
     [[nodiscard]] const std::vector<std::string>& right() const noexcept { return right_; }
     [[nodiscard]] const std::vector<std::string>& pool()  const noexcept { return pool_; }
+    /// The `f4` command's ROW-ALIGNED quartet columns (--pop1/--pop2/--pop3/--pop4). Also
+    /// carries the `--pops` 4-tuple convenience verbatim via pops() below; the app picks
+    /// whichever is non-empty (cmd_f4.cpp). Default empty.
+    [[nodiscard]] const std::vector<std::string>& pop1()  const noexcept { return pop1_; }
+    [[nodiscard]] const std::vector<std::string>& pop2()  const noexcept { return pop2_; }
+    [[nodiscard]] const std::vector<std::string>& pop3()  const noexcept { return pop3_; }
+    [[nodiscard]] const std::vector<std::string>& pop4()  const noexcept { return pop4_; }
+    /// The raw `--pops` labels (the f4 single-quartet convenience: 4 names = one quartet).
+    /// Distinct from pop_selection() (which extract-f2 maps it into) — the f4 command reads
+    /// these names directly, in groups of 4.
+    [[nodiscard]] const std::vector<std::string>& pops()  const noexcept { return pops_; }
     [[nodiscard]] const std::string& out_file() const noexcept { return out_file_; }
     [[nodiscard]] const std::string& format()   const noexcept { return format_; }
     [[nodiscard]] const std::string& geno()     const noexcept { return geno_; }
@@ -109,6 +120,8 @@ private:
     std::vector<std::string> left_;
     std::vector<std::string> right_;
     std::vector<std::string> pool_;
+    std::vector<std::string> pop1_, pop2_, pop3_, pop4_;  // f4 row-aligned quartet columns
+    std::vector<std::string> pops_;                       // f4 --pops 4-tuple convenience (raw labels)
     std::string out_file_;
     std::string format_ = "csv";   // cli-bindings.md §4.4 default
     std::string geno_;
