@@ -447,20 +447,41 @@ REAL v66 1240K, single-GPU `--device 0`, Release. `models/sec = #models / wall`.
 
 ### Measured — jackknife 1 (feasible-only SE pass-2)
 
-| pool N | #models | wall | models/sec | feasible | note |
-|---:|---:|---:|---:|---:|---|
-| 25 | 2,625   | 1.158 s | 2,267 | 440   | ok |
-| 50 | 20,875  | 2.314 s | 9,022 | 6,571 | ok (peak 29,148 MiB) |
-| 60 | 36,050  | — | — | — | **OOM** (cudaMalloc) |
-| 75 | 70,525  | — | — | — | **OOM** |
-| 100 | 166,750 | — | — | — | **OOM** (jk0 at the same N succeeds) |
+**UPDATE (ROADMAP §6 — the jk1/jk2 SE pass-2 VRAM-budget fix, `cuda_backend.cu`
+`fit_one_bucket`).** The OLD ~pool_50 jk1 OOM (the table's `—` rows below the line)
+is **FIXED**: the SE pass-2 LOO arenas (`dLooS` m·nb + `dQinvS` m² + `dWmatS` nb·nl
++ `dSeS` nl doubles + `dSurv` int per model) coexist with the still-live pass-1
+buffers in one flat RAII scope inside `fit_chunk`, but the per-chunk budgeter
+counted ONLY pass-1, so jk≥1 over-committed and `cudaMalloc` OOM'd above ~pool_50.
+The fix folds the pass-2 footprint into the EXISTING per-model budget term (JK-gated
+to 0 for `None` so jk0 is bit-for-bit unchanged) — a smaller `B_max` under jk≥1
+makes the EXISTING chunk loop tile BOTH passes. Chunk width moves no bits
+(architecture.md §12; the LOO SE is per-model + chunk-independent), so **pool_50 jk1
+is byte-identical pre/post the fix** (verified `cmp`/md5). jk1 now scales single-GPU
+to **pool_200** (1.33M models). Re-measured below on box5090 (1× RTX 5090, 32 GB),
+Release, REAL v66 1240K, `--device 0`, the `rot_pool200` resident f2 (P=207, 713
+blocks, 1,123,319 SNPs):
 
-**The jk1 single-GPU wall lands between N=50 and N=60** — a VRAM ceiling (32 GB),
-NOT the 5–8 min time wall. The SE pass-2 (LOO over survivors) allocates a second
-arena set while the pass-1 buffers are still live, and the per-model VRAM budgeter
-in `cuda_backend.cu` `fit_one_bucket` does **not** account for that pass-2
-footprint. **Real, reproducible single-GPU finding** worth a follow-up (chunk the
-SE pass-2, or budget it). jk0 at the same N=60/75/100/150/200 all succeed.
+| pool N | #models | wall | models/sec | peak VRAM | note (post-fix) |
+|---:|---:|---:|---:|---:|---|
+| 25 | 2,625   | 1.158 s | 2,267 | — | ok |
+| 50 | 20,875  | 2.314 s | 9,022 | 29,148 MiB | ok; **byte-identical pre/post the fix** |
+| 100 | 166,750 | 12.55 s | 13,287 | **30,014 MiB** | **COMPLETES (was OOM)** |
+| 150 | 562,625 | 30.64 s | 18,361 | **30,170 MiB** | **COMPLETES (was OOM)** |
+| 200 | 1,333,500 | 66.20 s | 20,144 | **30,062 MiB** | **COMPLETES (was OOM)** |
+
+(Pre-fix the N≥60 jk1 rows OOM'd with `cudaErrorMemoryAllocation` at
+`device_buffer.cuh:74` — re-confirmed on the pre-fix binary at pool_100 AND pool_200;
+the post-fix peak sits ~2.5 GB below the 32,607 MiB ceiling at every pool, vs the
+pre-fix OOM. GPU returned to 2 MiB after every run — no leak.)
+
+**The OLD jk1 ceiling (superseded).** Before the fix the jk1 single-GPU wall landed
+between N=50 and N=60 — a VRAM ceiling (32 GB), NOT the time wall. The SE pass-2
+(LOO over survivors) allocated a second arena set while the pass-1 buffers were
+still live, and the per-model VRAM budgeter in `cuda_backend.cu` `fit_one_bucket`
+did **not** account for that pass-2 footprint. That budgeting bug is now fixed (see
+the UPDATE above); the jk1 SE path scales to **pool_200** single-GPU, the same
+ceiling as jk0. jk0 at every N=60/75/100/150/200 also succeeds.
 
 ### The rate does NOT hold flat — it RISES then CONVERGES
 
@@ -508,8 +529,12 @@ sizes to <2.6% across the whole range (P^2 confirmed).
   32 GB ceiling. pool_200 is essentially the largest jk0 pool that fits resident:
   resident f2 (467 MB) + per-chunk arenas (`dX/dLoo/dXtau ≈ 3·B·m·nb`) brush the
   ceiling. The `fit_one_bucket` budgeter *does* chunk the bucket for jk0.
-- **jk1 pool_50**: PEAK 29,148 MiB; **pool_60 jk1 OOMs** (the uncounted pass-2 SE
-  arenas, above).
+- **jk1 pool_50**: PEAK 29,148 MiB (byte-identical pre/post the SE-budget fix).
+- **jk1 now scales to pool_200** (post the SE pass-2 budget fix): PEAK **30,014 /
+  30,170 / 30,062 MiB** at pool_100 / 150 / 200 (all ~2.5 GB below the 32,607 MiB
+  ceiling). The OLD **pool_60 jk1 OOM** (the uncounted pass-2 SE arenas) is FIXED —
+  the budgeter now counts the pass-2 footprint and the existing chunk loop tiles
+  both passes (see the jackknife-1 section above).
 - **No VRAM leak** — both 5090s returned to 2 MiB after every run.
 
 ### Extrapolation to pool = 500 / 1000 / whole-set
@@ -535,9 +560,11 @@ chew (10^7–10^8 models, tens of minutes single-GPU) if you point it at the ent
 panel — a throughput-ceiling stress test, not a research workflow. Both regimes
 are real; quote the one that matches the question.
 
-**Caveats carried forward.** (1) jk1 (SE) OOMs single-GPU above ~pool_50 — the
-binding limit there is VRAM, not time; the pass-2 SE footprint is uncounted by the
-chunk budgeter (follow-up filed above). (2) The projections assume the f2 stays
+**Caveats carried forward.** (1) ~~jk1 (SE) OOMs single-GPU above ~pool_50~~ —
+**FIXED** (ROADMAP §6): the chunk budgeter now counts the SE pass-2 footprint, so
+jk1 scales to pool_200 single-GPU (peaks ~30 GB, ~2.5 GB under the ceiling), the
+same envelope as jk0; the fix is parity-neutral (pool_50 jk1 byte-identical
+pre/post). (2) The projections assume the f2 stays
 resident; at pool≈1000 the ~11.5 GB `f2.bin` is near the point where the
 host/streamed f2 tier engages, which adds I/O the resident-only measurements don't
 include. (3) Single-GPU only; multi-GPU is PARKED.

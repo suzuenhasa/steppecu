@@ -2463,12 +2463,33 @@ private:
         // ---- VRAM-budget the chunk size B (design §6) ---------------------------
         // Per-model device bytes (double): dX + dLoo + dXtau (3·m·nb) + dQ + dQinv +
         // dQf + dI (4·m²) + small fit outputs (≈ nl + se + chisq + rank_chisq + pop).
+        //
+        // SE pass-2 COEXISTS with pass-1 (one flat RAII scope in fit_chunk: the pass-1
+        // arenas above are still live when the LOO SE arenas allocate on top). Under
+        // jackknife≥1 the worst-case compacted pass-2 path (Sn==B) allocates per model:
+        // dLooS (m·nb) + dQinvS (m²) + dWmatS (nb·nl) + dSeS (nl) doubles + dSurv (1 int).
+        // The pre-policy budgeter counted ONLY pass-1 (same class as the :612 ~2×-under-
+        // budget note), so jk1/jk2 over-committed and cudaMalloc OOM'd above ~pool_50.
+        // Fold the pass-2 term in here, JK-GATED to 0 for None so jk0's B_max is bit-for-
+        // bit unchanged. A smaller B under jk≥1 makes the EXISTING chunk loop (:2480) tile
+        // BOTH passes — chunk width moves no bits (architecture.md §12; the LOO SE is per-
+        // model + chunk-independent), so the pools that already ran jk1 stay byte-identical.
+        const bool se_pass = (opts.jackknife != JackknifePolicy::None);
+        const std::size_t se_per_model_dbl =
+            se_pass
+                ? (m_sz * static_cast<std::size_t>(nb)                            // dLooS
+                   + Mm                                                          // dQinvS
+                   + static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) // dWmatS
+                   + static_cast<std::size_t>(nl))                               // dSeS
+                : 0;
         const std::size_t per_model_dbl =
             3 * m_sz * static_cast<std::size_t>(nb) + 4 * Mm +
-            static_cast<std::size_t>(2 * nl + 1 + (rmax + 1) + (nl + 1) + nl);
+            static_cast<std::size_t>(2 * nl + 1 + (rmax + 1) + (nl + 1) + nl) +
+            se_per_model_dbl;  // SE pass-2 arenas coexist with pass-1 (JK-gated)
         const std::size_t per_model_bytes = per_model_dbl * sizeof(double) +
             static_cast<std::size_t>((nl + 1) + (nr + 1)) * sizeof(int) +
-            sizeof(int) /*status*/ + 3 * sizeof(double*) /*ptr arrays*/;
+            sizeof(int) /*status*/ + 3 * sizeof(double*) /*ptr arrays*/ +
+            (se_pass ? sizeof(int) : 0) /*dSurv (JK-gated)*/;
         std::size_t free_b = capabilities().free_vram_bytes;
         if (free_b == 0) free_b = kFitBudgetFreeVramFallbackBytes;  // 4 GB free-VRAM fallback
         const std::size_t headroom = kFitBudgetHeadroomBytes;       // 512 MB headroom
