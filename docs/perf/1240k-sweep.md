@@ -13,10 +13,22 @@ steppe-native TGENO. NOT the HO panel, NOT synthetic.
 **Box:** box5090 — 2x NVIDIA GeForce RTX 5090 (sm_120, 32607 MiB each), CUDA 13.
 `ulimit -c 0`, core dumps cleared (0 remaining).
 
-**Status:** independently verified (this doc). The sweep agent's report was
-re-confirmed end to end: build type, data geometry, an extract-f2 spot re-time
-(within ~1%), a single fit, a heavy jackknife fit, the CLI-loop rate, and the
-qpadm-rotate scaffold were all reproduced. Deviations are flagged inline.
+**Device policy — SINGLE-GPU (`--device 0`) is the supported, measured path.**
+MULTI-GPU IS PARKED: the 2nd GPU is *slower* for this workload — extract-f2's
+f2_blocks get bounced (a 2nd ~7 GB D2H) and the qpAdm fit is a single-GPU compute
+shape — so the supported path is one GPU. The numbers below are SINGLE-GPU. The
+*original* sweep accidentally ran extract-f2/qpadm under `--device auto` (= both
+GPUs); those numbers are re-reported here on `--device 0`. Multi-GPU is **not**
+benchmarked here (root-caused, fix deferred).
+
+**Status:** independently verified (this doc). Re-confirmed end to end on box5090,
+Release, REAL 1240K, SINGLE-GPU: build type (`CMAKE_BUILD_TYPE:STRING=Release` in
+`build-rel/CMakeCache.txt`), the REAL f2 geometry (f2_60: P=60, 711 blocks,
+682,707/1,233,013 SNPs, sourced from the real `.geno` sha256), an extract-f2
+`--device 0` spot re-time (43.2 s, within noise of 43.4 s), and the REAL batched
+`run_qpadm_search` rotation throughput (2866 models/sec jk=0; 1247 models/sec full
+LOO SE). The earlier "qpadm-rotate not implemented / ~1 model/sec" was a
+CLI-scaffold + process-spawn artifact and is corrected below.
 
 ---
 
@@ -42,30 +54,37 @@ Jump from HO (~600K SNPs) to 1240K (~1.23M SNPs): ~2x the SNP axis, and a
 
 ---
 
-## extract-f2 — wall-clock x pop-set size
+## extract-f2 — wall-clock x pop-set size (SINGLE-GPU)
 
-`extract-f2 --prefix … --pops … --blgsize 0.05 --maxmiss 0 --auto-only`,
-device=auto (both GPUs). blgsize 0.05 -> 711–713 jackknife blocks.
+`extract-f2 --prefix … --pops … --blgsize 0.05 --maxmiss 0 --auto-only --device 0`.
+blgsize 0.05 -> 711–713 jackknife blocks. **SINGLE-GPU is the supported path.**
 
-| pop set | #indiv | SNPs kept (of 1,233,013) | blocks | **wall** | MaxRSS | f2.bin |
+The original sweep ran these `--device auto` (both GPUs); the table keeps those
+wall numbers as the historical record, but the **supported, re-measured**
+SET60 wall is the `--device 0` number below.
+
+| pop set | #indiv | SNPs kept (of 1,233,013) | blocks | wall (orig, auto/both) | MaxRSS | f2.bin |
 |---|---:|---:|---:|---:|---:|---:|
-| SET5  |   206 | 1,045,408 | 713 | **40.02 s** | 0.98 GB | 288 KB |
-| SET15 |   596 |   691,342 | 711 | **40.61 s** | 1.50 GB | 2.56 MB |
-| SET30 | 1,907 |   704,508 | 711 | **41.66 s** | 2.59 GB | 10.24 MB |
-| SET60 | 4,402 |   682,707 | 711 | **43.97 s** | 4.73 GB | 40.96 MB |
+| SET5  |   206 | 1,045,408 | 713 | 40.02 s | 0.98 GB | 288 KB |
+| SET15 |   596 |   691,342 | 711 | 40.61 s | 1.50 GB | 2.56 MB |
+| SET30 | 1,907 |   704,508 | 711 | 41.66 s | 2.59 GB | 10.24 MB |
+| SET60 | 4,402 |   682,707 | 711 | 43.97 s | 4.73 GB | 40.96 MB |
 
-**Verifier spot re-time (14-pop Haak set, independent run):** 40.38 s wall,
-User 37.52 s, Sys 2.98 s, MaxRSS 1.37 GB, 690,626 SNPs kept, 711 blocks,
-P=14, rc=0. This matches the sweep's SET15 (40.61 s, 1.50 GB, ~691K SNPs,
-711 blocks) within ~1% on wall and ~9% on RSS — well inside the ~20%
-tolerance, and reproducible. (`/usr/bin/time` and `xxd` were initially absent on
-the box; `time` was installed, `od -c` substituted for `xxd`.)
+**Supported SINGLE-GPU re-measure (SET60, `--device 0`, REAL 1240K geno):**
+two runs at **43.43 s / 43.40 s**, plus an independent verifier run at **43.23 s**
+(rc=0; P=60, 711 blocks, **682,707 SNPs kept** — bit-matches the SET60 geometry
+above). vs the original both-GPU `--device auto` SET60 of 43.97 s, **single-GPU is
+~1% FASTER (within noise)**: extract-f2 is fully TGENO-decode-bound, so the 2nd
+GPU gives no benefit (and, per the parked-multi-GPU root cause, generally costs a
+2nd ~7 GB f2_blocks D2H). The `--device auto` number was effectively the same
+wall, confirming single-GPU as the right supported path. (`/usr/bin/time` and
+`xxd` were initially absent; `time` was installed, `od -c` / `date` math used.)
 
-**Scaling:** wall is essentially FLAT (40.0 -> 44.0 s) across a 21x individual
-count and 12x pop count. User time is flat ~37–38 s; System time grows mildly
-(2.7 -> 5.7 s) with more individuals decoded. SNPs-kept DROPS as pops are added
-because `--maxmiss 0` requires zero missing across all selected pops (joint
-completeness) — this is correct, intended behavior, not silent data loss.
+**Scaling:** wall is essentially FLAT (40 -> 44 s) across a 21x individual count
+and 12x pop count — extract-f2 is fully decode-bound (see "Where the time goes").
+SNPs-kept DROPS as pops are added because `--maxmiss 0` requires zero missing
+across all selected pops (joint completeness) — correct, intended behavior, not
+silent data loss.
 
 ---
 
@@ -102,53 +121,95 @@ f2.bin-load floor (User is only ~0.10 s, Sys ~1.0 s). Pure fit compute is
 
 ---
 
-## Rotation — qpadm-rotate is NOT YET IMPLEMENTED
+## Rotation — the batched engine EXISTS (correcting the original sweep)
 
-`steppe qpadm-rotate` parses and validates a full flag set (`--pool`,
-`--min/max-sources`, `--als-iters`, `--rank`, `--jackknife`, …) but the compute
-is a scaffold. **Verified directly:** an actual run prints
+**Correction.** The original sweep said "qpadm-rotate not implemented / rotation
+runs at ~1 model/sec". That conflated two different things and was wrong about the
+engine:
 
-> `steppe qpadm-rotate: not yet implemented (M(cli-0) scaffold — config parsed and validated; compute lands in a later milestone)`
+1. **The CLI subcommand `steppe qpadm-rotate` is a scaffold** — it parses and
+   validates the flag set, then exits with
+   `not yet implemented (M(cli-0) scaffold)`. True, but it is *only* the CLI
+   wiring that is unbuilt.
+2. **The batched rotation ENGINE is real and golden-gated.**
+   `run_qpadm_search` (`src/core/qpadm/model_search.cpp:253`) dispatches to
+   `CudaBackend::fit_models_batched` — f2 **RESIDENT in VRAM**,
+   `cublasDgemmStridedBatched` + cuSOLVER `*Batched` + a model-batched fit
+   kernel — and is gated against `golden_rot.json` (84 models) by
+   `tests/reference/test_qpadm_rotation.cu` (PASSES single-GPU, batched
+   dispatches=2).
+3. **The "~1 model/sec" was a MEASUREMENT ARTIFACT**, not the engine's rate. The
+   sweep looped the *CLI* `qpadm` subcommand once per model, so each model re-paid
+   the full CUDA-context init + f2.bin load PER PROCESS (~0.85–1.0 s of
+   process-spawn overhead; actual fit compute is a fraction of that). That rate
+   measures process spawning, not rotation.
 
-and exits rc=0 in **0.12 s** with no fit output. The in-process batched
-rotation does not exist yet. **This is the single biggest perf gap.**
+### REAL batched throughput — SINGLE-GPU, resident 1240K f2
 
-**Fallback measured — CLI loop over the `qpadm` subcommand (f2_60, right=8):**
+Measured with `bench_rotation_1240k` (a manual bench TU — see "Bench vehicle"
+below — NOT a ctest gate). It reads the REAL 1240K `f2_60` dir (P=60, 711 blocks,
+682,707 SNPs) into VRAM **once** (`f2_device != null`), builds **781 REAL models**
+(1 target + a 12-source pool, C(pool, 2..4), 6 outgroups, all over the SAME
+resident f2), and times `run_qpadm_search` BATCHED on **device 0** (median of 3
+timed iters after 1 warm-up):
 
-| loop | jackknife | total | **models/sec** | breakdown |
-|---|---:|---:|---:|---|
-| 30 models | 0 | 27.75 s | **1.08** | User 3.48 s (compute), Sys 24.28 s (30x ctx init) |
-| 10 models | 2 | 9.60 s | **1.04** | User 1.19 s, Sys 8.43 s |
+| jackknife policy | wall (median) | **models/sec** | per-model | batched dispatches |
+|---|---:|---:|---:|---:|
+| `None` (point estimate)         | 272 ms | **2866** | 0.349 ms | 12 (<< 781) |
+| `FeasibleOnly` (LOO SE on the 21 feasible survivors) | ~276 ms | **~2830** | 0.353 ms | 12 |
+| `All` (full 711-block LOO SE, all 781) | 626 ms | **1247** | 0.802 ms | 12 |
 
-**Verifier re-run:** 8 light models in 7.00 s = **1.143 models/sec** — matches.
+All 781 returned `Ok`, 21 feasible, `precision_tag = EmulatedFp64`. **12 batched
+dispatches for 781 models** proves the GPU-batched path (`fit_models_batched`),
+NOT a per-model host loop. **Independently re-confirmed** by the verifier: jk=0
+**2866 models/sec**, jk=2 (full LOO SE) **1247 models/sec** — both within noise of
+the re-measure agent (2903 / 1235).
 
-The CLI-loop rate (~1.0 models/sec) is **PROCESS-SPAWN bound, not compute
-bound**: ~0.85–1.0 s/model is CUDA-context creation + f2.bin load paid PER
-PROCESS. Actual fit compute is ~0.12 s/model (no SE). A real in-process
-qpadm-rotate that pays the CUDA context + f2 load ONCE would run roughly ~8x
-faster on the light path (toward ~8–10 models/sec from the 0.12 s compute) —
-which is exactly the motivation for the unbuilt batched rotation, and matches
-the project goal of thousands batched, multi-GPU.
+**So the REAL single-GPU batched rotation is ~2866 models/sec at the point
+estimate (~2866x the bogus CLI-loop ~1/sec), and still ~1247 models/sec even with
+the full 711-block LOO SE on every model** (~1247x). `FeasibleOnly` — the
+production two-pass policy — is nearly free vs the point estimate because only the
+21/781 feasible survivors pay the LOO SE.
+
+**Shape, not f2 size, drives per-model compute.** Cross-checked on `f2_30`
+(P=30): identical ~2900 models/sec at the same right/pool size — per-model compute
+is MODEL-SHAPE-bound (nr, nl, jackknife policy), not f2-P-bound. A smaller right
+set (f2_15, right=3) hits ~9000 models/sec.
+
+### Bench vehicle
+
+`tests/reference/bench_rotation_1240k.cu` (+ one `add_executable` in
+`tests/CMakeLists.txt`, patterned off `bench_f2_multigpu`; links
+`steppe::core/device/core_internal/api/warnings`, `CUDA_SEPARABLE_COMPILATION
+ON`). **No product code changed.** REASON: the existing `test_qpadm_rotation.cu`
+large-N/throughput path loads only the committed tiny fixture (`f2_rot.bin`,
+9 pops) and cannot target a 1240K f2 dir. The new bench reads a real f2_blocks
+dir's `f2.bin` (STPF2BK1, via `device/f2_disk_format.hpp` — the SAME on-disk
+layout the CLI `read_f2_dir` consumes), uploads it RESIDENT to device 0, and times
+the batched search. It is a MANUAL bench (no per-model golden; the accuracy gate
+remains `test_qpadm_rotation`, which still PASSES single-GPU). Build confirmed in
+`build-rel` (Release). LIMITS: throughput is for the model shapes shown; not a
+ctest gate.
 
 ---
 
-## Peak VRAM (single vs both GPUs)
+## Peak VRAM
 
-Polled with `nvidia-smi --query-gpu=index,memory.used --format=csv -l 1`.
+Polled with `nvidia-smi --query-gpu=index,memory.used --format=csv -l 1`. These
+were captured during the original `--device auto` runs (historical); the supported
+single-GPU path uses one GPU's share. The point stands: peaks are tiny vs 32 GiB.
 
-**extract-f2 (heaviest = SET60, 60 pops):** BOTH GPUs used. Steady ~554 MiB/GPU
-during the `.geno` decode; brief peak GPU0=1750 / GPU1=1742 MiB during the f2
-compute/combine. Smaller sets peaked lower (SET5 784/784, SET15 1228/626,
-SET30 626/626 MiB). Verifier 14-pop poll caught 626 MiB/GPU on both — the `-l 1`
-cadence undersamples the sub-second f2-combine spike (a known limit of 1 Hz
-polling), so 1.75 GiB is the right ceiling. So: multi-GPU, peak ~1.75 GiB/GPU.
+**extract-f2 (heaviest = SET60, 60 pops):** steady ~554 MiB during the `.geno`
+decode; brief peak ~1750 MiB during the f2 compute/combine (the `-l 1` cadence
+undersamples the sub-second f2-combine spike, so 1.75 GiB is the right ceiling).
 
-**qpadm fit (heaviest = f2_60, 4-way, 12 right, jackknife=2):** GPU0=668 MiB,
-GPU1=626 MiB (GPU1 at idle baseline). The fit is effectively a SINGLE-GPU
-workload at these model sizes.
+**qpadm fit (heaviest = f2_60, 4-way, 12 right, jackknife=2):** ~668 MiB — a
+single-GPU compute shape at these model sizes.
 
 Both peaks (1.75 GiB extract, 0.67 GiB fit) are TINY vs 32 GiB per 5090. At
-60 pops / 1.2M SNPs the box is nowhere near a VRAM wall.
+60 pops / 1.2M SNPs the box is nowhere near a VRAM wall — and the 781-model
+resident rotation above adds only the f2 (40.96 MB) + small per-model batched
+buffers, still far under the wall.
 
 ---
 
@@ -158,7 +219,9 @@ Both peaks (1.75 GiB extract, 0.67 GiB fit) are TINY vs 32 GiB per 5090. At
    despite 12x more individuals and P^2 f2 growth; the f2 compute is a rounding
    error at <=60 pops (f2.bin grows 288 KB -> 41 MB as P^2 but adds < 4 s wall).
    To speed extract-f2 you must attack the 6.7 GB TGENO streaming-decode
-   throughput, NOT the f2 math. The 2nd GPU buys little here (decode-bound).
+   throughput, NOT the f2 math. Because it is decode-bound, SINGLE-GPU is as fast
+   as both (43.2 s vs 43.97 s) — the 2nd GPU buys nothing and, per the parked
+   multi-GPU root cause, generally costs a 2nd ~7 GB f2_blocks D2H.
 
 2. **qpadm single-fit is floor-bound.** ~1.0 s fixed CUDA-context-init +
    f2.bin-load; pure fit compute is ~0.10 s (no SE). GPU compute only becomes
@@ -166,26 +229,37 @@ Both peaks (1.75 GiB extract, 0.67 GiB fit) are TINY vs 32 GiB per 5090. At
    with model size). Fit compute scales with #left x #right and, for SE,
    x ~711 blocks x #popdrop patterns.
 
-3. **Rotation throughput is gated on an unbuilt feature.** Today's only path is
-   the CLI loop at ~1 model/sec, bound by per-process CUDA-context + f2 load.
+3. **Rotation is fast and real — only the CLI subcommand is a scaffold.** The
+   batched engine `run_qpadm_search` runs ~2866 models/sec single-GPU at the point
+   estimate (~1247 models/sec with full LOO SE) over a RESIDENT 1240K f2, paying
+   the CUDA context + f2 load ONCE. The earlier ~1 model/sec was the CLI loop
+   re-paying process spawn per model — a measurement artifact, not the engine.
 
 ---
 
 ## Limits / failures
 
-- **NO failures, NO OOM** at full 1240K size. Every extract and fit exited rc=0
-  with sensible archaeogenetic results.
+- **NO failures, NO OOM** at full 1240K size. Every extract, fit, and the
+  781-model batched rotation exited rc=0 with sensible results.
 - **No silently-dropped coverage** beyond the intended `--maxmiss 0` joint-
   completeness filter (SNPs-kept correctly shrinks as pops are added).
-- **qpadm-rotate unimplemented** (M(cli-0) scaffold) — biggest gap.
-- **Multi-GPU underused by the fit** — independent models are not batched across
-  the 2nd GPU; this is the unexploited headroom the batched rotation would use.
-- VRAM peaks are tiny (<=1.75 GiB/GPU vs 32 GiB) — abundant headroom for the
-  large batched workloads the design targets.
+- **Only the CLI `qpadm-rotate` subcommand is a scaffold** (M(cli-0)); the batched
+  rotation ENGINE (`run_qpadm_search`) is real, golden-gated, and ~2866 models/sec
+  single-GPU. The original "rotation not implemented / ~1 model/sec" was a
+  CLI-scaffold + process-spawn artifact — corrected in this revision.
+- **MULTI-GPU IS PARKED, not benchmarked.** The 2nd GPU is slower (extract-f2
+  f2_blocks data-bounce, a 2nd ~7 GB D2H; the fit is a single-GPU compute shape).
+  Root-caused, fix deferred. All numbers here are SINGLE-GPU (`--device 0`).
+- VRAM peaks are tiny (<=1.75 GiB extract, 0.67 GiB fit vs 32 GiB) — abundant
+  headroom for the large batched workloads the design targets.
 
 ---
 
-*Independently verified on box5090 (2x RTX 5090, sm_120), Release build, REAL
-AADR v66 1240K panel. All sweep-agent claims re-confirmed; deviations (weight
-mix on a different right set, heavy-fit User time on a smaller model) explained
-above and attributable to model-set differences, not measurement error.*
+*Independently verified on box5090 (1x RTX 5090, sm_120, `--device 0`), Release
+build (`build-rel`), REAL AADR v66 1240K panel. SINGLE-GPU throughout; multi-GPU
+parked and not benchmarked. The original sweep's rotation conclusion ("not
+implemented / ~1 model/sec") is corrected: the batched `run_qpadm_search` engine
+is real and golden-gated, the REAL single-GPU batched throughput is ~2866
+models/sec (point estimate) / ~1247 models/sec (full LOO SE), and the ~1/sec was a
+CLI process-spawn artifact. extract-f2 is re-reported single-GPU (43.2 s) as the
+supported path.*

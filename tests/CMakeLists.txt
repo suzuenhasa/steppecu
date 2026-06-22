@@ -735,6 +735,15 @@ if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(bench_f2_multigpu PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
 
+# Manual bench (NOT a ctest gate): times the REAL batched run_qpadm_search rotation
+# (CudaBackend::fit_models_batched, f2 RESIDENT in VRAM) SINGLE-GPU over a REAL 1240K
+# f2_blocks dir — the honest rotation throughput the CLI-loop ~1/sec sweep mis-measured.
+# Mirrors the rotation target's links. Named .cu to device-link steppe_device's kernels.
+add_executable(bench_rotation_1240k reference/bench_rotation_1240k.cu)
+target_link_libraries(bench_rotation_1240k
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(bench_rotation_1240k PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 # --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
 # HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
 # core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
