@@ -133,8 +133,8 @@ The reusable convertf pipeline is on the box: `/workspace/AdmixTools_src/src/con
 - [ ] CLI arg/IO contract: pop lists by name, `blgsize`/`maxmiss`/precision, CSV/JSON, `--dry-run` per-box P_max.
 
 **Python bindings** (new `bindings/`; flip `STEPPE_BUILD_PYTHON`) — *decisions made: nanobind (NOT PyCUDA, `docs/research/pycuda-cuda13-viability.md`) + a DLPack/CAI interop seam; use-cases in `docs/research/interop-usecases.md` (MUST = results→pandas + f2→numpy; the msprime power-analysis loop; GPU-only, fp64-enforced):*
-- [ ] **M(py-1)** nanobind module: `qpadm`/`qpwave`/`qpadm_rotate` from a dir → pandas; results→DataFrame + f2→numpy; status enum + NA sentinels.
-- [ ] **M(py-2)** `extract_f2` from Python; scikit-build-core wheel (GPU-only, one wheel).
+- [x] **M(py-1)** nanobind module (`b6902f5`): `read_f2` + `qpadm`/`qpwave`/`qpadm_search` from a dir → pandas (results→DataFrame, status enum, SE-empty→NaN sentinels) + f2→numpy float64 F-contiguous. Marshalling-only `_core` TU (no pandas link); pure-Python facade `bindings/steppe/__init__.py` does the DataFrame shaping (lazy pandas soft dep). No dup compute (calls the existing `run_*`/`read_f2_dir` seams; the f2-dir reader + pop→index resolver moved to a new shared `steppe::access` host lib reused by the CLI + bindings). GPU-only (no CPU path; no-device → clear fault). Host-only TUs (no CUDA header; arch-grep structural). **GATE green:** the committed real-AADR `golden_fit0` reproduced THROUGH the Python API (weights rtol 1e-6, chisq tight, dof/f4rank exact, rankdrop) + f2 numpy bit-equal to the raw fixture + qpwave/qpadm_search/search-DataFrame structural — verified box5090 (2x RTX 5090, CUDA 13, Release): **6/6 pytest PASSED, ctest 48/48**.
+- [ ] **M(py-2)** `extract_f2` from Python; scikit-build-core wheel (GPU-only, one wheel). *(pyproject.toml + the wheel scaffold already landed with M(py-1); M(py-2) = wire the genotype→f2 extract binding + build/repair the wheel.)*
 
 ## ⏭️ Step 3 — Standalone f-stats (each WITH its own CLI/bindings)
 *After step 2. Refs: architecture.md (the "(planned)" standalone tools); `desirable-features-survey.md`.*
