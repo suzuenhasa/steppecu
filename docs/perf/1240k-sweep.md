@@ -104,6 +104,92 @@ pops (joint completeness) — correct, intended behavior, not silent data loss.
 
 ---
 
+## extract-f2 scaling to 700 pops (single-GPU, no-hash)
+
+**Build/policy:** Release (`build-rel`, `CMAKE_BUILD_TYPE:STRING=Release`),
+SINGLE-GPU (`--device 0`), **no `--hash`** (no-hash default — `meta.json` records
+`source_hash_computed: false`), REAL 1240K, `--blgsize 0.05 --maxmiss 0
+--auto-only`. The provenance-SHA bottleneck is FIXED (the 60-pop wall is now ~4.6 s,
+was ~44 s with hashing).
+
+Pop sets are **nested, deterministic file-encounter-order** lists of the 926
+pops with >=5 individuals (each P-set is the first P such pops; strictly nested).
+NOTE this differs from the §"extract-f2 — wall-clock" SET60 above, which is the
+*largest*-60 pops (682,707 SNPs); the file-order 60-set here is 446,853 SNPs. The
+collapse SHAPE is identical (and even steeper). #indiv per set is real
+(`.ind` 3rd column).
+
+| P | #indiv | SNPs kept (of 1,233,013) | blocks | f2.bin | wall (`--maxmiss 0`) | rc |
+|---:|---:|---:|---:|---:|---:|---:|
+|  60 |  1,353 | 446,853 | 711 |  40,956,508 B (41 MB) |  4.60 s | 0 |
+| 120 |  2,785 | 147,472 | 710 | 163,586,904 B (164 MB) |  6.40 s | 0 |
+| 250 |  4,876 |   8,557 | 645 | 645,002,644 B (645 MB) | 10.65 s | 0 |
+| 500 |  9,544 |       3 |   3 |  12,000,076 B (12 MB) | 16.79 s | 0 |
+| 700 | 14,057 |       0 |   — | — (no output, RC=2) | 22.95 s | 2 |
+
+f2.bin obeys `P² · n_block · 16 + ~2.6 KB header` exactly (verified all rows;
+e.g. 250²·645·16 = 645,000,000; 500²·3·16 = 12,000,000). `n_block` shrinks below
+711 once whole jackknife blocks lose every SNP (645 at P=250, 3 at P=500).
+
+**Headline 700-pop time: ~23 s — and it is NOT an f2 result.** Under `--maxmiss 0`
+the 700-pop joint-completeness filter leaves **0 of 1,233,013 SNPs**, so the tool
+exits **RC=2** (`every SNP was filtered out (0 of 1233013 kept) — relax the
+filters`) after ~22.95 s. That ~23 s is essentially all read+decode of 14,057
+individuals; the f2 GEMM never runs (0 SNPs). The maxmiss-0 700-pop "wall" is a
+hard **filter-empty failure**, not a perf number.
+
+**The `--maxmiss 0` SNP collapse is REAL and super-linear.** Each added pop is
+another zero-missing constraint, so the surviving SNP set collapses:
+446,853 (60) → 147,472 (120) → 8,557 (250) → 3 (500) → 0 (700). Consequence: at
+high P the maxmiss-0 f2 is cheap-but-degenerate (or empty), so wall is dominated
+by read+decode, not the GEMM.
+
+**Where O(P²·SNPs) f2 starts to dominate — it doesn't, under maxmiss 0; it shows
+as a VRAM wall under a relaxed filter.** Under maxmiss 0 the wall climbs
+monotonically with #indiv (4.6 → 6.4 → 10.7 → 16.8 → 22.9 s as #indiv goes
+1,353 → 14,057) while SNPs-kept (GEMM FLOPs) COLLAPSE to 3 then 0 — so it is
+**decode/individual-bound**, not GEMM-bound. The true O(P²·SNPs) f2 cost only
+appears when a full SNP set is retained, which requires relaxing maxmiss — and
+then the limit is **memory, not time**:
+
+| P | filter | SNPs kept | wall | peak VRAM (dev0) | result |
+|---:|---|---:|---:|---:|---|
+| 250 | `--maxmiss 0.5` | 1,104,231 | 17.1 s | ~16–31 GiB* | rc=0, f2.bin 713 MB |
+| 500 | `--maxmiss 0.5` |   (full)  | 26.2 s | 17,544 MiB | **OOM (RC=5)** |
+| 700 | `--maxmiss 0.5` |   (full)  | 37.1 s | 24,518 MiB | **OOM (RC=5)** |
+
+The OOMs are `cudaErrorMemoryAllocation` on a `DeviceBuffer<double>` AFTER decode:
+the packed genotype matrix frees first (VRAM drops), then the FP64 feeder/raw
+working buffers (~8·P·M doubles) fail to allocate. So with a real (non-collapsed)
+~1.1 M-SNP set, single-GPU extract-f2 **tops out between 250 and 500 pops**; 500
+and 700 both OOM on one 32 GB 5090. This matches the `cuda_backend.cu` budget
+comment ("at P=768/M=584k the raw (10.8 GB) + feeder outputs (17.9 GB) + resident
+f2/Vpair (7.1 GB) sum to 35.8 GB > 32 GB and OOM"). Reaching 700 pops with a real
+SNP set needs multi-GPU (parked) or M-tiling/streaming of the FP64 feeder buffers.
+
+\*The 250-pop maxmiss-0.5 run succeeds (rc=0) but is already near the 32 GB wall;
+peak VRAM was sampled at ~16 GiB by the original sweep and ~31 GiB on the verifier
+re-run (finer sampling caught a higher transient allocation spike) — either way it
+confirms P=250 with a full SNP set is the practical single-GPU ceiling.
+
+**Peak VRAM vs 32 GiB.** Heaviest measured run = 700p decode at **24,518 MiB of
+32,607 (~75 %)** — the in-VRAM packed genotype matrix for 14,057 individuals ×
+1.23 M SNPs (same decode peak for maxmiss 0 and 0.5). Idle baseline 2 MiB.
+The maxmiss-0 sweep peaks well under 32 GB at every P (the SNP collapse keeps the
+feeder buffers tiny); the 32 GB limit binds ONLY when a full SNP set is retained
+(relaxed filter) AND P is large.
+
+*Independently verified on box5090 (1x RTX 5090, sm_120, `--device 0`), Release
+(`build-rel`), REAL 1240K, no-hash. Spot re-runs reproduced exactly: P=250 maxmiss
+0 (10.61 s, 8,557 SNPs, 645 blocks, f2.bin 645,002,644 B, `source_hash_computed:
+false`), P=500 maxmiss 0 (16.71 s, 3 SNPs, f2.bin 12,000,076 B), P=700 maxmiss 0
+(RC=2 filter-empty, 22.60 s, peak 24,518 MiB), P=250 maxmiss 0.5 (rc=0, 17.07 s,
+1,104,231 SNPs), P=500 maxmiss 0.5 (RC=5 OOM, 26.29 s, 17,544 MiB). The only
+deviation from the sweep agent's report is the P=250 maxmiss-0.5 peak-VRAM sample
+(noted above); all rc/SNP/blocks/f2.bin/wall figures matched within noise.*
+
+---
+
 ## qpAdm fit — wall-clock
 
 `qpadm --f2-dir DIR --target … --left … --right …`, wrapped in `/usr/bin/time -v`.
