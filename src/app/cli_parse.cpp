@@ -9,9 +9,8 @@
 //   2. ConfigBuilder().with_defaults().merge_file(--config).merge_env().merge_cli(args)
 //      .build() runs the §9 precedence merge + validation.
 //   3. On InvalidConfig, print the builder's reason to stderr, return kExitInvalidConfig.
-//   4. Dispatch to the subcommand's run_*_command (the real GPU compute). qpadm,
-//      qpadm-rotate, and extract-f2 are wired; qpwave (M(cli-2)) is the one remaining
-//      scaffold (prints "not yet implemented") until its compute lands.
+//   4. Dispatch to the subcommand's run_*_command (the real GPU compute). qpadm, qpwave,
+//      qpadm-rotate, and extract-f2 are ALL wired to their GPU compute.
 #include "app/cli_parse.hpp"
 
 #include <cstdio>
@@ -23,6 +22,7 @@
 
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_qpadm.hpp"
+#include "app/cmd_qpwave.hpp"
 #include "app/cmd_rotate.hpp"
 #include "core/config/cli_args.hpp"
 #include "core/config/config_builder.hpp"
@@ -65,16 +65,6 @@ namespace cfg = steppe::config;
         return std::nullopt;
     }
     return std::move(result.value());
-}
-
-// Scaffold no-op: parses + validates its config but performs no compute yet. Returns
-// kExitOk so it stays a clean, scriptable no-op. ONLY qpwave still uses this (M(cli-2)
-// pending) — qpadm / qpadm-rotate / extract-f2 are all wired. Delete this when qpwave's
-// compute lands.
-[[nodiscard]] int run_not_yet_implemented(const char* name, const RunConfig& /*config*/) {
-    std::printf("steppe %s: not yet implemented (M(cli-0) scaffold — config parsed "
-                "and validated; compute lands in a later milestone)\n", name);
-    return cfg::kExitOk;
 }
 
 // Attach the GLOBAL resource/precision/output flags shared by every subcommand
@@ -128,6 +118,45 @@ void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
                            "Feasible-only also requires p >= --p-se-threshold");
 }
 
+// Bind --f2-dir (the f2_blocks directory) into `a.f2_dir`. Shared by qpadm / qpwave /
+// qpadm-rotate. The help string is PARAMETRIZED because qpadm's help is more verbose
+// ("...f2.bin + pops.txt + meta.json") than qpwave/rotate's ("The f2_blocks directory");
+// each caller passes its CURRENT exact string so `--help` stays byte-identical
+// (behavior-preserving dedup).
+void add_f2_dir_flag(CLI::App* sub, CliArgs& a, const char* help) {
+    sub->add_option_function<std::string>(
+        "--f2-dir", [&a](const std::string& v) { a.f2_dir = v; }, help);
+}
+
+// Bind --target (target population label) into `a.target`. Shared by qpadm + qpadm-rotate
+// (NOT qpwave — qpWave has no target). The help is IDENTICAL across both callers
+// ("Target population label"), so no parametrization is needed.
+void add_target_flag(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::string>(
+        "--target", [&a](const std::string& v) { a.target = v; }, "Target population label");
+}
+
+// Bind --right (comma- or space-separated outgroup labels) into `a.right`. Shared by
+// qpadm / qpwave / qpadm-rotate, with `->delimiter(',')`. The help is PARAMETRIZED because
+// qpadm's help ("...right[0] = R0") differs from qpwave/rotate's ("Right outgroup labels");
+// each caller passes its CURRENT exact string so `--help` stays byte-identical.
+void add_right_flag(CLI::App* sub, CliArgs& a, const char* help) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--right", [&a](const std::vector<std::string>& v) { a.right = v; }, help)
+        ->delimiter(',');
+}
+
+// Bind --left (comma- or space-separated population labels) into `a.left`. Shared by
+// qpadm + qpwave, with `->delimiter(',')`. The help is PARAMETRIZED because the two help
+// strings are SEMANTICALLY DISTINCT (qpadm "Left source population labels..." vs qpwave
+// "Left population set; left[0] is the reference"); each caller passes its CURRENT exact
+// string so `--help` stays byte-identical.
+void add_left_flag(CLI::App* sub, CliArgs& a, const char* help) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--left", [&a](const std::vector<std::string>& v) { a.left = v; }, help)
+        ->delimiter(',');
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -147,16 +176,12 @@ int run_cli(int argc, char** argv) {
     {
         CLI::App* sub = app.add_subcommand("qpadm", "qpAdm fit over an f2_blocks dir");
         qpadm_args.command = Command::QpAdm;
-        sub->add_option_function<std::string>("--f2-dir", [&](const std::string& v) { qpadm_args.f2_dir = v; },
-                                              "The f2_blocks directory (f2.bin + pops.txt + meta.json)");
-        sub->add_option_function<std::string>("--target", [&](const std::string& v) { qpadm_args.target = v; },
-                                              "Target population label");
-        sub->add_option_function<std::vector<std::string>>(
-            "--left", [&](const std::vector<std::string>& v) { qpadm_args.left = v; },
-            "Left source population labels (comma- or space-separated)")->delimiter(',');
-        sub->add_option_function<std::vector<std::string>>(
-            "--right", [&](const std::vector<std::string>& v) { qpadm_args.right = v; },
-            "Right outgroup labels; right[0] = R0")->delimiter(',');
+        add_f2_dir_flag(sub, qpadm_args,
+                        "The f2_blocks directory (f2.bin + pops.txt + meta.json)");
+        add_target_flag(sub, qpadm_args);
+        add_left_flag(sub, qpadm_args,
+                      "Left source population labels (comma- or space-separated)");
+        add_right_flag(sub, qpadm_args, "Right outgroup labels; right[0] = R0");
         add_qpadm_option_flags(sub, qpadm_args);
         add_output_flags(sub, qpadm_args);
         add_common_flags(sub, qpadm_args);
@@ -174,21 +199,19 @@ int run_cli(int argc, char** argv) {
     {
         CLI::App* sub = app.add_subcommand("qpwave", "qpWave rank sweep (no target; left[0]=ref)");
         qpwave_args.command = Command::QpWave;
-        sub->add_option_function<std::string>("--f2-dir", [&](const std::string& v) { qpwave_args.f2_dir = v; },
-                                              "The f2_blocks directory");
-        sub->add_option_function<std::vector<std::string>>(
-            "--left", [&](const std::vector<std::string>& v) { qpwave_args.left = v; },
-            "Left population set; left[0] is the reference")->delimiter(',');
-        sub->add_option_function<std::vector<std::string>>(
-            "--right", [&](const std::vector<std::string>& v) { qpwave_args.right = v; },
-            "Right outgroup labels")->delimiter(',');
+        add_f2_dir_flag(sub, qpwave_args, "The f2_blocks directory");
+        add_left_flag(sub, qpwave_args, "Left population set; left[0] is the reference");
+        add_right_flag(sub, qpwave_args, "Right outgroup labels");
         add_qpadm_option_flags(sub, qpwave_args);
         add_output_flags(sub, qpwave_args);
         add_common_flags(sub, qpwave_args);
         sub->callback([&]() {
             auto config = build_config(qpwave_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            std::exit(run_not_yet_implemented("qpwave", *config));
+            // M(cli-2): the real GPU qpWave rank sweep (read dir -> resolve left/right,
+            // NO target, left[0]=reference -> upload -> run_qpwave -> emit the rank-sweep
+            // table). Mirrors how `qpadm` dispatches.
+            std::exit(run_qpwave_command(*config));
         });
     }
 
@@ -196,16 +219,12 @@ int run_cli(int argc, char** argv) {
     {
         CLI::App* sub = app.add_subcommand("qpadm-rotate", "qpAdm rotation over a source pool");
         rotate_args.command = Command::QpAdmRotate;
-        sub->add_option_function<std::string>("--f2-dir", [&](const std::string& v) { rotate_args.f2_dir = v; },
-                                              "The f2_blocks directory");
-        sub->add_option_function<std::string>("--target", [&](const std::string& v) { rotate_args.target = v; },
-                                              "Target population label");
+        add_f2_dir_flag(sub, rotate_args, "The f2_blocks directory");
+        add_target_flag(sub, rotate_args);
         sub->add_option_function<std::vector<std::string>>(
             "--pool", [&](const std::vector<std::string>& v) { rotate_args.pool = v; },
             "Source pool to enumerate subsets of")->delimiter(',');
-        sub->add_option_function<std::vector<std::string>>(
-            "--right", [&](const std::vector<std::string>& v) { rotate_args.right = v; },
-            "Right outgroup labels")->delimiter(',');
+        add_right_flag(sub, rotate_args, "Right outgroup labels");
         sub->add_option_function<int>("--min-sources", [&](int v) { rotate_args.min_sources = v; },
                                       "Minimum sources per model (default 1)");
         sub->add_option_function<int>("--max-sources", [&](int v) { rotate_args.max_sources = v; },

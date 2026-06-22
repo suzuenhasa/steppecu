@@ -1166,6 +1166,26 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+  # --- M(cli-2) `steppe qpwave` golden gate (cli-bindings.md §7, §537) -----------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpwave` over the COMMITTED real-AADR
+  # 9-pop f2 fixture (fixtures/f2_fit0_9pop.bin) with golden_qpwave's EXACT inputs (NO
+  # --target — the distinguishing qpWave invocation; left[0]=reference) and diffs the
+  # rank-sweep output (est_rank/f4rank/rankdrop chisq/dof/p + the per_rank cross-check)
+  # against the pinned f2-object-path constants test_qpwave_parity.cu gates (NO AT2 re-run),
+  # at the SAME tiers the engine gate uses. The CLI counterpart of the engine-level
+  # qpwave_parity test. SKIPs cleanly (exit 0) when no CUDA device is visible. Links the
+  # CUDA-FREE f2_disk_format header (via core_internal) + the standard host warnings; the
+  # GPU work is in the spawned child. Depends on steppe_app so the binary exists; the binary
+  # path + the golden dir are argv.
+  add_executable(test_cli_qpwave cli/test_cli_qpwave.cpp)
+  target_link_libraries(test_cli_qpwave
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_qpwave steppe_app)
+  add_test(NAME cli_qpwave
+           COMMAND test_cli_qpwave
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
   # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
   # triple (STEPPE_AADR_ROOT/raw/<prefix>.{geno,snp,ind}) for the golden pop sets, then

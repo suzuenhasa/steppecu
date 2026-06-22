@@ -345,6 +345,116 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
     os << "}\n";
 }
 
+// ---- qpWave (M(cli-2)): the rank-sweep result ---------------------------------
+// qpWave has NO target -> no admixture weights / popdrop. The result is the per-rank
+// rank-sufficiency sweep (rank_chisq/rank_dof/rank_p, ASCENDING r) + the AT2-shaped
+// rankdrop table (f4rank-DESCENDING) + the f4rank/est_rank/status summary. Both emitters
+// REUSE the file-static format primitives verbatim (fmt_double/json_double/fmt_dofdiff/
+// csv_quote/json_quote/status_str + the rankdrop loop body / parallel-array lambdas), so
+// the rankdrop output is byte-shaped exactly like the qpadm rankdrop section / golden_qpwave.
+
+void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
+                     const std::vector<std::string>& left, int right_n, char sep) {
+    // rankdrop section (AT2 res$rankdrop order, f4rank DESCENDING) — the SAME columns and
+    // loop body as the qpadm rankdrop section (emit_csv above).
+    os << "# section: rankdrop\n";
+    os << "\"f4rank\"" << sep << "\"dof\"" << sep << "\"chisq\"" << sep << "\"p\""
+       << sep << "\"dofdiff\"" << sep << "\"chisqdiff\"" << sep << "\"p_nested\"\n";
+    for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
+        os << r.rankdrop_f4rank[k] << sep << r.rankdrop_dof[k] << sep
+           << fmt_double(r.rankdrop_chisq[k]) << sep << fmt_double(r.rankdrop_p[k]) << sep
+           << fmt_dofdiff(r.rankdrop_dofdiff[k]) << sep
+           << fmt_double(r.rankdrop_chisqdiff[k]) << sep
+           << fmt_double(r.rankdrop_p_nested[k]) << "\n";
+    }
+
+    // per_rank section (the ASCENDING-r sweep; `rank` column == the index r, 0-based).
+    os << "# section: per_rank\n";
+    os << "\"rank\"" << sep << "\"chisq\"" << sep << "\"dof\"" << sep << "\"p\"\n";
+    for (std::size_t rr = 0; rr < r.rank_chisq.size(); ++rr) {
+        os << rr << sep << fmt_double(r.rank_chisq[rr]) << sep
+           << (rr < r.rank_dof.size() ? std::to_string(r.rank_dof[rr]) : std::string("NA"))
+           << sep
+           << (rr < r.rank_p.size() ? fmt_double(r.rank_p[rr]) : std::string("NA")) << "\n";
+    }
+
+    // summary section (scalars). Echo the reference label + right_n for readability; the
+    // minimal schema-gated columns are f4rank/est_rank/status/precision (cli-bindings.md §357).
+    os << "# section: summary\n";
+    os << "\"f4rank\"" << sep << "\"est_rank\"" << sep << "\"status\"" << sep
+       << "\"precision\"" << sep << "\"reference\"" << sep << "\"right_n\"\n";
+    os << r.f4rank << sep << r.est_rank << sep
+       << csv_quote(status_str(r.status)) << sep
+       << csv_quote(r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
+                    : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
+                                                                      : "fp64")
+       << sep << csv_quote(left.empty() ? std::string() : left.front()) << sep
+       << right_n << "\n";
+}
+
+void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
+                      const std::vector<std::string>& left, int right_n) {
+    os << "{\n";
+
+    // left[] (left[0] is the reference) + right_n for human readability / round-trip.
+    os << "  \"left\": [";
+    for (std::size_t i = 0; i < left.size(); ++i)
+        os << (i ? ", " : "") << json_quote(left[i]);
+    os << "],\n";
+    os << "  \"right_n\": " << right_n << ",\n";
+
+    // rankdrop block: parallel arrays (golden_qpwave.json res$rankdrop shape) — the SAME
+    // lambdas as the qpadm rankdrop block (NaN->null via json_double; dofdiff INT_MIN->null).
+    os << "  \"rankdrop\": {\n";
+    auto emit_int_arr = [&](const char* name, const std::vector<int>& v, bool last) {
+        os << "    " << json_quote(name) << ": [";
+        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
+        os << "]" << (last ? "\n" : ",\n");
+    };
+    auto emit_dbl_arr = [&](const char* name, const std::vector<double>& v, bool last) {
+        os << "    " << json_quote(name) << ": [";
+        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << json_double(v[k]);
+        os << "]" << (last ? "\n" : ",\n");
+    };
+    auto emit_dofdiff_arr = [&](const char* name, const std::vector<int>& v, bool last) {
+        os << "    " << json_quote(name) << ": [";
+        for (std::size_t k = 0; k < v.size(); ++k)
+            os << (k ? ", " : "") << (v[k] == INT_MIN ? std::string("null") : std::to_string(v[k]));
+        os << "]" << (last ? "\n" : ",\n");
+    };
+    emit_int_arr("f4rank", r.rankdrop_f4rank, false);
+    emit_int_arr("dof", r.rankdrop_dof, false);
+    emit_dbl_arr("chisq", r.rankdrop_chisq, false);
+    emit_dbl_arr("p", r.rankdrop_p, false);
+    emit_dofdiff_arr("dofdiff", r.rankdrop_dofdiff, false);
+    emit_dbl_arr("chisqdiff", r.rankdrop_chisqdiff, false);
+    emit_dbl_arr("p_nested", r.rankdrop_p_nested, true);
+    os << "  },\n";
+
+    // per_rank block: the ASCENDING-r sweep (rank == the 0-based index r).
+    os << "  \"per_rank\": {\n";
+    os << "    \"rank\": [";
+    for (std::size_t rr = 0; rr < r.rank_chisq.size(); ++rr) os << (rr ? ", " : "") << rr;
+    os << "],\n";
+    emit_dbl_arr("chisq", r.rank_chisq, false);
+    emit_int_arr("dof", r.rank_dof, false);
+    emit_dbl_arr("p", r.rank_p, true);
+    os << "  },\n";
+
+    // summary block: scalars.
+    os << "  \"summary\": {\n";
+    os << "    \"f4rank\": " << r.f4rank << ",\n";
+    os << "    \"est_rank\": " << r.est_rank << ",\n";
+    os << "    \"status\": " << json_quote(status_str(r.status)) << ",\n";
+    os << "    \"precision\": " << json_quote(
+        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
+        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
+                                                          : "fp64") << "\n";
+    os << "  }\n";
+
+    os << "}\n";
+}
+
 }  // namespace
 
 bool parse_output_format(const std::string& token, OutputFormat& out) {
@@ -380,6 +490,17 @@ void emit_rotation_table(std::ostream& os, OutputFormat fmt,
         case OutputFormat::Json:
             emit_rotation_json(os, results, target_label, left_labels_per_model, right_n);
             break;
+    }
+}
+
+void emit_qpwave_result(std::ostream& os, OutputFormat fmt,
+                        const QpWaveResult& result,
+                        const std::vector<std::string>& left_labels,
+                        int right_n) {
+    switch (fmt) {
+        case OutputFormat::Csv:  emit_qpwave_csv(os, result, left_labels, right_n, ','); break;
+        case OutputFormat::Tsv:  emit_qpwave_csv(os, result, left_labels, right_n, '\t'); break;
+        case OutputFormat::Json: emit_qpwave_json(os, result, left_labels, right_n); break;
     }
 }
 

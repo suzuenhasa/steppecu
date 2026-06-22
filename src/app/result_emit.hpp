@@ -70,6 +70,27 @@ void emit_rotation_table(std::ostream& os, OutputFormat fmt,
                          const std::vector<std::vector<std::string>>& left_labels_per_model,
                          int right_n);
 
+/// Serialize one qpWave rank-sweep result (M(cli-2); cli-bindings.md §4.1 row `qpwave`)
+/// to `os` in `fmt`. qpWave has NO target and produces NO admixture weights/popdrop; the
+/// result is the per-rank rank-sufficiency sweep + the AT2-shaped rankdrop table + the
+/// f4rank/est_rank/status summary (QpWaveResult, qpadm.hpp:212). `left_labels` are the
+/// resolved left-source names (left_labels[0] is the qpWave reference row), echoed into
+/// the output header so a run is human-readable; `right_n` is the convention nr
+/// (right.size()-1). The serialization REUSES emit_qpadm_result's format primitives
+/// (fmt_double/json_double/fmt_dofdiff/quote/status + the parallel-array lambdas), so the
+/// rankdrop block is byte-shaped exactly like golden_qpwave.json's per-model rankdrop{}.
+///
+/// CSV/TSV: three `# section: NAME` sections — `rankdrop` (f4rank-DESCENDING, the AT2
+/// res$rankdrop table: f4rank,dof,chisq,p,dofdiff,chisqdiff,p_nested), `per_rank` (the
+/// ASCENDING-r sweep: rank,chisq,dof,p), and `summary` (f4rank,est_rank,status,precision).
+/// JSON: a single object { left[], right_n, rankdrop{}, per_rank{}, summary{} } mirroring
+/// golden_qpwave.json's rankdrop parallel-array shape. Total: NA/null sentinels for the
+/// last-row nested-diff NA (dofdiff==INT_MIN, chisqdiff/p_nested==NaN), never throws.
+void emit_qpwave_result(std::ostream& os, OutputFormat fmt,
+                        const QpWaveResult& result,
+                        const std::vector<std::string>& left_labels,
+                        int right_n);
+
 }  // namespace steppe::app
 
 #endif  // STEPPE_APP_RESULT_EMIT_HPP
