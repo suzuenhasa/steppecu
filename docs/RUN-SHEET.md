@@ -86,6 +86,7 @@ $S qpadm-rotate --f2-dir /tmp/f2_haak \
 `--max-sources -1` = use the whole pool. (Engine ~2,866 models/sec single-GPU; the CLI subcommand is being wired — check `$S qpadm-rotate --help`.)
 
 ## 4. qpwave — rank sweep (no target; `left[0]` is the reference)
+> ⚠️ **The `qpwave` CLI is still a scaffold** (prints "not yet implemented") — M(cli-2) pending. The *engine* (`run_qpwave`) works and is golden-gated; only the CLI subcommand isn't wired yet. The command below is the intended form.
 ```bash
 $S qpwave --f2-dir /tmp/f2_haak \
   --left Czechia_EBA_CordedWare,Turkey_N,Russia_Samara_EBA_Yamnaya \

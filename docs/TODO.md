@@ -125,9 +125,11 @@ The reusable convertf pipeline is on the box: `/workspace/AdmixTools_src/src/con
 **CLI** (`src/app/`, CLI11 via CPM, GPU-only, app is a plain-CXX CUDA-free target):
 - [x] **M(cli-0)** scaffold + the CUDA-free `ConfigBuilder`/`RunConfig` precedence + Status→exit-code (`62253ab`).
 - [x] **M(cli-1)** `steppe qpadm` over an f2 dir (`f2.bin`+`pops.txt`+`meta.json` reader, name→index, GPU, tidy CSV/JSON) — golden-gated through the CLI (`67dc696`).
-- [ ] **M(cli-4)** `steppe extract-f2` (genotypes → f2 dir; STPF2BK1 writer w/ real vpair) — **BUILT but BLOCKED**: its golden gate fails only because the golden is corrupt (above). Re-gate after golden regen. *(Mechanically complete; verdict reverted it pending the corrected golden.)*
-- [ ] **M(cli-2)** `steppe qpwave` (the `run_qpwave` entry).
-- [ ] **M(cli-3)** `steppe qpadm-rotate` (S8 rotation; `--jackknife 0|1|2`).
+- [x] **M(cli-4)** `steppe extract-f2` (genotypes → f2 dir) — DONE + re-gated (`74c3c71`) + extended: **`--tier auto|resident|host|disk`** (M5 streaming wired in — big-P streams, 700+ pops single-GPU), **`--hash`/`--no-hash`** (default off; the ~37 s provenance SHA is now overlapped + opt-in), `--ploidy auto`, `--auto-top-k`.
+- [x] **M(cli-3)** `steppe qpadm-rotate` (S8 rotation; `--pool`/`--min-sources`/`--max-sources`/`--jackknife 0|1|2`) — DONE (`17c4606`), batched `run_qpadm_search`, golden-gated through the CLI vs `golden_rot`. The jk1 SE-pass VRAM budget fixed (`66280b7`) so SE rotations scale to ~pool_200 single-GPU.
+- [ ] **M(cli-2)** `steppe qpwave` — **the ONE remaining CLI scaffold** (`cli_parse.cpp:189` `run_not_yet_implemented`). Engine `run_qpwave` + `golden_qpwave` done; route the subcommand to it + golden-gate (same easy wiring as `qpadm-rotate`).
+- [x] **Studies reproduced** on real v66 1240K: Haak 2015 + Olalde 2018 (single-model + competing-sources **rotation**) — `docs/studies/{haak2015,olalde2018,olalde2018-rotation}.md`, vs published, cross-version pop-mapping documented.
+- [x] **Perf characterized** (`docs/perf/1240k-sweep.md` + `docs/RUN-SHEET.md`): extract-f2 streams big-P; rotation ~60k models/sec (jk0) / jk1 SE scales to pool_200. Follow-up: rotation **f2-input streaming for pools >~1700** (the resident f2 itself exceeds 32 GB) — the only scaling wall left.
 - [ ] CLI arg/IO contract: pop lists by name, `blgsize`/`maxmiss`/precision, CSV/JSON, `--dry-run` per-box P_max.
 
 **Python bindings** (new `bindings/`; flip `STEPPE_BUILD_PYTHON`) — *decisions made: nanobind (NOT PyCUDA, `docs/research/pycuda-cuda13-viability.md`) + a DLPack/CAI interop seam; use-cases in `docs/research/interop-usecases.md` (MUST = results→pandas + f2→numpy; the msprime power-analysis loop; GPU-only, fp64-enforced):*
