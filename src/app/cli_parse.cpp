@@ -265,6 +265,15 @@ int run_cli(int argc, char** argv) {
             },
             "Ploidy policy: auto (AT2 adjust_pseudohaploid, default) | 1 (pseudo-haploid) | 2 (diploid)");
         sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
+        // --hash / --no-hash: source-provenance SHA-256 opt-in. DEFAULT OFF — the whole-
+        // .geno SHA is a ~tens-of-seconds whole-file read+compress that dominated extract-f2
+        // (a provenance value, not correctness), so it is skipped unless requested. When
+        // ON it is overlapped on a background thread with the GPU decode+f2 pipeline.
+        // --no-hash is accepted as the explicit form of the default. meta.json records
+        // source_hash_computed + empty *_sha256 when skipped (the deliberate-absence marker).
+        sub->add_flag_function("--hash,!--no-hash",
+                               [&](std::int64_t v) { extract_args.hash_source = (v >= 0); },
+                               "Compute source-dataset provenance SHA-256 (default OFF; overlapped on a background thread)");
         add_common_flags(sub, extract_args);
         sub->callback([&]() {
             auto config = build_config(extract_args);

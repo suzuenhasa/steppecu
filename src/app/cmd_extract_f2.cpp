@@ -24,8 +24,10 @@
 #include <cstddef>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "app/f2_dir_writer.hpp"
@@ -256,6 +258,31 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitOk;
     }
 
+    // ---- SOURCE-PROVENANCE HASH (overlapped, --hash opt-in; default OFF) ----------
+    // The whole-source-.geno SHA-256 is a ~tens-of-seconds whole-file read+compress that
+    // historically dominated extract-f2 (~37s of ~41s on the 6.7 GB 1240K .geno) yet
+    // only produces a provenance value (it once caught a corrupt golden via a sha
+    // mismatch), so it is SKIPPED by default. With --hash we compute it, and since it
+    // depends ONLY on the .geno path (independent of the decode/f2 GPU pipeline) we run
+    // it on a BACKGROUND THREAD started HERE, before the GPU work, and JOIN it just
+    // before meta.json is written — the hash overlaps the decode+filter+f2+D2H wall time
+    // instead of adding to it. The small .snp/.ind shas are left to the writer (cheap).
+    const bool hash_source = config.hash_source();
+    std::string geno_sha;            // filled by the worker iff hash_source
+    std::thread geno_hash_thread;    // joined before write_f2_dir (never detached)
+    if (hash_source) {
+        const std::string geno_path = config.geno();
+        geno_hash_thread = std::thread([geno_path, &geno_sha]() {
+            geno_sha = sha256_file(std::filesystem::path(geno_path));
+        });
+    }
+    // RAII safety: if any early return / exception fires before the explicit join below,
+    // make sure the worker is joined so the thread is never destroyed un-joined.
+    struct ThreadJoiner {
+        std::thread& t;
+        ~ThreadJoiner() { if (t.joinable()) t.join(); }
+    } geno_hash_joiner{geno_hash_thread};
+
     // ---- 5. Decode the tile on the GPU backend -> Q/V/N [P x M] -------------------
     device::DeviceF2Blocks dev_f2;
     std::vector<double> Qk, Vk, Nk;  // the (possibly filtered) Q/V/N (own storage)
@@ -443,12 +470,17 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     meta.snp_path = config.snp();
     meta.ind_path = config.ind();
     meta.pop_selection = pop_selection_str(sel);
-    // Content shas of the source triple (so the dir is reproducible + the shas match
-    // the golden metadata's geno/snp/ind sha256). Computed by the writer's streaming
-    // SHA-256 to avoid buffering the 4 GB .geno; see f2_dir_writer.cpp.
-    // (write_f2_dir hashes f2.bin for f2_cache_id; the dataset shas are hashed here so
-    //  the writer stays a pure serializer of provided fields — but to keep the writer
-    //  the single SHA home, we pass the paths and the writer fills them.)
+    // Source-provenance shas (the --hash opt-in; default OFF). When requested, JOIN the
+    // background geno-hash worker HERE (its wall time overlapped the GPU pipeline above)
+    // and PRE-fill meta.geno_sha256 so the writer skips re-hashing the big .geno; the
+    // writer fills the small .snp/.ind shas. When OFF, hash_source_files stays false and
+    // every *_sha256 stays empty — meta.json records source_hash_computed:false so the
+    // absence is recognizably DELIBERATE (see f2_dir_writer.cpp / cli-bindings.md §4.3).
+    meta.hash_source_files = hash_source;
+    if (hash_source) {
+        if (geno_hash_thread.joinable()) geno_hash_thread.join();
+        meta.geno_sha256 = geno_sha;  // "" if the .geno could not be opened
+    }
 
     const F2DirWriteResult wr =
         write_f2_dir(config.out_dir(), host_f2, pop_labels, meta);

@@ -132,6 +132,12 @@ struct CliArgs {
 
     // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
     std::optional<bool>   dry_run;          ///< --dry-run (report tiers/sizes, no compute)
+    /// --hash (default OFF): compute the source-dataset provenance SHA-256s
+    /// (geno/snp/ind). OFF by default because the whole-.geno SHA is a ~tens-of-seconds
+    /// whole-file read+compress that dominated extract-f2 yet only yields a provenance
+    /// value; when ON it is overlapped on a background thread with the GPU pipeline.
+    /// When OFF, meta.json records source_hash_computed:false + empty *_sha256.
+    std::optional<bool>   hash_source;
 
     // ---- Output (cli-bindings.md §4.4) ----------------------------------------
     std::optional<std::string> out_file;    ///< --out FILE (stdout if unset)

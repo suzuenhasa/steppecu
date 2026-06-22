@@ -63,6 +63,15 @@ struct F2DirMeta {
     std::string snp_sha256;
     std::string ind_sha256;
     std::string geno_path, snp_path, ind_path;
+    // Source-provenance hash policy (the extract-f2 --hash opt-in; default OFF). The
+    // whole-.geno SHA is the bottleneck (~37s of ~41s on the 6.7 GB 1240K .geno — a
+    // provenance value, NOT correctness), so it is SKIPPED by default. When false the
+    // writer does NOT hash any source file whose sha is still empty; meta.json records
+    // geno/snp/ind_sha256 = "" + "source_hash_computed": false so a consumer knows the
+    // absence is DELIBERATE (not a failed/forgotten hash). When true the writer fills
+    // any empty source sha from its path (the caller may PRE-fill geno_sha256 from a
+    // background thread to overlap the big hash with the GPU pipeline).
+    bool hash_source_files = false;
     // Pop selection echo (mode + the resolved labels are in pops.txt; this records the request).
     std::string pop_selection;      ///< human string, e.g. "explicit:England_BellBeaker,..." | "auto-top:9" | "min-n:30".
 };
@@ -89,6 +98,15 @@ struct F2DirWriteResult {
                                             const F2BlockTensor& f2,
                                             const std::vector<std::string>& pop_labels,
                                             const F2DirMeta& meta);
+
+/// SHA-256 of a whole file as a lowercase hex digest (64 chars), or "" if the file
+/// cannot be opened. This is the SAME bulk/block SHA-256 the writer uses for the
+/// f2_cache_id and the source-dataset shas (the single SHA home), exposed so the
+/// extract-f2 command can hash the (large) source .geno on a BACKGROUND THREAD,
+/// overlapping the ~tens-of-seconds whole-file hash with the GPU decode+f2 pipeline,
+/// then PRE-fill F2DirMeta.geno_sha256 before write_f2_dir (which then skips re-hashing
+/// it). The digest is byte-for-byte `sha256sum`-compatible (FIPS 180-4).
+[[nodiscard]] std::string sha256_file(const std::filesystem::path& path);
 
 }  // namespace steppe::app
 

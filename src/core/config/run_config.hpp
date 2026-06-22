@@ -86,6 +86,12 @@ public:
     /// (cli-bindings.md §4.5 planning aid). Defaults to false (a real run).
     [[nodiscard]] bool dry_run()                const noexcept { return dry_run_; }
 
+    /// --hash (extract-f2): compute the source-dataset provenance SHA-256s. Default
+    /// false — the whole-.geno SHA dominated extract-f2 (a provenance value, not
+    /// correctness), so it is skipped unless explicitly requested. When true the
+    /// command overlaps the big geno hash with the GPU pipeline on a background thread.
+    [[nodiscard]] bool hash_source()            const noexcept { return hash_source_; }
+
 private:
     // ConfigBuilder is the ONLY constructor of a validated RunConfig (it sets these
     // fields after build()-validation). Friendship keeps the fields const-after-build
@@ -114,6 +120,7 @@ private:
     int min_sources_ = 1;
     int max_sources_ = -1;          // -1 ⇒ "up to the whole pool" (app default)
     bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)
+    bool hash_source_ = false;      // --hash (extract-f2): source-provenance SHA opt-in (default OFF)
 };
 
 }  // namespace steppe::config

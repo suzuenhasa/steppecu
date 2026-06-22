@@ -266,6 +266,7 @@ steppe extract-f2  --geno/--snp/--ind PREFIX   (or --geno F --snp F --ind F)
                    [--precision emu40|emu32|fp64|tf32]            # Precision
                    [--device auto|0,1]                            # DeviceConfig.devices (GPU only)
                    [--dry-run]                                    # T_max / tiles / largest-fitting
+                   [--hash | --no-hash]                           # source-provenance SHA-256 (default OFF; see §4.3)
 
 steppe qpadm       --f2-dir DIR  --target T  --left a,b  --right r0,r1,…
                    [--rank -1 --fudge 1e-4 --als-iters 20 --rank-alpha 0.05
@@ -314,6 +315,18 @@ Adopt a **directory**, not the bare blob, because the engine carries no names (�
   meta.json       # provenance: steppe version+SHA, precision_tag (engaged, not just requested),
                   #   blgsize cM, n_block, filter flags, source dataset sha256s, f2_cache_id (sha256 of f2.bin)
 ```
+
+**Source-provenance hashing (`--hash`, default OFF).** The `source.{geno,snp,ind}_sha256`
+fields are computed ONLY when `--hash` is passed. They default OFF because the whole-source
+`.geno` SHA-256 is a multi-GiB whole-file read+compress (e.g. ~5–6s on the 6.7 GB 1240K
+`.geno` even with hardware SHA-NI) that historically dominated `extract-f2` wall time, yet
+yields a provenance value, not correctness. `meta.json` always records
+`source.source_hash_computed` (bool): when `false` the `*_sha256` fields are `""` **by
+design** — a consumer reads this marker to know the absence is DELIBERATE, not a failed or
+forgotten hash. With `--hash` ON, the (large) `.geno` SHA is computed on a BACKGROUND THREAD
+overlapping the GPU decode+f2 pipeline (it depends only on the path), so it costs ~nothing
+beyond the standalone hash; the digests are byte-for-byte `sha256sum`-compatible. `f2.bin`'s
+`f2_cache_id` (sha256 of the small `f2.bin`) is ALWAYS computed regardless of `--hash`.
 
 `pops.txt` is the missing piece that makes `qpadm --left England_BellBeaker,…` resolvable
 (it is `IndPartition.groups[].label` in order, `ind_reader.hpp:65-72`). `f2.bin` mmaps/

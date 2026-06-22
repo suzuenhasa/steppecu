@@ -59,32 +59,48 @@ Jump from HO (~600K SNPs) to 1240K (~1.23M SNPs): ~2x the SNP axis, and a
 `extract-f2 --prefix … --pops … --blgsize 0.05 --maxmiss 0 --auto-only --device 0`.
 blgsize 0.05 -> 711–713 jackknife blocks. **SINGLE-GPU is the supported path.**
 
-The original sweep ran these `--device auto` (both GPUs); the table keeps those
-wall numbers as the historical record, but the **supported, re-measured**
-SET60 wall is the `--device 0` number below.
+**CORRECTION (ROADMAP §6, the extract-f2 hash-bottleneck fix).** The original
+~40–44 s wall below was NOT decode/IO — it was a **byte-at-a-time provenance
+SHA-256** of the whole 6.7 GB `.geno` (stored as `geno_sha256` in `meta.json`),
+which compressed at ~190 MB/s scalar and burned ~37 s of the ~41 s. The genuine
+per-individual seek+gather + TGENO decode + f2 GEMM are each well under a second;
+the table's flat ~40 s was the constant whole-file hash, NOT the (pop-set-scaling)
+genuine work. That hash is now **OFF by default** (`--no-hash`); it is opt-in via
+`--hash` (a bulk SHA-NI hash overlapped on a background thread with the GPU
+pipeline). The original `--device auto`/`--device 0` numbers are kept below as the
+historical record of the OLD (hashing-by-default) code.
 
-| pop set | #indiv | SNPs kept (of 1,233,013) | blocks | wall (orig, auto/both) | MaxRSS | f2.bin |
+| pop set | #indiv | SNPs kept (of 1,233,013) | blocks | wall (OLD, hash-by-default) | MaxRSS | f2.bin |
 |---|---:|---:|---:|---:|---:|---:|
 | SET5  |   206 | 1,045,408 | 713 | 40.02 s | 0.98 GB | 288 KB |
 | SET15 |   596 |   691,342 | 711 | 40.61 s | 1.50 GB | 2.56 MB |
 | SET30 | 1,907 |   704,508 | 711 | 41.66 s | 2.59 GB | 10.24 MB |
 | SET60 | 4,402 |   682,707 | 711 | 43.97 s | 4.73 GB | 40.96 MB |
 
-**Supported SINGLE-GPU re-measure (SET60, `--device 0`, REAL 1240K geno):**
-two runs at **43.43 s / 43.40 s**, plus an independent verifier run at **43.23 s**
-(rc=0; P=60, 711 blocks, **682,707 SNPs kept** — bit-matches the SET60 geometry
-above). vs the original both-GPU `--device auto` SET60 of 43.97 s, **single-GPU is
-~1% FASTER (within noise)**: extract-f2 is fully TGENO-decode-bound, so the 2nd
-GPU gives no benefit (and, per the parked-multi-GPU root cause, generally costs a
-2nd ~7 GB f2_blocks D2H). The `--device auto` number was effectively the same
-wall, confirming single-GPU as the right supported path. (`/usr/bin/time` and
-`xxd` were initially absent; `time` was installed, `od -c` / `date` math used.)
+**Re-measured SINGLE-GPU (`--device 0`, REAL 1240K geno, page-cache warm), SET60
+on the post-fix build:**
 
-**Scaling:** wall is essentially FLAT (40 -> 44 s) across a 21x individual count
-and 12x pop count — extract-f2 is fully decode-bound (see "Where the time goes").
-SNPs-kept DROPS as pops are added because `--maxmiss 0` requires zero missing
-across all selected pops (joint completeness) — correct, intended behavior, not
-silent data loss.
+- **DEFAULT (no `--hash`):** two runs at **5.81 s / 5.88 s** (rc=0; P=60, 711
+  blocks, **682,707 SNPs kept** — bit-matches the SET60 geometry above; f2.bin
+  digest `a55433654f29…` is byte-identical to the OLD dir). vs the OLD
+  hash-by-default 43.97 s, that is **~7.5x faster** — the ~38 s removed was
+  exactly the provenance SHA, not decode/IO.
+- **WITH `--hash`:** **7.75 s** (rc=0). The 6.7 GB hash runs on a background
+  thread (bulk SHA-NI, ~5.5 s standalone — `sha256sum` is 5.54 s) overlapping the
+  ~5.8 s GPU pipeline, so it adds only ~1.9 s, not ~38 s. The digest
+  `geno_sha256 = ce9e13a990b26e29eadbb5630dfd2f706cff0aea7a5df59c8d7744346d7428b4`
+  is **byte-for-byte equal to `sha256sum`** of the `.geno` — provenance preserved.
+
+The genuine read+decode+f2 floor is ~5.8 s at SET60 (P=60, 4,402 individuals);
+it is single-GPU (the 2nd GPU is parked, per the multi-GPU root cause, and would
+cost a 2nd ~7 GB f2_blocks D2H). `meta.json` records `source_hash_computed`
+(false on the no-hash default, with the `*_sha256` fields `""` by design) so a
+consumer knows the absence is DELIBERATE.
+
+**Scaling:** the genuine wall scales with the pop set (individuals gathered + the
+P×P×n_block f2), no longer masked by the constant whole-file hash. SNPs-kept DROPS
+as pops are added because `--maxmiss 0` requires zero missing across all selected
+pops (joint completeness) — correct, intended behavior, not silent data loss.
 
 ---
 
@@ -215,13 +231,17 @@ buffers, still far under the wall.
 
 ## Where the time goes
 
-1. **extract-f2 is fully decode-bound.** Wall is flat ~40–44 s from 5 to 60 pops
-   despite 12x more individuals and P^2 f2 growth; the f2 compute is a rounding
-   error at <=60 pops (f2.bin grows 288 KB -> 41 MB as P^2 but adds < 4 s wall).
-   To speed extract-f2 you must attack the 6.7 GB TGENO streaming-decode
-   throughput, NOT the f2 math. Because it is decode-bound, SINGLE-GPU is as fast
-   as both (43.2 s vs 43.97 s) — the 2nd GPU buys nothing and, per the parked
-   multi-GPU root cause, generally costs a 2nd ~7 GB f2_blocks D2H.
+1. **extract-f2 was hash-bound, NOT decode-bound (CORRECTED, ROADMAP §6).** The
+   old flat ~40–44 s was a **byte-at-a-time provenance SHA-256** of the whole
+   6.7 GB `.geno` (~37 s of ~41 s at ~190 MB/s scalar) — a `meta.json` provenance
+   value, not the genotype math. With that hash now OFF by default the SET60 wall
+   is **~5.8 s** (`--hash` opt-in adds only ~1.9 s, overlapped on a background
+   thread by bulk SHA-NI). The genuine per-individual seek+gather + TGENO decode +
+   f2 GEMM are each well under a second; f2.bin grows 288 KB -> 41 MB as P^2 but
+   adds little wall. SINGLE-GPU is the supported path; the 2nd GPU is parked and,
+   per the multi-GPU root cause, would cost a 2nd ~7 GB f2_blocks D2H. (If you do
+   want to speed it further, attack the genuine TGENO seek+gather+decode — NOT the
+   hash, which is now opt-in and overlapped.)
 
 2. **qpadm single-fit is floor-bound.** ~1.0 s fixed CUDA-context-init +
    f2.bin-load; pure fit compute is ~0.10 s (no SE). GPU compute only becomes

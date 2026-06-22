@@ -170,6 +170,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.autosomes_only, args.autosomes_only);
     take_b(merged_.drop_monomorphic, args.drop_monomorphic);
     take_b(merged_.transversions_only, args.transversions_only);
+    take_b(merged_.dry_run, args.dry_run);
+    take_b(merged_.hash_source, args.hash_source);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     // A --config on the CLI is the highest-precedence TOML request.
@@ -425,7 +427,8 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     if (merged_.snp)      cfg.snp_ = *merged_.snp;
     if (merged_.ind)      cfg.ind_ = *merged_.ind;
     if (merged_.out_dir)  cfg.out_dir_ = *merged_.out_dir;
-    if (merged_.dry_run)  cfg.dry_run_ = *merged_.dry_run;
+    if (merged_.dry_run)     cfg.dry_run_ = *merged_.dry_run;
+    if (merged_.hash_source) cfg.hash_source_ = *merged_.hash_source;
 
     return cfg;
 }

@@ -254,6 +254,38 @@ struct ScopedEnv {
            o.allow_negative_weights == false;
 }
 
+// ---- extract-f2 --hash / --dry-run flags: default OFF, override flows through -------
+// The source-provenance SHA is OFF by default (the extract-f2 hash-bottleneck fix); the
+// opt-in --hash and the --dry-run flag must both default false and flip to true only when
+// the CLI sets them (the §9 sentinel merge — a regression here silently re-enables the
+// ~tens-of-seconds whole-.geno hash on every run, or breaks --dry-run).
+[[nodiscard]] bool test_extract_hash_and_dry_run_flags() {
+    // Default: neither flag set -> both false.
+    {
+        CliArgs a; a.command = Command::ExtractF2;
+        const auto r = ConfigBuilder().with_defaults().merge_cli(a).build();
+        if (!r) return false;
+        if (r->hash_source() != false) return false;
+        if (r->dry_run() != false) return false;
+    }
+    // --hash sets hash_source(); --dry-run sets dry_run().
+    {
+        CliArgs a; a.command = Command::ExtractF2; a.hash_source = true; a.dry_run = true;
+        const auto r = ConfigBuilder().with_defaults().merge_cli(a).build();
+        if (!r) return false;
+        if (r->hash_source() != true) return false;
+        if (r->dry_run() != true) return false;
+    }
+    // --no-hash (explicit false) keeps it OFF.
+    {
+        CliArgs a; a.command = Command::ExtractF2; a.hash_source = false;
+        const auto r = ConfigBuilder().with_defaults().merge_cli(a).build();
+        if (!r) return false;
+        if (r->hash_source() != false) return false;
+    }
+    return true;
+}
+
 struct Case {
     const char* name;
     bool (*fn)();
@@ -273,6 +305,7 @@ constexpr Case kCases[] = {
     {"valid precision/device tokens map correctly", test_valid_token_mapping},
     {"Status -> exit-code map (record-and-continue)", test_exit_code_map},
     {"QpAdmOptions overrides flow through build()", test_qpadm_option_overrides},
+    {"extract-f2 --hash/--dry-run default OFF, override flows through", test_extract_hash_and_dry_run_flags},
 };
 
 }  // namespace
