@@ -27,6 +27,7 @@ add_executable(steppe_app
     main.cpp
     cli_parse.cpp
     cmd_qpadm.cpp      # M(cli-1): the qpAdm GPU fit command
+    cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
     cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command
     f2_dir_io.cpp      # M(cli-1): the f2_blocks dir READER (f2.bin + pops.txt)
     f2_dir_writer.cpp  # M(cli-4): the f2_blocks dir WRITER (STPF2BK1 REAL vpair + sidecars)

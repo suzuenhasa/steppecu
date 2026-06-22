@@ -22,6 +22,7 @@
 
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_qpadm.hpp"
+#include "app/cmd_rotate.hpp"
 #include "core/config/cli_args.hpp"
 #include "core/config/config_builder.hpp"
 #include "core/config/exit_code.hpp"
@@ -213,7 +214,10 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(rotate_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            std::exit(run_not_yet_implemented("qpadm-rotate", *config));
+            // M(cli-3): the real GPU qpAdm ROTATION (read dir -> resolve target/pool/
+            // right -> enumerate pool subsets [min,max] -> ONE batched run_qpadm_search
+            // -> emit the per-model table). Mirrors how `qpadm` dispatches.
+            std::exit(run_qpadm_rotate_command(*config));
         });
     }
 

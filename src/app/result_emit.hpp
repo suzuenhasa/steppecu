@@ -23,6 +23,7 @@
 #define STEPPE_APP_RESULT_EMIT_HPP
 
 #include <ostream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,27 @@ void emit_qpadm_result(std::ostream& os, OutputFormat fmt,
                        const QpAdmResult& result,
                        const std::string& target_label,
                        const std::vector<std::string>& left_labels);
+
+/// Serialize a qpAdm ROTATION result set (M(cli-3); cli-bindings.md §4.4 `qpadm-rotate`)
+/// to `os` in `fmt` — ONE ROW PER MODEL, in input (model_index) order. This is a sibling
+/// of emit_qpadm_result (NOT the single-model four-section layout): the rotation reports
+/// the per-model feasibility table the batched run_qpadm_search returns.
+///
+/// `results` are the per-model fits (results[i] resolves the i-th input model — the
+/// engine returns them in input order, qpadm.hpp:190). `target_label` is the shared
+/// resolved target name; `left_labels_per_model[i]` are the resolved left-source names of
+/// model i (len == results.size(); used for the row's `left` column and the per-weight
+/// label headers). `right_n` is the convention nr (right.size()-1) reported per row.
+///
+/// CSV/TSV: a `# section: rotation` header + a column-header row + one data row per model.
+/// JSON: a `{ "models": [ {model_index,left,weight,se,z,p,chisq,dof,f4rank,feasible,
+/// status}, ... ] }` array mirroring golden_rot.json's models[] shape so a run diffs
+/// directly against the golden. Total: a domain-outcome row emits NA/null sentinels.
+void emit_rotation_table(std::ostream& os, OutputFormat fmt,
+                         std::span<const QpAdmResult> results,
+                         const std::string& target_label,
+                         const std::vector<std::vector<std::string>>& left_labels_per_model,
+                         int right_n);
 
 }  // namespace steppe::app
 

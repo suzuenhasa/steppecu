@@ -1147,6 +1147,25 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+  # --- M(cli-3) `steppe qpadm-rotate` golden gate (cli-bindings.md §7, §538) ----------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpadm-rotate` over the COMMITTED
+  # real-AADR rotation fixture (fixtures/f2_rot.bin) with golden_rot.json's EXACT inputs
+  # (target/pool/right, --min-sources 2 --max-sources 3 = 84 models) and diffs every
+  # per-model row (weights/p/f4rank/feasible/left/status) against golden_rot.json at the
+  # SAME tiers the engine gate test_qpadm_rotation.cu uses. The CLI counterpart of the
+  # engine-level qpadm_rotation test. SKIPs cleanly (exit 0) when no CUDA device is
+  # visible. Links the CUDA-FREE f2_disk_format header (via core_internal) + the standard
+  # host warnings; the GPU work is in the spawned child. Depends on steppe_app so the
+  # binary exists; the binary path + the golden dir are argv.
+  add_executable(test_cli_rotate cli/test_cli_rotate.cpp)
+  target_link_libraries(test_cli_rotate
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_rotate steppe_app)
+  add_test(NAME cli_rotate
+           COMMAND test_cli_rotate
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
   # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
   # triple (STEPPE_AADR_ROOT/raw/<prefix>.{geno,snp,ind}) for the golden pop sets, then

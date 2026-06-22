@@ -8,6 +8,7 @@
 #include <cmath>     // std::isnan
 #include <cstddef>
 #include <ostream>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -250,6 +251,100 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "}\n";
 }
 
+// ---- ROTATION (M(cli-3)): per-model table -------------------------------------
+// The per-model feasibility decision the rotation row carries. The engine's own
+// decision lives on the popdrop FULL-model row (index 0); prefer it (byte-faithful to
+// what run_qpadm_search recorded, matching the engine gate test_qpadm_rotation.cu:474),
+// falling back to the canonical model_feasible (weights in [0,1]) when popdrop is empty
+// (a domain-failed model that produced no popdrop). Both sources agree for these models
+// (the same canonical screen), so either matches the golden.
+[[nodiscard]] bool rotation_feasible(const QpAdmResult& r) {
+    if (!r.popdrop_feasible.empty()) return r.popdrop_feasible[0] != 0;
+    return model_feasible(r);
+}
+
+// Join the model's left labels into one field (semicolon-separated; §4.4 `left` as one
+// field). Quoting is applied by the caller (csv_quote / json_quote).
+[[nodiscard]] std::string join_left(const std::vector<std::string>& labels) {
+    std::string s;
+    for (std::size_t i = 0; i < labels.size(); ++i) { if (i) s += ";"; s += labels[i]; }
+    return s;
+}
+
+void emit_rotation_csv(std::ostream& os, std::span<const QpAdmResult> results,
+                       const std::string& target,
+                       const std::vector<std::vector<std::string>>& left_labels, int right_n,
+                       char sep) {
+    // One section, one row per model (cli-bindings.md §4.4 qpadm-rotate row schema).
+    os << "# section: rotation\n";
+    os << "\"model_index\"" << sep << "\"target\"" << sep << "\"left\"" << sep
+       << "\"right_n\"" << sep << "\"p\"" << sep << "\"chisq\"" << sep << "\"dof\""
+       << sep << "\"f4rank\"" << sep << "\"feasible\"" << sep << "\"status\"" << sep
+       << "\"weights\"" << sep << "\"se\"\n";
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        const QpAdmResult& r = results[i];
+        const std::string left =
+            (i < left_labels.size()) ? join_left(left_labels[i]) : std::string();
+        // weights / se as semicolon-joined per-row sub-fields (se = "NA" when absent).
+        std::string wjoin, sjoin;
+        for (std::size_t k = 0; k < r.weight.size(); ++k) {
+            if (k) { wjoin += ";"; sjoin += ";"; }
+            wjoin += fmt_double(r.weight[k]);
+            sjoin += (k < r.se.size() ? fmt_double(r.se[k]) : std::string("NA"));
+        }
+        if (r.se.empty()) sjoin = "NA";  // policy sentinel: SE not computed for this model
+        os << r.model_index << sep << csv_quote(target) << sep << csv_quote(left) << sep
+           << right_n << sep << fmt_double(r.p) << sep << fmt_double(r.chisq) << sep
+           << r.dof << sep << r.est_rank << sep
+           << (rotation_feasible(r) ? "TRUE" : "FALSE") << sep
+           << csv_quote(status_str(r.status)) << sep
+           << csv_quote(wjoin) << sep << csv_quote(sjoin) << "\n";
+    }
+}
+
+void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
+                        const std::string& target,
+                        const std::vector<std::vector<std::string>>& left_labels,
+                        int right_n) {
+    // Mirror golden_rot.json's models[] shape so a run diffs directly against the golden.
+    os << "{\n";
+    os << "  \"target\": " << json_quote(target) << ",\n";
+    os << "  \"right_n\": " << right_n << ",\n";
+    os << "  \"models\": [\n";
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        const QpAdmResult& r = results[i];
+        const bool have_se = !r.se.empty();
+        os << "    {\n";
+        os << "      \"model_index\": " << r.model_index << ",\n";
+        os << "      \"left\": [";
+        if (i < left_labels.size())
+            for (std::size_t k = 0; k < left_labels[i].size(); ++k)
+                os << (k ? ", " : "") << json_quote(left_labels[i][k]);
+        os << "],\n";
+        os << "      \"weight\": [";
+        for (std::size_t k = 0; k < r.weight.size(); ++k)
+            os << (k ? ", " : "") << json_double(r.weight[k]);
+        os << "],\n";
+        os << "      \"se\": [";
+        for (std::size_t k = 0; k < r.weight.size(); ++k)
+            os << (k ? ", " : "") << (have_se && k < r.se.size() ? json_double(r.se[k]) : "null");
+        os << "],\n";
+        os << "      \"z\": [";
+        for (std::size_t k = 0; k < r.weight.size(); ++k)
+            os << (k ? ", " : "") << (have_se && k < r.z.size() ? json_double(r.z[k]) : "null");
+        os << "],\n";
+        os << "      \"p\": " << json_double(r.p) << ",\n";
+        os << "      \"chisq\": " << json_double(r.chisq) << ",\n";
+        os << "      \"dof\": " << r.dof << ",\n";
+        os << "      \"f4rank\": " << r.est_rank << ",\n";
+        os << "      \"feasible\": " << (rotation_feasible(r) ? "true" : "false") << ",\n";
+        os << "      \"status\": " << json_quote(status_str(r.status)) << "\n";
+        os << "    }" << (i + 1 < results.size() ? ",\n" : "\n");
+    }
+    os << "  ]\n";
+    os << "}\n";
+}
+
 }  // namespace
 
 bool parse_output_format(const std::string& token, OutputFormat& out) {
@@ -267,6 +362,24 @@ void emit_qpadm_result(std::ostream& os, OutputFormat fmt,
         case OutputFormat::Csv:  emit_csv(os, result, target_label, left_labels, ','); break;
         case OutputFormat::Tsv:  emit_csv(os, result, target_label, left_labels, '\t'); break;
         case OutputFormat::Json: emit_json(os, result, target_label, left_labels); break;
+    }
+}
+
+void emit_rotation_table(std::ostream& os, OutputFormat fmt,
+                         std::span<const QpAdmResult> results,
+                         const std::string& target_label,
+                         const std::vector<std::vector<std::string>>& left_labels_per_model,
+                         int right_n) {
+    switch (fmt) {
+        case OutputFormat::Csv:
+            emit_rotation_csv(os, results, target_label, left_labels_per_model, right_n, ',');
+            break;
+        case OutputFormat::Tsv:
+            emit_rotation_csv(os, results, target_label, left_labels_per_model, right_n, '\t');
+            break;
+        case OutputFormat::Json:
+            emit_rotation_json(os, results, target_label, left_labels_per_model, right_n);
+            break;
     }
 }
 
