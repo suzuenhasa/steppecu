@@ -29,8 +29,10 @@
 namespace {
 
 using steppe::core::accumulate_genotype;
+using steppe::core::accumulate_genotype_ploidy;
 using steppe::core::AfResult;
 using steppe::core::finalize_af;
+using steppe::core::finalize_af_counts;
 using steppe::core::genotype_code;
 using steppe::core::genotype_valid;
 using steppe::core::kMissingGenotypeCode;
@@ -175,6 +177,94 @@ using steppe::core::kMissingGenotypeCode;
     return r.n == 2.0 && r.q == 1.0 && r.v == 1.0;
 }
 
+// ---- accumulate_genotype_ploidy: AT2 adjust_pseudohaploid per-sample fold ------
+// AT2 (cpp_readgeno.cpp): AC += code/(3-ploidy); N += ploidy; missing/bad-ploidy
+// excluded from BOTH. This is the per-sample pseudo-haploid f2 fix.
+
+// DIPLOID (ploidy 2): code/(3.0-2)=code, N += 2. So {0,1,2} fold to ac=3, n=6 — the
+// SAME ac as the legacy accumulate_genotype, and N = 2·(non-missing count).
+[[nodiscard]] bool test_accumulate_ploidy_diploid_matches_legacy() {
+    const std::uint8_t seg[] = {0u, 1u, 2u, kMissingGenotypeCode};  // 3 valid
+    double ac = 0.0; std::int64_t n = 0;
+    for (std::uint8_t c : seg) accumulate_genotype_ploidy(c, /*ploidy=*/2, ac, n);
+    // Legacy: ac=0+1+2=3, an=3 ⇒ N=2·3=6. Per-sample diploid must match exactly.
+    std::int64_t lac = 0, lan = 0;
+    for (std::uint8_t c : seg) accumulate_genotype(c, lac, lan);
+    return ac == 3.0 && n == 6 && ac == static_cast<double>(lac) && n == 2 * lan;
+}
+
+// PSEUDO-HAPLOID (ploidy 1) homozygous: code∈{0,2}, code/(3.0-1)=code/2 ∈{0,1}, N += 1.
+// {0,2,2,missing} ⇒ ac = 0+1+1 = 2, n = 3 (3 non-missing × 1).
+[[nodiscard]] bool test_accumulate_ploidy_pseudohaploid() {
+    const std::uint8_t seg[] = {0u, 2u, 2u, kMissingGenotypeCode};
+    double ac = 0.0; std::int64_t n = 0;
+    for (std::uint8_t c : seg) accumulate_genotype_ploidy(c, /*ploidy=*/1, ac, n);
+    return ac == 2.0 && n == 3;  // Q = 2/3
+}
+
+// PSEUDO-HAPLOID with an OUT-OF-WINDOW het (code 1): AT2 adds code/2.0 = 0.5 (the
+// FLOAT divide is load-bearing — an integer 1/2 would drop it, the Q=0.004 bug).
+// {2,1} at ploidy 1 ⇒ ac = 1 + 0.5 = 1.5, n = 2 ⇒ Q = 0.75.
+[[nodiscard]] bool test_accumulate_ploidy_pseudohaploid_het_half() {
+    double ac = 0.0; std::int64_t n = 0;
+    accumulate_genotype_ploidy(2u, /*ploidy=*/1, ac, n);  // ref/ref ⇒ +1.0
+    accumulate_genotype_ploidy(1u, /*ploidy=*/1, ac, n);  // stray het ⇒ +0.5 (NOT 0)
+    return ac == 1.5 && n == 2;  // Q = 1.5/2 = 0.75
+}
+
+// A MISSING code is excluded from BOTH accumulators regardless of ploidy.
+[[nodiscard]] bool test_accumulate_ploidy_missing_excluded() {
+    double ac = 5.0; std::int64_t n = 4;
+    accumulate_genotype_ploidy(kMissingGenotypeCode, /*ploidy=*/2, ac, n);
+    accumulate_genotype_ploidy(kMissingGenotypeCode, /*ploidy=*/1, ac, n);
+    return ac == 5.0 && n == 4;
+}
+
+// A bad ploidy (∉ {1,2}) is fail-soft: the sample contributes NOTHING (no divide by
+// 3.0-ploidy ≤ 0, no fabricated count) — mirrors the finalize ploidy guard.
+[[nodiscard]] bool test_accumulate_ploidy_bad_excluded() {
+    double ac = 0.0; std::int64_t n = 0;
+    accumulate_genotype_ploidy(2u, /*ploidy=*/0, ac, n);
+    accumulate_genotype_ploidy(2u, /*ploidy=*/3, ac, n);
+    accumulate_genotype_ploidy(2u, /*ploidy=*/-1, ac, n);
+    return ac == 0.0 && n == 0;
+}
+
+// MIXED-PLOIDY pop (the real aDNA case): one diploid (code 1) + one pseudo-haploid
+// (code 2). AC = 1/(3.0-2) + 2/(3.0-1) = 1 + 1 = 2; N = 2 + 1 = 3 ⇒ Q = 2/3. This is
+// what the per-pop ploidy tag could NOT express.
+[[nodiscard]] bool test_accumulate_ploidy_mixed_pop() {
+    double ac = 0.0; std::int64_t n = 0;
+    accumulate_genotype_ploidy(1u, /*ploidy=*/2, ac, n);  // diploid het
+    accumulate_genotype_ploidy(2u, /*ploidy=*/1, ac, n);  // pseudo-haploid ref/ref
+    const AfResult r = finalize_af_counts(ac, n);
+    return ac == 2.0 && n == 3 && r.n == 3.0 && r.v == 1.0 &&
+           (r.q > 0.6666 && r.q < 0.6667);  // 2/3
+}
+
+// ---- finalize_af_counts: divide the already-ploidy-weighted AC/N ---------------
+
+// finalize_af_counts(ac, n) == finalize_af(ac, an, 2) when n == 2·an (the diploid
+// equivalence the modern-data bit-identity rests on).
+[[nodiscard]] bool test_finalize_counts_matches_diploid() {
+    const AfResult c = finalize_af_counts(/*ac=*/3.0, /*n=*/6);
+    const AfResult d = finalize_af(/*ac=*/3, /*an=*/3, /*ploidy=*/2);  // N=6
+    return c.q == d.q && c.n == d.n && c.v == d.v && c.n == 6.0 && c.q == 0.5;
+}
+
+// n == 0 (whole-pop-missing) ⇒ masked {0,0,0}, no divide-by-zero.
+[[nodiscard]] bool test_finalize_counts_n0_masked() {
+    const AfResult r = finalize_af_counts(/*ac=*/0.0, /*n=*/0);
+    return r.q == 0.0 && r.n == 0.0 && r.v == 0.0;
+}
+
+// A single pseudo-haploid sample: ac=1, n=1 ⇒ N=1 (ODD — the convention that was
+// impossible under the all-diploid 2×count rule), Q=1.0, V=1.
+[[nodiscard]] bool test_finalize_counts_single_pseudohaploid() {
+    const AfResult r = finalize_af_counts(/*ac=*/1.0, /*n=*/1);
+    return r.n == 1.0 && r.q == 1.0 && r.v == 1.0;
+}
+
 struct Case {
     const char* name;
     bool (*fn)();
@@ -197,6 +287,15 @@ constexpr Case kCases[] = {
     {"finalize_af haploid vs diploid 1x/2x factor", test_finalize_haploid_vs_diploid_factor},
     {"finalize_af an=0 -> masked {0,0,0}", test_finalize_an0_masked},
     {"finalize_af an=1 -> valid cell", test_finalize_an1_valid},
+    {"accumulate_genotype_ploidy diploid == legacy", test_accumulate_ploidy_diploid_matches_legacy},
+    {"accumulate_genotype_ploidy pseudo-haploid AC/N", test_accumulate_ploidy_pseudohaploid},
+    {"accumulate_genotype_ploidy PH out-of-window het = +0.5", test_accumulate_ploidy_pseudohaploid_het_half},
+    {"accumulate_genotype_ploidy missing excluded", test_accumulate_ploidy_missing_excluded},
+    {"accumulate_genotype_ploidy bad ploidy fail-soft", test_accumulate_ploidy_bad_excluded},
+    {"accumulate_genotype_ploidy mixed-ploidy pop", test_accumulate_ploidy_mixed_pop},
+    {"finalize_af_counts == diploid finalize_af", test_finalize_counts_matches_diploid},
+    {"finalize_af_counts n=0 -> masked", test_finalize_counts_n0_masked},
+    {"finalize_af_counts single pseudo-haploid (N=1 odd)", test_finalize_counts_single_pseudohaploid},
 };
 
 }  // namespace

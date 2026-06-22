@@ -80,6 +80,19 @@ inline constexpr std::uint8_t kCodeMask = (1u << kBitsPerCode) - 1u;
 /// the oracle). Excluded from BOTH numerator and denominator of the allele freq.
 inline constexpr std::uint8_t kMissingCode = 3;
 
+/// The 2-bit code that denotes a HETEROZYGOUS genotype (1 reference-allele copy).
+/// Used by the AT2 pseudo-haploid auto-detection (adjust_pseudohaploid=TRUE): a
+/// sample is DIPLOID iff it has at least one het call in the detection prefix
+/// (a haploid genome can never be heterozygous), else PSEUDO-HAPLOID. Mirrors
+/// core::kHeterozygousGenotypeCode (kept here so the io leaf does not depend on core).
+inline constexpr std::uint8_t kHetCode = 1;
+
+/// AT2 pseudo-haploid auto-detection window: the number of leading SNPs scanned
+/// per sample for a het call (admixtools cpp_*_ploidy default ntest = 1000;
+/// verified against admixtools 2.0.10). Mirrors core::kPloidyDetectSnps. A record
+/// shorter than this just scans fewer SNPs (the whole prefix).
+inline constexpr std::size_t kPloidyDetectSnps = 1000;
+
 // ---------------------------------------------------------------------------
 // EIGENSTRAT .snp non-autosomal chromosome codes — the single home for the
 // sex/mitochondrial label→code convention (ROADMAP §4 "io format constants";

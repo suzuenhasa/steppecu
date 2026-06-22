@@ -170,6 +170,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.autosomes_only, args.autosomes_only);
     take_b(merged_.drop_monomorphic, args.drop_monomorphic);
     take_b(merged_.transversions_only, args.transversions_only);
+    if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     // A --config on the CLI is the highest-precedence TOML request.
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -381,6 +382,12 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
         if (!(*merged_.blgsize > 0.0)) return fail("--blgsize must be > 0 (Morgans)");
         cfg.blgsize_cm_ = *merged_.blgsize * kCentimorgansPerMorgan;
     }
+
+    // ---- ploidy policy (extract-f2; the f2 pseudo-haploid fix) ------------------
+    // Default Auto (= AT2 adjust_pseudohaploid=TRUE per-sample detection); --ploidy
+    // 1/2 force a uniform pseudo-haploid/diploid ploidy. The detection/forcing
+    // happens in cmd_extract_f2 against the gathered tile (the genotypes).
+    if (merged_.ploidy.has_value()) cfg.ploidy_ = *merged_.ploidy;
 
     // ---- rotate pool-enumeration bounds ----------------------------------------
     if (merged_.min_sources.has_value()) {

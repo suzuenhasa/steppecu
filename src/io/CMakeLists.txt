@@ -18,6 +18,7 @@ add_library(steppe_io STATIC
     ind_reader.cpp               # .ind → pop labels + selection (oracle-faithful)
     snp_reader.cpp               # .snp → id / chrom / genpos (Morgans) / ref / alt
     geno_reader.cpp              # .geno tiled raw-byte gather (NO decode)
+    ploidy_detect.cpp            # AT2 per-sample pseudo-haploid auto-detection (adjust_pseudohaploid)
     # M2 on-the-fly filters (host-pure; part of the SAME io leaf). filter_decision/
     # filter_plan are header-only predicates/structs (no .cpp). architecture.md §1,
     # §5 S-1/S0'; ROADMAP M2.

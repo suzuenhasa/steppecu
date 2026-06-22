@@ -39,6 +39,18 @@ enum class Command {
     QpAdmRotate,
 };
 
+/// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
+/// fix). `Auto` (the DEFAULT, matching AT2 adjust_pseudohaploid=TRUE) auto-detects
+/// each sample's ploidy from its genotypes (a het call ⇒ diploid, none ⇒ pseudo-
+/// haploid); `Diploid`/`PseudoHaploid` force a uniform ploidy for every sample
+/// (the --ploidy 2 / --ploidy 1 overrides; the legacy hardcoded-2 behavior is
+/// `Diploid`).
+enum class PloidyMode {
+    Auto,
+    Diploid,
+    PseudoHaploid,
+};
+
 /// The flat, parse-time CLI surface. Every field is the std::optional "was it set?"
 /// sentinel for the §9 precedence merge (an UNSET field does NOT override the lower
 /// layer). The vector/string fields that default to empty use emptiness as the
@@ -108,6 +120,7 @@ struct CliArgs {
     std::optional<int>         auto_top_k;  ///< --auto-top-k (PopSelection::AutoTopK)
     std::optional<int>         min_n;       ///< --min-n (PopSelection::MinN)
     std::optional<double>      blgsize;     ///< --blgsize (MORGANS, AT2 convention; default 0.05 = 5 cM). ConfigBuilder converts Morgans->cM (×kCentimorgansPerMorgan) into the cM-stored RunConfig::blgsize_cm_.
+    std::optional<PloidyMode>  ploidy;      ///< --ploidy auto|1|2 (default Auto = AT2 adjust_pseudohaploid; the f2 pseudo-haploid fix)
 
     // ---- FilterConfig overrides (cli-bindings.md §4.1; M(cli-4)) ---------------
     std::optional<double> maf;              ///< --maf

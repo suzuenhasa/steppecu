@@ -44,6 +44,7 @@
 #include "io/geno_reader.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
+#include "io/ploidy_detect.hpp"   // detect_sample_ploidy (AT2 adjust_pseudohaploid)
 #include "io/snp_reader.hpp"
 #include "io/filter/include_exclude.hpp"
 #include "io/filter/snp_filter.hpp"
@@ -56,8 +57,10 @@ namespace cfg = steppe::config;
 using steppe::core::MatView;
 namespace flt = steppe::io::filter;
 
-// AADR is diploid (ROADMAP Q/V/N contract; a metadata parameter, never inferred).
-constexpr int kPloidy = 2;
+// AT2 ploidy values (mirror core::kPloidy{PseudoHaploid,Diploid}; the app names them
+// here so the resolved per-sample vector / forced-uniform fallback read clearly).
+constexpr int kPloidyPseudoHaploid = 1;
+constexpr int kPloidyDiploid = 2;
 
 // A human label for the resolved precision (recorded in meta.json; cli-bindings §4.3
 // — the ENGAGED tag). Mirrors result_emit's emu/fp64/tf32 vocabulary.
@@ -180,6 +183,29 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
+    // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) ---
+    // Default --ploidy auto: detect each gathered sample's ploidy from the tile (a het
+    // call in the leading SNPs ⇒ diploid, none ⇒ pseudo-haploid) — AT2-parity per
+    // SAMPLE, so mixed-ploidy pops (Turkey_N/Serbia/Yamnaya/Karitiana) decode correctly.
+    // --ploidy 1/2 force a uniform vector (pseudo-haploid / diploid) for every sample.
+    // The vector is parallel to the gathered sample axis and fed to decode_af via
+    // DecodeTileView::sample_ploidy (per-sample weighting AC += code/(3-ploidy),
+    // N += ploidy). n_ph/n_dip are echoed below for observability.
+    std::vector<int> sample_ploidy;
+    std::size_t n_ph = 0, n_dip = 0;
+    switch (config.ploidy()) {
+        case cfg::PloidyMode::Auto:
+            sample_ploidy = io::detect_sample_ploidy(tile);
+            break;
+        case cfg::PloidyMode::PseudoHaploid:
+            sample_ploidy.assign(tile.n_individuals, kPloidyPseudoHaploid);
+            break;
+        case cfg::PloidyMode::Diploid:
+            sample_ploidy.assign(tile.n_individuals, kPloidyDiploid);
+            break;
+    }
+    for (int pl : sample_ploidy) (pl == kPloidyPseudoHaploid ? n_ph : n_dip)++;
+
     // The engaged precision (the requested DeviceConfig.precision; the resident path
     // honors it or downgrades to native — recorded as the tag in meta.json).
     const Precision precision = config.device().precision;
@@ -256,7 +282,12 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         view.n_individuals = tile.n_individuals;
         view.pop_offsets = tile.pop_offsets.data();
         view.n_pop = P;
-        view.ploidy = kPloidy;
+        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid; the f2 pseudo-haploid fix):
+        // the decode folds it as AC += code/(3-ploidy), N += ploidy per sample, so
+        // mixed-ploidy pops are correct. sample_ploidy is always populated (auto /
+        // forced) above; the scalar fallback (kept diploid) is never reached here.
+        view.sample_ploidy = sample_ploidy.data();
+        view.ploidy = kPloidyDiploid;  // unused (sample_ploidy non-null), kept as the safe default
         const DecodeResult dec = backend.decode_af(view);
 
         // ---- 6. Filters: build the per-SNP keep mask, subset the SNP axis ---------
@@ -286,7 +317,14 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         fin.P = P;
         fin.M = M;
         fin.pop_individuals = pop_individuals;
-        fin.ploidy = kPloidy;
+        // fin.ploidy is used ONLY by the SAMPLE-axis missing predicate
+        // (nonmissing_indiv = Σ N/ploidy), which the extract-f2 path DISABLES below
+        // (class_filter.geno_max_missing = 1.0 ⇒ no-op); the pooled MAF it also feeds
+        // is convention-invariant (Q·N/N). The AT2 pop-coverage maxmiss (applied
+        // separately on N>0) and the f2 het-correction N (now per-sample, via decode)
+        // do NOT read this. Kept diploid (a valid {1,2} value) for the disabled path;
+        // a future per-sample sample-axis maxmiss would need the per-sample vector here.
+        fin.ploidy = kPloidyDiploid;
 
         FilterConfig class_filter = filter;
         class_filter.geno_max_missing = 1.0;  // pop-coverage maxmiss is applied below
@@ -425,6 +463,11 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     std::printf("  precision = %s, blgsize = %.4g Morgans (%.4g cM)\n",
                 precision_label(engaged),
                 config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());
+    const char* ploidy_mode = (config.ploidy() == cfg::PloidyMode::Auto) ? "auto"
+                            : (config.ploidy() == cfg::PloidyMode::PseudoHaploid) ? "1 (forced pseudo-haploid)"
+                            : "2 (forced diploid)";
+    std::printf("  ploidy = %s: %zu pseudo-haploid + %zu diploid samples\n",
+                ploidy_mode, n_ph, n_dip);
     if (!wr.f2_cache_id.empty()) {
         std::printf("  f2_cache_id = %s\n", wr.f2_cache_id.c_str());
     }

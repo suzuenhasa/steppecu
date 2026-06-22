@@ -226,10 +226,21 @@ struct DecodeTileView {
     const std::size_t* pop_offsets = nullptr;  ///< P+1 segment boundaries (sample axis)
     int n_pop = 0;                          ///< number of populations P (row axis)
 
-    /// Per-sample PLOIDY factor for N: 2 diploid (the AADR case — every sample is
-    /// diploid, so every N is even), 1 pseudo-haploid (ancient DNA). A METADATA
-    /// parameter, NEVER auto-detected from genotypes (ROADMAP Q/V/N contract).
-    /// Default 2 (diploid), documented.
+    /// PER-SAMPLE PLOIDY (length n_individuals, parallel to the GATHERED sample axis
+    /// — sample_ploidy[g] is the ploidy of gathered individual g): 2 diploid, 1
+    /// pseudo-haploid (ancient DNA). AT2's adjust_pseudohaploid=TRUE auto-detects this
+    /// PER SAMPLE (a het call ⇒ diploid; none ⇒ pseudo-haploid), so MIXED-PLOIDY
+    /// populations (real for aDNA) are handled correctly. The io leaf
+    /// (geno_reader::detect_sample_ploidy) fills it; the decode folds it via
+    /// core::accumulate_genotype_ploidy (AC += code/(3-ploidy), N += ploidy).
+    ///
+    /// NULL ⇒ use the scalar `ploidy` for EVERY sample (the legacy uniform-ploidy
+    /// path; the existing all-diploid callers/tests that never set this stay
+    /// bit-identical). When non-null it OVERRIDES the scalar.
+    const int* sample_ploidy = nullptr;
+
+    /// The uniform fallback ploidy when `sample_ploidy == nullptr` (2 diploid / 1
+    /// pseudo-haploid). Default 2 (diploid). With `sample_ploidy` set this is unused.
     int ploidy = 2;
 };
 

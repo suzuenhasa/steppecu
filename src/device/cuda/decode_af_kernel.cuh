@@ -32,12 +32,17 @@ namespace steppe::device {
 ///   d_pop_offsets  [P+1] segment boundaries over the individual axis
 ///   d_Q,d_V,d_N    [P × M] column-major outputs (element (i,s) at i + P·s)
 ///
-/// `M` is the SNP count (column axis). `ploidy` is the per-sample haploid factor
-/// (2 diploid / 1 pseudo-haploid — a metadata parameter, never inferred).
+/// `M` is the SNP count (column axis). `d_sample_ploidy` is the PER-SAMPLE ploidy
+/// vector (device, length n_individuals, parallel to the gathered sample axis; 2
+/// diploid / 1 pseudo-haploid, AT2-auto-detected upstream). When non-null the kernel
+/// folds it via the AT2 adjust_pseudohaploid accumulation (AC += code/(3-ploidy),
+/// N += ploidy); when NULL it falls back to the uniform scalar `ploidy` for every
+/// sample (the legacy all-diploid path, bit-identical).
 void launch_decode_af(const std::uint8_t* d_packed,
                       std::size_t bytes_per_record,
                       const std::size_t* d_pop_offsets,
                       int P, long M, int ploidy,
+                      const int* d_sample_ploidy,
                       double* d_Q, double* d_V, double* d_N,
                       cudaStream_t stream);
 

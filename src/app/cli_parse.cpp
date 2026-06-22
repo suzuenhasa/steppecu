@@ -251,6 +251,19 @@ int run_cli(int argc, char** argv) {
                                [&](std::int64_t v) { extract_args.drop_monomorphic = (v >= 0); },
                                "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
         sub->add_flag_function("--transversions", [&](std::int64_t) { extract_args.transversions_only = true; }, "Keep only transversions");
+        // --ploidy auto|1|2: AT2 adjust_pseudohaploid policy (default auto = per-sample
+        // detection; the f2 pseudo-haploid fix). 1 = force pseudo-haploid, 2 = force
+        // diploid (the legacy hardcoded behavior). An unknown token is InvalidConfig.
+        sub->add_option_function<std::string>(
+            "--ploidy",
+            [&](const std::string& v) {
+                if (v == "auto") extract_args.ploidy = cfg::PloidyMode::Auto;
+                else if (v == "1") extract_args.ploidy = cfg::PloidyMode::PseudoHaploid;
+                else if (v == "2") extract_args.ploidy = cfg::PloidyMode::Diploid;
+                else throw CLI::ValidationError(
+                    "--ploidy", "must be auto, 1 (pseudo-haploid), or 2 (diploid); got '" + v + "'");
+            },
+            "Ploidy policy: auto (AT2 adjust_pseudohaploid, default) | 1 (pseudo-haploid) | 2 (diploid)");
         sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
         add_common_flags(sub, extract_args);
         sub->callback([&]() {

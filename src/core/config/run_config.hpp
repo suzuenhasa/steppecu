@@ -76,6 +76,10 @@ public:
     [[nodiscard]] const std::string& out_dir()  const noexcept { return out_dir_; }
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
+
+    /// extract-f2 ploidy policy (--ploidy auto|1|2). Default Auto = AT2
+    /// adjust_pseudohaploid per-sample auto-detection (the f2 pseudo-haploid fix).
+    [[nodiscard]] PloidyMode ploidy()           const noexcept { return ploidy_; }
     [[nodiscard]] int max_sources()             const noexcept { return max_sources_; }
 
     /// --dry-run (extract-f2): report tiers/sizes/precision and exit without compute
@@ -106,6 +110,7 @@ private:
     std::string ind_;
     std::string out_dir_;
     double blgsize_cm_ = kDefaultBlockSizeCm;  // cli-bindings.md §4.1 default (5 cM)
+    PloidyMode ploidy_ = PloidyMode::Auto;     // --ploidy default (AT2 adjust_pseudohaploid)
     int min_sources_ = 1;
     int max_sources_ = -1;          // -1 ⇒ "up to the whole pool" (app default)
     bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)

@@ -21,8 +21,9 @@
 //   4. Asserts both == the numpy oracle Q.f64/V.f64/N.f64:
 //        * N, V: EXACT (zero diff — integer-valued doubles).
 //        * Q:    EXACT (max|Δ| == 0 is the goal/gate; integer AC/AN, one divide).
-//   5. Property invariants: Q∈[0,1]; V∈{0,1}; N≥0; V==(N>0); ALL N even (the
-//      2×count diploid convention).
+//   5. Property invariants: Q∈[0,1]; V∈{0,1}; N≥0; V==(N>0); N is a non-negative
+//      INTEGER (the AT2 adjust_pseudohaploid N = Σ ploidy convention — pseudo-
+//      haploid samples contribute 1, so N is no longer all-even).
 //   6. End-to-end: feeds M1's decoded Q/V/N into compute_f2 (both backends) and
 //      confirms the full S0→S2 chain reproduces the M0 f2 result on derived_acc
 //      (CPU oracle vs GPU f2 within the M0 tight tier).
@@ -48,6 +49,7 @@
 #include "io/geno_reader.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
+#include "io/ploidy_detect.hpp"   // detect_sample_ploidy (AT2 adjust_pseudohaploid)
 #include "io/snp_reader.hpp"
 
 using steppe::ComputeBackend;
@@ -196,8 +198,18 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[tile] n_individuals=%zu n_pop=%zu bytes/rec=%zu packed=%zu bytes\n",
                  tile.n_individuals, tile.n_pop(), tile.bytes_per_record, tile.packed.size());
 
-    // Build the CUDA-free DecodeTileView over the gathered tile (ploidy 2 = the
-    // diploid AADR case — a metadata parameter, not inferred from genotypes).
+    // PER-SAMPLE PLOIDY (AT2 adjust_pseudohaploid=TRUE; the f2 pseudo-haploid fix):
+    // detect each gathered sample's ploidy from the tile (a het call in the leading
+    // SNPs ⇒ diploid, none ⇒ pseudo-haploid). The oracle (build_tgeno_matrix.py,
+    // --ploidy auto) uses the SAME per-sample detection + AT2 weighting, so the
+    // numpy Q/V/N and BOTH backends agree exactly. The auto-top-50 set includes
+    // ancient pops, so N is NOT all-even any more (PH samples contribute 1 to N).
+    const std::vector<int> sample_ploidy = steppe::io::detect_sample_ploidy(tile);
+    std::size_t n_ph = 0, n_dip = 0;
+    for (int pl : sample_ploidy) (pl == 1 ? n_ph : n_dip)++;
+    std::fprintf(stderr, "[ploidy] auto-detected %zu pseudo-haploid + %zu diploid samples\n",
+                 n_ph, n_dip);
+
     DecodeTileView view;
     view.packed = tile.packed.data();
     view.bytes_per_record = tile.bytes_per_record;
@@ -205,7 +217,8 @@ int main(int argc, char** argv) {
     view.n_individuals = tile.n_individuals;
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = static_cast<int>(tile.n_pop());
-    view.ploidy = 2;
+    view.sample_ploidy = sample_ploidy.data();
+    view.ploidy = 2;  // unused (sample_ploidy non-null); the diploid default
 
     const int P = view.n_pop;
     const std::size_t pm = static_cast<std::size_t>(P) * M;
@@ -259,22 +272,26 @@ int main(int argc, char** argv) {
     }
 
     // ---- (4) Property invariants on the decoded Q/V/N ------------------------
-    bool inv_q = true, inv_v = true, inv_n = true, inv_vn = true, inv_even = true;
+    // N is Σ ploidy_i over non-missing samples (AT2 adjust_pseudohaploid), so it is a
+    // non-negative INTEGER but NO LONGER always even — a pseudo-haploid sample
+    // contributes 1 to N (the whole point of the pseudo-haploid fix). The pinned
+    // invariant is therefore "N is a non-negative integer" (replacing the former
+    // diploid-only "N even" check), plus the rest. N-integer guards against a stray
+    // fractional N from a mis-applied per-sample weight.
+    bool inv_q = true, inv_v = true, inv_n = true, inv_vn = true, inv_int = true;
     for (std::size_t k = 0; k < pm; ++k) {
         const double q = dec_gpu.q[k], v = dec_gpu.v[k], n = dec_gpu.n[k];
         if (q < 0.0 || q > 1.0) inv_q = false;
         if (v != 0.0 && v != 1.0) inv_v = false;
         if (n < 0.0) inv_n = false;
         if ((v != 0.0) != (n > 0.0)) inv_vn = false;
-        // ALL N even (2 × non-missing-individual count, the diploid convention).
-        const double half = n * 0.5;
-        if (half != std::floor(half)) inv_even = false;
+        if (n != std::floor(n)) inv_int = false;  // N is an integer haploid count
     }
-    const bool inv_ok = inv_q && inv_v && inv_n && inv_vn && inv_even;
+    const bool inv_ok = inv_q && inv_v && inv_n && inv_vn && inv_int;
     if (!inv_ok) ++failures;
-    std::fprintf(stderr, "[invariants]   Q∈[0,1]:%s V∈{0,1}:%s N≥0:%s V==(N>0):%s N-even:%s  %s\n",
+    std::fprintf(stderr, "[invariants]   Q∈[0,1]:%s V∈{0,1}:%s N≥0:%s V==(N>0):%s N-int:%s  %s\n",
                  inv_q ? "y" : "N", inv_v ? "y" : "N", inv_n ? "y" : "N",
-                 inv_vn ? "y" : "N", inv_even ? "y" : "N", inv_ok ? "PASS" : "FAIL");
+                 inv_vn ? "y" : "N", inv_int ? "y" : "N", inv_ok ? "PASS" : "FAIL");
 
     // ---- (5) End-to-end: decoded Q/V/N → compute_f2 (full S0→S2) -------------
     // Feed the GPU-decoded contract into BOTH f2 backends and confirm the GPU f2

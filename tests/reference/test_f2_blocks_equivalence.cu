@@ -27,7 +27,10 @@
 //      per-block PURE-relative inflates on the many near-zero block f2 entries
 //      while the absolute error stays at the FP64 floor — so the production gate is
 //      the combined form, architecture.md §12 tolerance policy):
-//        * native vs oracle  < 1e-9   (near bit-stable)
+//        * native vs oracle  < 1e-6   (the §12 floor exposed by the pseudo-haploid
+//                                       f2 fix: near-zero PH block-pairs sit just
+//                                       above kAtol; absolute agreement is the FP64
+//                                       floor maxAbs~7.6e-15 — see kTolNativeVsRef)
 //        * emu{40} vs oracle < 1e-6   (40-bit ≈ native; spike combined ~4.5e-5 @P=768)
 //   4. Property checks: per-block f2 symmetric; Vpair integer-valued and EQUAL to
 //      an INDEPENDENT recount of the per-block pairwise non-missing SNP count. The
@@ -78,7 +81,24 @@ constexpr const char* kGenoBase = "v66.p1_HO.aadr.patch.PUB";  // raw/<base>.snp
 // Tight-tier COMBINED-tolerance thresholds (architecture.md §12; spike-measured).
 constexpr double kAtol           = 1e-9;   // absorbs the near-zero block-f2 entries
 constexpr double kTolEmuVsRef    = 1e-6;   // EmulatedFp64{40} vs oracle, combined form
-constexpr double kTolNativeVsRef = 1e-8;   // native Fp64 vs oracle, combined form
+// native Fp64 vs the long-double oracle, combined form. RAISED 1e-8 -> 1e-6 as the
+// documented §12 native-vs-oracle FLOOR exposed by the pseudo-haploid f2 fix
+// (docs/research/f2-estimator-at2.md §3/§5; the AT2 adjust_pseudohaploid N convention).
+// WHY THE FLOOR MOVED (this is a precision floor, NOT a correctness regression):
+// before the fix steppe used N=2n for every sample, which (per the diagnosis)
+// OVER-subtracted nothing / under-subtracted half the het correction and kept the
+// pseudo-haploid block-pair f2 values away from zero. The AT2-correct convention
+// produces GENUINELY near-zero block-f2 entries for close-kin pseudo-haploid pops in
+// a block (e.g. the measured worst entry (i=19,j=10,blk=104): true f2 = 3.31e-08,
+// just above kAtol=1e-9). The native FP64 GEMM and the long-double oracle agree there
+// to |Δ| = 1.7e-15 (the FP64 ULP at that scale; the WHOLE-tensor maxAbs is 7.6e-15) —
+// PERFECT agreement — but the combined ratio |Δ|/(atol+|r|) inflates to ~5.1e-8 on a
+// 3.3e-8 true value. maxAbs (7.6e-15) is the bit-level proof there is no real error;
+// the combined metric only reports the near-zero-entry atol floor. emu{40} sits at
+// 1.1e-07 (same cause), so 1e-6 is the honest shared §12 floor for both lanes on the
+// post-fix near-zero pseudo-haploid block-pairs. The signFlip==0 + maxAbs gates
+// (asserted alongside) remain the bit-level correctness guards.
+constexpr double kTolNativeVsRef = 1e-6;   // native Fp64 vs oracle, combined form (§12 PH floor)
                                            //   (per-block native sits ~1.6e-9: fewer
                                            //    SNPs/block than the M0 big GEMM ⇒ less
                                            //    averaging; still firmly the tight tier)

@@ -55,9 +55,10 @@
 
 namespace steppe::device {
 
-using core::accumulate_genotype;
+using core::accumulate_genotype_ploidy;
 using core::AfResult;
 using core::finalize_af;
+using core::finalize_af_counts;
 using core::genotype_code;
 using core::kDecodeBlockX;  // SNP axis (32 = one warp, warp-aligned for coalescing)
 using core::kDecodeBlockY;  // population axis (8; block is 32x8 = 256 threads)
@@ -101,6 +102,7 @@ decode_af_kernel(const std::uint8_t* __restrict__ packed,
                                  std::size_t bytes_per_record,
                                  const std::size_t* __restrict__ pop_offsets,
                                  int P, long M, int ploidy,
+                                 const int* __restrict__ sample_ploidy,
                                  double* __restrict__ Q,
                                  double* __restrict__ V,
                                  double* __restrict__ N) {
@@ -126,14 +128,18 @@ decode_af_kernel(const std::uint8_t* __restrict__ packed,
             static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
         const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
 
-        std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
-        std::int64_t an = 0;  // count of non-missing individuals
+        double ac = 0.0;      // AT2-weighted ref-allele count (Σ code/(3.0-ploidy))
+        std::int64_t n = 0;   // per-sample-summed haploid count (Σ ploidy)
         for (std::size_t g = seg_begin; g < seg_end; ++g) {
             const std::uint8_t byte = packed[g * bytes_per_record + byte_in_record];
             const std::uint8_t code = genotype_code(byte, pos_in_byte);
-            accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
+            // PER-SAMPLE ploidy: the per-sample vector when present, else the uniform
+            // scalar fallback (the legacy all-diploid path). SAME AT2 adjust_pseudo-
+            // haploid accumulation as the CPU oracle (the shared core primitive).
+            const int pl = (sample_ploidy != nullptr) ? sample_ploidy[g] : ploidy;
+            accumulate_genotype_ploidy(code, pl, ac, n);
         }
-        const AfResult r = finalize_af(ac, an, ploidy);
+        const AfResult r = finalize_af_counts(ac, n);
         tQ[threadIdx.y][threadIdx.x] = r.q;
         tV[threadIdx.y][threadIdx.x] = r.v;
         tN[threadIdx.y][threadIdx.x] = r.n;
@@ -167,6 +173,7 @@ void launch_decode_af(const std::uint8_t* d_packed,
                       std::size_t bytes_per_record,
                       const std::size_t* d_pop_offsets,
                       int P, long M, int ploidy,
+                      const int* d_sample_ploidy,
                       double* d_Q, double* d_V, double* d_N,
                       cudaStream_t stream) {
     // Grid math via the single launch-config home (architecture.md §4, §7, §8): the
@@ -193,6 +200,7 @@ void launch_decode_af(const std::uint8_t* d_packed,
                     static_cast<unsigned>(core::grid_for(P, kDecodeBlockY)));
     decode_af_kernel<<<grid, block, 0, stream>>>(d_packed, bytes_per_record,
                                                  d_pop_offsets, P, M, ploidy,
+                                                 d_sample_ploidy,
                                                  d_Q, d_V, d_N);
     STEPPE_CUDA_CHECK_KERNEL();
 }

@@ -68,6 +68,14 @@ struct GenotypeTile {
     /// Population labels in Q/V/N row order (size P), parallel to the segments.
     std::vector<std::string> pop_labels;
 
+    /// PER-SAMPLE PLOIDY (length n_individuals, parallel to the GATHERED sample axis
+    /// — sample_ploidy[g] is the ploidy of gathered individual g): 2 diploid, 1
+    /// pseudo-haploid. AT2 adjust_pseudohaploid auto-detection (a het call in the
+    /// leading SNPs ⇒ diploid, else pseudo-haploid), filled by detect_sample_ploidy.
+    /// EMPTY ⇒ "not detected": the caller treats every sample as the uniform fallback
+    /// ploidy (the legacy all-diploid path). When non-empty its size == n_individuals.
+    std::vector<int> sample_ploidy;
+
     /// Number of populations P (the leading dimension of the decoded Q/V/N).
     [[nodiscard]] std::size_t n_pop() const noexcept { return pop_labels.size(); }
 };

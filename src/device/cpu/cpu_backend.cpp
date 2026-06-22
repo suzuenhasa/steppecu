@@ -381,17 +381,23 @@ public:
                 const std::size_t byte_in_rec =
                     static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
                 const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
-                std::int64_t ac = 0;  // Σ ref-allele copies over non-missing individuals
-                std::int64_t an = 0;  // count of non-missing individuals
+                double ac = 0.0;      // AT2-weighted ref-allele count (Σ code/(3.0-ploidy))
+                std::int64_t n = 0;   // per-sample-summed haploid count (Σ ploidy)
 
                 for (std::size_t g = seg_begin; g < seg_end; ++g) {
                     const std::uint8_t byte =
                         tile.packed[g * tile.bytes_per_record + byte_in_rec];
                     const std::uint8_t code = core::genotype_code(byte, pos_in_byte);
-                    core::accumulate_genotype(code, ac, an);  // shared inner step (A-1/B27)
+                    // PER-SAMPLE ploidy: the per-sample vector when present, else the
+                    // uniform scalar fallback (the legacy all-diploid path). AT2
+                    // adjust_pseudohaploid accumulation, shared with the GPU kernel.
+                    const int pl = (tile.sample_ploidy != nullptr)
+                                       ? tile.sample_ploidy[g]
+                                       : tile.ploidy;
+                    core::accumulate_genotype_ploidy(code, pl, ac, n);
                 }
 
-                const core::AfResult r = core::finalize_af(ac, an, tile.ploidy);
+                const core::AfResult r = core::finalize_af_counts(ac, n);
                 const std::size_t off =
                     static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
                 out.q[off] = r.q;

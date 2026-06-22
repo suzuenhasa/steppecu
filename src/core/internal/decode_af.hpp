@@ -20,16 +20,36 @@
 //       AC += code            for each NON-missing individual (code != 3)
 //       AN += 1               counting NON-missing INDIVIDUALS (not alleles)
 //     Missing individuals are excluded from BOTH AC and AN.
-//   * Then, with the per-sample PLOIDY factor `ploidy` (2 diploid / 1 pseudo-
-//     haploid — a PARAMETER sourced from metadata, never auto-detected from
-//     genotypes; ROADMAP Q/V/N contract):
-//       N = ploidy * AN       (non-missing HAPLOID count: 2×non-missing diploids)
-//       Q = AC / N            (ref-allele frequency in [0,1]; 0 where AN == 0)
-//       V = (AN > 0 && ploidy > 0) ? 1 : 0  (validity mask; a non-positive ploidy
-//                             is misset metadata and masks the cell OUT — see
-//                             finalize_af, cleanup B10/X-11)
-//     For the real AADR data every sample is diploid (ploidy == 2), so every N is
-//     even — exactly the oracle's `N = 2*non-missing`, `Q = AC/(2*AN)`.
+//   * Then, with a PER-SAMPLE PLOIDY (2 diploid / 1 pseudo-haploid — AUTO-detected
+//     per sample from the genotypes the AT2 way, see below). AT2's
+//     cpp_*_to_afs convention (src/cpp_readgeno.cpp:
+//         altalleles(pop)     += val / (3.0 - ploidy(i));
+//         observedalleles(pop) += ploidy(i);
+//     ) accumulates a per-sample-WEIGHTED allele count and a per-sample-summed
+//     haploid count:
+//       AC = Σ_i code_i / (3 - ploidy_i)   over NON-missing individuals
+//       N  = Σ_i ploidy_i                  over NON-missing individuals
+//       Q  = AC / N                        (ref-allele frequency in [0,1]; 0 where N==0)
+//       V  = (N > 0) ? 1 : 0               (validity mask)
+//     For a diploid sample (ploidy 2): code/(3-2) = code, contributes 2 to N — so
+//     an ALL-DIPLOID population reduces EXACTLY to the legacy `AC = Σcode`,
+//     `N = 2·non-missing`, `Q = AC/(2·AN)` (the modern-data path is bit-identical).
+//     For a pseudo-haploid sample (ploidy 1): code ∈ {0,2}, code/(3-1) = code/2 ∈
+//     {0,1}, contributes 1 to N. MIXED-PLOIDY populations (a diploid sample and a
+//     pseudo-haploid sample in the same pop — real for aDNA: Turkey_N, Serbia,
+//     Yamnaya, Karitiana) are therefore handled correctly because the weighting is
+//     PER SAMPLE, not per population.
+//
+//   * AT2 PSEUDO-HAPLOID AUTO-DETECTION (the per-sample ploidy SOURCE, matching
+//     adjust_pseudohaploid=TRUE; src/cpp_readgeno.cpp cpp_*_ploidy verified against
+//     admixtools 2.0.10): scan the FIRST kPloidyDetectSnps (= 1000) SNPs of each
+//     sample; the sample is DIPLOID (ploidy 2) iff ANY of those SNPs is a
+//     HETEROZYGOUS call (code == 1), else PSEUDO-HAPLOID (ploidy 1). A haploid
+//     genome cannot be heterozygous, so observing a het ⇒ diploid; observing none
+//     ⇒ pseudo-haploid. (AT2 initializes ploidy = 1 and bumps to 2 on the first het;
+//     an all-missing / all-homozygous prefix stays ploidy 1.) The detection is done
+//     UPSTREAM in the io leaf (geno_reader::detect_sample_ploidy) and carried as a
+//     per-sample vector on DecodeTileView, never re-derived here.
 //
 // __host__ __device__ portability: like f2_estimator.hpp, STEPPE_HD (from the
 // single home core/internal/host_device.hpp) expands to the CUDA qualifiers under
@@ -69,6 +89,23 @@ inline constexpr std::uint8_t kMissingGenotypeCode = 3;
 inline constexpr int kCodesPerByte = 4;
 inline constexpr int kBitsPerCode = 2;
 
+/// The 2-bit code that denotes a HETEROZYGOUS genotype (RAW-VALUE mapping: 1
+/// reference-allele copy). Used by the AT2 pseudo-haploid auto-detection: a sample
+/// is diploid iff it has at least one het call in the detection prefix (a haploid
+/// genome can never be heterozygous). The single home of the het sentinel.
+inline constexpr std::uint8_t kHeterozygousGenotypeCode = 1;
+
+/// AT2 pseudo-haploid auto-detection window (adjust_pseudohaploid=TRUE; admixtools
+/// cpp_*_ploidy default ntest = 1000): a sample is classified by scanning its FIRST
+/// kPloidyDetectSnps SNPs for any heterozygous call. The single home of the AT2
+/// detection-window constant (geno_reader / the oracle build_tgeno_matrix.py mirror
+/// it). A SNP count below this just scans fewer SNPs (the whole record).
+inline constexpr int kPloidyDetectSnps = 1000;
+
+/// Per-sample ploidy values (the only meaningful ones; AT2 emits {1, 2}).
+inline constexpr int kPloidyPseudoHaploid = 1;  ///< pseudo-haploid (ancient DNA): N contributes 1
+inline constexpr int kPloidyDiploid = 2;        ///< diploid (modern / het-bearing): N contributes 2
+
 /// Extract the 2-bit code for SNP position `k` (0-based) within a packed byte,
 /// MSB-first: position 0 → bits 7-6, 1 → 5-4, 2 → 3-2, 3 → 1-0. This is the
 /// `(byte >> (6 - 2*(k mod 4))) & 3` rule. SAME bit order as
@@ -102,6 +139,41 @@ STEPPE_HD inline void accumulate_genotype(std::uint8_t code,
     if (genotype_valid(code)) {
         ac += static_cast<std::int64_t>(code);
         ++an;
+    }
+}
+
+/// PER-SAMPLE-PLOIDY fold — AT2's adjust_pseudohaploid accumulation, BYTE-FAITHFUL
+/// to admixtools 2.0.10 src/cpp_readgeno.cpp:
+///   altalleles(pop)      += val / (3.0 - ploidy(i));   // NOTE: FLOAT 3.0
+///   observedalleles(pop) += ploidy(i);
+/// Folds one individual's 2-bit `code` and its per-sample `ploidy` (1 pseudo-haploid
+/// / 2 diploid) into:
+///   `ac` (DOUBLE) += code / (3.0 - ploidy)   — the AT2-WEIGHTED ref-allele count.
+///   `n`  (int)    += ploidy                  — the per-sample-summed HAPLOID count.
+///
+/// THE FLOAT IS LOAD-BEARING (not an integer divide): a sample CLASSIFIED pseudo-
+/// haploid (no het in the first kPloidyDetectSnps SNPs) can STILL carry a het call
+/// (code == 1) at a SNP OUTSIDE that detection window. For such a SNP, ploidy == 1 ⇒
+/// 3.0 - 1 == 2.0 ⇒ code/2.0 == 0.5 — AT2 adds 0.5 (the het contributes half a ref
+/// allele to the haploidized count). An INTEGER `1/2 == 0` would silently drop it,
+/// diverging from AT2 by exactly that 0.5 (the measured Q max|Δ| == 0.004 = 1/250
+/// before this fix). 0.5-multiples are exact in double, so the sum stays exact and Q
+/// is still the single exact divide AC/N in finalize_af_counts — no precision loss,
+/// just the AT2-correct value. For ploidy == 2, code/1.0 == code (integer-valued
+/// double), so an ALL-DIPLOID segment is BIT-IDENTICAL to the legacy
+/// accumulate_genotype + `N = 2·AN`.
+///
+/// A MISSING code (code == 3) is excluded from BOTH. A ploidy outside {1,2} (misset
+/// per-sample metadata) is excluded from BOTH (fail-soft: it contributes nothing
+/// rather than dividing by 3-ploidy ≤ 0 / fabricating a count) — mirrors the
+/// finalize ploidy guard. This is THE per-element accumulation for the auto-ploidy
+/// decode, shared by the GPU kernel and the CPU oracle (architecture.md §8/§13).
+STEPPE_HD inline void accumulate_genotype_ploidy(std::uint8_t code, int ploidy,
+                                                 double& ac,
+                                                 std::int64_t& n) noexcept {
+    if (genotype_valid(code) && (ploidy == kPloidyDiploid || ploidy == kPloidyPseudoHaploid)) {
+        ac += static_cast<double>(code) / (3.0 - static_cast<double>(ploidy));
+        n += ploidy;
     }
 }
 
@@ -151,6 +223,28 @@ struct AfResult {
         const double n = static_cast<double>(ploidy) * static_cast<double>(an);
         r.n = n;
         r.q = static_cast<double>(ac) / n;
+        r.v = 1.0;
+    }
+    return r;
+}
+
+/// Finalize Q/V/N from the PER-SAMPLE-PLOIDY accumulators (accumulate_genotype_ploidy):
+///   `ac` = Σ_i code_i/(3.0-ploidy_i) (the AT2-weighted ref-allele count, DOUBLE —
+///                                     0.5-multiples from PH het calls are exact),
+///   `n`  = Σ_i ploidy_i              (the per-sample-summed haploid count, integer).
+/// Yields N = n, Q = ac/n (0 where n==0), V = (n>0). The ploidy is ALREADY folded
+/// into `ac`/`n` by accumulate_genotype_ploidy, so this just does the single FP64
+/// divide AC/N — the analogue of finalize_af for the per-sample path. An all-diploid
+/// segment gives n = 2·non-missing and ac = Σcode (integer-valued double), so this is
+/// BIT-IDENTICAL to finalize_af(ac, an, 2) on the modern-data path. Used by BOTH the
+/// CPU reference and the GPU kernel on the auto-ploidy decode.
+[[nodiscard]] STEPPE_HD inline AfResult finalize_af_counts(double ac,
+                                                           std::int64_t n) noexcept {
+    AfResult r;
+    if (n > 0) {
+        const double nd = static_cast<double>(n);
+        r.n = nd;
+        r.q = ac / nd;
         r.v = 1.0;
     }
     return r;

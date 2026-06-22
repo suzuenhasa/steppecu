@@ -1174,6 +1174,14 @@ public:
         DeviceBuffer<std::size_t> dOffsets(n_off);
         DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
 
+        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid): upload the per-sample vector
+        // when the caller supplied one (the auto-detect path); when NULL the kernel
+        // falls back to the uniform scalar tile.ploidy (the legacy all-diploid path),
+        // and we pass a null device pointer (no alloc/copy). A zero-length DeviceBuffer
+        // yields a null .data(), so the same handle serves both cases.
+        const bool have_sample_ploidy = (tile.sample_ploidy != nullptr);
+        DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
+
         // ---- Upload the packed tile + the population partition ---------------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
                                           packed_bytes * sizeof(std::uint8_t),
@@ -1181,10 +1189,17 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
                                           n_off * sizeof(std::size_t),
                                           cudaMemcpyHostToDevice, stream_.get()));
+        if (have_sample_ploidy) {
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSamplePloidy.data(), tile.sample_ploidy,
+                                              tile.n_individuals * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+        }
 
         // ---- Decode (S0 unpack + S1 segmented reduction → Q/V/N) -------------
         launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
-                         P, M, tile.ploidy, dQ.data(), dV.data(), dN.data(), stream_.get());
+                         P, M, tile.ploidy,
+                         have_sample_ploidy ? dSamplePloidy.data() : nullptr,
+                         dQ.data(), dV.data(), dN.data(), stream_.get());
 
         // ---- Copy results back across the CUDA-free seam ---------------------
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.q.data(), dQ.data(), pm * sizeof(double),
