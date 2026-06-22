@@ -62,7 +62,7 @@ namespace {
 
 int g_failures = 0;
 
-// NRBIG (nl=2, nr=39, nb=701) PRE-FIX (serial large-LOO) GPU jackknife se/z — the
+// NRBIG (nl=2, nr=39, nb=710) PRE-FIX (serial large-LOO) GPU jackknife se/z — the
 // BIT-IDENTITY anchor for the parallel large-LOO. Captured from the BEFORE run on
 // box5090 (serial host nb-loop). The parallel kernel reuses the SAME cuSOLVER SVD
 // seed + the SAME als_large/weight math (only the loop parallelizes) ⇒ the post-fix
@@ -71,10 +71,15 @@ int g_failures = 0;
 // seed path, qpadm_parity = 369.79 s). The GPU differs from the CpuBackend ORACLE
 // (Jacobi seed) at the ~2e-11 SVD-seed localizer level — so the anchor is the GPU
 // SERIAL value, the one the parallel kernel (same cuSOLVER seed) must reproduce EXACTLY.
-constexpr double kNrbigPreSe0 = 0.15871216584857264;
-constexpr double kNrbigPreSe1 = 0.15871216584857259;
-constexpr double kNrbigPreZ0  = 4.9857579543926072;
-constexpr double kNrbigPreZ1  = 1.3149562640378851;
+// CORRECTED convertf-PA NRBIG anchors (710 blocks). These are the GPU large-LOO se/z the
+// parallel kernel must reproduce EXACTLY (the cuSOLVER-gesvd-seed value, which differs from
+// the AT2/golden se ~0.01385 at the SVD-seed level — the anchor is the GPU's own value, the
+// one the parallel kernel must match bit-for-bit). CAPTURED from the post-regen GPU run on
+// box5090 (the [INFO] NRBIG GPU se/z line).
+constexpr double kNrbigPreSe0 = 0.013841499254064424;
+constexpr double kNrbigPreSe1 = 0.013841499254064468;
+constexpr double kNrbigPreZ0  = 60.300645525138961;
+constexpr double kNrbigPreZ1  = 11.945863443631822;
 
 void check_close(const char* what, double got, double want, double rtol, double atol) {
     const double tol = atol + rtol * std::fabs(want);
@@ -438,14 +443,16 @@ int main(int argc, char** argv) {
                     std::printf("  [INFO] NRBIG ORACLE se=[%.17g, %.17g] z=[%.17g, %.17g]\n",
                                 rbig.se.at(0), rbig.se.at(1), rbig.z.at(0), rbig.z.at(1));
                 }
-                // golden_fit1_NRBIG.json res$rankdrop (rows rank1, rank0; read_f2 form):
+                // golden_fit1_NRBIG.json res$rankdrop (rows rank1, rank0; read_f2 form).
+                // CORRECTED convertf-PA values (710 blocks; the prior 701-block
+                // chisq 52.70/190.84 was AT2 2.0.10's silent misread of the raw v66 TGENO).
                 const int    b_f4rank = 1;
                 const int    brd_dof[2]    = {38, 78};
-                const double brd_chisq[2]  = {52.704281610335912, 190.83602239090976};
-                const double brd_p[2]      = {0.05678246029948012, 1.922125797354803e-11};
+                const double brd_chisq[2]  = {128.26136352330221, 3839.7412172688014};
+                const double brd_p[2]      = {1.020610965435702e-11, 0.0};
                 const int    brd_dofdiff   = 40;
-                const double brd_chisqdiff = 138.131740780574;
-                const double brd_p_nested  = 1.00598619034513e-12;
+                const double brd_chisqdiff = 3711.4798537455;
+                const double brd_p_nested  = 0.0;
                 check_eq_int("nr>32 f4rank", rbig.f4rank, b_f4rank);
                 check_eq_int("nr>32 rankdrop rows", static_cast<int>(rbig.rankdrop_f4rank.size()), 2);
                 for (int k = 0; k < 2; ++k) {
@@ -464,7 +471,7 @@ int main(int argc, char** argv) {
                 // popdrop ("00","01","10"):
                 const char*  bpd_pat[3]   = {"00", "01", "10"};
                 const int    bpd_dof[3]   = {38, 39, 39};
-                const double bpd_chisq[3] = {52.704281610335912, 100.19050317026696, 169.11350353681215};
+                const double bpd_chisq[3] = {128.26136352330221, 222.24801068920448, 3027.5167243765891};
                 const int    bpd_f4rank[3]= {1, 0, 0};
                 check_eq_int("nr>32 popdrop rows", static_cast<int>(rbig.popdrop_pat.size()), 3);
                 for (int k = 0; k < 3 && static_cast<std::size_t>(k) < rbig.popdrop_pat.size(); ++k) {
@@ -501,7 +508,7 @@ int main(int argc, char** argv) {
                 // The LARGE path (cuSOLVER gesvd SVD seed + VRAM-scratch ALS/weight/
                 // chisq, the FROZEN CONTRACT §1/§2) now SERVES nr=39 RESIDENT on the GPU.
                 // The GPU rank_sweep no longer throws — it EXECUTES and GATES against the
-                // AT2 golden (dof 38/78, chisq 52.7043/190.836 rtol 1e-6, dofdiff 40,
+                // AT2 golden (dof 38/78, chisq 128.2614/3839.741 rtol 1e-6, dofdiff 40,
                 // chisqdiff) + a GPU-vs-CPU-oracle localizer. f2 is RESIDENT (devbig in
                 // VRAM); the gather/jackknife/SVD/ALS run on the device — no host round-
                 // trip of the big tensor. -------------------------------------------
@@ -539,24 +546,29 @@ int main(int argc, char** argv) {
                     check_eq_int("nr>32 GPU f4rank", grswb.f4rank, b_f4rank);              // 1
                     check_eq_int("nr>32 GPU svd_path (gesvd executed)", grswb.svd_path, 2);
                     check_eq_int("nr>32 GPU rd rows", static_cast<int>(grswb.rd_chisq.size()), 2);
-                    check_close("nr>32 GPU rd[0].chisq", grswb.rd_chisq.at(0), brd_chisq[0], 1e-6, 1e-9);  // 52.7043
-                    check_close("nr>32 GPU rd[1].chisq", grswb.rd_chisq.at(1), brd_chisq[1], 1e-6, 1e-9);  // 190.836
+                    check_close("nr>32 GPU rd[0].chisq", grswb.rd_chisq.at(0), brd_chisq[0], 1e-6, 1e-9);  // 128.2614
+                    check_close("nr>32 GPU rd[1].chisq", grswb.rd_chisq.at(1), brd_chisq[1], 1e-6, 1e-9);  // 3839.741
                     check_eq_int("nr>32 GPU rd[0].dof", grswb.rd_dof.at(0), brd_dof[0]);   // 38
                     check_eq_int("nr>32 GPU rd[1].dof", grswb.rd_dof.at(1), brd_dof[1]);   // 78
                     check_eq_int("nr>32 GPU rd[0].dofdiff", grswb.rd_dofdiff.at(0), brd_dofdiff);  // 40
                     check_close("nr>32 GPU rd[0].chisqdiff", grswb.rd_chisqdiff.at(0), brd_chisqdiff, 1e-6, 1e-9);
                     // GPU-vs-CPU-oracle localizer (cuSOLVER SVD vs core::jacobi_svd seed,
                     // then identical ALS): bit-close in practice. The golden tier (1e-6)
-                    // above is non-negotiable; this localizer is 1e-7 (the §5.1 relaxation
-                    // allowed ONLY for the SVD-seed delta, NOT the golden tier).
-                    check_close("nr>32 GPU-vs-CPU rd[0].chisq", grswb.rd_chisq.at(0), rswb.rd_chisq.at(0), 0.0, 1e-7);
-                    check_close("nr>32 GPU-vs-CPU rd[1].chisq", grswb.rd_chisq.at(1), rswb.rd_chisq.at(1), 0.0, 1e-7);
+                    // above is non-negotiable; this localizer is the §5.1 relaxation allowed
+                    // ONLY for the SVD-seed delta, NOT the golden tier. The SVD-seed delta is
+                    // RELATIVE (a few ulps of the singular values propagated through the ALS),
+                    // so the tier is rtol 1e-9 (≈3.6e-11 in practice — still 1000x tighter than
+                    // the golden 1e-6): the corrected rank-0 chisq is ~3839 (vs the corrupt
+                    // ~190), so an absolute 1e-7 floor was a magnitude-specific accident; the
+                    // relative tier scales correctly with the chisq magnitude.
+                    check_close("nr>32 GPU-vs-CPU rd[0].chisq", grswb.rd_chisq.at(0), rswb.rd_chisq.at(0), 1e-9, 1e-9);
+                    check_close("nr>32 GPU-vs-CPU rd[1].chisq", grswb.rd_chisq.at(1), rswb.rd_chisq.at(1), 1e-9, 1e-9);
 
                     // ---- nr>32 popdrop ON THE GPU (the FROZEN CONTRACT §5.2) ----
                     // Run the full run_qpadm on the RESIDENT devbig (mirrors the 9-pop GPU
                     // block); this drives gls_weights' large path for the reduced popdrop
                     // models. Assert the popdrop 00/01/10 rows match the golden ON THE GPU.
-                    // The NRBIG jackknife SE (the ~701-block LOO) is the parallel large-LOO
+                    // The NRBIG jackknife SE (the ~710-block LOO) is the parallel large-LOO
                     // gate: time this run (was ~371 s SERIAL; now the parallel kernel) and
                     // dump the se/z to prove BIT-IDENTITY vs the pre-fix value.
                     const auto t_big0 = std::chrono::steady_clock::now();
@@ -565,7 +577,7 @@ int main(int argc, char** argv) {
                     const auto t_big1 = std::chrono::steady_clock::now();
                     const double big_secs =
                         std::chrono::duration<double>(t_big1 - t_big0).count();
-                    std::printf("  [TIME] NRBIG GPU run_qpadm (incl. ~701-block LOO SE) = "
+                    std::printf("  [TIME] NRBIG GPU run_qpadm (incl. ~710-block LOO SE) = "
                                 "%.3f s\n", big_secs);
                     if (gpu_big_res.status != steppe::Status::Ok) {
                         std::printf("  [FAIL] nr>32 GPU run_qpadm status != Ok (%d)\n",
@@ -925,17 +937,22 @@ int main(int argc, char** argv) {
                 if (!feas_ok) ++g_failures;
             }
 
-            // GPU == CpuBackend ORACLE to 1e-9 (the localizer: any GPU rank-test
-            // regression localizes against the native reference, not only the golden).
+            // GPU == CpuBackend ORACLE to RELATIVE 1e-9 (the localizer: any GPU rank-test
+            // regression localizes against the native reference, not only the golden). The
+            // delta is the cuSOLVER/emulated-SYRK vs native/Jacobi SVD-seed difference, which
+            // is RELATIVE (a few ulps of the singular values through the ALS); on the corrected
+            // convertf-PA golden_fit0 the rank-0 chisq is ~1474 (vs the old corrupt small
+            // value), so an absolute 1e-9 floor was magnitude-specific — the relative tier
+            // scales with the chisq and stays ~1000x tighter than the golden gate (rtol 1e-6).
             // THOROUGH-only: reads the CpuBackend oracle `res` (Block A).
             if (g_thorough) {
-                std::printf("-- GPU rank test vs CpuBackend ORACLE (diff localizer, 1e-9) --\n");
+                std::printf("-- GPU rank test vs CpuBackend ORACLE (diff localizer, rtol 1e-9) --\n");
                 check_eq_int("gpu-vs-cpu f4rank", gpu.f4rank, res.f4rank);
-                check_close("gpu-vs-cpu rd[0].chisq", gpu.rankdrop_chisq.at(0), res.rankdrop_chisq.at(0), 0.0, 1e-9);
-                check_close("gpu-vs-cpu rd[1].chisq", gpu.rankdrop_chisq.at(1), res.rankdrop_chisq.at(1), 0.0, 1e-9);
-                check_close("gpu-vs-cpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), res.rankdrop_chisqdiff.at(0), 0.0, 1e-9);
-                check_close("gpu-vs-cpu pd[1].chisq", gpu.popdrop_chisq.at(1), res.popdrop_chisq.at(1), 0.0, 1e-9);
-                check_close("gpu-vs-cpu pd[2].chisq", gpu.popdrop_chisq.at(2), res.popdrop_chisq.at(2), 0.0, 1e-9);
+                check_close("gpu-vs-cpu rd[0].chisq", gpu.rankdrop_chisq.at(0), res.rankdrop_chisq.at(0), 1e-9, 1e-9);
+                check_close("gpu-vs-cpu rd[1].chisq", gpu.rankdrop_chisq.at(1), res.rankdrop_chisq.at(1), 1e-9, 1e-9);
+                check_close("gpu-vs-cpu rd[0].chisqdiff", gpu.rankdrop_chisqdiff.at(0), res.rankdrop_chisqdiff.at(0), 1e-9, 1e-9);
+                check_close("gpu-vs-cpu pd[1].chisq", gpu.popdrop_chisq.at(1), res.popdrop_chisq.at(1), 1e-9, 1e-9);
+                check_close("gpu-vs-cpu pd[2].chisq", gpu.popdrop_chisq.at(2), res.popdrop_chisq.at(2), 1e-9, 1e-9);
             }
 
             // DIRECT GPU rank_sweep (the dispatch report + assert the GPU backend ran it).

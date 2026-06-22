@@ -425,7 +425,11 @@ int main(int argc, char** argv) {
     fitNA.right = {"Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan",
                    "Karitiana", "Afghanistan_DarraiKurCave_MBA"};
     fitNA.blgsize_morgans = 0.05; fitNA.maxmiss = 0.99;  // 0.05 Morgans == 5 cM
-    fitNA.weight = {21.9095007306, -20.9095007306};
+    // CORRECTED convertf-PA reference (golden_fitNA.json regenerated; the prior
+    // [21.91,-20.91] was AT2 2.0.10's silent misread of the raw v66 TGENO). Compared via
+    // diag_close (NON-GATING: this is steppe's OWN extract+partition vs AT2's f2-object
+    // weights, a numeric diagnostic, not a ctest gate).
+    fitNA.weight = {0.8388144816506641, 0.1611855183493359};
     fitNA.assert_summary = false;  // f2-object NA golden's summary shape differs; weights diag only.
 
     const bool ran0 = run_case(bin, prefix, tmp, fit0);
@@ -447,8 +451,10 @@ int main(int argc, char** argv) {
                 "      --blgsize is in Morgans (0.05 == 5 cM), so the partitions agree closely.\n"
                 "      The small residual block-partition diff (an assign_blocks tie convention)\n"
                 "      is covered by the 5e-3 weight tier and is a TRACKED FOLLOW-UP — NOT a decode\n"
-                "      bug. golden_fitNA's weight comparison remains a non-gating diagnostic (its\n"
-                "      AT2 reference was not regenerated).\n");
+                "      bug. golden_fitNA's weight comparison remains a non-gating diagnostic: its\n"
+                "      AT2 reference IS now the regenerated convertf-PA golden, but this is steppe's\n"
+                "      OWN extract+block-partition vs AT2's f2-object fit, so the residual partition\n"
+                "      diff keeps it a REPORTED diagnostic, not a gate.\n");
     if (g_failures == 0) {
         std::printf("\nRESULT: PASS (extract-f2 -> qpadm reproduces the CORRECTED golden_fit0 within "
                     "the justified tier AND is decisively NOT the corrupt golden)\n");

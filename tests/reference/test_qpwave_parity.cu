@@ -333,9 +333,17 @@ int main(int argc, char** argv) {
                                    std::span<const int>(g.right), opts, gpu_res);
             gate_qpwave("CudaBackend (GPU, f2 RESIDENT)", g, qw);
 
-            // GPU == CpuBackend ORACLE localizer (1e-9): any GPU qpWave regression
-            // localizes against the native reference, not only the golden. THOROUGH-only
-            // (re-runs the oracle here so the oracle `res` need not be hoisted).
+            // GPU == CpuBackend ORACLE localizer (RELATIVE rtol 1e-9): any GPU qpWave
+            // regression localizes against the native reference, not only the golden.
+            // THOROUGH-only (re-runs the oracle here so the oracle `res` need not be
+            // hoisted). The delta is the cuSOLVER/emulated-SYRK vs native/Jacobi SVD-seed
+            // difference, which is RELATIVE (a few ulps of the singular values through the
+            // rank test); on the corrected convertf-PA golden_fit0/qpwave fixture the
+            // rank-0 chisq is ~1474/~1402 (vs the old corrupt small value), so an ABSOLUTE
+            // 1e-9 floor was magnitude-specific — it fires at ~9e-9/~3e-8 absolute even
+            // though the relative delta is ~2e-11. The relative tier scales with the chisq
+            // and stays ~50000x tighter than the golden gate (rtol 1e-6); the GOLDEN
+            // comparison (gate_qpwave above, rtol 1e-6) is unchanged and still PASSES.
             if (g_thorough) {
                 steppe::device::Resources cpu_res;
                 steppe::device::PerGpuResources cpu;
@@ -345,13 +353,13 @@ int main(int argc, char** argv) {
                 const steppe::QpWaveResult ow =
                     steppe::run_qpwave(f2, std::span<const int>(g.left),
                                        std::span<const int>(g.right), opts, cpu_res);
-                std::printf("  -- GPU vs CpuBackend ORACLE localizer (1e-9) [%s] --\n", g.label);
+                std::printf("  -- GPU vs CpuBackend ORACLE localizer (rtol 1e-9) [%s] --\n", g.label);
                 check_eq_int("gpu-vs-cpu f4rank", qw.f4rank, ow.f4rank);
                 for (std::size_t k = 0; k < qw.rankdrop_chisq.size() &&
                                          k < ow.rankdrop_chisq.size(); ++k) {
                     char nm[48];
                     std::snprintf(nm, sizeof(nm), "gpu-vs-cpu rd[%zu].chisq", k);
-                    check_close(nm, qw.rankdrop_chisq.at(k), ow.rankdrop_chisq.at(k), 0.0, 1e-9);
+                    check_close(nm, qw.rankdrop_chisq.at(k), ow.rankdrop_chisq.at(k), 1e-9, 1e-9);
                 }
             }
         }

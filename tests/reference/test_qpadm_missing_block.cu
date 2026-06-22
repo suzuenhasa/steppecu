@@ -120,31 +120,34 @@ bool read_na_fixture(const std::string& path, steppe::F2BlockTensor& out) {
 //      analogue, NOT qpadm(dir,...)) ----------------------------------------------
 // target=England_BellBeaker(0), left={CordedWare(1),Turkey_N(2)},
 // right={Mbuti(3),Natufian(4),GanjDareh(5),Han(6),Papuan(7),Karitiana(8),Afghan_MBA(9)}.
-// One block (0-based 534) is dropped: the (Afghan_MBA, Mbuti) pair has Vpair==0. The
-// 2-source model is a poor fit for these outgroups (large weights) — AT2's exact answer,
-// which steppe reproduces bit-for-bit; the gate is steppe==AT2 WITH the drop + drop!=impute.
-constexpr double kW0 = 21.9095007306;        // weight[CordedWare]
-constexpr double kW1 = -20.9095007306;       // weight[Turkey_N]
-constexpr double kChisq = 8.26893432701;     // fitted-rank chisq
+// CORRECTED convertf-PA values (golden_fitNA.json regenerated from the convertf-PA; the
+// prior weights [21.91,-20.91]/chisq 8.27 were AT2 2.0.10's silent misread of the raw v66
+// TGENO). One block (0-based 534) is dropped: the (Afghan_MBA, England_BellBeaker) pair has
+// Vpair==0. The 2-source model is now a GOOD fit (weights in the unit interval) — AT2's exact
+// answer, which steppe reproduces bit-for-bit; the gate is steppe==AT2 WITH the drop +
+// drop!=impute (the drop-vs-impute reldiff 2.22e-4 still fails impute-0 at the rtol-1e-6 tier).
+constexpr double kW0 = 0.8388144816506641;    // weight[CordedWare]
+constexpr double kW1 = 0.1611855183493359;    // weight[Turkey_N]
+constexpr double kChisq = 21.35755158981002;  // fitted-rank chisq
 constexpr int    kDof = 5;
-constexpr double kP = 0.142023723110;
-constexpr double kSe = 139.254797565;        // both left SE equal (Σw=1)
-constexpr double kZ0 = 0.157333902413;       // z[CordedWare]
-constexpr double kZ1 = -0.150152821276;      // z[Turkey_N]
+constexpr double kP = 0.0006932484542600176;
+constexpr double kSe = 0.02601682803391921;   // both left SE equal (Σw=1)
+constexpr double kZ0 = 32.241227891312;       // z[CordedWare]
+constexpr double kZ1 = 6.195433130402829;     // z[Turkey_N]
 // rankdrop rows (f4rank DESC: rank1, rank0)
 constexpr int    kRdF4rank[2] = {1, 0};
 constexpr int    kRdDof[2]    = {5, 12};
-constexpr double kRdChisq[2]  = {8.26893432701, 97.84153701761};
+constexpr double kRdChisq[2]  = {21.35755158981002, 1479.9782871459238};
 constexpr int    kRdDofdiff   = 7;             // row0
-constexpr double kRdChisqdiff = 89.5726026906; // row0
+constexpr double kRdChisqdiff = 1458.62073555611; // row0
 // steppe-convention f4 X (leftref=TARGET, rows=sources, rightref=Mbuti), row TurkeyN
 // (i=1) over the 6 rights — what assemble_f4 computes (k=j+nr*i). The LAST entry
 // (Afghan_MBA) is the one a missing block most perturbs. (The buggy impute-0 path
 // differs measurably here — the drop discriminator.)
-constexpr double kXTurkeyN[6] = {1.66993190213e-04, 3.47353762472e-05, 0.000742604696600,
-                                 0.000417419530876, 0.000176477228166, -3.01081865168e-04};
-constexpr double kXCordedWare[6] = {2.64042025208e-05, 2.43227639508e-05, 0.000704048777804,
-                                    0.000445239755203, 0.000112900574313, 4.74253984197e-05};
+constexpr double kXTurkeyN[6] = {0.002672935745242549, -0.00107962700694954, -0.00184994718218137,
+                                 -0.001478902262705872, -0.003634263907262343, -0.001287949785248532};
+constexpr double kXCordedWare[6] = {-0.0008696378978417514, 0.0001970701857865456, 1.587296403835641e-05,
+                                    -8.374755722289243e-06, 0.0003495223230114979, -0.0004625931600094486};
 constexpr int kSurvivingBlocks = 709;          // 710 raw - 1 dropped
 constexpr int kRawBlocks = 710;
 
@@ -325,14 +328,14 @@ int main(int argc, char** argv) {
         // chisq/dof are the well-conditioned quadratic form ⇒ tight agreement (1e-9).
         check_close("chisq agree", gpu_res.chisq, cpu_res.chisq, 0.0, 1e-9);
         check_eq_int("dof agree", gpu_res.dof, cpu_res.dof);
-        // The WEIGHTS are a ridge-GLS solve on a near-singular Q (this poor 2-source
-        // outgroup model has |w|~22), so the CPU LU inverse and the GPU cuSOLVER potrf/
-        // potri differ in the last ~7 figures and the large magnitude AMPLIFIES that:
-        // the agreement is reldiff ~1.6e-8 (|d|~3.5e-7 on ~22). Gate it RELATIVE (rtol
-        // 1e-6, the golden weight tier) — the bit-1e-9 absolute localizer used by the
-        // well-conditioned goldens (|w|~0.5) is not the right scale for an ill-
-        // conditioned ~22 weight. The DROP itself is bit-identical across backends (the
-        // f4 X / survivor set agree exactly; only the final ill-conditioned solve differs).
+        // The WEIGHTS are a ridge-GLS solve; on the CORRECTED convertf-PA fit they are
+        // well-determined (|w|~[0.839,0.161]), so the CPU LU inverse and the GPU cuSOLVER
+        // potrf/potri agree to bit (CPU |d|=0 in practice). Gate RELATIVE (rtol 1e-6, the
+        // golden weight tier) for a backend-agnostic localizer that scales with the weight
+        // magnitude. The DROP itself is bit-identical across backends (the f4 X / survivor
+        // set agree exactly). [The OLD corrupt golden produced a pathological ~22 weight on
+        // a near-singular Q where the inverses diverged ~1.6e-8 — the convertf-PA regen
+        // removed that ill-conditioning; the rtol-1e-6 tier remains correct either way.]
         check_close("weight[0] agree", gpu_res.weight.at(0), cpu_res.weight.at(0), 1e-6, 1e-9);
         check_close("weight[1] agree", gpu_res.weight.at(1), cpu_res.weight.at(1), 1e-6, 1e-9);
     }

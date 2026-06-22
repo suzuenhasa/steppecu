@@ -479,17 +479,22 @@ int main(int argc, char** argv) {
     nrbig.target = "England_BellBeaker";
     nrbig.left = {"Czechia_EBA_CordedWare", "Turkey_N"};
     for (std::size_t i = 3; i < nrbig.pops.size(); ++i) nrbig.right.push_back(nrbig.pops[i]);  // 40 rights
-    nrbig.weight = {0.7913004433128438, 0.2086995566871562};
-    nrbig.se = {0.1588254912031973, 0.1588254912031974};
-    nrbig.z = {4.982200510247275, 1.314018015031045};
-    nrbig.chisq = 52.704281610335912; nrbig.dof = 38; nrbig.p = 0.05678246029948012;
+    // CORRECTED convertf-PA values (golden_fit1_NRBIG.json regenerated; 710 blocks). The
+    // prior weights [0.7913,0.2087] / chisq 52.70/190.84 / se ~0.1588 was AT2 2.0.10's
+    // silent misread of the raw v66 TGENO (701-block). se/z compared at the LOOSE 1e-3 tier,
+    // so the AT2 golden se 0.013851/z 60.258 covers the GPU cuSOLVER-gesvd seed value
+    // (se 0.013841/z 60.301, rel ~7e-4 < 1e-3); weights/chisq/rankdrop/popdrop at TIGHT 1e-6.
+    nrbig.weight = {0.8346513400572224, 0.1653486599427775};
+    nrbig.se = {0.01385125709754287, 0.01385125709754288};
+    nrbig.z = {60.258165318820396, 11.93744789937581};
+    nrbig.chisq = 128.2613635233022; nrbig.dof = 38; nrbig.p = 1.020610965435702e-11;
     nrbig.rd_f4rank = {1, 0}; nrbig.rd_dof = {38, 78};
-    nrbig.rd_chisq = {52.704281610335912, 190.83602239090976};
-    nrbig.rd_p = {0.05678246029948012, 1.922125797354803e-11};
-    nrbig.rd0_dofdiff = 40; nrbig.rd0_chisqdiff = 138.131740780574; nrbig.rd0_p_nested = 1.00598619034513e-12;
+    nrbig.rd_chisq = {128.2613635233022, 3839.7412172688014};
+    nrbig.rd_p = {1.020610965435702e-11, 0.0};
+    nrbig.rd0_dofdiff = 40; nrbig.rd0_chisqdiff = 3711.4798537455; nrbig.rd0_p_nested = 0.0;
     nrbig.f4rank = 1;
     nrbig.pd_pat = {"00", "01", "10"}; nrbig.pd_dof = {38, 39, 39};
-    nrbig.pd_chisq = {52.704281610335912, 100.19050317026696, 169.11350353681215};
+    nrbig.pd_chisq = {128.2613635233022, 222.24801068920448, 3027.516724376589};
     nrbig.pd_f4rank = {1, 0, 0};
 
     const bool ran0 = run_case(steppe_bin, golden_dir, tmp_root, fit0);
