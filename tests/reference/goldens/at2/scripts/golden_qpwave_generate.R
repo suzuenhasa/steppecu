@@ -15,7 +15,7 @@ cat("R.version.string :", R.version.string, "\n")
 cat("admixtools ver   :", as.character(packageVersion("admixtools")), "\n")
 cat("RNGkind          :", paste(RNGkind(), collapse=", "), "\n")
 
-outdir <- "/workspace/data/aadr/f2_fit0_FINAL"   # the SAME REAL f2 dir golden_fit0 used
+outdir <- "/workspace/data/aadr/f2_fit0_corrected"   # the SAME corrected convertf-PA f2 dir golden_fit0 used (351539 polymorphic SNPs / 710 blocks); NOT f2_fit0_FINAL (the corrupt raw-TGENO-misread cache: 500848 SNPs / 708 blocks)
 fudge  <- 1e-4
 alpha  <- 0.05
 right  <- c("Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana")
@@ -56,8 +56,8 @@ saveRDS(list(m1=m1, m2=m2,
              meta=list(R=R.version.string, admixtools=as.character(packageVersion("admixtools")),
                        right=right, fudge=fudge, boot=FALSE, alpha=alpha,
                        blgsize=0.05, maxmiss=0, seed=42,
-                       dataset="v66.p1_HO.aadr.patch.PUB",
-                       geno_sha256="7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3")),
+                       dataset="v66_HO_pa (convertf PACKEDANCESTRYMAP of v66.p1_HO.aadr.patch.PUB TGENO)",
+                       geno_sha256="e588406332f072063fa59cf85fb3440308329c3440309da33dc707486824d538")),
         "/workspace/data/aadr/golden_qpwave.rds")
 write.csv(m1$rd, "/workspace/data/aadr/golden_qpwave_m1_rankdrop.csv", row.names=FALSE)
 write.csv(m2$rd, "/workspace/data/aadr/golden_qpwave_m2_rankdrop.csv", row.names=FALSE)

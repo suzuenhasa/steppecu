@@ -19,8 +19,9 @@
     "seed": 42,
     "alpha": 0.05,
     "allsnps": true,
-    "dataset": "v66.p1_HO.aadr.patch.PUB",
-    "geno_sha256": "7af8c2f5cf0db612e39257e59f20aba87906de90c79f409771c3b3145a253ec3",
+    "dataset": "v66_HO_pa (convertf PACKEDANCESTRYMAP of v66.p1_HO.aadr.patch.PUB TGENO)",
+    "source_geno_format": "PACKEDANCESTRYMAP (convertf v8621 from the raw v66 TGENO)",
+    "geno_sha256": "e588406332f072063fa59cf85fb3440308329c3440309da33dc707486824d538",
     "snp_sha256": "c0d565ee9e6a6edf30c2063430ee4f828e5db45f26d4747fd76f19eee650a5de",
     "ind_sha256": "51f99bee3667b5c3a97b663cc12fd3e25486cf64049782657d99db347b65509e"
   },
