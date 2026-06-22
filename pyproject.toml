@@ -1,0 +1,45 @@
+# pyproject.toml — the steppe GPU-only Python wheel (M(py-1); cli-bindings.md §6.3).
+#
+# ONE GPU wheel, NO CPU-only variant (memory cpu-is-test-only): steppe is a GPU product.
+# scikit-build-core drives CMake with the bindings on (STEPPE_BUILD_PYTHON=ON) and the CLI
+# off; nanobind provides the extension machinery. The CUDA-13 runtime is NOT bundled — the
+# wheel declares the unsuffixed nvidia-* redistributable runtime deps and auditwheel-repair
+# excludes the CUDA shared libs (so the wheel uses the user's CUDA 13 install). pandas is a
+# SOFT/lazy dep (imported inside the .to_dataframe accessors), NOT a hard wheel dep, so
+# `import steppe` works without it.
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "steppe"
+version = "0.1.0"
+description = "GPU/CUDA-13 qpAdm / qpWave (f-statistics & model fitting)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# The CUDA-13 redistributable runtime (unsuffixed, >=13,<14): NOT bundled in the wheel
+# (auditwheel --exclude); resolved from the user's environment / these pip deps.
+dependencies = [
+    "numpy>=1.22",
+    "nvidia-cuda-runtime-cu13>=13,<14",
+    "nvidia-cublas-cu13>=13,<14",
+    "nvidia-cusolver-cu13>=13,<14",
+    "nvidia-curand-cu13>=13,<14",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]   # the DataFrame accessors; soft/lazy (import steppe works without).
+test = ["pytest>=7", "pandas>=1.5", "numpy>=1.22"]
+
+[tool.scikit-build]
+# Build ONLY the bindings (no CLI); the importable package is bindings/steppe.
+cmake.version = ">=3.28"
+cmake.args = [
+    "-DSTEPPE_BUILD_PYTHON=ON",
+    "-DSTEPPE_BUILD_CLI=OFF",
+    "-DSTEPPE_BUILD_TESTS=OFF",
+]
+build.targets = ["_core"]
+wheel.packages = ["bindings/steppe"]
+build-dir = "build/{wheel_tag}"

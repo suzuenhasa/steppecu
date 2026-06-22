@@ -23,6 +23,11 @@ else()
   message(STATUS "steppe CLI: using CLI11 ${CLI11_VERSION} via find_package")
 endif()
 
+# f2_dir_io.cpp (the f2-dir READER) + pop_resolver.cpp (name -> P-axis index) moved to
+# the shared steppe::access lib (src/access) so the Python bindings reuse them too — the
+# cli-bindings.md M(py-1) §0 DRY move. The .cpp files still live here in src/app/ (next to
+# the CLI command flows that grew them); steppe::access compiles them and steppe_app links
+# it (below) rather than compiling them a second time.
 add_executable(steppe_app
     main.cpp
     cli_parse.cpp
@@ -30,9 +35,7 @@ add_executable(steppe_app
     cmd_qpwave.cpp     # M(cli-2): the qpWave rank-sweep command (no target; left[0]=ref)
     cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
     cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command
-    f2_dir_io.cpp      # M(cli-1): the f2_blocks dir READER (f2.bin + pops.txt)
     f2_dir_writer.cpp  # M(cli-4): the f2_blocks dir WRITER (STPF2BK1 REAL vpair + sidecars)
-    pop_resolver.cpp   # M(cli-1): name -> P-axis-index resolution against pops.txt
     result_emit.cpp)   # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
@@ -45,6 +48,7 @@ set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
 # itself device-links nothing — it is a pure host target (cli-bindings.md §6.1).
 target_link_libraries(steppe_app
     PRIVATE steppe::core steppe::io steppe::api steppe::device
+            steppe::access            # the shared f2-dir reader + pop->index resolver (DRY, §0)
             CLI11::CLI11 steppe::warnings)
 target_compile_features(steppe_app PRIVATE cxx_std_20)
 

@@ -1208,3 +1208,22 @@ if(STEPPE_BUILD_CLI)
                    "${STEPPE_AADR_ROOT}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 endif()
+
+# --- M(py-1) nanobind Python gate (cli-bindings.md §7, §8) ----------------------------
+# Reproduce the real-AADR golden_fit0 THROUGH the Python API (read_f2 -> qpadm -> the
+# pandas-shaped result) + the f2 numpy round-trip + a qpwave/qpadm_search sanity, gated by
+# STEPPE_BUILD_PYTHON. SKIPs cleanly (the pytest device-present guard) when no CUDA device
+# is visible — identical to the CLI test wiring. STEPPE_BINDINGS_DIR points the conftest
+# sys.path shim at the BUILD-tree-staged steppe package (bindings/steppe/_core*.so +
+# __init__.py). Depends on _core so the extension is built before the test runs. NO new
+# data: it stages the COMMITTED fixtures into a temp f2-dir (memory real-data-only).
+if(STEPPE_BUILD_PYTHON)
+  find_package(Python 3.9 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME py_qpadm
+           COMMAND "${Python_EXECUTABLE}" -m pytest -v
+                   "${CMAKE_CURRENT_SOURCE_DIR}/python")
+  set_tests_properties(py_qpadm PROPERTIES
+      ENVIRONMENT "STEPPE_BINDINGS_DIR=${CMAKE_BINARY_DIR}/bindings")
+  # The CTest target depends on the extension via the build graph; CTest itself does not
+  # build, so the `cmake --build` step (which builds _core) must precede `ctest`.
+endif()

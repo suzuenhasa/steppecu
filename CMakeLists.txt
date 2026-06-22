@@ -41,6 +41,17 @@ include(SteppeOptions)     # all option()/cache vars in one place
 include(CUDAArch)          # CMAKE_CUDA_ARCHITECTURES policy (M0: sm_120)
 include(SteppeWarnings)    # defines INTERFACE target steppe::warnings
 
+# Position-independent code for the whole build when the Python bindings are on: the
+# nanobind extension `_core` is a SHARED module, and it links the first-party STATIC libs
+# (steppe_core / steppe_device / steppe_io / steppe_access). A shared object cannot embed
+# non-PIC static objects (R_X86_64_PC32 relocations fail), so every static lib + the CUDA
+# device-link must be PIC. PIC is negligible cost and standard for libs feeding a shared
+# module; it does not change the CLI-only / tests-only build (the option is OFF there).
+# Must follow include(SteppeOptions) so STEPPE_BUILD_PYTHON is defined.
+if(STEPPE_BUILD_PYTHON)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # --- CUDA toolkit (cuBLAS for the f2 GEMMs; architecture.md §3, §8) ----------
 find_package(CUDAToolkit REQUIRED)
 
@@ -62,6 +73,14 @@ add_subdirectory(src/io)         # steppe_io           (LEAF: genotype readers; 
 add_subdirectory(src/core)       # steppe_core_internal (INTERFACE) + steppe_core (host)
 add_subdirectory(src/device)     # steppe_device        (CUDA, PRIVATE cuBLAS)
 
+# access — steppe_access: the CUDA-FREE host access helpers (the f2-dir READER +
+# the pop-name->index resolver) shared by BOTH the CLI app AND the Python bindings
+# (cli-bindings.md M(py-1) §0 finding: those helpers were exe-private; this is their
+# shared linkable home). A PLAIN CXX target; built whenever either consumer is on.
+if(STEPPE_BUILD_CLI OR STEPPE_BUILD_PYTHON)
+  add_subdirectory(src/access)
+endif()
+
 # app — the steppe CLI (Phase 3 / step 2 productization). A PLAIN CXX target (NO
 # LANGUAGES CUDA) behind the already-present STEPPE_BUILD_CLI option
 # (SteppeOptions.cmake:23, default OFF), per cli-bindings.md §6.1 + architecture.md §4.
@@ -69,6 +88,17 @@ add_subdirectory(src/device)     # steppe_device        (CUDA, PRIVATE cuBLAS)
 # fetches stay PRIVATE to the src/app subtree (never reaching core/device).
 if(STEPPE_BUILD_CLI)
   add_subdirectory(src/app)
+endif()
+
+# bindings — the nanobind Python module steppe._core (Phase 3 / M(py-1)). A PLAIN CXX
+# target (NO LANGUAGES CUDA, NO .cu) behind STEPPE_BUILD_PYTHON (SteppeOptions.cmake:22,
+# default OFF), per cli-bindings.md §6.1 + architecture.md §4/§15. It reaches the GPU
+# ONLY through the CUDA-free seams (build_resources / run_qpadm* / run_qpwave /
+# upload_f2_blocks_to_device) + steppe::access; nanobind + its CPM machinery stay PRIVATE
+# to the bindings subtree (never reaching core/device). A leaked CUDA header hard-fails
+# this host compile — the §4 layering / arch-grep gate is structural (cli-bindings.md §6.2).
+if(STEPPE_BUILD_PYTHON)
+  add_subdirectory(bindings)
 endif()
 
 if(STEPPE_BUILD_TESTS)
