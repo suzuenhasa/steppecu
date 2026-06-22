@@ -9,8 +9,9 @@
 //   2. ConfigBuilder().with_defaults().merge_file(--config).merge_env().merge_cli(args)
 //      .build() runs the §9 precedence merge + validation.
 //   3. On InvalidConfig, print the builder's reason to stderr, return kExitInvalidConfig.
-//   4. M(cli-0): print "not yet implemented" + return 0 (no compute this milestone).
-//      M(cli-1) replaces step 4 for `qpadm` with the real GPU fit.
+//   4. Dispatch to the subcommand's run_*_command (the real GPU compute). qpadm,
+//      qpadm-rotate, and extract-f2 are wired; qpwave (M(cli-2)) is the one remaining
+//      scaffold (prints "not yet implemented") until its compute lands.
 #include "app/cli_parse.hpp"
 
 #include <cstdio>
@@ -66,9 +67,10 @@ namespace cfg = steppe::config;
     return std::move(result.value());
 }
 
-// M(cli-0) placeholder: a subcommand that parses + validates its config but performs
-// no compute yet. Returns kExitOk so the scaffold is a clean, scriptable no-op (the
-// compute lands in M(cli-1+)). qpadm is the one M(cli-1) will replace.
+// Scaffold no-op: parses + validates its config but performs no compute yet. Returns
+// kExitOk so it stays a clean, scriptable no-op. ONLY qpwave still uses this (M(cli-2)
+// pending) — qpadm / qpadm-rotate / extract-f2 are all wired. Delete this when qpwave's
+// compute lands.
 [[nodiscard]] int run_not_yet_implemented(const char* name, const RunConfig& /*config*/) {
     std::printf("steppe %s: not yet implemented (M(cli-0) scaffold — config parsed "
                 "and validated; compute lands in a later milestone)\n", name);
@@ -161,9 +163,9 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpadm_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // M(cli-1): the real GPU qpAdm fit (read dir -> resolve -> upload ->
-            // run_qpadm -> emit CSV/JSON). The other subcommands stay scaffold no-ops
-            // until their milestones (M(cli-2/3/4)).
+            // The real GPU qpAdm fit (read dir -> resolve -> upload -> run_qpadm ->
+            // emit CSV/JSON). qpadm-rotate + extract-f2 are likewise wired; only
+            // qpwave (M(cli-2)) remains a scaffold no-op.
             std::exit(run_qpadm_command(*config));
         });
     }
