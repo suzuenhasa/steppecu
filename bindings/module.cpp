@@ -428,6 +428,47 @@ nb::dict run_f4_py(F2Handle& h,
     return f4_to_dict(result, h.pops);
 }
 
+// run_qpdstat: the qpDstat Part-A binding — D-statistic / f4 over the f2-data path. A THIN
+// clone of run_f4_py (the qpdstat f2-path == f4: admixtools::qpdstat(f2dir,f4mode=TRUE) is
+// byte-identical to f4mode=FALSE and to f4, since f4mode is a no-op without per-SNP
+// genotypes). Returns the SAME dict {pop1..pop4,est,se,z,p,status,precision} as run_f4 (z =
+// est/se, p = 2*(1-Phi(|z|)) ARE the AT2 D-stat sign/Z/p convention). The normalized-D
+// MAGNITUDE (per-SNP genotypes) is Part B, a separate later binding. NO new compute, NO new
+// emitter, NO new result type — it REUSES run_f4 + f4_to_dict verbatim.
+nb::dict run_qpdstat_py(F2Handle& h,
+                        const std::vector<std::array<std::string, 4>>& quartets) {
+    if (quartets.empty()) raise_value("qpdstat: needs at least one (p1,p2,p3,p4) quartet");
+
+    const sa::PopResolver resolver(h.pops);
+    if (!resolver.valid()) raise_value(resolver.error());
+
+    std::vector<std::array<int, 4>> idx_quartets;
+    idx_quartets.reserve(quartets.size());
+    for (const std::array<std::string, 4>& q : quartets) {
+        std::array<int, 4> qi{};
+        for (int c = 0; c < 4; ++c) {
+            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
+            if (!rr.ok) throw nb::key_error(("quartet pop: " + rr.error).c_str());
+            qi[static_cast<std::size_t>(c)] = rr.index;
+        }
+        idx_quartets.push_back(qi);
+    }
+
+    steppe::QpAdmOptions opts;  // qpdstat==f4 uses fudge=0 internally (run_f4); opts default.
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::F4Result result;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        result = steppe::run_f4(
+            dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
+    return f4_to_dict(result, h.pops);
+}
+
 // run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
 // BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
 // input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
@@ -621,6 +662,14 @@ NB_MODULE(_core, m) {
     m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
           "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "
           "tuples; returns a dict of parallel arrays {pop1,pop2,pop3,pop4,est,se,z,p}.");
+
+    m.def("run_qpdstat", &run_qpdstat_py, "f2"_a, "quartets"_a,
+          "D-statistic / f4 over the f2-data path (GPU; qpDstat Part A). The --f2-dir "
+          "qpdstat path reports f4 (the AT2 f2-path convention: qpdstat(f2dir,f4mode) is "
+          "byte-identical to f4, f4mode being a no-op without per-SNP genotypes). `quartets` "
+          "is a list of (p1,p2,p3,p4) name tuples; returns a dict of parallel arrays "
+          "{pop1,pop2,pop3,pop4,est,se,z,p}. The normalized-D magnitude needs a genotype "
+          "prefix (Part B, not yet implemented).");
 
     m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
           "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "

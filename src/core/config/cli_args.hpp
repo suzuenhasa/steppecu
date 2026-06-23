@@ -40,6 +40,7 @@ enum class Command {
     F4,
     F3,
     F4Ratio,
+    Qpdstat,
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
@@ -104,6 +105,14 @@ struct CliArgs {
     /// command (it reuses the `pops` field below, read in groups of 4), so a one-line f4
     /// needs no four flags.
     std::vector<std::string> pop1, pop2, pop3, pop4;
+
+    /// `--prefix PATH` (the `qpdstat` command ONLY) — the genotype prefix for the
+    /// normalized-D MAGNITUDE (Part B; not yet implemented). DISTINCT from `prefix` below
+    /// (extract-f2's geno/snp/ind triple prefix) so the qpdstat guard checks it WITHOUT
+    /// triggering ConfigBuilder's extract-f2 prefix->geno/snp/ind expansion. When SET, the
+    /// qpdstat command fails fast with a "Part B not yet implemented" message; the --f2-dir
+    /// path reports f4 (the AT2 f2-path convention, proven byte-identical to qpdstat f4mode).
+    std::optional<std::string> qpdstat_prefix;
 
     /// `--pop5` (the `f4-ratio` command only) — the 5th ROW-ALIGNED column (admixtools
     /// ::qpf4ratio): tuple k = (pop1[k], pop2[k], pop3[k], pop4[k], pop5[k]); alpha =

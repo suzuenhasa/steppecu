@@ -85,6 +85,10 @@ public:
     [[nodiscard]] const std::vector<std::string>& pops()  const noexcept { return pops_; }
     [[nodiscard]] const std::string& out_file() const noexcept { return out_file_; }
     [[nodiscard]] const std::string& format()   const noexcept { return format_; }
+    /// qpdstat's `--prefix` (the Part-B normalized-D genotype prefix). Empty ⇒ unset (the
+    /// --f2-dir f4-reporting path); non-empty ⇒ the qpdstat command fails fast (Part B not
+    /// yet implemented). Carried verbatim, NOT expanded into geno/snp/ind (extract's prefix).
+    [[nodiscard]] const std::string& qpdstat_prefix() const noexcept { return qpdstat_prefix_; }
     [[nodiscard]] const std::string& geno()     const noexcept { return geno_; }
     [[nodiscard]] const std::string& snp()      const noexcept { return snp_; }
     [[nodiscard]] const std::string& ind()      const noexcept { return ind_; }
@@ -129,6 +133,7 @@ private:
     std::vector<std::string> pops_;                       // f4 --pops 4-tuple convenience (raw labels)
     std::string out_file_;
     std::string format_ = "csv";   // cli-bindings.md §4.4 default
+    std::string qpdstat_prefix_;   // qpdstat --prefix (Part-B normalized-D; carried verbatim)
     std::string geno_;
     std::string snp_;
     std::string ind_;

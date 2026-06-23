@@ -137,6 +137,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.out_file,    args.out_file);
     take(merged_.format,      args.format);
     take(merged_.prefix,      args.prefix);
+    take(merged_.qpdstat_prefix, args.qpdstat_prefix);
     take(merged_.geno,        args.geno);
     take(merged_.snp,         args.snp);
     take(merged_.ind,         args.ind);
@@ -453,6 +454,10 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     cfg.pop5_  = merged_.pop5;   // f4-ratio 5th row-aligned column (--pop5)
     cfg.pops_  = merged_.pops;   // f4 --pops 4-tuple convenience (raw labels, carried verbatim)
     if (merged_.out_file) cfg.out_file_ = *merged_.out_file;
+    // qpdstat's --prefix (the Part-B normalized-D genotype prefix) is carried VERBATIM and
+    // NOT expanded into geno/snp/ind — it is only the fail-fast sentinel the qpdstat command
+    // reads (Part B not yet implemented). Distinct from extract-f2's --prefix below.
+    if (merged_.qpdstat_prefix) cfg.qpdstat_prefix_ = *merged_.qpdstat_prefix;
     // --prefix P expands to the genotype triple P.{geno,snp,ind} (cli-bindings.md §4.2;
     // EIGENSTRAT/PACKEDANCESTRYMAP convention). An explicit --geno/--snp/--ind OVERRIDES
     // the corresponding prefix-derived path (cli_parse documents --geno overrides --prefix).

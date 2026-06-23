@@ -32,6 +32,7 @@ __all__ = [
     "f4",
     "f3",
     "f4ratio",
+    "qpdstat",
     "qpadm_search",
 ]
 
@@ -447,6 +448,37 @@ def f4(
             quads.append((p1, p2, p3, p4))
 
     d = _core.run_f4(f2._h, quads)
+    res = F4Result(d)
+    return res.table if as_dataframe else res
+
+
+def qpdstat(
+    f2: F2Blocks,
+    quartets: list[Any],
+    *,
+    as_dataframe: bool = False,
+):
+    """D-statistic / f4 over the f2-data path on the GPU — est/se/z/p per quartet (qpDstat
+    Part A). The ``--f2-dir`` qpdstat path reports f4 (the AT2 f2-path convention:
+    ``admixtools::qpdstat(f2dir, f4mode=TRUE)`` is byte-identical to ``f4mode=FALSE`` and to
+    ``f4``, since f4mode is a no-op without per-SNP genotypes), where z = est/se and
+    p = 2*(1-Phi(|z|)) ARE the AT2 D-stat sign/Z/p convention. NO new compute and NO new
+    result type — it returns an ``F4Result`` (or, when ``as_dataframe=True``, the tidy
+    ``F4Result.table`` DataFrame: pop1,pop2,pop3,pop4,est,se,z,p).
+
+    ``quartets`` is a list where each entry is a ``(p1, p2, p3, p4)`` name tuple/list (or a
+    ``{"pop1":..,"pop2":..,"pop3":..,"pop4":..}`` dict) = the QUADRUPLE input. The
+    normalized-D MAGNITUDE needs a genotype prefix (Part B, not yet implemented). Unknown pop
+    names raise a clean KeyError."""
+    quads: list[tuple[str, str, str, str]] = []
+    for q in quartets:
+        if isinstance(q, dict):
+            quads.append((q["pop1"], q["pop2"], q["pop3"], q["pop4"]))
+        else:
+            p1, p2, p3, p4 = q  # exactly 4 names (raises on a malformed tuple)
+            quads.append((p1, p2, p3, p4))
+
+    d = _core.run_qpdstat(f2._h, quads)
     res = F4Result(d)
     return res.table if as_dataframe else res
 
