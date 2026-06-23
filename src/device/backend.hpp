@@ -694,6 +694,41 @@ public:
             "ComputeBackend::assemble_f3_triples(host): not implemented by this backend");
     }
 
+    /// qpDstat Part B (the genotype-path NORMALIZED-D reduction; include/steppe/dstat.hpp).
+    /// The S2 DIVERGENCE — NOT the f2 GEMM, NOT the f2 cache. Per BLOCK b, per QUADRUPLE k =
+    /// (p1,p2,p3,p4), a segmented reduction over the block's SNP columns accumulating
+    ///   numsum[k,b] += (a-b)*(c-d),  densum[k,b] += (a+b-2ab)*(c+d-2cd),  cnt[k,b] += 1
+    /// over ONLY the SNPs where V==1 for all 4 pops (a,b,c,d = Q[p1,s]..Q[p4,s]; the
+    /// allsnps=TRUE per-(block,quadruple) finiteness mask). Q/V are the column-major [P × M]
+    /// decode_af outputs over ALL M SNPs; `block_id` is the per-SNP dense block id from
+    /// assign_blocks (length M, non-decreasing ⇒ each block's columns are contiguous);
+    /// `quadruples` is the flattened P-axis index quad array (length 4*N, quad k at
+    /// [4*k .. 4*k+3] = {p1,p2,p3,p4}). Outputs are ROW-MAJOR [N × n_block]: numsum[k*nb+b]
+    /// etc. (tiny, like F4Blocks::x_blocks). The CUDA backend uploads Q/V to VRAM and runs
+    /// the SNP-tile-streamed batched-over-N kernel (device-resident); the CpuBackend is the
+    /// long-double host oracle. Native FP64 / long-double accumulation (cancellation in
+    /// num/den per §12). NON-PURE: the base throws (the established backend.hpp pattern).
+    ///
+    /// @param Q          reference-allele frequencies in [0,1], 0 where invalid, [P × M].
+    /// @param V          validity mask (1.0 valid / 0.0 missing), [P × M].
+    /// @param P          number of populations (the leading dimension of Q/V).
+    /// @param M          number of SNPs (the column count of Q/V).
+    /// @param block_id   per-SNP dense block id (length M), from assign_blocks.
+    /// @param n_block    number of distinct blocks (== max(block_id)+1).
+    /// @param quadruples flattened P-axis index quad array (length 4*N).
+    /// @param numsum     OUT [N * n_block] row-major Σnum per (quadruple, block).
+    /// @param densum     OUT [N * n_block] row-major Σden per (quadruple, block).
+    /// @param cnt        OUT [N * n_block] row-major used-SNP count per (quadruple, block).
+    virtual void dstat_block_reduce(const double* Q, const double* V, int P, long M,
+                                    const int* block_id, int n_block,
+                                    std::span<const int> quadruples,
+                                    double* numsum, double* densum, double* cnt) {
+        (void)Q; (void)V; (void)P; (void)M; (void)block_id; (void)n_block;
+        (void)quadruples; (void)numsum; (void)densum; (void)cnt;
+        throw std::runtime_error(
+            "ComputeBackend::dstat_block_reduce: not implemented by this backend");
+    }
+
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
     /// the per-block jackknife WEIGHTS. OQ-3 RESOLVED: the weight is block_sizes[b]
     /// (AT2 block_lengths, the per-block SNP count) — NOT Vpair. Pipeline (AT2

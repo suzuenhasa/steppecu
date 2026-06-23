@@ -408,6 +408,62 @@ public:
         return out;
     }
 
+    /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction REFERENCE oracle
+    /// (the S2 divergence; backend.hpp dstat_block_reduce / include/steppe/dstat.hpp). The
+    /// long-double per-(quadruple, block) segmented reduction the GPU kernel is diffed
+    /// against: for each block's contiguous SNP columns, accumulate the AT2 qpdstat_geno
+    /// num/den over the allsnps=TRUE per-(block,quadruple) finiteness mask (V==1 in all 4
+    /// pops). Q/V are column-major [P × M]; outputs ROW-MAJOR [N × n_block]. Native FP64 /
+    /// long double (the §12 num/den cancellation), AT2-exact.
+    void dstat_block_reduce(const double* Q, const double* V, int P, long M,
+                            const int* block_id, int n_block,
+                            std::span<const int> quadruples,
+                            double* numsum, double* densum, double* cnt) override {
+        const int N = static_cast<int>(quadruples.size() / 4);
+        if (P <= 0 || M <= 0 || N <= 0 || n_block <= 0) return;
+
+        // The SINGLE-SOURCE inverse of assign_blocks (same primitive the f2 path uses):
+        // each block's contiguous SNP-column slice [begin, end).
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+
+        for (int k = 0; k < N; ++k) {
+            const int p1 = quadruples[static_cast<std::size_t>(4 * k + 0)];
+            const int p2 = quadruples[static_cast<std::size_t>(4 * k + 1)];
+            const int p3 = quadruples[static_cast<std::size_t>(4 * k + 2)];
+            const int p4 = quadruples[static_cast<std::size_t>(4 * k + 3)];
+            for (int b = 0; b < n_block; ++b) {
+                const core::BlockRange& rng = ranges[static_cast<std::size_t>(b)];
+                long double nsum = 0.0L, dsum = 0.0L;
+                double c = 0.0;
+                for (long s = rng.begin; s < rng.end; ++s) {
+                    const std::size_t col = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+                    if (V[col + static_cast<std::size_t>(p1)] == 0.0 ||
+                        V[col + static_cast<std::size_t>(p2)] == 0.0 ||
+                        V[col + static_cast<std::size_t>(p3)] == 0.0 ||
+                        V[col + static_cast<std::size_t>(p4)] == 0.0) {
+                        continue;
+                    }
+                    const double a = Q[col + static_cast<std::size_t>(p1)];
+                    const double bb = Q[col + static_cast<std::size_t>(p2)];
+                    const double cc = Q[col + static_cast<std::size_t>(p3)];
+                    const double dd = Q[col + static_cast<std::size_t>(p4)];
+                    nsum += static_cast<long double>((a - bb) * (cc - dd));
+                    dsum += static_cast<long double>((a + bb - 2.0 * a * bb) *
+                                                     (cc + dd - 2.0 * cc * dd));
+                    c += 1.0;
+                }
+                const std::size_t out = static_cast<std::size_t>(k) *
+                                            static_cast<std::size_t>(n_block) +
+                                        static_cast<std::size_t>(b);
+                numsum[out] = static_cast<double>(nsum);
+                densum[out] = static_cast<double>(dsum);
+                cnt[out] = c;
+            }
+        }
+    }
+
     // =====================================================================
     // qpAdm fit-engine reference (S3/S4/S5/S6) — native FP64, AT2-exact.
     // The math reproduces ADMIXTOOLS 2 R/qpadm.R + R/resampling.R verbatim

@@ -91,6 +91,11 @@ add_library(steppe_core STATIC
     # the base fit_models_batched default) + the GPU-free model->device shard planner.
     qpadm/model_search.cpp
     qpadm/model_search_core.cpp
+    # qpDstat Part B (run_dstat): the GENOTYPE-PATH normalized-D — REUSES the extract-f2
+    # decode front-end (io reader + decode_af + assign_blocks) + DIVERGES at S2 into the
+    # per-SNP D kernel (ComputeBackend::dstat_block_reduce, the .cu) + the num/den block-
+    # jackknife (host-pure, the f4ratio ratio-jackknife FAMILY). NEVER reads the f2 cache.
+    stats/dstat.cpp
     # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
     # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
     # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps
@@ -104,6 +109,7 @@ add_library(steppe::core ALIAS steppe_core)
 target_link_libraries(steppe_core
     PUBLIC  steppe::api steppe::core_internal
     PRIVATE steppe::device steppe::warnings     # GPU only via ComputeBackend
+            steppe::io                          # qpDstat Part B (run_dstat): the genotype decode front-end (GenoReader/read_ind/read_snp)
             Threads::Threads)                   # SPMG per-device fan-out (f2_blocks_multigpu)
 
 # steppe_core has NO CUDA sources of its own (pure host orchestration); it links

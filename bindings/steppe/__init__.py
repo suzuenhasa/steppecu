@@ -33,6 +33,7 @@ __all__ = [
     "f3",
     "f4ratio",
     "qpdstat",
+    "dstat",
     "qpadm_search",
 ]
 
@@ -479,6 +480,43 @@ def qpdstat(
             quads.append((p1, p2, p3, p4))
 
     d = _core.run_qpdstat(f2._h, quads)
+    res = F4Result(d)
+    return res.table if as_dataframe else res
+
+
+def dstat(
+    prefix: Any,
+    quartets: list[Any],
+    *,
+    blgsize: float = 0.05,
+    device: int = 0,
+    as_dataframe: bool = False,
+):
+    """Genotype-path NORMALIZED-D on the GPU — est/se/z/p per quadruple (qpDstat Part B).
+
+    UNLIKE :func:`qpdstat` (which reads an f2-dir and reports f4), this reads the GENOTYPE
+    TRIPLE ``<prefix>.{geno,snp,ind}`` directly: D = mean_snp(num)/mean_snp(den),
+    num=(a-b)(c-d), den=(a+b-2ab)(c+d-2cd) over per-SNP allele frequencies, block-jackknifed
+    (the AT2 ``qpdstat_geno`` allsnps=TRUE / f4mode=FALSE convention). Forced diploid +
+    autosomes-only + allsnps=TRUE are pinned (the AT2 genotype-path parity). The est is the
+    NORMALIZED D (~±0.06), distinct from the f2-path f4 (~10x smaller); z = est/se and
+    p = 2*(1-Phi(|z|)) ARE the AT2 D sign/Z/p convention.
+
+    ``prefix`` is the genotype prefix (``<prefix>.geno/.snp/.ind`` must exist). ``quartets``
+    is a list where each entry is a ``(p1, p2, p3, p4)`` name tuple/list (or a
+    ``{"pop1":..,"pop2":..,"pop3":..,"pop4":..}`` dict). ``blgsize`` is the jackknife block
+    size in MORGANS (AT2 default 0.05). Returns an ``F4Result`` (or, when
+    ``as_dataframe=True``, the tidy DataFrame: pop1,pop2,pop3,pop4,est,se,z,p). Unknown pop
+    names raise a clean KeyError; a missing genotype file raises a ValueError."""
+    quads: list[tuple[str, str, str, str]] = []
+    for q in quartets:
+        if isinstance(q, dict):
+            quads.append((q["pop1"], q["pop2"], q["pop3"], q["pop4"]))
+        else:
+            p1, p2, p3, p4 = q  # exactly 4 names (raises on a malformed tuple)
+            quads.append((p1, p2, p3, p4))
+
+    d = _core.run_dstat(str(prefix), quads, blgsize, device)
     res = F4Result(d)
     return res.table if as_dataframe else res
 

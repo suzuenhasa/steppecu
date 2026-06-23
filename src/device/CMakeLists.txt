@@ -24,6 +24,7 @@ add_library(steppe_device STATIC
     cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
+    cuda/dstat_kernel.cu          # qpDstat Part B: per-block per-quadruple normalized-D reduction (the S2 divergence)
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)

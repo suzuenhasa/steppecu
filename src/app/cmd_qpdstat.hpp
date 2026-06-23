@@ -9,8 +9,10 @@
 // diagonal SE) and emit_f4_result (the exact p1,p2,p3,p4,est,se,z,p columns), where z = est/se
 // and p = 2*(1-Phi(|z|)) ARE the AT2 D-stat sign/Z/p convention.
 //
-// The normalized-D MAGNITUDE (which needs per-SNP genotypes) is Part B (--prefix), a SEPARATE
-// later workflow. When --prefix is given THIS command fails fast (Part B not yet implemented).
+// The normalized-D MAGNITUDE (per-SNP genotypes) is Part B (--prefix): when --prefix is given
+// THIS command reads the genotype triple PREFIX.{geno,snp,ind} through run_dstat (the
+// genotype-path D = mean_snp(num)/mean_snp(den) block-jackknifed; include/steppe/dstat.hpp)
+// and emits the SAME p1..p4,est,se,z,p table (REUSING emit_f4_result — the D convention).
 //
 // QUARTETS come from EITHER the row-aligned --pop1/--pop2/--pop3/--pop4 columns OR the single-
 // quartet --pops A,B,C,D convenience (4 names = one quartet) — the QUADRUPLE input.
@@ -27,11 +29,11 @@ namespace steppe::app {
 
 /// Run `steppe qpdstat` over the frozen config and return the process exit code
 /// (steppe::config::CliExitCode). --f2-dir reports f4 (the AT2 f2-path convention); --prefix
-/// (the normalized-D magnitude) is Part B and fails fast as kExitInvalidConfig. Owns its
-/// stdout/stderr (the library never prints, architecture.md §10). A DOMAIN outcome (e.g.
-/// NonSpd covariance over the m-batch) rides on the result `status` and EXITS 0 (record-and-
-/// continue); only FAULTS (bad names/dir, --prefix, DeviceOom, file/format/CUDA-runtime
-/// errors) return a nonzero code (cli-bindings.md §1.3, §4.4).
+/// runs the genotype-path NORMALIZED-D (Part B, run_dstat). Owns its stdout/stderr (the
+/// library never prints, architecture.md §10). A DOMAIN outcome (e.g. a degenerate quadruple)
+/// rides on the result `status` / per-row NaN and EXITS 0 (record-and-continue); only FAULTS
+/// (bad names/dir, missing genotype files, DeviceOom, file/format/CUDA-runtime errors) return
+/// a nonzero code (cli-bindings.md §1.3, §4.4).
 [[nodiscard]] int run_qpdstat_command(const config::RunConfig& config);
 
 }  // namespace steppe::app

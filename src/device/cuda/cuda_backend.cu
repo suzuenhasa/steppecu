@@ -83,6 +83,7 @@
 #include "device/cuda/device_f2_blocks_impl.cuh" // DeviceF2Blocks::Impl (the DeviceBuffer<double> owners)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
+#include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
@@ -1210,6 +1211,70 @@ public:
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
+    }
+
+    /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction on the GPU (the
+    /// S2 divergence; backend.hpp dstat_block_reduce / include/steppe/dstat.hpp). Uploads
+    /// the resident Q/V [P × M] + the [4 × N] quadruple index table + the per-block
+    /// begin/size layout (from core::block_ranges, the X-3/B3 single-source inverse of
+    /// assign_blocks), runs the SNP-tile-batched kernel (one thread per (quadruple, block)
+    /// cell), and copies the tiny [N × n_block] numsum/densum/cnt back. Device-resident
+    /// (the deliverable): Q/V live in VRAM; the output is row-major like F4Blocks::x_blocks.
+    void dstat_block_reduce(const double* Q, const double* V, int P, long M,
+                            const int* block_id, int n_block,
+                            std::span<const int> quadruples,
+                            double* numsum, double* densum, double* cnt) override {
+        guard_device();
+        const int N = static_cast<int>(quadruples.size() / 4);
+        if (P <= 0 || M <= 0 || N <= 0 || n_block <= 0) return;
+
+        // Per-block contiguous SNP layout from block_id (the SINGLE-SOURCE inverse of
+        // assign_blocks; same primitive the f2 path uses). begin/size as int (M fits int
+        // by the same B22 guard the f2 path enforces upstream).
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+        std::vector<int> begin(static_cast<std::size_t>(n_block));
+        std::vector<int> size(static_cast<std::size_t>(n_block));
+        for (int b = 0; b < n_block; ++b) {
+            begin[static_cast<std::size_t>(b)] = static_cast<int>(ranges[static_cast<std::size_t>(b)].begin);
+            size[static_cast<std::size_t>(b)]  = static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+        }
+
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t nq = static_cast<std::size_t>(N) * 4u;
+        const std::size_t nb_out = static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
+
+        DeviceBuffer<double> dQ(pm), dV(pm);
+        DeviceBuffer<int> dQuad(nq);
+        DeviceBuffer<int> dBegin(static_cast<std::size_t>(n_block));
+        DeviceBuffer<int> dSize(static_cast<std::size_t>(n_block));
+        DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
+
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        launch_dstat_block_reduce(dQ.data(), dV.data(), P, M, dQuad.data(), N,
+                                  dBegin.data(), dSize.data(), n_block,
+                                  dNum.data(), dDen.data(), dCnt.data(), stream_.get());
+
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(numsum, dNum.data(), nb_out * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(densum, dDen.data(), nb_out * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(cnt, dCnt.data(), nb_out * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     }
 
     /// Probe the capability tier of THE device this backend is bound to (the

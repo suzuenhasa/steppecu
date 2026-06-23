@@ -19,6 +19,7 @@
 //      to_numpy exports `double` -> numpy float64. No GPU export, no float32 footgun.
 //   #4 column-major layout: the tensor is i + P*j + P*P*b (fstats.hpp); to_numpy exports
 //      F-contiguous (P, P, n_block) so arr[:,:,b] is slab b with no silent transpose.
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <exception>
@@ -40,12 +41,16 @@
 #include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/config.hpp"            // steppe::DeviceConfig
+#include "steppe/dstat.hpp"             // run_dstat + DstatResult (qpDstat Part B genotype-path D)
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f3.hpp"                // run_f3 + F3Result (the standalone-f3 binding)
 #include "steppe/f4.hpp"                // run_f4 + F4Result (the standalone-f4 binding)
 #include "steppe/f4ratio.hpp"           // run_f4ratio + F4RatioResult (the standalone-f4-ratio binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
+
+#include "io/geno_reader.hpp"           // io::GenoReader (qpDstat Part B P-axis order)
+#include "io/ind_reader.hpp"            // io::read_ind / PopSelection / IndPartition
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -222,6 +227,35 @@ nb::dict qpwave_to_dict(const steppe::QpWaveResult& r) {
 // binding resolves them back to NAMES (the facade reshapes to a DataFrame). NaN est/se/z/p
 // (a degenerate quartet) ride through as numpy NaN — the honest sentinel, never a fake 0.
 nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& pops) {
+    nb::dict d;
+    const auto names = [&pops](const std::vector<int>& idx) {
+        std::vector<std::string> out;
+        out.reserve(idx.size());
+        for (int i : idx)
+            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
+                              ? pops[static_cast<std::size_t>(i)]
+                              : std::string());
+        return out;
+    };
+    d["pop1"] = names(r.p1);
+    d["pop2"] = names(r.p2);
+    d["pop3"] = names(r.p3);
+    d["pop4"] = names(r.p4);
+    d["est"] = r.est;
+    d["se"] = r.se;
+    d["z"] = r.z;
+    d["p"] = r.p;
+    d["status"] = status_str(r.status);
+    d["precision"] = precision_str(r.precision_tag);
+    return d;
+}
+
+// DstatResult -> a Python dict of parallel arrays {pop1..pop4 (names),est,se,z,p}. IDENTICAL
+// shape to f4_to_dict (DstatResult mirrors F4Result; the genotype-path D est/se/z/p ARE the
+// AT2 D sign/Z/p convention). The result carries P-axis INDICES; `pops` is the name<->index
+// map so the binding resolves them back to NAMES. NaN est/se/z/p (a degenerate quadruple)
+// ride through as numpy NaN — the honest sentinel, never a fake 0.
+nb::dict dstat_to_dict(const steppe::DstatResult& r, const std::vector<std::string>& pops) {
     nb::dict d;
     const auto names = [&pops](const std::vector<int>& idx) {
         std::vector<std::string> out;
@@ -469,6 +503,83 @@ nb::dict run_qpdstat_py(F2Handle& h,
     return f4_to_dict(result, h.pops);
 }
 
+// run_dstat: the qpDstat Part-B genotype-path NORMALIZED-D. UNLIKE run_qpdstat (which reads
+// the f2 cache and reports f4), this reads the GENOTYPE TRIPLE prefix.{geno,snp,ind} directly
+// (the extract-f2 decode front-end + the per-SNP D kernel + the num/den block-jackknife), so
+// it does NOT take an F2Handle. It builds the P-axis from read_ind(MinN,1) (every population,
+// sorted ASC by label — IDENTICAL to run_dstat's internal decode), resolves the quadruple
+// names to that axis, builds resources for `device`, and runs the CUDA-free seam. Returns the
+// SAME dict {pop1..pop4,est,se,z,p} as run_qpdstat (the D convention). `blgsize` is MORGANS
+// (AT2 default 0.05). Faults (no device, missing files, CUDA runtime) raise (§1.3 / §5.2).
+nb::dict run_dstat_py(const std::string& prefix,
+                      const std::vector<std::array<std::string, 4>>& quadruples,
+                      double blgsize, int device) {
+    if (quadruples.empty()) raise_value("qpdstat (genotype): needs at least one (p1,p2,p3,p4) quadruple");
+    const std::string geno = prefix + ".geno";
+    const std::string snp = prefix + ".snp";
+    const std::string ind = prefix + ".ind";
+
+    // The pop UNION (the AT2 indvec): the DISTINCT names across every quadruple. run_dstat
+    // reads ONLY these (read_ind(Explicit{union}), NOT the whole prefix). The P axis is that
+    // Explicit partition (sorted ASC by label); the resolver below is built over the SAME
+    // read_ind(Explicit{union}) so its indices match run_dstat's decode exactly.
+    std::vector<std::string> pop_union;
+    for (const std::array<std::string, 4>& q : quadruples) {
+        for (const std::string& nm : q) {
+            if (std::find(pop_union.begin(), pop_union.end(), nm) == pop_union.end())
+                pop_union.push_back(nm);
+        }
+    }
+
+    std::vector<std::string> pops;  // the SORTED Explicit partition (the P axis order).
+    try {
+        steppe::io::GenoReader reader(geno);
+        const std::size_t n_present = reader.records_present();
+        steppe::io::PopSelection sel;
+        sel.mode = steppe::io::PopSelection::Mode::Explicit;
+        sel.labels = pop_union;
+        const steppe::io::IndPartition part = steppe::io::read_ind(ind, sel, n_present);
+        pops.reserve(part.groups.size());
+        for (const steppe::io::PopGroup& g : part.groups) pops.push_back(g.label);
+    } catch (const std::exception& e) {
+        raise_value(std::string("input error: ") + e.what());
+    }
+
+    const sa::PopResolver resolver(pops);
+    if (!resolver.valid()) raise_value(resolver.error());
+
+    std::vector<std::array<int, 4>> idx_quads;
+    idx_quads.reserve(quadruples.size());
+    for (const std::array<std::string, 4>& q : quadruples) {
+        std::array<int, 4> qi{};
+        for (int c = 0; c < 4; ++c) {
+            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
+            if (!rr.ok) throw nb::key_error(("quadruple pop: " + rr.error).c_str());
+            qi[static_cast<std::size_t>(c)] = rr.index;
+        }
+        idx_quads.push_back(qi);
+    }
+
+    steppe::DeviceConfig cfg;
+    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    steppe::DstatResult result;
+    try {
+        sd::Resources resources = sd::build_resources(cfg);
+        if (resources.gpus.empty()) {
+            raise_value(
+                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
+                "required)");
+        }
+        result = steppe::run_dstat(geno, snp, ind,
+                                   std::span<const std::string>(pop_union),
+                                   std::span<const std::array<int, 4>>(idx_quads),
+                                   blgsize, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
+    return dstat_to_dict(result, pops);
+}
+
 // run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
 // BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
 // input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
@@ -670,6 +781,16 @@ NB_MODULE(_core, m) {
           "is a list of (p1,p2,p3,p4) name tuples; returns a dict of parallel arrays "
           "{pop1,pop2,pop3,pop4,est,se,z,p}. The normalized-D magnitude needs a genotype "
           "prefix (Part B, not yet implemented).");
+
+    m.def("run_dstat", &run_dstat_py, "prefix"_a, "quadruples"_a, "blgsize"_a = 0.05,
+          "device"_a = 0,
+          "Genotype-path NORMALIZED-D (GPU; qpDstat Part B). Reads the genotype triple "
+          "<prefix>.{geno,snp,ind} directly (NOT the f2 cache): D = mean_snp(num)/mean_snp(den), "
+          "num=(a-b)(c-d), den=(a+b-2ab)(c+d-2cd) over per-SNP allele freqs, block-jackknifed. "
+          "`quadruples` is a list of (p1,p2,p3,p4) name tuples; `blgsize` is the block size in "
+          "MORGANS (AT2 default 0.05). Returns a dict of parallel arrays {pop1,pop2,pop3,pop4,"
+          "est,se,z,p} (the AT2 D sign/Z/p convention). Forced diploid + allsnps=TRUE + "
+          "autosomes-only are pinned (AT2 qpdstat_geno parity).");
 
     m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
           "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "

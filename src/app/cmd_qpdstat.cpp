@@ -22,6 +22,7 @@
 // continue); only faults return nonzero (cli-bindings.md §1.3, §4.4).
 #include "app/cmd_qpdstat.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <exception>
@@ -36,10 +37,15 @@
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
+#include "steppe/config.hpp"            // kCentimorgansPerMorgan (blgsize cM -> Morgans)
 #include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
+#include "steppe/dstat.hpp"             // steppe::run_dstat + DstatResult (qpDstat Part B, --prefix)
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f4.hpp"                // steppe::run_f4 + F4Result/options
+
+#include "io/geno_reader.hpp"           // io::GenoReader (records_present for the --prefix P-axis read)
+#include "io/ind_reader.hpp"            // io::read_ind / PopSelection (the --prefix P-axis order)
 
 namespace steppe::app {
 
@@ -97,18 +103,140 @@ namespace cfg = steppe::config;
     return true;
 }
 
+/// qpDstat Part B (--prefix): the genotype-path NORMALIZED-D magnitude. Reads the genotype
+/// triple PREFIX.{geno,snp,ind} through run_dstat (the extract-f2 decode front-end + the
+/// per-SNP D kernel + the num/den block-jackknife), emitting the SAME p1..p4,est,se,z,p table
+/// as the f2-path (REUSING emit_f4_result — the D est/se/z/p ARE the AT2 D sign/Z/p
+/// convention). The P-axis is read_ind(PopSelection::Explicit{the union of the quadruple
+/// pops}), sorted ASC by label — IDENTICAL to run_dstat's internal read, so the resolver
+/// indices line up. Forced diploid + allsnps=TRUE + autosomes_only are PINNED inside
+/// run_dstat (the AT2 qpdstat_geno parity). blgsize is config.blgsize_cm() -> Morgans.
+[[nodiscard]] int run_qpdstat_prefix(const cfg::RunConfig& config) {
+    const std::string& prefix = config.qpdstat_prefix();
+    const std::string geno = prefix + ".geno";
+    const std::string snp = prefix + ".snp";
+    const std::string ind = prefix + ".ind";
+
+    // ---- 1. Build the quartet name table (REUSE the existing builder) ----------------
+    std::vector<std::array<std::string, 4>> quartet_names;
+    std::string qerr;
+    if (!build_quartet_names(config, quartet_names, qerr)) {
+        std::fprintf(stderr, "steppe qpdstat: %s\n", qerr.c_str());
+        return cfg::kExitInvalidConfig;
+    }
+
+    // ---- 2. The pop UNION (the AT2 indvec) + resolve names -> indices against it ------
+    // run_dstat reads ONLY these populations (read_ind(Explicit{union}), NOT the whole
+    // prefix), so a 4-pop D over the giant 27594-ind PA prefix decodes a tiny P. The P axis
+    // is that Explicit partition, SORTED ASC by label; the resolver below is built over the
+    // SAME read_ind(Explicit{union}) so its indices match run_dstat's decode exactly. The
+    // union is the DISTINCT names across every quadruple (any order; read_ind sorts).
+    std::vector<std::string> pop_union;
+    for (const std::array<std::string, 4>& q : quartet_names) {
+        for (const std::string& nm : q) {
+            if (std::find(pop_union.begin(), pop_union.end(), nm) == pop_union.end())
+                pop_union.push_back(nm);
+        }
+    }
+
+    std::vector<std::string> pop_labels;  // the SORTED Explicit partition (the P axis order).
+    try {
+        io::GenoReader reader(geno);
+        const std::size_t n_present = reader.records_present();
+        io::PopSelection sel;
+        sel.mode = io::PopSelection::Mode::Explicit;
+        sel.labels = pop_union;
+        const io::IndPartition part = io::read_ind(ind, sel, n_present);
+        pop_labels.reserve(part.groups.size());
+        for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe qpdstat: input error: %s\n", e.what());
+        return cfg::kExitIoError;
+    }
+
+    const PopResolver resolver(pop_labels);
+    if (!resolver.valid()) {
+        std::fprintf(stderr, "steppe qpdstat: %s\n", resolver.error().c_str());
+        return cfg::kExitIoError;
+    }
+
+    std::vector<std::array<int, 4>> quadruples;
+    quadruples.reserve(quartet_names.size());
+    std::vector<std::string> l1, l2, l3, l4;
+    for (const std::array<std::string, 4>& q : quartet_names) {
+        std::array<int, 4> idx{};
+        for (int c = 0; c < 4; ++c) {
+            const ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
+            if (!rr.ok) {
+                std::fprintf(stderr, "steppe qpdstat: %s\n", rr.error.c_str());
+                return cfg::kExitInvalidConfig;
+            }
+            idx[static_cast<std::size_t>(c)] = rr.index;
+        }
+        quadruples.push_back(idx);
+        l1.push_back(resolver.label_at(idx[0]));
+        l2.push_back(resolver.label_at(idx[1]));
+        l3.push_back(resolver.label_at(idx[2]));
+        l4.push_back(resolver.label_at(idx[3]));
+    }
+
+    // ---- 3/4. build_resources -> run_dstat (the genotype-path D, GPU device-resident) -
+    // blgsize is the jackknife block size in MORGANS (AT2 blgsize default 0.05 ⇒ 5 cM).
+    const double blgsize_morgans = config.blgsize_cm() / kCentimorgansPerMorgan;
+    DstatResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (resources.gpus.empty()) {
+            std::fprintf(stderr,
+                         "steppe qpdstat: no CUDA device available (steppe is a GPU product; "
+                         "a CUDA-capable GPU is required)\n");
+            return cfg::kExitRuntimeError;
+        }
+        result = run_dstat(geno, snp, ind, std::span<const std::string>(pop_union),
+                           std::span<const std::array<int, 4>>(quadruples),
+                           blgsize_morgans, resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe qpdstat: device error: %s\n", e.what());
+        return cfg::kExitRuntimeError;
+    }
+
+    // ---- 5. Emit (CSV/TSV/JSON) — REUSE emit_f4_result via an F4Result shim -----------
+    // DstatResult mirrors F4Result (p1..p4,est,se,z,p); shim it across so the emitter +
+    // the f2-path output schema are IDENTICAL (the D est/se/z/p ARE the AT2 D convention).
+    OutputFormat fmt = OutputFormat::Csv;
+    if (!parse_output_format(config.format(), fmt)) {
+        std::fprintf(stderr, "steppe qpdstat: unknown --format '%s' (csv|tsv|json)\n",
+                     config.format().c_str());
+        return cfg::kExitInvalidConfig;
+    }
+    F4Result shim;
+    shim.p1 = result.p1; shim.p2 = result.p2; shim.p3 = result.p3; shim.p4 = result.p4;
+    shim.est = result.est; shim.se = result.se; shim.z = result.z; shim.p = result.p;
+    shim.status = result.status; shim.precision_tag = result.precision_tag;
+
+    if (config.out_file().empty()) {
+        emit_f4_result(std::cout, fmt, shim, l1, l2, l3, l4);
+    } else {
+        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "steppe qpdstat: cannot open --out file: %s\n",
+                         config.out_file().c_str());
+            return cfg::kExitIoError;
+        }
+        emit_f4_result(out, fmt, shim, l1, l2, l3, l4);
+    }
+    return cfg::exit_code_for(result.status);
+}
+
 }  // namespace
 
 int run_qpdstat_command(const cfg::RunConfig& config) {
-    // ---- 0. Part-B guard: --prefix (the normalized-D magnitude) is not yet implemented --
+    // ---- 0. --prefix BRANCH: the genotype-path NORMALIZED-D magnitude (Part B) --------
     // The --f2-dir path reports f4 (the AT2 f2-path convention, proven byte-identical to
-    // qpdstat f4mode); the normalized-D MAGNITUDE needs per-SNP genotypes (Part B).
+    // qpdstat f4mode); --prefix is the genotype-reading normalized-D (D = mean num / mean
+    // den over per-SNP allele freqs, block-jackknifed). KEEP --f2-dir Part A unchanged.
     if (!config.qpdstat_prefix().empty()) {
-        std::fprintf(stderr,
-                     "steppe qpdstat: --prefix (genotype-path normalized-D magnitude) is "
-                     "Part B, not yet implemented; --f2-dir reports f4 (the AT2 f2-path "
-                     "convention)\n");
-        return cfg::kExitInvalidConfig;
+        return run_qpdstat_prefix(config);
     }
 
     // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE the f4/qpwave path -----

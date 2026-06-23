@@ -1221,6 +1221,25 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+  # --- `steppe qpdstat --prefix` qpDstat Part-B golden gate (genotype-path NORMALIZED-D) --
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpdstat --prefix
+  # <STEPPE_AADR_ROOT>/converted_pa/v66_HO_pa` over ALL 60 quadruples of the genotype-path
+  # golden (csv/golden_fit0_dstat_geno.csv) and diffs the est/se/z table row-for-row at rtol
+  # 1e-6 — RUNNING ON THE GPU through the per-SNP D kernel + num/den block-jackknife (the S2
+  # divergence; NEVER the f2 cache). The est is the NORMALIZED D (~±0.06), distinct from the
+  # f2-path f4 (~10x smaller). AT2 reads only the needed individuals via indvec (steppe reads
+  # only the 9-pop union), so no physical subset is needed. SKIPs cleanly (exit 0) when no
+  # CUDA device is visible OR the PA prefix / golden is absent. Also exercises the
+  # single-quadruple --pops convenience. NO SYNTHETIC DATA (memory real-data-only).
+  add_executable(test_cli_dstat_geno cli/test_cli_dstat_geno.cpp)
+  target_link_libraries(test_cli_dstat_geno PRIVATE steppe::warnings)
+  add_dependencies(test_cli_dstat_geno steppe_app)
+  add_test(NAME cli_dstat_geno
+           COMMAND test_cli_dstat_geno
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
   # --- `steppe f3` standalone-f3 golden gate (fit-engine §6) ---------------------------
   # PLAIN C++ host TU (NO CUDA): the THREE-slab clone of the cli_f4 gate. Runs the BUILT
   # `steppe f3` over the COMMITTED real-AADR 9-pop f2 fixture (fixtures/f2_fit0_9pop.bin) for
@@ -1288,8 +1307,12 @@ if(STEPPE_BUILD_PYTHON)
   add_test(NAME py_qpadm
            COMMAND "${Python_EXECUTABLE}" -m pytest -v
                    "${CMAKE_CURRENT_SOURCE_DIR}/python")
+  # STEPPE_AADR_ROOT is passed so test_py_dstat_geno.py finds the raw TGENO prefix steppe
+  # reads (<root>/raw/v66.p1_HO.aadr.patch.PUB — the lossless transcode of the convertf-PA
+  # v66_HO_pa that AT2 generated the genotype-path D golden from); it SKIPs cleanly when that
+  # prefix is absent (the genotype-path data-absent guard).
   set_tests_properties(py_qpadm PROPERTIES
-      ENVIRONMENT "STEPPE_BINDINGS_DIR=${CMAKE_BINARY_DIR}/bindings")
+      ENVIRONMENT "STEPPE_BINDINGS_DIR=${CMAKE_BINARY_DIR}/bindings;STEPPE_AADR_ROOT=${STEPPE_AADR_ROOT}")
   # The CTest target depends on the extension via the build graph; CTest itself does not
   # build, so the `cmake --build` step (which builds _core) must precede `ctest`.
 endif()

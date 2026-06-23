@@ -16,8 +16,9 @@
 //
 // TIERS: est/se/z/p ALL TIGHT at rtol 1e-6 (atol 1e-9) — the qpdstat f2-path == f4, whose
 // regen cross-check measured max rel delta 1.36e-12, so 1e-6 is a comfortable gate. status
-// == "ok". Also exercises the single-quadruple --pops convenience AND the --prefix (Part B)
-// fail-fast (a clear not-yet-implemented message + nonzero exit).
+// == "ok". Also exercises the single-quadruple --pops convenience AND that --prefix routes to
+// the genotype-path branch (Part B, run_dstat; the real golden gate is cli_dstat_geno) —
+// a missing genotype prefix fail-fasts with an io error, NOT an f4 table.
 //
 // PLAIN C++ host TU (NO CUDA header): it spawns the steppe binary and parses stdout; the GPU
 // work happens inside that child. SKIPs cleanly (exit 0) when no CUDA device is visible —
@@ -413,26 +414,29 @@ int main(int argc, char** argv) {
         check_true("json status ok", t.find("\"status\": \"ok\"") != std::string::npos);
     }
 
-    // ---------------- --prefix (Part B) fail-fast (the not-yet-implemented guard) -------
-    // qpdstat --prefix must fail fast with a clear "Part B not yet implemented" message and a
-    // NONZERO exit (the normalized-D magnitude needs per-SNP genotypes; --f2-dir reports f4).
+    // ---------------- --prefix (Part B) is the GENOTYPE-PATH branch (now implemented) ----
+    // qpdstat --prefix now runs the genotype-path normalized-D (run_dstat). With a MISSING
+    // genotype prefix it must fail fast (nonzero exit + an input/io error), NOT report f4 —
+    // proving --prefix routes to the genotype branch (the real golden-path gate is the
+    // separate cli_dstat_geno test, which needs the real AADR triple). The Part-A f2-dir path
+    // above is unchanged.
     {
         const DRow& g0 = golden.front();
         const std::string pops_arg = g0.p1 + "," + g0.p2 + "," + g0.p3 + "," + g0.p4;
         const RunResult pb = run_steppe(steppe_bin,
-            {"qpdstat", "--f2-dir", dir.string(), "--pops", pops_arg,
+            {"qpdstat", "--pops", pops_arg,
              "--prefix", "/tmp/no_such_genotype_prefix", "--device", "0"},
             tmp_root);
-        check_true("--prefix Part B nonzero exit", pb.exit_code != 0);
-        check_true("--prefix Part B message",
-                   pb.stdout_text.find("Part B") != std::string::npos &&
-                   pb.stdout_text.find("not yet implemented") != std::string::npos);
+        check_true("--prefix missing-geno nonzero exit", pb.exit_code != 0);
+        check_true("--prefix routes to the genotype branch (input/io error, NOT an f4 table)",
+                   pb.stdout_text.find("error") != std::string::npos &&
+                   pb.stdout_text.find("est") == std::string::npos);
     }
 
     std::filesystem::remove_all(tmp_root, ec);
 
     if (g_failures == 0) {
-        std::printf("\nRESULT: PASS (60 qpdstat quadruples reproduced through the GPU; CSV + JSON + --pops + --prefix Part-B guard)\n");
+        std::printf("\nRESULT: PASS (60 qpdstat quadruples reproduced through the GPU; CSV + JSON + --pops + --prefix genotype-branch routing)\n");
         return 0;
     }
     std::printf("\nRESULT: FAIL (%d check(s) failed)\n", g_failures);
