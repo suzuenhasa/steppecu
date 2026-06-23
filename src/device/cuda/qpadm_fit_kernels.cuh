@@ -55,6 +55,22 @@ void launch_assemble_f4_quartets_gather(const double* f2, int P,
                                         const int* d_surv,
                                         double* dX, cudaStream_t stream);
 
+/// STANDALONE f3 triple-gather (the run_f3 seam; fit-engine §6) — the THREE-slab clone of
+/// launch_assemble_f4_quartets_gather. Build the per-block f3 matrix dX[k + N*b] whose m
+/// axis is the N TRIPLES — each triple k has its OWN (C,A,B). `d_triples` is the H2D'd
+/// flattened index triple array (length 3*N, triple k at [3*k .. 3*k+2] = {p1=C,p2=A,p3=B}).
+/// Per (k, b):
+///   dX[k + N*b] = 0.5*( f2(C,A,b) + f2(C,B,b) - f2(A,B,b) )
+/// the THREE-slab AT2 f3 identity — the ONE new math seam f3 adds over f4. Reads the
+/// RESIDENT f2 (column-major i + P*j + P*P*b) — NO D2H. Native FP64 (the cancellation
+/// carve-out). F1/OQ-12 SURVIVOR COMPACTION: `nb` is the SURVIVOR block count and `d_surv`
+/// (length nb, ASCENDING) maps a compacted survivor index to its ORIGINAL resident block
+/// id; d_surv==nullptr ⇒ identity.
+void launch_assemble_f3_triples_gather(const double* f2, int P,
+                                       const int* d_triples, int N, int nb,
+                                       const int* d_surv,
+                                       double* dX, cudaStream_t stream);
+
 /// F1 / OQ-12 keep-mask: one thread per resident block writes d_keep[b]=0 iff block b
 /// is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair Vpair>0 — AT2 read_f2's
 /// `!is.finite` drop), else 1. A fully-zero slab is the "no Vpair info" sentinel (the

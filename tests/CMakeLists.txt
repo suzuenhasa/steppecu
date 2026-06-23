@@ -1204,6 +1204,21 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+  # --- `steppe f3` standalone-f3 golden gate (fit-engine §6) ---------------------------
+  # PLAIN C++ host TU (NO CUDA): the THREE-slab clone of the cli_f4 gate. Runs the BUILT
+  # `steppe f3` over the COMMITTED real-AADR 9-pop f2 fixture (fixtures/f2_fit0_9pop.bin) for
+  # ALL 36 triples of the fixture-matched golden (csv/golden_fit0_f3_readf2.csv) and diffs
+  # the est/se/z/p table row-for-row at rtol 1e-6 — RUNNING ON THE GPU. Also exercises the
+  # single-triple --pops convenience. SKIPs cleanly (exit 0) when no CUDA device is visible.
+  add_executable(test_cli_f3 cli/test_cli_f3.cpp)
+  target_link_libraries(test_cli_f3
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_f3 steppe_app)
+  add_test(NAME cli_f3
+           COMMAND test_cli_f3
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
   # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
   # triple (STEPPE_AADR_ROOT/raw/<prefix>.{geno,snp,ind}) for the golden pop sets, then

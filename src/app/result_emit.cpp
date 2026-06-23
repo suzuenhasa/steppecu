@@ -507,6 +507,55 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     os << "}\n";
 }
 
+// STANDALONE f3 table emitter — the THREE-column clone of emit_f4_csv (drop pop4). The
+// fixture-matched golden schema (golden_fit0_f3_readf2.csv): pop1,pop2,pop3,est,se,z,p.
+// REUSES the file-static format primitives verbatim (fmt_double/json_double/csv_quote/
+// json_quote), so a NaN est/se/z/p (a degenerate triple) emits the SAME NA/null sentinel.
+// No `# section:` prefix — a single flat table (bare header + data rows), so a row-for-row
+// CSV diff against the golden is direct.
+void emit_f3_csv(std::ostream& os, const F3Result& r,
+                 const std::vector<std::string>& p1, const std::vector<std::string>& p2,
+                 const std::vector<std::string>& p3, char sep) {
+    os << "\"pop1\"" << sep << "\"pop2\"" << sep << "\"pop3\""
+       << sep << "\"est\"" << sep << "\"se\"" << sep << "\"z\"" << sep << "\"p\"\n";
+    for (std::size_t k = 0; k < r.est.size(); ++k) {
+        const auto at = [k](const std::vector<std::string>& v) {
+            return k < v.size() ? v[k] : std::string();
+        };
+        os << csv_quote(at(p1)) << sep << csv_quote(at(p2)) << sep
+           << csv_quote(at(p3)) << sep
+           << fmt_double(r.est[k]) << sep << fmt_double(r.se[k]) << sep
+           << fmt_double(r.z[k]) << sep << fmt_double(r.p[k]) << "\n";
+    }
+}
+
+void emit_f3_json(std::ostream& os, const F3Result& r,
+                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
+                  const std::vector<std::string>& p3) {
+    os << "{\n";
+    os << "  \"triples\": [\n";
+    for (std::size_t k = 0; k < r.est.size(); ++k) {
+        const auto at = [k](const std::vector<std::string>& v) {
+            return k < v.size() ? v[k] : std::string();
+        };
+        os << "    { \"pop1\": " << json_quote(at(p1))
+           << ", \"pop2\": " << json_quote(at(p2))
+           << ", \"pop3\": " << json_quote(at(p3))
+           << ", \"est\": " << json_double(r.est[k])
+           << ", \"se\": " << json_double(r.se[k])
+           << ", \"z\": " << json_double(r.z[k])
+           << ", \"p\": " << json_double(r.p[k]) << " }"
+           << (k + 1 < r.est.size() ? ",\n" : "\n");
+    }
+    os << "  ],\n";
+    os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
+    os << "  \"precision\": " << json_quote(
+        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
+        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
+                                                          : "fp64") << "\n";
+    os << "}\n";
+}
+
 }  // namespace
 
 bool parse_output_format(const std::string& token, OutputFormat& out) {
@@ -571,6 +620,24 @@ void emit_f4_result(std::ostream& os, OutputFormat fmt,
             break;
         case OutputFormat::Json:
             emit_f4_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels);
+            break;
+    }
+}
+
+void emit_f3_result(std::ostream& os, OutputFormat fmt,
+                    const F3Result& result,
+                    const std::vector<std::string>& p1_labels,
+                    const std::vector<std::string>& p2_labels,
+                    const std::vector<std::string>& p3_labels) {
+    switch (fmt) {
+        case OutputFormat::Csv:
+            emit_f3_csv(os, result, p1_labels, p2_labels, p3_labels, ',');
+            break;
+        case OutputFormat::Tsv:
+            emit_f3_csv(os, result, p1_labels, p2_labels, p3_labels, '\t');
+            break;
+        case OutputFormat::Json:
+            emit_f3_json(os, result, p1_labels, p2_labels, p3_labels);
             break;
     }
 }

@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "steppe/f3.hpp"     // steppe::F3Result (the standalone-f3 emitter)
 #include "steppe/f4.hpp"     // steppe::F4Result (the standalone-f4 emitter)
 #include "steppe/qpadm.hpp"  // steppe::QpAdmResult
 
@@ -107,6 +108,21 @@ void emit_f4_result(std::ostream& os, OutputFormat fmt,
                     const std::vector<std::string>& p2_labels,
                     const std::vector<std::string>& p3_labels,
                     const std::vector<std::string>& p4_labels);
+
+/// Serialize a STANDALONE f3 result table (the `steppe f3` command) to `os` in `fmt` —
+/// ONE ROW PER TRIPLE, in input order, exactly the fixture-matched golden schema
+/// (golden_fit0_f3_readf2.csv): columns pop1,pop2,pop3,est,se,z,p so the parity test diffs
+/// row-for-row. The THREE-slab clone of emit_f4_result (drop the pop4 column). `p1..p3
+/// labels` are the resolved population names of each triple (len == result.est; the result
+/// carries the indices, the app resolves them back to names). This REUSES the SAME
+/// OutputFormat / fmt_double / json_double / csv_quote / json_quote / status_str format
+/// primitives emit_f4_result reuses (no compute / no format duplicated). A domain-outcome
+/// row (NaN est/se) emits NA/null sentinels, never throws.
+void emit_f3_result(std::ostream& os, OutputFormat fmt,
+                    const F3Result& result,
+                    const std::vector<std::string>& p1_labels,
+                    const std::vector<std::string>& p2_labels,
+                    const std::vector<std::string>& p3_labels);
 
 }  // namespace steppe::app
 

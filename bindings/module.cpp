@@ -41,6 +41,7 @@
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/config.hpp"            // steppe::DeviceConfig
 #include "steppe/error.hpp"             // steppe::Status
+#include "steppe/f3.hpp"                // run_f3 + F3Result (the standalone-f3 binding)
 #include "steppe/f4.hpp"                // run_f4 + F4Result (the standalone-f4 binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
@@ -243,6 +244,33 @@ nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& p
     return d;
 }
 
+// F3Result -> a Python dict of parallel arrays {pop1,pop2,pop3 (names),est,se,z,p}. The
+// THREE-column clone of f4_to_dict (drop pop4). The result carries P-axis INDICES; `pops`
+// is the handle's name<->index map so the binding resolves them back to NAMES (the facade
+// reshapes to a DataFrame). NaN est/se/z/p (a degenerate triple) ride through as numpy NaN.
+nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::string>& pops) {
+    nb::dict d;
+    const auto names = [&pops](const std::vector<int>& idx) {
+        std::vector<std::string> out;
+        out.reserve(idx.size());
+        for (int i : idx)
+            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
+                              ? pops[static_cast<std::size_t>(i)]
+                              : std::string());
+        return out;
+    };
+    d["pop1"] = names(r.p1);
+    d["pop2"] = names(r.p2);
+    d["pop3"] = names(r.p3);
+    d["est"] = r.est;
+    d["se"] = r.se;
+    d["z"] = r.z;
+    d["p"] = r.p;
+    d["status"] = status_str(r.status);
+    d["precision"] = precision_str(r.precision_tag);
+    return d;
+}
+
 // ---- read_f2: the f2-dir loader -> the opaque F2Handle ----------------------------
 // Returns a raw heap pointer; the binding uses rv_policy::take_ownership so Python owns
 // the F2Handle and frees it (with its cached Resources) at GC. (F2Handle is move-only via
@@ -370,6 +398,45 @@ nb::dict run_f4_py(F2Handle& h,
     return f4_to_dict(result, h.pops);
 }
 
+// run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
+// BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
+// input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
+// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives only
+// here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+nb::dict run_f3_py(F2Handle& h,
+                   const std::vector<std::array<std::string, 3>>& triples) {
+    if (triples.empty()) raise_value("f3: needs at least one (C,A,B) triple");
+
+    const sa::PopResolver resolver(h.pops);
+    if (!resolver.valid()) raise_value(resolver.error());
+
+    std::vector<std::array<int, 3>> idx_triples;
+    idx_triples.reserve(triples.size());
+    for (const std::array<std::string, 3>& t : triples) {
+        std::array<int, 3> ti{};
+        for (int c = 0; c < 3; ++c) {
+            const sa::ResolveResult rr = resolver.resolve(t[static_cast<std::size_t>(c)]);
+            if (!rr.ok) throw nb::key_error(("triple pop: " + rr.error).c_str());
+            ti[static_cast<std::size_t>(c)] = rr.index;
+        }
+        idx_triples.push_back(ti);
+    }
+
+    steppe::QpAdmOptions opts;  // f3 uses fudge=0 internally (run_f3); opts is the default.
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::F3Result result;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        result = steppe::run_f3(
+            dev_f2, std::span<const std::array<int, 3>>(idx_triples), opts, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
+    return f3_to_dict(result, h.pops);
+}
+
 // qpadm_search: a list of explicit (left, right) models against the SAME resident f2,
 // fit BATCHED (run_qpadm_search). Returns one dict per model in INPUT order
 // (results[k].model_index resolves the k-th input; qpadm.hpp:190-191).
@@ -485,6 +552,10 @@ NB_MODULE(_core, m) {
     m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
           "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "
           "tuples; returns a dict of parallel arrays {pop1,pop2,pop3,pop4,est,se,z,p}.");
+
+    m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
+          "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "
+          "returns a dict of parallel arrays {pop1,pop2,pop3,est,se,z,p}.");
 
     m.def("run_qpadm_search", &run_qpadm_search_py, "f2"_a, "target"_a, "lefts"_a,
           "right"_a, "rank"_a = -1, "fudge"_a = 1e-4, "als_iterations"_a = 20,

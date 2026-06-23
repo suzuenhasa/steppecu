@@ -24,10 +24,12 @@ __all__ = [
     "QpAdmResult",
     "QpWaveResult",
     "F4Result",
+    "F3Result",
     "read_f2",
     "qpadm",
     "qpwave",
     "f4",
+    "f3",
     "qpadm_search",
 ]
 
@@ -248,6 +250,46 @@ class F4Result:
         return f"F4Result(n_quartets={len(self.est)}, status={self.status.name})"
 
 
+class F3Result:
+    """A standalone f3 result table (one row per triple), pandas-shaped. The THREE-column
+    clone of F4Result (drop pop4). Built from the flat dict of parallel arrays the compiled
+    layer returns; ``.table`` is a tidy DataFrame with the golden columns pop1,pop2,pop3,
+    est,se,z,p (admixtools::f3 parity)."""
+
+    def __init__(self, d: dict):
+        self._d = d
+        self.pop1: list[str] = list(d["pop1"])
+        self.pop2: list[str] = list(d["pop2"])
+        self.pop3: list[str] = list(d["pop3"])
+        self.est: list[float] = list(d["est"])
+        self.se: list[float] = list(d["se"])
+        self.z: list[float] = list(d["z"])
+        self.p: list[float] = list(d["p"])
+        self.status: Status = Status._from(d["status"])
+        self.precision: str = d["precision"]
+
+    @property
+    def table(self):  # -> pandas.DataFrame [pop1, pop2, pop3, est, se, z, p]
+        pd = _require_pandas()
+        return pd.DataFrame(
+            {
+                "pop1": list(self.pop1),
+                "pop2": list(self.pop2),
+                "pop3": list(self.pop3),
+                "est": list(self.est),
+                "se": list(self.se),
+                "z": list(self.z),
+                "p": list(self.p),
+            }
+        )
+
+    def __len__(self) -> int:
+        return len(self.est)
+
+    def __repr__(self) -> str:
+        return f"F3Result(n_triples={len(self.est)}, status={self.status.name})"
+
+
 class F2Blocks:
     """An opaque f2-dir handle: the host f2 tensor + the P pop labels (P-axis order).
     Wraps the compiled ``_core.F2Handle``; build_resources is cached on the handle so the
@@ -362,6 +404,34 @@ def f4(
 
     d = _core.run_f4(f2._h, quads)
     res = F4Result(d)
+    return res.table if as_dataframe else res
+
+
+def f3(
+    f2: F2Blocks,
+    triples: list[Any],
+    *,
+    as_dataframe: bool = False,
+):
+    """Standalone f3(C;A,B) statistic on the GPU — est/se/z/p per triple (NO ALS / NO rank;
+    the AT2 weighted block-jackknife f3 + the jackknife-diagonal SE). The THREE-tuple clone
+    of f4.
+
+    ``triples`` is a list where each entry is a ``(C, A, B)`` name tuple/list (or a
+    ``{"pop1":..,"pop2":..,"pop3":..}`` dict; pop1=C is the apex/outgroup/target). Returns an
+    ``F3Result`` (or, when ``as_dataframe=True``, the tidy ``F3Result.table`` DataFrame:
+    pop1,pop2,pop3,est,se,z,p). Outgroup-f3 = f3(Outgroup;A,B) (shared drift); admixture-f3 =
+    f3(Target;Src1,Src2) (negative ⇒ admixture). Unknown pop names raise a clean KeyError."""
+    trips: list[tuple[str, str, str]] = []
+    for t in triples:
+        if isinstance(t, dict):
+            trips.append((t["pop1"], t["pop2"], t["pop3"]))
+        else:
+            c, a, b = t  # exactly 3 names (raises on a malformed tuple)
+            trips.append((c, a, b))
+
+    d = _core.run_f3(f2._h, trips)
+    res = F3Result(d)
     return res.table if as_dataframe else res
 
 

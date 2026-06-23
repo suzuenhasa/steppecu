@@ -38,6 +38,7 @@ enum class Command {
     QpWave,
     QpAdmRotate,
     F4,
+    F3,
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid

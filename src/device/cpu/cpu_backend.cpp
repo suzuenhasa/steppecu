@@ -560,6 +560,71 @@ public:
         return out;
     }
 
+    /// STANDALONE f3 triple assemble (run_f3 seam; fit-engine §6) — the THREE-slab clone of
+    /// assemble_f4_quartets. Build ONE F4Blocks whose m axis is the N input TRIPLES. For
+    /// triple k = (C=p1, A=p2, B=p3) and block b:
+    ///   X[k,b] = 0.5*( f2(C,A,b) + f2(C,B,b) - f2(A,B,b) )
+    /// the THREE-slab AT2 f3 identity (vs the four-slab quartet diff) — the ONE new math
+    /// seam f3 adds. nl is set to N and nr to 1 so m = nl*nr = N, and compute_loo_and_total
+    /// / jackknife_cov consume the m-batch unchanged. The SURVIVOR-block drop (F1 / OQ-12,
+    /// AT2 read_f2(remove_na=TRUE)) is reused verbatim. Native FP64 (the cancellation
+    /// carve-out, OQ-5; ignores `precision`).
+    [[nodiscard]] F4Blocks assemble_f3_triples(const F2BlockTensor& f2,
+                                               std::span<const int> triples,
+                                               const Precision& precision) override {
+        (void)precision;  // native FP64 reference (the cancellation-sensitive f-stat diff)
+
+        const int N = static_cast<int>(triples.size()) / 3;  // triple count (m axis)
+        const int nb = f2.n_block;
+        const int P = f2.P;
+        const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+
+        F4Blocks out;
+        out.nl = N;   // m = nl*nr = N triples (the batched f3 m-axis convention)
+        out.nr = 1;
+        const std::size_t m = static_cast<std::size_t>(N);
+        if (N <= 0 || nb <= 0) { out.n_block = 0; return out; }
+
+        // F1 / OQ-12 — the SAME model-independent survivor-block set assemble_f4_quartets
+        // builds (AT2 read_f2(remove_na=TRUE)); reused verbatim so the f3 path drops the
+        // same blocks. With no Vpair / no missing block this is 0..nb-1.
+        const std::vector<int> surv = survivor_blocks(f2.vpair, P, nb, f2.block_sizes);
+        const int nb_s = static_cast<int>(surv.size());
+        out.n_block = nb_s;
+        out.block_sizes.assign(static_cast<std::size_t>(nb_s), 0);
+        for (int bs = 0; bs < nb_s; ++bs)
+            out.block_sizes[static_cast<std::size_t>(bs)] =
+                f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        if (nb_s <= 0) return out;  // all blocks missing — degenerate (caller-gated)
+
+        // f2 accessor: f2[i + P*j + P*P*b].
+        const auto f2at = [&](int i, int j, int b) -> double {
+            return f2.f2[static_cast<std::size_t>(i) +
+                         static_cast<std::size_t>(P) * static_cast<std::size_t>(j) +
+                         slab * static_cast<std::size_t>(b)];
+        };
+        for (int k = 0; k < N; ++k) {
+            const int pc = triples[static_cast<std::size_t>(3 * k) + 0];  // C (apex/outgroup/target)
+            const int pa = triples[static_cast<std::size_t>(3 * k) + 1];  // A
+            const int pb = triples[static_cast<std::size_t>(3 * k) + 2];  // B
+            for (int bs = 0; bs < nb_s; ++bs) {
+                const int b = surv[static_cast<std::size_t>(bs)];
+                // The THREE-slab f3 identity:
+                //   X = 0.5*( f2(C,A) + f2(C,B) - f2(A,B) )
+                const double x = 0.5 * (f2at(pc, pa, b) + f2at(pc, pb, b) -
+                                        f2at(pa, pb, b));
+                out.x_blocks[static_cast<std::size_t>(k) +
+                             m * static_cast<std::size_t>(bs)] = x;
+            }
+        }
+
+        // est_to_loo + the AT2 jackknife point estimate over the SURVIVOR blocks — the
+        // SAME compute_loo_and_total assemble_f4_quartets uses (it reads x.nl*x.nr == m).
+        compute_loo_and_total(out, out.block_sizes);
+        return out;
+    }
+
     /// S4 — weighted block-jackknife covariance (design §4 S4; AT2
     /// jack_pairarr_stats). Consumes the per-entry LOO replicates carried on
     /// F4Blocks (x_loo) and the AT2 point estimate (x_total). Builds the xtau

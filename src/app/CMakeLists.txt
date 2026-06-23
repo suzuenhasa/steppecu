@@ -34,6 +34,7 @@ add_executable(steppe_app
     cmd_qpadm.cpp      # M(cli-1): the qpAdm GPU fit command
     cmd_qpwave.cpp     # M(cli-2): the qpWave rank-sweep command (no target; left[0]=ref)
     cmd_f4.cpp         # Standalone f4 statistic (run_f4): est/se/z/p per quartet
+    cmd_f3.cpp         # Standalone f3 statistic (run_f3): est/se/z/p per triple
     cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
     cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command
     f2_dir_writer.cpp  # M(cli-4): the f2_blocks dir WRITER (STPF2BK1 REAL vpair + sidecars)

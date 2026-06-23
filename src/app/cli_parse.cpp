@@ -21,6 +21,7 @@
 #include <CLI/CLI.hpp>
 
 #include "app/cmd_extract_f2.hpp"
+#include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpwave.hpp"
@@ -186,6 +187,30 @@ void add_f4_quartet_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
+// Bind the `f3` triple flags: the THREE-slab clone of add_f4_quartet_flags (drop --pop4).
+// The ROW-ALIGNED --pop1/--pop2/--pop3 columns (triple k = (pop1[k]=C, pop2[k]=A,
+// pop3[k]=B)) AND the single-/multi-triple --pops convenience (names in groups of 3). All
+// comma/space delimited. f3 has NO target/left/right (it is a bare triple stat), so this is
+// the ONE new flag helper the command needs (cli-bindings.md §4.1; the rest is reused).
+void add_f3_triple_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
+            "Triple column 1 (C, the f3 apex/outgroup/target), row-aligned with --pop2/3")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
+            "Triple column 2 (A, the f3 first arg)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
+            "Triple column 3 (B, the f3 second arg)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
+            "Triple(s) as names in groups of 3: C,A,B[,C,A,B,...]")
+        ->delimiter(',');
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -201,6 +226,7 @@ int run_cli(int argc, char** argv) {
     CliArgs rotate_args;
     CliArgs extract_args;
     CliArgs f4_args;
+    CliArgs f3_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -262,6 +288,26 @@ int run_cli(int argc, char** argv) {
             // The real GPU f4 (read dir -> resolve quartets -> upload -> run_f4 -> emit the
             // pop1,pop2,pop3,pop4,est,se,z,p table). Mirrors how `qpadm`/`qpwave` dispatch.
             std::exit(run_f4_command(*config));
+        });
+    }
+
+    // ---- f3 (standalone f3 statistic; fit-engine §6) ----------------------------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "f3", "Standalone f3(C;A,B) statistic (est/se/z/p per triple)");
+        f3_args.command = Command::F3;
+        add_f2_dir_flag(sub, f3_args, "The f2_blocks directory");
+        // f3 takes TRIPLES, not target/left/right: the row-aligned --pop1..--pop3 columns
+        // OR the --pops 3-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
+        add_f3_triple_flags(sub, f3_args);
+        add_output_flags(sub, f3_args);
+        add_common_flags(sub, f3_args);
+        sub->callback([&]() {
+            auto config = build_config(f3_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The real GPU f3 (read dir -> resolve triples -> upload -> run_f3 -> emit the
+            // pop1,pop2,pop3,est,se,z,p table). Mirrors how `qpadm`/`qpwave`/`f4` dispatch.
+            std::exit(run_f3_command(*config));
         });
     }
 

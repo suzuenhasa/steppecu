@@ -634,6 +634,36 @@ __global__ void assemble_f4_quartets_gather_kernel(const double* __restrict__ f2
     }
 }
 
+// --- STANDALONE f3 triple-gather kernel ------------------------------------------
+// The THREE-slab clone of assemble_f4_quartets_gather_kernel. One thread per (k, bs),
+// k in 0..N-1 (the triple/m index), bs in 0..nb-1 (the SURVIVOR block index). Each
+// triple has its OWN (C,A,B) from d_triples (the flattened 3*N triple array). Writes
+// the dense compacted dX[k + N*bs] reading the resident f2 at the ORIGINAL block
+// b = d_surv[bs] (d_surv==nullptr ⇒ identity). Native FP64; the 3-slab combine is the
+// cancellation-sensitive f-stat difference (§12).
+//   dX[k + N*bs] = 0.5*( f2(C,A,b) + f2(C,B,b) - f2(A,B,b) )
+__global__ void assemble_f3_triples_gather_kernel(const double* __restrict__ f2, int P,
+                                                  const int* __restrict__ d_triples,
+                                                  int N, int nb,
+                                                  const int* __restrict__ d_surv,
+                                                  double* __restrict__ dX) {
+    const long total = static_cast<long>(N) * static_cast<long>(nb);
+    for (long idx = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int k  = static_cast<int>(idx % N);            // triple (m) index
+        const int bs = static_cast<int>(idx / N);            // compacted survivor index
+        const int b  = d_surv ? d_surv[bs] : bs;             // original resident block id
+        const int pc = d_triples[3 * k + 0];                 // C (apex/outgroup/target)
+        const int pa = d_triples[3 * k + 1];                 // A
+        const int pb = d_triples[3 * k + 2];                 // B
+        const long slab = static_cast<long>(P) * static_cast<long>(P) * b;
+        const auto at = [&](int a, int c) -> double {
+            return f2[static_cast<long>(a) + static_cast<long>(P) * c + slab];
+        };
+        dX[idx] = 0.5 * (at(pc, pa) + at(pc, pb) - at(pa, pb));
+    }
+}
+
 // F1 / OQ-12 keep-mask: one thread per resident block b scans the [P×P] Vpair slab and
 // writes d_keep[b] = 0 iff the block is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair
 // Vpair>0) — AT2 read_f2's `!is.finite` drop. A fully-zero slab is the "no Vpair info"
@@ -1560,6 +1590,19 @@ void launch_assemble_f4_quartets_gather(const double* f2, int P,
     const int grid = static_cast<int>((total + block - 1) / block);
     assemble_f4_quartets_gather_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_quartets, N, nb, d_surv, dX);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_assemble_f3_triples_gather(const double* f2, int P,
+                                       const int* d_triples, int N, int nb,
+                                       const int* d_surv,
+                                       double* dX, cudaStream_t stream) {
+    const long total = static_cast<long>(N) * nb;
+    if (total <= 0) return;
+    const int block = 256;
+    const int grid = static_cast<int>((total + block - 1) / block);
+    assemble_f3_triples_gather_kernel<<<grid, block, 0, stream>>>(
+        f2, P, d_triples, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

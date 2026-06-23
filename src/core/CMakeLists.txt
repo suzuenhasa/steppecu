@@ -80,6 +80,9 @@ add_library(steppe_core STATIC
     # Standalone f4 statistic (run_f4): the SIBLING of run_qpwave — REUSES
     # assemble_f4_quartets + jackknife_cov (fit-engine §6), no ALS/rank, ZERO new math.
     qpadm/f4.cpp
+    # Standalone f3 statistic (run_f3): the THREE-slab SIBLING of run_f4 — REUSES
+    # jackknife_cov (fit-engine §6), no ALS/rank; the ONE new math seam is the 3-slab combine.
+    qpadm/f3.cpp
     # M(fit-6) S8 ROTATION: the model-space search orchestrator (run_qpadm_search +
     # the base fit_models_batched default) + the GPU-free model->device shard planner.
     qpadm/model_search.cpp

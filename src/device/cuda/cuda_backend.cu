@@ -1613,6 +1613,114 @@ public:
             "CpuBackend oracle door");
     }
 
+    /// STANDALONE f3 triple assemble (run_f3 seam; fit-engine §6) — the THREE-slab clone of
+    /// assemble_f4_quartets, the GPU mirror of the CpuBackend oracle. Build ONE F4Blocks
+    /// whose m axis is the N input TRIPLES (nl=N, nr=1), reading the RESIDENT f2 (zero D2H
+    /// of the tensor). Each triple column gathers its OWN three-slab combine via
+    /// launch_assemble_f3_triples_gather; the est_to_loo / x_total / tot_line reduction
+    /// REUSES launch_f4_loo_total (it reads only m), so the jackknife pipeline downstream is
+    /// byte-identical to the f4/fit path. The SURVIVOR-block drop (F1/OQ-12) reuses
+    /// device_survivor_blocks. Native FP64 (cancellation carve-out).
+    [[nodiscard]] F4Blocks assemble_f3_triples(
+        const steppe::device::DeviceF2Blocks& f2,
+        std::span<const int> triples,
+        const Precision& precision) override {
+        (void)precision;  // native FP64 (the cancellation-sensitive f-stat diff)
+        guard_device();
+
+        const int N = static_cast<int>(triples.size()) / 3;  // triple count (m axis)
+        const int nb = f2.n_block;
+        const int P = f2.P;
+
+        F4Blocks out;
+        out.nl = N;  // m = nl*nr = N (the batched f3 m-axis convention; matches the oracle)
+        out.nr = 1;
+        const std::size_t m = static_cast<std::size_t>(N);
+        out.x_total.assign(m, 0.0);
+        tot_line_.assign(m, 0.0);
+        if (N <= 0 || nb <= 0 || f2.f2_device() == nullptr) {
+            out.n_block = 0;
+            return out;
+        }
+
+        // F1 / OQ-12 SURVIVOR drop (the SAME on-device keep-mask the fit/f4 path uses).
+        const std::vector<int> surv = device_survivor_blocks(f2, nb, P);
+        const int nb_s = static_cast<int>(surv.size());
+        out.n_block = nb_s;
+        out.block_sizes.assign(static_cast<std::size_t>(nb_s), 0);
+        for (int bs = 0; bs < nb_s; ++bs)
+            out.block_sizes[static_cast<std::size_t>(bs)] =
+                f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+        out.x_blocks.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        out.x_loo.assign(m * static_cast<std::size_t>(nb_s), 0.0);
+        if (nb_s <= 0) return out;  // all blocks missing — degenerate (caller-gated)
+
+        const bool dropped = (nb_s != nb);
+
+        // H2D the flattened triple array (3*N) + the SURVIVOR block sizes + (only on a real
+        // drop) the survivor map.
+        DeviceBuffer<int> dTriples(triples.size());
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
+        DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTriples.data(), triples.data(),
+                                          triples.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), out.block_sizes.data(),
+                                          static_cast<std::size_t>(nb_s) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        if (dropped)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
+                                              static_cast<std::size_t>(nb_s) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+
+        DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dTotal(m);
+        DeviceBuffer<double> dTotLine(m);
+
+        // S3 per-triple gather (reads RESIDENT f2; native FP64 3-slab combine).
+        launch_assemble_f3_triples_gather(f2.f2_device(), P, dTriples.data(), N, nb_s,
+                                          dropped ? dSurv.data() : nullptr,
+                                          dX.data(), stream_.get());
+
+        long long n_ll = 0;
+        for (int v : out.block_sizes) n_ll += v;
+        const double n = static_cast<double>(n_ll);
+
+        // est_to_loo + x_total + tot_line (REUSE the fit/f4 kernel; it reads only m = N).
+        launch_f4_loo_total(dX.data(), dBlockSizes.data(),
+                            static_cast<int>(m), nb_s, n,
+                            dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
+
+        // D2H the small fit intermediates across the CUDA-free seam (SURVIVOR-sized).
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
+                                          m * static_cast<std::size_t>(nb_s) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
+                                          m * static_cast<std::size_t>(nb_s) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
+                                          m * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(tot_line_.data(), dTotLine.data(),
+                                          m * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
+    /// STANDALONE f3 host-oracle overload — NOT the GPU path (sibling of
+    /// assemble_f4_quartets(host)); the CudaBackend implements only the DeviceF2Blocks form.
+    [[nodiscard]] F4Blocks assemble_f3_triples(const F2BlockTensor& f2,
+                                               std::span<const int> triples,
+                                               const Precision& precision) override {
+        (void)f2; (void)triples; (void)precision;
+        throw std::runtime_error(
+            "CudaBackend::assemble_f3_triples(host): the GPU path reads DEVICE-RESIDENT "
+            "f2 (assemble_f3_triples(DeviceF2Blocks)); the host-tensor overload is the "
+            "CpuBackend oracle door");
+    }
+
     /// S4 — weighted block-jackknife covariance Q + Qinv on the GPU (the FROZEN
     /// CONTRACT §2b). xtau kernel (native; cancellation carve-out) → cublasDsyrk Q
     /// (well-conditioned matmul; ENGAGES `precision` — emulated{40} by default, auto-

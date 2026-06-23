@@ -659,6 +659,41 @@ public:
             "ComputeBackend::assemble_f4_quartets(host): not implemented by this backend");
     }
 
+    /// STANDALONE f3 (the run_f3 seam; fit-engine §6) — the THREE-slab clone of
+    /// assemble_f4_quartets. Assemble ONE F4Blocks (reused as the generic per-block X
+    /// carrier) whose m axis is the N input TRIPLES. For triple k = (C=p1, A=p2, B=p3),
+    /// per block b:
+    ///   X[k,b] = 0.5*( f2(C,A,b) + f2(C,B,b) - f2(A,B,b) )
+    /// i.e. the THREE-slab AT2 f3 identity (vs the four-slab quartet diff) — the ONE new
+    /// math seam f3 adds over f4. The returned F4Blocks sets nl = N, nr = 1 (so m = nl*nr =
+    /// N), and carries x_blocks / x_loo / x_total / block_sizes EXACTLY like
+    /// assemble_f4_quartets, so jackknife_cov (S4) consumes the whole m-batch with NO change
+    /// and se[k] = sqrt(Q[k + m*k]). Native FP64 (the cancellation carve-out, OQ-5; the
+    /// `precision` argument is acknowledged but the 3-slab diff stays native). The GPU
+    /// backend overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides the
+    /// host F2BlockTensor form (the oracle door). `triples` is the flattened P-axis index
+    /// triple array (length 3*N, triple k at [3*k .. 3*k+2] = {p1=C, p2=A, p3=B}).
+    [[nodiscard]] virtual F4Blocks assemble_f3_triples(
+        const steppe::device::DeviceF2Blocks& f2,
+        std::span<const int> triples,
+        const Precision& precision) {
+        (void)f2; (void)triples; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f3_triples: not implemented by this backend");
+    }
+
+    /// STANDALONE f3 host-oracle overload — the SAME per-triple three-slab combine reading
+    /// a host F2BlockTensor (the CpuBackend oracle door; sibling of assemble_f4_quartets(host)).
+    /// Identical math to the DeviceF2Blocks overload; only the f2 storage differs.
+    [[nodiscard]] virtual F4Blocks assemble_f3_triples(
+        const F2BlockTensor& f2,
+        std::span<const int> triples,
+        const Precision& precision) {
+        (void)f2; (void)triples; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::assemble_f3_triples(host): not implemented by this backend");
+    }
+
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
     /// the per-block jackknife WEIGHTS. OQ-3 RESOLVED: the weight is block_sizes[b]
     /// (AT2 block_lengths, the per-block SNP count) — NOT Vpair. Pipeline (AT2
