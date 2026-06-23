@@ -140,6 +140,11 @@ struct CliArgs {
     std::optional<int> max_sources;         ///< --max-sources
 
     // ---- f4-sweep / f3-sweep (GPU-only all-combinations f-stat sweep) ----------
+    /// --all-quartets (f4 / qpdstat) / --all-triples (f3) : ENABLE the sweep mode on the
+    /// standalone-stat commands. When set, the command enumerates EVERY C(P,k) combination
+    /// over the --pops SUBSET (empty ⇒ the whole f2 dir) instead of the explicit row-aligned
+    /// --pop1..--popK list. Unset ⇒ the byte-identical explicit-list path (the goldens).
+    std::optional<bool>   sweep_all_combinations;
     /// --min-z Z : keep items with |z| >= Z (the on-device filter; default 3.0). Mutually
     /// exclusive with --top-k.
     std::optional<double> sweep_min_z;
@@ -148,6 +153,10 @@ struct CliArgs {
     /// --sure : lift the maxcomb cap (a sweep over more than kFstatMaxComb items refuses
     /// without it — the cap guards COMPUTE TIME, every item is computed to test the filter).
     std::optional<bool>   sweep_sure;
+    /// --shard-dir DIR : write the survivor table to a CSV file under DIR (created if absent),
+    /// instead of stdout/--out. At sweep scale the survivor set (post |z| / top-k filter) is
+    /// the small output; the full C(P,k) table is NEVER materialized (it stays on-device).
+    std::optional<std::string> shard_dir;
 
     // ---- extract-f2 inputs (cli-bindings.md §4.1; consumed in M(cli-4)) --------
     std::optional<std::string> prefix;      ///< --prefix (sets geno/snp/ind = PREFIX.{geno,snp,ind})

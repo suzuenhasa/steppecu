@@ -247,6 +247,32 @@ void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
+// GPU-only f-stat SWEEP MODE flags for the standalone-stat commands (f4 / f3 / qpdstat):
+// the --all-quartets / --all-triples ENABLE flag (route to the GPU sweep over the C(P,k)
+// of the --pops SUBSET — empty ⇒ the whole f2 dir), the on-device filter (--min-z |
+// --top-k), the maxcomb-cap override (--sure), and the survivor destination (--shard-dir).
+// It does NOT re-bind --pops (the f4/f3 command already binds it as the quartet/triple
+// input; in sweep mode the same --pops is read as the SUBSET). `enable_flag`/`enable_help`
+// parametrize the enable flag (f4/qpdstat: --all-quartets; f3: --all-triples) so each
+// command's --help stays exact.
+void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
+                          const char* enable_help) {
+    sub->add_flag_function(enable_flag, [&a](std::int64_t) { a.sweep_all_combinations = true; },
+                           enable_help);
+    sub->add_option_function<double>(
+        "--min-z", [&a](double v) { a.sweep_min_z = v; },
+        "Sweep: keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
+    sub->add_option_function<int>(
+        "--top-k", [&a](int v) { a.sweep_top_k = v; },
+        "Sweep: keep the K items with the largest |z| (device keeps all, host ranks). Excludes --min-z.");
+    sub->add_flag_function(
+        "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
+        "Sweep: lift the maxcomb cap (a sweep over more than the cap refuses without this).");
+    sub->add_option_function<std::string>(
+        "--shard-dir", [&a](const std::string& v) { a.shard_dir = v; },
+        "Sweep: write the survivor table to a CSV under this dir (created if absent; vs stdout/--out).");
+}
+
 // GPU-only f-stat SWEEP flags: an OPTIONAL --pops SUBSET to sweep (empty ⇒ the whole f2 dir),
 // the on-device filter (--min-z | --top-k), and the maxcomb-cap override (--sure). Reused by
 // both f4-sweep and f3-sweep.
@@ -339,6 +365,11 @@ int run_cli(int argc, char** argv) {
         // f4 takes QUARTETS, not target/left/right: the row-aligned --pop1..--pop4 columns
         // OR the --pops 4-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
         add_f4_quartet_flags(sub, f4_args);
+        // SWEEP MODE: --all-quartets routes to the GPU sweep over C(P,4) of the --pops SUBSET
+        // (empty ⇒ the whole f2 dir). The explicit-list path above stays byte-identical when
+        // --all-quartets is absent (the goldens). Reuses the same --pops binding as the subset.
+        add_sweep_mode_flags(sub, f4_args, "--all-quartets",
+                             "Sweep ALL quartets C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
         add_output_flags(sub, f4_args);
         add_common_flags(sub, f4_args);
         sub->callback([&]() {
@@ -366,6 +397,10 @@ int run_cli(int argc, char** argv) {
         // qpdstat takes QUADRUPLES, not target/left/right: the row-aligned --pop1..--pop4
         // columns OR the --pops 4-tuple convenience (reused verbatim from f4).
         add_f4_quartet_flags(sub, qpdstat_args);
+        // SWEEP MODE: --all-quartets routes to the GPU f4 sweep over C(P,4) of the --pops
+        // SUBSET (the D-output-convention all-quartets scan). Explicit-list path unchanged.
+        add_sweep_mode_flags(sub, qpdstat_args, "--all-quartets",
+                             "Sweep ALL quadruples C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
         // --prefix: the Part-B genotype prefix for the normalized-D magnitude. Bound to the
         // DEDICATED qpdstat_prefix field (NOT extract's --prefix) so the qpdstat command's
         // fail-fast guard reads it WITHOUT ConfigBuilder expanding it into geno/snp/ind.
@@ -394,6 +429,11 @@ int run_cli(int argc, char** argv) {
         // f3 takes TRIPLES, not target/left/right: the row-aligned --pop1..--pop3 columns
         // OR the --pops 3-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
         add_f3_triple_flags(sub, f3_args);
+        // SWEEP MODE: --all-triples routes to the GPU sweep over C(P,3) of the --pops SUBSET
+        // (empty ⇒ the whole f2 dir). The explicit-list path above stays byte-identical when
+        // --all-triples is absent (the goldens). Reuses the same --pops binding as the subset.
+        add_sweep_mode_flags(sub, f3_args, "--all-triples",
+                             "Sweep ALL triples C(P,3) over the --pops subset (empty ⇒ whole f2 dir)");
         add_output_flags(sub, f3_args);
         add_common_flags(sub, f3_args);
         sub->callback([&]() {

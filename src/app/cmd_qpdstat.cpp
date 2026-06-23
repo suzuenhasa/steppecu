@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_fstat_sweep.hpp"      // run_fstat_sweep (the GPU sweep, --all-quartets mode)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -237,6 +238,13 @@ int run_qpdstat_command(const cfg::RunConfig& config) {
     // den over per-SNP allele freqs, block-jackknifed). KEEP --f2-dir Part A unchanged.
     if (!config.qpdstat_prefix().empty()) {
         return run_qpdstat_prefix(config);
+    }
+
+    // ---- SWEEP MODE (--all-quartets): the f2-path all-quadruples D scan == the f4 sweep
+    // over C(P,4) of the --pops SUBSET (empty ⇒ whole f2 dir). on-device enumerate+compute+
+    // |z|filter+compact, survivors only. SEPARATE from the explicit-list f2-path below.
+    if (config.sweep_all_combinations()) {
+        return run_fstat_sweep(config, /*k=*/4, "qpdstat");
     }
 
     // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE the f4/qpwave path -----

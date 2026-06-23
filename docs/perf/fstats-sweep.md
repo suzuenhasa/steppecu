@@ -22,7 +22,57 @@ sampled with `nvidia-smi --query-gpu` during the heaviest runs.
 
 ---
 
-## TL;DR — the headline finding
+## Full C(500,4) = 2.57B sweep — the bounded device-side top-K (the production path)
+
+The production `--all-quartets` / `--all-triples` sweep is the on-device unrank +
+`assemble_f4_quartets` + **diagonal** jackknife variance + `|z|` filter + a
+**bounded device-side top-K reservoir** — NOT the dense `jackknife_cov` engine
+profiled below (which OOMs at N≈36k). It computes EVERY C(P,k) item on the GPU but
+keeps only the K most-significant (largest `|z|`) in a fixed `CAP=O(K)` device
+reservoir with a monotonically rising `|z|` threshold tau. Host RAM is **O(K)**
+(a few GB at K=1e6) regardless of how many billions are computed — the prior pass'
+unbounded host `std::vector` accumulation that OOM-killed at 152 GB is GONE.
+
+**Measured — the FULL C(500,4) = 2,573,031,125-quartet sweep, COMPLETED:**
+
+| metric | value |
+|---|---|
+| f2 cache | REAL AADR `f2_500` (P=500), single-GPU `--device 0` |
+| enumerated | 2,573,031,125 (full C(500,4)) |
+| **wall clock** | **2:57.01 = 177.01 s** (`/usr/bin/time -v` Elapsed) |
+| **throughput** | **≈ 14.54M quartets/sec** (2,573,031,125 / 177.01) |
+| survivors written | **exactly 1,000,000** (default top-K, sorted by `\|z\|` desc, 81 MB CSV) |
+| top-K cut `\|z\|` | 140.4 (the 1,000,000th-largest; `\|z\|>6` keeps far more than 1M on real AADR — the `\|z\|` filter is NOT a real bound) |
+| **peak host RSS** | **3.13 GB** (`time -v` Max RSS = 3,135,104 KB — BOUNDED, not 150 GB) |
+| peak VRAM | ≈ 14.6 GB (14,986 MiB, nvidia-smi) |
+| **GPU util** | **100% across the entire compute window** (161/167 samples; the 6 non-100% are the leading f2-load + the trailing 1M-row D2H/CSV-write — GPU-BOUND) |
+| exit | 0 (no OOM) |
+
+**Command:**
+```
+steppe f4 --all-quartets --f2-dir /workspace/data/f2_500 --sure --shard-dir DIR
+```
+`--all-quartets`/`--all-triples` DEFAULT to top-K = 1,000,000 (so a bare sweep
+CANNOT OOM); `--top-k INT` overrides K; `--min-z FLOAT` raises the device tau floor
+(a pre-filter that coexists with the K cap); `--sure` gates the maxcomb ENUMERATION
+(a TIME guard — computing 2.57B on the GPU takes minutes); `--shard-dir` writes the
+survivor CSV to a file vs stdout. Explicit-list mode (`--pop1..4`/`--pops` without
+`--all-quartets`) is byte-identical to the pre-sweep path — goldens EXACT, no regen.
+
+**Design (the OOM fix):** per chunk the existing on-device unrank + assemble +
+diagonal-jackknife computes ALL items (GPU-bound, unchanged); a `sweep_zfilter_tau`
+kernel reads the live rising tau from device memory and flags `|z| >= tau`; CUB
+`DeviceSelect::Flagged` compacts the chunk's survivors; they are appended D2D into a
+fixed `CAP=2K` reservoir; when the reservoir fills, CUB `DeviceRadixSort::Sort`
+`PairsDescending` by `|z|` + a gather + truncate-to-K raises tau to the new K-th
+`|z|`. At the end the device holds exactly the top-K and D2H returns ONLY those ≤K
+rows. tau rises monotonically, so an item dropped at the filter (`|z| < tau`) could
+never have beaten the current K-th — the bounded reservoir is exact for the global
+top-K. (CUB two-call temp-storage idiom, 64-bit `NumItemsT`, verified vs CCCL CUB.)
+
+---
+
+## TL;DR — the headline finding (the OLD dense-jackknife standalone bench)
 
 **Shape audit:** the per-item DEVICE kernels are properly shaped — `assemble_f4_quartets`
 / `assemble_f3_triples` are ONE batched gather launch over ALL items reading the

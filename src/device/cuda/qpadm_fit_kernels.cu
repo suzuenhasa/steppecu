@@ -791,6 +791,92 @@ __global__ void sweep_deinterleave_keys_kernel(const int* __restrict__ d_items, 
     d_c3[t] = (k >= 4) ? d_items[k * t + 3] : 0;  // f3 (k=3): 4th key unused (0).
 }
 
+// ---- BOUNDED DEVICE TOP-K reservoir (the fix for the unbounded-host-vector sweep OOM) ----
+
+// |z| FILTER with a DEVICE-RESIDENT rising threshold tau: identical to sweep_zfilter_kernel but
+// the cut is read from d_tau[0] (the live, monotonically-RISING top-K threshold) instead of a
+// host constant — so each chunk pre-filters against the CURRENT K-th-largest |z|, not a fixed
+// min_z. Also writes the |z| sort key into dAbsZ for the survivors (CUB DeviceRadixSort key).
+// d_flags[k] = (|z| > tau) as uint8 0/1; tau is the floor (init = min_z, raised on each compact).
+// A NaN/degenerate var (var<=0) yields se=NaN, z=NaN, |z|>tau is FALSE (NaN compares false) ⇒
+// dropped (the honest behavior; an item that can never make the top-K is never kept).
+__global__ void sweep_zfilter_tau_kernel(const double* __restrict__ dXtotal,
+                                         const double* __restrict__ dVar,
+                                         int C, const double* __restrict__ d_tau,
+                                         double* __restrict__ dEst, double* __restrict__ dSe,
+                                         double* __restrict__ dZ, double* __restrict__ dAbsZ,
+                                         unsigned char* __restrict__ d_flags) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= C) return;
+    const double est = dXtotal[k];
+    const double var = dVar[k];
+    const double se = (var > 0.0) ? sqrt(var) : nan("");
+    const double z = est / se;
+    const double az = fabs(z);
+    dEst[k] = est;
+    dSe[k] = se;
+    dZ[k] = z;
+    dAbsZ[k] = az;
+    const double tau = d_tau[0];
+    // |z| >= tau (INCLUSIVE — matches the original MinZ semantics: --min-z Z keeps |z|>=Z, so a
+    // min_z=0 floor keeps even z==0 exactly, and a min_z=3 cut keeps |z|>=3). For the rising-tau
+    // TopK, keeping ties at the K-th |z| is harmless: they land in the reservoir and the next
+    // sort+truncate keeps exactly the top K (NaN fails >= and is dropped, never entering top-K).
+    d_flags[k] = (az >= tau) ? 1 : 0;
+}
+
+// Fill d_idx[0..n) = 0,1,2,...,n-1 — the permutation VALUE array CUB SortPairsDescending reorders
+// alongside the |z| keys (so after the sort d_idx[r] names the reservoir row of the r-th-largest
+// |z|, which the gather kernel uses to compact the kept rows). One thread per slot.
+__global__ void sweep_topk_iota_kernel(int* __restrict__ d_idx, int n) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    d_idx[t] = t;
+}
+
+// GATHER the reservoir rows by a permutation index: out[r] = in[d_perm[r]] for r in [0,m). Used
+// to reorder the (est/se/z/absz + 4 key cols) reservoir arrays into the |z|-descending order CUB
+// produced, then truncate to K. Operates out-of-place (the caller swaps buffers). One thread per
+// output row; the same d_perm drives every column (so the row tuple stays intact). Native copy.
+__global__ void sweep_topk_gather_kernel(const int* __restrict__ d_perm, int m,
+                                         const double* __restrict__ inEst,
+                                         const double* __restrict__ inSe,
+                                         const double* __restrict__ inZ,
+                                         const double* __restrict__ inAbsZ,
+                                         const int* __restrict__ inC0,
+                                         const int* __restrict__ inC1,
+                                         const int* __restrict__ inC2,
+                                         const int* __restrict__ inC3,
+                                         double* __restrict__ outEst, double* __restrict__ outSe,
+                                         double* __restrict__ outZ, double* __restrict__ outAbsZ,
+                                         int* __restrict__ outC0, int* __restrict__ outC1,
+                                         int* __restrict__ outC2, int* __restrict__ outC3) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= m) return;
+    const int src = d_perm[r];
+    outEst[r] = inEst[src];
+    outSe[r] = inSe[src];
+    outZ[r] = inZ[src];
+    outAbsZ[r] = inAbsZ[src];
+    outC0[r] = inC0[src];
+    outC1[r] = inC1[src];
+    outC2[r] = inC2[src];
+    outC3[r] = inC3[src];
+}
+
+// RAISE the rising-tau threshold to the new K-th-largest |z| after a compact-to-K: d_tau[0] =
+// max(d_tau[0], d_sorted_absz[K-1]) when the reservoir overflowed (fill >= K). tau MONOTONICALLY
+// RISES (max guard) so no item dropped at an earlier, lower tau could have beaten the current
+// K-th — the bounded reservoir is exact for the global top-K. A single thread. Only fires in
+// TopK mode (mode 1); MinZ mode (mode 0) leaves tau pinned at the min_z floor.
+__global__ void sweep_topk_raise_tau_kernel(const double* __restrict__ d_sorted_absz,
+                                            int K, int mode, double* __restrict__ d_tau) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (mode != 1 || K <= 0) return;
+    const double kth = d_sorted_absz[K - 1];
+    if (kth > d_tau[0]) d_tau[0] = kth;  // monotone rise; never lowers the floor.
+}
+
 // F1 / OQ-12 keep-mask: one thread per resident block b scans the [P×P] Vpair slab and
 // writes d_keep[b] = 0 iff the block is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair
 // Vpair>0) — AT2 read_f2's `!is.finite` drop. A fully-zero slab is the "no Vpair info"
@@ -1835,6 +1921,49 @@ void launch_sweep_deinterleave_keys(const int* d_items, int C, int k,
     const int grid = (C + block - 1) / block;
     sweep_deinterleave_keys_kernel<<<grid, block, 0, stream>>>(d_items, C, k,
                                                                d_c0, d_c1, d_c2, d_c3);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+// ---- BOUNDED DEVICE TOP-K reservoir launch wrappers ----
+
+void launch_sweep_zfilter_tau(const double* dXtotal, const double* dVar, int C,
+                              const double* d_tau, double* dEst, double* dSe, double* dZ,
+                              double* dAbsZ, unsigned char* d_flags, cudaStream_t stream) {
+    if (C <= 0) return;
+    const int block = 256;
+    const int grid = (C + block - 1) / block;
+    sweep_zfilter_tau_kernel<<<grid, block, 0, stream>>>(dXtotal, dVar, C, d_tau,
+                                                         dEst, dSe, dZ, dAbsZ, d_flags);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_topk_iota(int* d_idx, int n, cudaStream_t stream) {
+    if (n <= 0) return;
+    const int block = 256;
+    const int grid = (n + block - 1) / block;
+    sweep_topk_iota_kernel<<<grid, block, 0, stream>>>(d_idx, n);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_topk_gather(const int* d_perm, int m,
+                              const double* inEst, const double* inSe, const double* inZ,
+                              const double* inAbsZ, const int* inC0, const int* inC1,
+                              const int* inC2, const int* inC3,
+                              double* outEst, double* outSe, double* outZ, double* outAbsZ,
+                              int* outC0, int* outC1, int* outC2, int* outC3,
+                              cudaStream_t stream) {
+    if (m <= 0) return;
+    const int block = 256;
+    const int grid = (m + block - 1) / block;
+    sweep_topk_gather_kernel<<<grid, block, 0, stream>>>(
+        d_perm, m, inEst, inSe, inZ, inAbsZ, inC0, inC1, inC2, inC3,
+        outEst, outSe, outZ, outAbsZ, outC0, outC1, outC2, outC3);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_topk_raise_tau(const double* d_sorted_absz, int K, int mode,
+                                 double* d_tau, cudaStream_t stream) {
+    sweep_topk_raise_tau_kernel<<<1, 1, 0, stream>>>(d_sorted_absz, K, mode, d_tau);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

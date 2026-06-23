@@ -147,6 +147,36 @@ void launch_sweep_deinterleave_keys(const int* d_items, int C, int k,
                                     int* d_c0, int* d_c1, int* d_c2, int* d_c3,
                                     cudaStream_t stream);
 
+// ---- BOUNDED DEVICE TOP-K reservoir (the fix for the unbounded-host-vector sweep OOM) ----
+
+/// |z| FILTER with a DEVICE-RESIDENT rising threshold: like launch_sweep_zfilter but the cut is
+/// read from d_tau[0] (the live top-K threshold, raised on each compact) instead of a host
+/// constant, and the |z| sort key is written into dAbsZ. d_flags[t] = (|z| > d_tau[0]). NaN z
+/// (degenerate var) flags 0 (never enters the top-K). Native FP64.
+void launch_sweep_zfilter_tau(const double* dXtotal, const double* dVar, int C,
+                              const double* d_tau, double* dEst, double* dSe, double* dZ,
+                              double* dAbsZ, unsigned char* d_flags, cudaStream_t stream);
+
+/// Fill d_idx[0..n) = 0..n-1 (the permutation VALUE array for CUB SortPairsDescending).
+void launch_sweep_topk_iota(int* d_idx, int n, cudaStream_t stream);
+
+/// GATHER reservoir rows by a permutation: out[r] = in[d_perm[r]] for r in [0,m), across all
+/// columns (est/se/z/absz + 4 key cols) with the SAME perm so the row tuple stays intact. Used
+/// to reorder the reservoir into |z|-descending order (then truncate to K). Out-of-place.
+void launch_sweep_topk_gather(const int* d_perm, int m,
+                              const double* inEst, const double* inSe, const double* inZ,
+                              const double* inAbsZ, const int* inC0, const int* inC1,
+                              const int* inC2, const int* inC3,
+                              double* outEst, double* outSe, double* outZ, double* outAbsZ,
+                              int* outC0, int* outC1, int* outC2, int* outC3,
+                              cudaStream_t stream);
+
+/// RAISE the rising-tau threshold to the new K-th-largest |z|: d_tau[0] = max(d_tau[0],
+/// d_sorted_absz[K-1]) when mode==1 (TopK) and K>0. Monotone (never lowers); a no-op in MinZ
+/// mode (mode 0, tau pinned at the min_z floor). A single device thread.
+void launch_sweep_topk_raise_tau(const double* d_sorted_absz, int K, int mode,
+                                 double* d_tau, cudaStream_t stream);
+
 /// Mirror the LOWER triangle of an n×n COLUMN-MAJOR matrix into the UPPER (so a
 /// SYRK/potri result that fills one triangle becomes the full symmetric matrix the
 /// CpuBackend writes both triangles of). In-place. One thread per (i,j), i>j writes

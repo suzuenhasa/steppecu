@@ -53,6 +53,14 @@ inline constexpr int kDefaultMantissaBits = 40;
 /// allocation. The AT2 qpAdm `sure` analogue for the all-combinations f4/f3 sweep.
 inline constexpr unsigned long long kFstatMaxComb = 100000000ULL;  // 1e8
 
+/// Default device-bounded top-K for a bare `--all-quartets`/`--all-triples` sweep (no explicit
+/// --top-k, no --min-z override). The sweep computes EVERY C(P,k) item on the GPU but keeps only
+/// the K most-significant (largest |z|) in a FIXED device reservoir (rising-tau top-K), so a
+/// full C(500,4)=2.57B sweep cannot OOM host RAM: only K rows (~40 MB at K=1e6) ever cross the
+/// CUDA-free seam, INDEPENDENT of how many billions are computed. --top-k overrides K; --min-z
+/// raises the device tau floor (a pre-filter that coexists with the K cap).
+inline constexpr std::size_t kFstatDefaultSweepTopK = 1000000;  // 1e6
+
 /// Square thread-block edge for the elementwise f2 assemble/numerator kernels:
 /// a `dim3(kCdivBlock, kCdivBlock)` 2-D block over the [P × P] output.
 /// Replaces the spike's `dim3 block(16,16)` (f2_emu_spike.cu:311). The single

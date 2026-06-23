@@ -17,6 +17,7 @@
 #include <array>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <ostream>
@@ -69,10 +70,12 @@ void emit_sweep(std::ostream& os, OutputFormat fmt, const SweepResult& r,
     }
 }
 
-/// Shared body for both sweep commands. `k` selects the arity (4 ⇒ run_f4_sweep, 3 ⇒ run_f3_sweep).
-int run_sweep_command(const cfg::RunConfig& config, int k) {
-    const char* cmd = (k == 4) ? "f4-sweep" : "f3-sweep";
+}  // namespace
 
+/// Shared body for the sweep — reused by the dedicated `f4-sweep`/`f3-sweep` subcommands AND
+/// by the standalone `f4`/`f3`/`qpdstat` commands in --all-quartets/--all-triples mode. `k`
+/// selects the arity (4 ⇒ run_f4_sweep, 3 ⇒ run_f3_sweep); `prog` is the stderr program name.
+int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe %s: --f2-dir is required\n", cmd);
         return cfg::kExitInvalidConfig;
@@ -101,15 +104,27 @@ int run_sweep_command(const cfg::RunConfig& config, int k) {
     }
 
     // Build the sweep request from the frozen config (--min-z / --top-k / --sure).
+    //
+    // TopK now means a DEVICE-BOUNDED reservoir (the GPU keeps the K most-significant |z| in a
+    // fixed CAP=O(K) buffer with a rising tau threshold), so HOST RAM is O(K) regardless of how
+    // many billions are computed. A bare --all-quartets/--all-triples therefore DEFAULTS to
+    // TopK=kFstatDefaultSweepTopK (1e6) so a full C(P,4) sweep cannot OOM the host. --top-k
+    // overrides K; --min-z stays the tau FLOOR (a device pre-filter) and COEXISTS with the K cap.
     SweepRequest req;
     req.pop_subset = subset;
     req.sure = config.sweep_sure();
+    req.min_z = config.sweep_min_z();  // the device tau FLOOR (default 3.0; --min-z raises it).
     if (config.sweep_top_k() > 0) {
         req.filter = SweepFilter::TopK;
         req.top_k = static_cast<std::size_t>(config.sweep_top_k());
+    } else if (config.sweep_all_combinations()) {
+        // Bare sweep on a standalone-stat command: default to the bounded 1M top-K cap so the
+        // host cannot OOM on a signal-rich full sweep (the |z| filter alone is NOT a real bound).
+        req.filter = SweepFilter::TopK;
+        req.top_k = steppe::kFstatDefaultSweepTopK;
     } else {
+        // The dedicated f4-sweep/f3-sweep subcommands keep the explicit MinZ default.
         req.filter = SweepFilter::MinZ;
-        req.min_z = config.sweep_min_z();
     }
 
     SweepResult result;
@@ -147,6 +162,36 @@ int run_sweep_command(const cfg::RunConfig& config, int k) {
         return cfg::kExitInvalidConfig;
     }
 
+    // Destination precedence: --shard-dir (a CSV file under the dir) > --out FILE > stdout.
+    // The survivor set (post |z| / top-k filter) is the SMALL output; the full C(P,k) table
+    // is never materialized (the device keeps it). --shard-dir is the sweep-scale destination
+    // (a stable on-disk path the survivors are written to, vs piping a big stdout stream).
+    if (!config.shard_dir().empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(config.shard_dir(), ec);
+        if (ec) {
+            std::fprintf(stderr, "steppe %s: cannot create --shard-dir '%s': %s\n",
+                         cmd, config.shard_dir().c_str(), ec.message().c_str());
+            return cfg::kExitIoError;
+        }
+        const char* ext = (fmt == OutputFormat::Json) ? "json"
+                          : (fmt == OutputFormat::Tsv) ? "tsv" : "csv";
+        const std::filesystem::path shard_path =
+            std::filesystem::path(config.shard_dir()) /
+            (std::string("survivors.") + ext);
+        std::ofstream out(shard_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "steppe %s: cannot open shard file: %s\n",
+                         cmd, shard_path.string().c_str());
+            return cfg::kExitIoError;
+        }
+        emit_sweep(out, fmt, result, resolver, k);
+        out.flush();
+        std::fprintf(stderr, "steppe %s: enumerated %zu, %zu survivors -> %s\n",
+                     cmd, result.enumerated, result.survivors, shard_path.string().c_str());
+        return cfg::exit_code_for(result.status);
+    }
+
     if (config.out_file().empty()) {
         emit_sweep(std::cout, fmt, result, resolver, k);
     } else {
@@ -165,9 +210,11 @@ int run_sweep_command(const cfg::RunConfig& config, int k) {
     return cfg::exit_code_for(result.status);
 }
 
-}  // namespace
-
-int run_f4_sweep_command(const cfg::RunConfig& config) { return run_sweep_command(config, 4); }
-int run_f3_sweep_command(const cfg::RunConfig& config) { return run_sweep_command(config, 3); }
+int run_f4_sweep_command(const cfg::RunConfig& config) {
+    return run_fstat_sweep(config, 4, "f4-sweep");
+}
+int run_f3_sweep_command(const cfg::RunConfig& config) {
+    return run_fstat_sweep(config, 3, "f3-sweep");
+}
 
 }  // namespace steppe::app

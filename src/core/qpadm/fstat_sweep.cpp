@@ -83,66 +83,45 @@ inline constexpr std::size_t kPrimaryGpu = 0;
         return res;
     }
 
-    // Map the public request -> the backend device-config.
+    // Map the public request -> the backend device-config. The backend maintains the top-K ON
+    // THE DEVICE (a fixed CAP=O(K) reservoir with a rising tau), so it returns at most top_k rows
+    // already sorted by |z| descending — NO unbounded host vector, NO host re-rank.
     SweepConfig cfg;
     cfg.k = k;
-    cfg.filter_mode = (req.filter == SweepFilter::MinZ) ? 0 : 1;  // 1 = keep-all (TopK).
+    cfg.filter_mode = (req.filter == SweepFilter::MinZ) ? 0 : 1;  // 0 = fixed-tau MinZ; 1 = rising-tau TopK.
     cfg.min_z = req.min_z;
+    // top_k is the device reservoir cap. For TopK it is the requested K (the user's intent). For
+    // MinZ it is a hard SAFETY CEILING (so even a billions-item min-z sweep cannot OOM the host) —
+    // NOT req.top_k (which is meaningless when the filter is MinZ; the public struct defaults it to
+    // a small 100). A 0/unset TopK K also falls back to the bounded default so the reservoir is
+    // always finite. The ceiling is large (kFstatDefaultSweepTopK = 1e6) so a MinZ sweep returns
+    // ALL its |z|>=min_z survivors unless they exceed a million (then it keeps the most extreme K).
+    cfg.top_k = (req.filter == SweepFilter::TopK && req.top_k > 0)
+                    ? req.top_k
+                    : kFstatDefaultSweepTopK;
     cfg.pop_subset = req.pop_subset;
     cfg.sure = req.sure;
 
     // Dispatch the WHOLE on-device sweep (enumerate+compute+filter+compact) and receive ONLY
     // the survivors. A device fault PROPAGATES as an exception (the app maps it to a fault
     // exit); a domain outcome is the returned status (record-and-continue).
-    const SweepSurvivors sv = (k == 4) ? be.f4_sweep(f2, cfg, prec) : be.f3_sweep(f2, cfg, prec);
+    SweepSurvivors sv = (k == 4) ? be.f4_sweep(f2, cfg, prec) : be.f3_sweep(f2, cfg, prec);
     res.status = sv.status;
     res.enumerated = sv.enumerated;  // the backend's exact count (it knows the survivor range).
     res.capped = sv.capped;
     if (sv.status != Status::Ok) return res;
 
-    // Move the survivor arrays onto the result + compute p on the (small) survivor set.
+    // Move the survivor arrays onto the result + compute p on the (small, <=top_k) survivor set.
+    // The DEVICE already maintained the top-K (a bounded rising-tau reservoir) and returned the
+    // rows sorted by |z| descending — NO host re-rank, NO unbounded host vector. The driver only
+    // moves the <=K rows across and computes the two-sided p (a per-survivor O(K) loop, not O(N)).
     const std::size_t n = sv.est.size();
-    res.keys = sv.keys;
-    res.est = sv.est;
-    res.se = sv.se;
-    res.z = sv.z;
+    res.keys = std::move(sv.keys);
+    res.est = std::move(sv.est);
+    res.se = std::move(sv.se);
+    res.z = std::move(sv.z);
     res.p.assign(n, 0.0);
-    for (std::size_t r = 0; r < n; ++r) res.p[r] = f4_two_sided_p(sv.z[r]);
-
-    // TopK: the device kept every item (filter_mode 1) and compacted to the survivor set; rank
-    // it host-side to the top K by |z| descending. This is a sort over the COMPACTED set (the
-    // survivors that fit VRAM/host budget), NOT a per-item host loop over the full N — the
-    // device already dropped degenerate rows. For MinZ the device already selected by |z|.
-    if (req.filter == SweepFilter::TopK && n > req.top_k) {
-        std::vector<std::size_t> order(n);
-        for (std::size_t r = 0; r < n; ++r) order[r] = r;
-        std::partial_sort(order.begin(),
-                          order.begin() + static_cast<std::ptrdiff_t>(req.top_k), order.end(),
-                          [&](std::size_t a, std::size_t b) {
-                              const double za = std::fabs(res.z[a]);
-                              const double zb = std::fabs(res.z[b]);
-                              // NaN sorts last (a degenerate item never beats a finite one).
-                              if (std::isnan(za)) return false;
-                              if (std::isnan(zb)) return true;
-                              return za > zb;
-                          });
-        order.resize(req.top_k);
-        SweepResult top;
-        top.precision_tag = res.precision_tag;
-        top.enumerated = res.enumerated;
-        top.status = res.status;
-        top.keys.reserve(req.top_k); top.est.reserve(req.top_k); top.se.reserve(req.top_k);
-        top.z.reserve(req.top_k);    top.p.reserve(req.top_k);
-        for (std::size_t idx : order) {
-            top.keys.push_back(res.keys[idx]);
-            top.est.push_back(res.est[idx]);
-            top.se.push_back(res.se[idx]);
-            top.z.push_back(res.z[idx]);
-            top.p.push_back(res.p[idx]);
-        }
-        top.survivors = top.keys.size();
-        return top;
-    }
+    for (std::size_t r = 0; r < n; ++r) res.p[r] = f4_two_sided_p(res.z[r]);
 
     res.survivors = res.keys.size();
     return res;

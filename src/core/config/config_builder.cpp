@@ -171,6 +171,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_d(merged_.sweep_min_z, args.sweep_min_z);
     take_i(merged_.sweep_top_k, args.sweep_top_k);
     take_b(merged_.sweep_sure, args.sweep_sure);
+    take_b(merged_.sweep_all_combinations, args.sweep_all_combinations);
+    take(merged_.shard_dir, args.shard_dir);
     take_i(merged_.auto_top_k, args.auto_top_k);
     take_i(merged_.min_n, args.min_n);
     take_d(merged_.blgsize, args.blgsize);
@@ -457,6 +459,9 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
         return fail("--min-z and --top-k are mutually exclusive (pick one sweep filter)");
     }
     if (merged_.sweep_sure.has_value()) cfg.sweep_sure_ = *merged_.sweep_sure;
+    if (merged_.sweep_all_combinations.has_value())
+        cfg.sweep_all_combinations_ = *merged_.sweep_all_combinations;
+    if (merged_.shard_dir) cfg.shard_dir_ = *merged_.shard_dir;
 
     // ---- carry the verbatim I/O strings ----------------------------------------
     if (merged_.f2_dir)   cfg.f2_dir_ = *merged_.f2_dir;

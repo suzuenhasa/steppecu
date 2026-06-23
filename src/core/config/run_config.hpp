@@ -101,6 +101,11 @@ public:
     [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
     [[nodiscard]] int    sweep_top_k()          const noexcept { return sweep_top_k_; }
     [[nodiscard]] bool   sweep_sure()           const noexcept { return sweep_sure_; }
+    /// --all-quartets / --all-triples: when true, the f4/f3/qpdstat command routes to the
+    /// GPU sweep (every C(P,k) over the --pops subset) instead of the explicit-list path.
+    [[nodiscard]] bool   sweep_all_combinations() const noexcept { return sweep_all_combinations_; }
+    /// --shard-dir: directory the sweep writes the survivor CSV into (empty ⇒ stdout/--out).
+    [[nodiscard]] const std::string& shard_dir() const noexcept { return shard_dir_; }
 
     /// extract-f2 ploidy policy (--ploidy auto|1|2). Default Auto = AT2
     /// adjust_pseudohaploid per-sample auto-detection (the f2 pseudo-haploid fix).
@@ -151,6 +156,8 @@ private:
     double sweep_min_z_ = 3.0;      // f4/f3-sweep --min-z (MinZ filter threshold; default 3.0)
     int sweep_top_k_ = -1;          // f4/f3-sweep --top-k (>0 ⇒ TopK mode; -1 ⇒ MinZ mode)
     bool sweep_sure_ = false;       // f4/f3-sweep --sure (lift the maxcomb cap)
+    bool sweep_all_combinations_ = false;  // --all-quartets / --all-triples (route f4/f3 to the sweep)
+    std::string shard_dir_;         // --shard-dir (survivor CSV destination; empty ⇒ stdout/--out)
     bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)
     bool hash_source_ = false;      // --hash (extract-f2): source-provenance SHA opt-in (default OFF)
 };

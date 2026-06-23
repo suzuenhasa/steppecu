@@ -191,8 +191,15 @@ struct SweepSurvivors {
 /// the compacted set). pop_subset empty ⇒ sweep [0,P).
 struct SweepConfig {
     int k = 4;                    ///< item arity (quartet/triple).
-    int filter_mode = 0;         ///< 0 = MinZ on-device flag; 1 = keep-all (TopK/All).
-    double min_z = 3.0;          ///< |z| threshold for filter_mode 0.
+    /// 0 = MinZ: a fixed-threshold |z|>=min_z filter; tau does NOT rise (but the device reservoir
+    /// still caps to top_k as a hard safety ceiling so even a billions-item MinZ sweep cannot OOM
+    /// the host). 1 = TopK: a DEVICE-BOUNDED rising-tau reservoir — keep the top_k most-significant
+    /// |z| in a fixed CAP=O(top_k) buffer; tau RISES to the running K-th |z| (min_z is its floor),
+    /// monotonically shrinking the per-chunk survivor count. Either way the host receives <=top_k
+    /// rows, sorted by |z| descending, INDEPENDENT of how many billions are computed.
+    int filter_mode = 0;
+    double min_z = 3.0;          ///< |z| threshold / the rising-tau FLOOR.
+    std::size_t top_k = 1000000; ///< device reservoir cap K (the bounded top-K target).
     std::vector<int> pop_subset; ///< optional subset of f2 indices; empty ⇒ all P.
     bool sure = false;           ///< lift the maxcomb cap.
 };

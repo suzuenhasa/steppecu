@@ -61,6 +61,10 @@
                                          // survivor stream-compaction (CUDA 13.x / CCCL CUB;
                                          // two-call temp-storage idiom, num_items NumItemsT,
                                          // no debug_synchronous param — verified vs the docs)
+#include <cub/device/device_radix_sort.cuh>  // cub::DeviceRadixSort::SortPairsDescending — the
+                                             // bounded device top-K reservoir compaction
+                                             // (KeyT=double |z|, ValueT=int perm index; classic
+                                             // stream overload, two-call idiom, NumItemsT 64-bit)
 
 #include <algorithm>
 #include <climits>    // INT_MIN — the AT2 rankdrop "NA" sentinel (M(fit-2))
@@ -1528,21 +1532,37 @@ public:
                                               static_cast<std::size_t>(range) * sizeof(int),
                                               cudaMemcpyHostToDevice, stream_.get()));
 
+        // The bounded top-K reservoir target K (clamped to INT_MAX + the enumerated total). Sized
+        // FIRST so its FIXED device footprint (CAP=2K reservoir + 2K gather scratch + sort
+        // outputs ≈ 5·CAP·~52 B) is subtracted from free VRAM before the chunk is sized.
+        std::size_t K_budget = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
+        if (K_budget > static_cast<std::size_t>(enumerated)) K_budget = static_cast<std::size_t>(enumerated);
+        if (K_budget > static_cast<std::size_t>(0x40000000)) K_budget = 0x40000000;
+        if (K_budget < 1) K_budget = 1;
+        const std::size_t cap_budget = K_budget * 2;
+        // Reservoir + gather-scratch + sort-out per CAP slot: 4 doubles + 4 ints (reservoir) +
+        // 4 doubles + 4 ints (gather scratch) + 1 double (sort keys) + 2 ints (perm in/out) ≈
+        // 9·8 + 10·4 = 112 B/slot. Round up generously for the CUB sort temp.
+        const std::size_t reservoir_bytes = cap_budget * 160;
+
         // CHUNK size from free VRAM. Per item the device holds: the k-int key (k·4B) + x_blocks
         // (nb_s·8) + x_loo (nb_s·8) + xtau (nb_s·8) + est/loo-total/tot_line (3·8) + diag var
-        // (8) + est/se/z (3·8) + 4 key columns (4·4) + flag (1) + the compacted outputs (~7·8).
-        // Bound by 0.5·free to leave headroom for the CUB temp storage + the resident f2.
+        // (8) + est/se/z/absz (4·8) + 4 key columns (4·4) + flag (1) + the compacted outputs
+        // (5·8 + 4·4). Bound by 0.4·(free − reservoir) to leave headroom for the CUB temp storage
+        // + the resident f2 + the fixed reservoir footprint.
         std::size_t free_b = 0, total_b = 0;
         STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        const std::size_t free_after_res = (free_b > reservoir_bytes) ? (free_b - reservoir_bytes)
+                                                                      : (free_b / 4);
         const std::size_t per_item_bytes =
             static_cast<std::size_t>(k) * sizeof(int) +                       // dItems
             static_cast<std::size_t>(nb_s) * sizeof(double) * 3 +             // dX + dLoo + dXtau
             sizeof(double) * 4 +                                              // dTotal,dTotLine,dVar,(pad)
-            sizeof(double) * 3 +                                             // dEst,dSe,dZ
+            sizeof(double) * 4 +                                             // dEst,dSe,dZ,dAbsZ
             static_cast<std::size_t>(4) * sizeof(int) +                       // 4 key cols
             sizeof(unsigned char) +                                          // flag
-            sizeof(double) * 4 + static_cast<std::size_t>(4) * sizeof(int);   // compacted outs
-        std::size_t budget = static_cast<std::size_t>(static_cast<double>(free_b) * 0.5);
+            sizeof(double) * 5 + static_cast<std::size_t>(4) * sizeof(int);   // compacted outs (+absz)
+        std::size_t budget = static_cast<std::size_t>(static_cast<double>(free_after_res) * 0.4);
         if (budget < per_item_bytes) budget = per_item_bytes;  // at least one item
         std::size_t chunk_sz = budget / (per_item_bytes == 0 ? 1 : per_item_bytes);
         // Optional override (the chunk lever) via STEPPE_FSTAT_CHUNK.
@@ -1567,28 +1587,105 @@ public:
         DeviceBuffer<double> dTotal(Cm);
         DeviceBuffer<double> dTotLine(Cm);
         DeviceBuffer<double> dVar(Cm);
-        DeviceBuffer<double> dEst(Cm), dSe(Cm), dZ(Cm);
+        DeviceBuffer<double> dEst(Cm), dSe(Cm), dZ(Cm), dAbsZ(Cm);
         DeviceBuffer<int> dC0(Cm), dC1(Cm), dC2(Cm), dC3(Cm);
         DeviceBuffer<unsigned char> dFlags(Cm);
-        // Compacted outputs (survivors of ONE chunk; bounded by C_max).
-        DeviceBuffer<double> dEstSel(Cm), dSeSel(Cm), dZSel(Cm);
+        // Per-chunk compacted survivors (above the CURRENT tau; bounded by C_max).
+        DeviceBuffer<double> dEstSel(Cm), dSeSel(Cm), dZSel(Cm), dAbsZSel(Cm);
         DeviceBuffer<int> dC0Sel(Cm), dC1Sel(Cm), dC2Sel(Cm), dC3Sel(Cm);
         DeviceBuffer<int> dNumSel(1);
 
-        // CUB temp storage — size ONCE at C_max (the max num_items) and reuse. Two-call idiom:
-        // d_temp_storage=nullptr first to query temp_storage_bytes.
-        std::size_t cub_bytes = 0;
-        cub::DeviceSelect::Flagged(nullptr, cub_bytes, dEst.data(), dFlags.data(),
-                                   dEstSel.data(), dNumSel.data(), C_max, stream_.get());
+        // ---- BOUNDED DEVICE TOP-K reservoir (the fix for the unbounded-host-vector OOM) ----
+        // The host NEVER accumulates survivors. Instead a FIXED CAP=O(K) device reservoir keeps
+        // the running top-K (largest |z|) with a MONOTONICALLY RISING threshold tau: the zfilter
+        // pre-drops items at-or-below the current K-th |z|, so the per-chunk survivor count only
+        // SHRINKS as the sweep proceeds. Host RAM is O(K) (~40 MB at K=1e6) regardless of the
+        // billions computed. mode 1 = TopK (tau rises); mode 0 = MinZ (tau pinned at min_z, but
+        // the reservoir still caps to K as a hard safety ceiling so a MinZ sweep cannot OOM).
+        const int zmode = cfg.filter_mode;  // 0 = fixed-tau MinZ; 1 = rising-tau TopK.
+        // K = the reservoir target; CAP = 2K slack so a chunk's survivors always fit before a
+        // compact (each compact returns the fill to <=K, leaving >=K free headroom). K is also
+        // clamped to INT_MAX (CUB num_items + our int kernels) and to the enumerated total.
+        std::size_t K_sz = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
+        if (K_sz > static_cast<std::size_t>(enumerated)) K_sz = static_cast<std::size_t>(enumerated);
+        if (K_sz > static_cast<std::size_t>(0x40000000)) K_sz = 0x40000000;
+        if (K_sz < 1) K_sz = 1;
+        const int K = static_cast<int>(K_sz);
+        const std::size_t CAP_sz = K_sz * 2;  // slack = K (proven: chunk always fits pre-compact).
+        const int CAP = (CAP_sz > static_cast<std::size_t>(INT_MAX)) ? INT_MAX
+                                                                     : static_cast<int>(CAP_sz);
+
+        // Persistent reservoir state allocated ONCE (fixed device footprint, ~80-100 B/slot).
+        DeviceBuffer<double> dResEst(CAP_sz), dResSe(CAP_sz), dResZ(CAP_sz), dResAbsZ(CAP_sz);
+        DeviceBuffer<int> dResC0(CAP_sz), dResC1(CAP_sz), dResC2(CAP_sz), dResC3(CAP_sz);
+        // Double-buffered sort outputs (CUB SortPairsDescending, non-overwrite) + gather scratch.
+        DeviceBuffer<double> dSortAbsZ(CAP_sz);    // sorted keys (descending).
+        DeviceBuffer<int> dPermIn(CAP_sz), dPermOut(CAP_sz);  // iota -> sorted permutation.
+        DeviceBuffer<double> dGEst(CAP_sz), dGSe(CAP_sz), dGZ(CAP_sz), dGAbsZ(CAP_sz);
+        DeviceBuffer<int> dGC0(CAP_sz), dGC1(CAP_sz), dGC2(CAP_sz), dGC3(CAP_sz);
+        DeviceBuffer<double> dTau(1);
+        // tau floor = min_z (for TopK this is just the floor; for MinZ it stays fixed here).
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTau.data(), &cfg.min_z, sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        int res_n = 0;  // host mirror of the reservoir fill (advanced by num_sel, reset on compact).
+
+        // CUB temp storage — size ONCE at the max num_items each call ever sees (C_max for the
+        // per-chunk Flagged compaction; CAP for the reservoir SortPairsDescending) and reuse.
+        // Two-call idiom: d_temp_storage=nullptr first to query temp_storage_bytes.
+        std::size_t sel_bytes = 0;
+        cub::DeviceSelect::Flagged(nullptr, sel_bytes, dEst.data(), dFlags.data(),
+                                   dEstSel.data(), dNumSel.data(),
+                                   static_cast<std::int64_t>(C_max), stream_.get());
+        std::size_t sort_bytes = 0;
+        cub::DeviceRadixSort::SortPairsDescending(
+            nullptr, sort_bytes, dResAbsZ.data(), dSortAbsZ.data(), dPermIn.data(),
+            dPermOut.data(), static_cast<std::int64_t>(CAP), 0, sizeof(double) * 8, stream_.get());
+        const std::size_t cub_bytes = std::max(sel_bytes, sort_bytes);
         DeviceBuffer<unsigned char> dCubTemp(cub_bytes == 0 ? 1 : cub_bytes);
 
-        // Host survivor accumulators (only the SMALL filtered set lands here).
-        const int zmode = cfg.filter_mode;  // 0 = MinZ on-device; 1 = keep-all (TopK ranked host).
-        std::vector<int> h_c0, h_c1, h_c2, h_c3;
-        std::vector<double> h_est, h_se, h_z;
+        // COMPACT-AND-RAISE: sort the reservoir by |z| descending, truncate to K, raise tau to the
+        // new K-th |z|. Fires when the reservoir would overflow CAP (and once at the end). After
+        // it, res_n <= K. Because |z| is monotone in significance and tau only RISES, no kept item
+        // is ever wrongly evicted relative to a GLOBAL top-K (an item dropped at the zfilter when
+        // |z|<=tau could never make a top-K whose K-th value is already tau).
+        auto compact_and_raise = [&](int keep) {
+            if (res_n <= 0) return;
+            const int m = res_n;
+            launch_sweep_topk_iota(dPermIn.data(), m, stream_.get());
+            std::size_t sb = cub_bytes;
+            cub::DeviceRadixSort::SortPairsDescending(
+                dCubTemp.data(), sb, dResAbsZ.data(), dSortAbsZ.data(), dPermIn.data(),
+                dPermOut.data(), static_cast<std::int64_t>(m), 0, sizeof(double) * 8,
+                stream_.get());
+            const int newn = (m < keep) ? m : keep;  // truncate to <=K.
+            // Gather the top `newn` rows (by the sorted permutation) into scratch, then swap back.
+            launch_sweep_topk_gather(
+                dPermOut.data(), newn, dResEst.data(), dResSe.data(), dResZ.data(),
+                dResAbsZ.data(), dResC0.data(), dResC1.data(), dResC2.data(), dResC3.data(),
+                dGEst.data(), dGSe.data(), dGZ.data(), dGAbsZ.data(),
+                dGC0.data(), dGC1.data(), dGC2.data(), dGC3.data(), stream_.get());
+            const std::size_t db = static_cast<std::size_t>(newn) * sizeof(double);
+            const std::size_t ib = static_cast<std::size_t>(newn) * sizeof(int);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResEst.data(), dGEst.data(), db, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResSe.data(),  dGSe.data(),  db, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResZ.data(),   dGZ.data(),   db, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResAbsZ.data(),dGAbsZ.data(),db, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC0.data(),  dGC0.data(),  ib, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC1.data(),  dGC1.data(),  ib, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC2.data(),  dGC2.data(),  ib, cudaMemcpyDeviceToDevice, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC3.data(),  dGC3.data(),  ib, cudaMemcpyDeviceToDevice, stream_.get()));
+            // Raise tau to the new K-th |z| (only when the reservoir was actually FULL to K, and
+            // only in TopK mode — MinZ keeps tau at the floor). dSortAbsZ is |z| descending, so
+            // position K-1 is the K-th-largest. A no-op when newn < K (we have not yet seen K items).
+            if (zmode == 1 && newn >= K)
+                launch_sweep_topk_raise_tau(dSortAbsZ.data(), K, zmode, dTau.data(), stream_.get());
+            res_n = newn;
+        };
 
-        // The HOST chunk loop: advance c0, run the chunk pipeline, D2H survivors. NO per-item
-        // host work (no enumeration, no filter — those are device kernels).
+        // The HOST chunk loop: advance c0, run the chunk pipeline, APPEND survivors into the
+        // device reservoir (D2D — NO host transfer of survivors). NO per-item host work (no
+        // enumeration, no filter — those are device kernels); the only host touch is the num_sel
+        // int readback (one int per chunk).
         for (unsigned long long c0 = 0; c0 < enumerated; c0 += static_cast<unsigned long long>(C_max)) {
             const unsigned long long remaining = enumerated - c0;
             const int C = (remaining < static_cast<unsigned long long>(C_max))
@@ -1621,31 +1718,43 @@ public:
                            C, nb_s, n, dXtau.data(), stream_.get());
             launch_f4_diag_var(dXtau.data(), C, nb_s, dVar.data(), stream_.get());
 
-            // (3) |z| FILTER -> dEst/dSe/dZ + the uint8 survivor flag (device-side, no host).
-            launch_sweep_zfilter(dTotal.data(), dVar.data(), C, zmode, cfg.min_z,
-                                 dEst.data(), dSe.data(), dZ.data(), dFlags.data(),
-                                 stream_.get());
+            // (3) |z| FILTER against the LIVE rising tau (read from dTau, not a host constant)
+            // -> dEst/dSe/dZ/dAbsZ + the uint8 survivor flag (|z| > tau). Device-side, no host.
+            launch_sweep_zfilter_tau(dTotal.data(), dVar.data(), C, dTau.data(),
+                                     dEst.data(), dSe.data(), dZ.data(), dAbsZ.data(),
+                                     dFlags.data(), stream_.get());
 
             // Deinterleave the key columns for compaction.
             launch_sweep_deinterleave_keys(dItems.data(), C, k,
                                            dC0.data(), dC1.data(), dC2.data(), dC3.data(),
                                            stream_.get());
 
-            // (4) COMPACT survivors ON THE DEVICE (CUB Flagged; num_selected written on device).
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dEst.data(), dFlags.data(),
-                                       dEstSel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dSe.data(), dFlags.data(),
-                                       dSeSel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dZ.data(), dFlags.data(),
-                                       dZSel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC0.data(), dFlags.data(),
-                                       dC0Sel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC1.data(), dFlags.data(),
-                                       dC1Sel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC2.data(), dFlags.data(),
-                                       dC2Sel.data(), dNumSel.data(), C, stream_.get());
-            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC3.data(), dFlags.data(),
-                                       dC3Sel.data(), dNumSel.data(), C, stream_.get());
+            // (4) COMPACT the chunk's above-tau survivors ON THE DEVICE (CUB Flagged; num_selected
+            // written on device). The SAME 8 columns (est/se/z/absz + 4 keys) with the SAME flags.
+            std::size_t sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dEst.data(), dFlags.data(),
+                                       dEstSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dSe.data(), dFlags.data(),
+                                       dSeSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dZ.data(), dFlags.data(),
+                                       dZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dAbsZ.data(), dFlags.data(),
+                                       dAbsZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC0.data(), dFlags.data(),
+                                       dC0Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC1.data(), dFlags.data(),
+                                       dC1Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC2.data(), dFlags.data(),
+                                       dC2Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            sb = cub_bytes;
+            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC3.data(), dFlags.data(),
+                                       dC3Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
 
             int num_sel = 0;
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(&num_sel, dNumSel.data(), sizeof(int),
@@ -1653,36 +1762,54 @@ public:
             STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
             if (num_sel <= 0) continue;
 
-            // (5) D2H ONLY the compacted survivors (num_sel, small) — the only host write.
-            const std::size_t base = h_est.size();
-            h_est.resize(base + static_cast<std::size_t>(num_sel));
-            h_se.resize(base + static_cast<std::size_t>(num_sel));
-            h_z.resize(base + static_cast<std::size_t>(num_sel));
-            h_c0.resize(base + static_cast<std::size_t>(num_sel));
-            h_c1.resize(base + static_cast<std::size_t>(num_sel));
-            h_c2.resize(base + static_cast<std::size_t>(num_sel));
-            h_c3.resize(base + static_cast<std::size_t>(num_sel));
-            const std::size_t db = static_cast<std::size_t>(num_sel) * sizeof(double);
-            const std::size_t ib = static_cast<std::size_t>(num_sel) * sizeof(int);
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_est.data() + base, dEstSel.data(), db,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_se.data() + base, dSeSel.data(), db,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_z.data() + base, dZSel.data(), db,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c0.data() + base, dC0Sel.data(), ib,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c1.data() + base, dC1Sel.data(), ib,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c2.data() + base, dC2Sel.data(), ib,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c3.data() + base, dC3Sel.data(), ib,
-                                              cudaMemcpyDeviceToHost, stream_.get()));
+            // (5) APPEND the chunk's survivors into the device reservoir (D2D). If they would
+            // overflow CAP, compact-and-raise FIRST (frees >=K headroom), then append. A single
+            // chunk may yield more than K survivors (the first chunks, before tau rises); append
+            // in pieces of <=(CAP-res_n) and compact between, so the reservoir never overruns.
+            int off = 0;
+            while (off < num_sel) {
+                if (res_n >= CAP) compact_and_raise(K);  // reservoir full -> truncate to K.
+                int take = num_sel - off;
+                if (take > CAP - res_n) take = CAP - res_n;  // fill to CAP, then compact.
+                const std::size_t db = static_cast<std::size_t>(take) * sizeof(double);
+                const std::size_t ib = static_cast<std::size_t>(take) * sizeof(int);
+                const std::size_t doff = static_cast<std::size_t>(off);
+                const std::size_t rdoff = static_cast<std::size_t>(res_n);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResEst.data() + rdoff, dEstSel.data() + doff, db, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResSe.data()  + rdoff, dSeSel.data()  + doff, db, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResZ.data()   + rdoff, dZSel.data()   + doff, db, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResAbsZ.data()+ rdoff, dAbsZSel.data()+ doff, db, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC0.data()  + rdoff, dC0Sel.data()  + doff, ib, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC1.data()  + rdoff, dC1Sel.data()  + doff, ib, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC2.data()  + rdoff, dC2Sel.data()  + doff, ib, cudaMemcpyDeviceToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dResC3.data()  + rdoff, dC3Sel.data()  + doff, ib, cudaMemcpyDeviceToDevice, stream_.get()));
+                res_n += take;
+                off += take;
+            }
+        }
+
+        // FINAL compact: sort the reservoir by |z| descending + truncate to min(res_n,K). The
+        // device now holds EXACTLY the top-K rows (sorted) — D2H ONLY these <=K rows.
+        compact_and_raise(K);
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        const std::size_t ns = static_cast<std::size_t>(res_n < 0 ? 0 : res_n);
+
+        std::vector<double> h_est(ns), h_se(ns), h_z(ns);
+        std::vector<int> h_c0(ns), h_c1(ns), h_c2(ns), h_c3(ns);
+        if (ns > 0) {
+            const std::size_t db = ns * sizeof(double);
+            const std::size_t ib = ns * sizeof(int);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_est.data(), dResEst.data(), db, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_se.data(),  dResSe.data(),  db, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_z.data(),   dResZ.data(),   db, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c0.data(),  dResC0.data(),  ib, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c1.data(),  dResC1.data(),  ib, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c2.data(),  dResC2.data(),  ib, cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c3.data(),  dResC3.data(),  ib, cudaMemcpyDeviceToHost, stream_.get()));
             STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         }
 
-        // Pack the survivor set onto the CUDA-free POD.
-        const std::size_t ns = h_est.size();
+        // Pack the bounded top-K survivor set onto the CUDA-free POD (host RAM is O(K)).
         out.keys.resize(ns);
         out.est = std::move(h_est);
         out.se = std::move(h_se);

@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_fstat_sweep.hpp"      // run_fstat_sweep (the GPU sweep, --all-quartets mode)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -96,6 +97,14 @@ namespace cfg = steppe::config;
 }  // namespace
 
 int run_f4_command(const cfg::RunConfig& config) {
+    // ---- SWEEP MODE (--all-quartets): route to the GPU sweep over C(P,4) of the --pops
+    // SUBSET (empty ⇒ the whole f2 dir). on-device unrank+compute+|z|filter+CUB-compact,
+    // survivors only. SEPARATE from the explicit-list path below (which the goldens gate
+    // byte-identical). The sweep body lives in cmd_fstat_sweep.cpp (the SAME run_f4_sweep).
+    if (config.sweep_all_combinations()) {
+        return run_fstat_sweep(config, /*k=*/4, "f4");
+    }
+
     // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE cmd_qpwave path -----
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe f4: --f2-dir is required\n");
