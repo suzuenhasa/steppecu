@@ -53,12 +53,13 @@ nanobind_add_module(_core NB_STATIC module.cpp)
 add_library(steppe::pycore ALIAS _core)
 
 # CUDA-FREE seams only: steppe::access (the shared f2-dir reader + pop->index resolver),
-# steppe::{core,api,device} (the run_qpadm*/build_resources/upload seams). steppe::io is
-# linked for parity with the CLI / the future M(py-2) extract binding (the genotype->f2
-# readers); M(py-1) consumes a pre-built f2-dir and does not call into io.
+# steppe::extract (the shared genotype->f2 extract chain run_extract_f2 + the STPF2BK1 dir
+# WRITER — M(py-2)), steppe::{core,io,api,device} (the run_qpadm*/build_resources/upload/
+# decode seams). steppe::io is linked for the genotype->f2 readers the M(py-2) extract
+# binding builds the P-axis from; M(py-1) consumed a pre-built f2-dir and did not call io.
 target_link_libraries(_core
     PRIVATE steppe::core steppe::io steppe::api steppe::device
-            steppe::access steppe::warnings)
+            steppe::access steppe::extract steppe::warnings)
 target_compile_features(_core PRIVATE cxx_std_20)
 
 # Install the compiled extension next to the pure-Python facade (scikit-build-core lays

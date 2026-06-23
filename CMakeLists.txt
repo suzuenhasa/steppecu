@@ -81,6 +81,16 @@ if(STEPPE_BUILD_CLI OR STEPPE_BUILD_PYTHON)
   add_subdirectory(src/access)
 endif()
 
+# extract — steppe_extract: the genotype->f2 EXTRACT library entry (run_extract_f2) + the
+# STPF2BK1 dir WRITER, shared by BOTH the CLI app AND the Python bindings (M(py-2) §0
+# finding: the extract chain was exe-private in src/app, which is CLI-only — a wheel build
+# would have no extract entry; this is its shared linkable home). UNLIKE access it reaches
+# the GPU through the CUDA-free seams (links steppe::{core,io,device}); still a PLAIN CXX
+# target (NO LANGUAGES CUDA, NO .cu). Built whenever either consumer is on.
+if(STEPPE_BUILD_CLI OR STEPPE_BUILD_PYTHON)
+  add_subdirectory(src/extract)
+endif()
+
 # app — the steppe CLI (Phase 3 / step 2 productization). A PLAIN CXX target (NO
 # LANGUAGES CUDA) behind the already-present STEPPE_BUILD_CLI option
 # (SteppeOptions.cmake:23, default OFF), per cli-bindings.md §6.1 + architecture.md §4.

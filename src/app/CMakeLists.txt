@@ -39,8 +39,7 @@ add_executable(steppe_app
     cmd_fstat_sweep.cpp # GPU-only f4-sweep / f3-sweep: all C(P,k) on-device + |z|/top-k filter
     cmd_qpdstat.cpp    # qpDstat Part A: D-stat/f4 over an f2-dir (--f2-dir reports f4; reuses run_f4)
     cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
-    cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command
-    f2_dir_writer.cpp  # M(cli-4): the f2_blocks dir WRITER (STPF2BK1 REAL vpair + sidecars)
+    cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command (thin wrapper over steppe::extract)
     result_emit.cpp)   # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
@@ -54,6 +53,7 @@ set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
 target_link_libraries(steppe_app
     PRIVATE steppe::core steppe::io steppe::api steppe::device
             steppe::access            # the shared f2-dir reader + pop->index resolver (DRY, §0)
+            steppe::extract           # the shared genotype->f2 extract chain + the dir WRITER (DRY, M(py-2) §0)
             CLI11::CLI11 steppe::warnings)
 target_compile_features(steppe_app PRIVATE cxx_std_20)
 

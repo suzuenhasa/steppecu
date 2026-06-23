@@ -2,11 +2,19 @@
 #
 # ONE GPU wheel, NO CPU-only variant (memory cpu-is-test-only): steppe is a GPU product.
 # scikit-build-core drives CMake with the bindings on (STEPPE_BUILD_PYTHON=ON) and the CLI
-# off; nanobind provides the extension machinery. The CUDA-13 runtime is NOT bundled — the
-# wheel declares the unsuffixed nvidia-* redistributable runtime deps and auditwheel-repair
-# excludes the CUDA shared libs (so the wheel uses the user's CUDA 13 install). pandas is a
-# SOFT/lazy dep (imported inside the .to_dataframe accessors), NOT a hard wheel dep, so
-# `import steppe` works without it.
+# off; nanobind provides the extension machinery.
+#
+# THE CUDA-13 RUNTIME IS A REQUIREMENT, NOT BUNDLED, NOT A PIP DEP (the GPU-wheel decision).
+# `_core.so` carries DT_NEEDED for libcudart.so.13 / libcublas.so.13 / libcusolver.so.12 and
+# resolves them DYNAMICALLY AT LOAD from the user's CUDA 13 install (the system loader /
+# LD_LIBRARY_PATH=/usr/local/cuda/lib64) — the toolkit (~GBs) is deliberately NOT bundled,
+# and the user's driver must match the CUDA 13 runtime anyway. The pip `nvidia-*-cu13`
+# redistributable wheels are NOT declared as deps: as of this build they are NOT published on
+# PyPI with a real (>=13) version (only 0.0.x placeholders exist), so pinning them makes the
+# wheel pip-uninstallable. When the cu13 redistributable wheels ship a real version, an
+# OPTIONAL `cuda` extra (below) can pull them for a self-contained install; the BASE wheel
+# documents CUDA 13 as a system requirement. pandas is a SOFT/lazy dep (imported inside the
+# .to_dataframe accessors), NOT a hard wheel dep, so `import steppe` works without it.
 [build-system]
 requires = ["scikit-build-core>=0.10", "nanobind>=2"]
 build-backend = "scikit_build_core.build"
@@ -18,27 +26,43 @@ description = "GPU/CUDA-13 qpAdm / qpWave (f-statistics & model fitting)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-# The CUDA-13 redistributable runtime (unsuffixed, >=13,<14): NOT bundled in the wheel
-# (auditwheel --exclude); resolved from the user's environment / these pip deps.
+# numpy is the ONLY hard runtime dep (_core's `_f2_numpy` returns an ndarray). The CUDA 13
+# runtime is a SYSTEM requirement resolved at load (see the header note) — NOT a pip dep, so
+# `pip install steppe` succeeds and `import steppe` works wherever CUDA 13 is on the loader
+# path; a GPU call raises a clear "no CUDA device" fault on a box without one.
 dependencies = [
     "numpy>=1.22",
-    "nvidia-cuda-runtime-cu13>=13,<14",
-    "nvidia-cublas-cu13>=13,<14",
-    "nvidia-cusolver-cu13>=13,<14",
-    "nvidia-curand-cu13>=13,<14",
 ]
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]   # the DataFrame accessors; soft/lazy (import steppe works without).
 test = ["pytest>=7", "pandas>=1.5", "numpy>=1.22"]
+# OPTIONAL self-contained CUDA-13 runtime via the pip redistributable wheels (`pip install
+# steppe[cuda]`). Declared as an EXTRA, not a base dep, because these wheels are not yet on
+# PyPI with a real >=13 version; when they are, this extra installs libcudart/libcublas/
+# libcusolver into site-packages/nvidia/*/lib (the user then puts those on LD_LIBRARY_PATH,
+# or a future auditwheel-repair injects an $ORIGIN/../nvidia/*/lib RPATH).
+cuda = [
+    "nvidia-cuda-runtime-cu13>=13,<14",
+    "nvidia-cublas-cu13>=13,<14",
+    "nvidia-cusolver-cu13>=13,<14",
+]
 
 [tool.scikit-build]
 # Build ONLY the bindings (no CLI); the importable package is bindings/steppe.
 cmake.version = ">=3.28"
+# RELEASE is mandatory (memory perf-bench-release-build): scikit-build-core does NOT pass a
+# build type by default, and a Debug/unspecified build voids the precision/perf contract.
+cmake.build-type = "Release"
 cmake.args = [
     "-DSTEPPE_BUILD_PYTHON=ON",
     "-DSTEPPE_BUILD_CLI=OFF",
     "-DSTEPPE_BUILD_TESTS=OFF",
+    # CUDA-13 arch: scikit-build-core does NOT pass STEPPE_CUDA_ARCH, so the build would
+    # otherwise fall to the CUDAArch.cmake default. Pin the Blackwell box arch (sm_120; the
+    # 2x RTX 5090 box5090 / the RTX PRO 6000 rtxbox). Override with a different matrix via
+    # `pip wheel . --config-settings=cmake.define.STEPPE_CUDA_ARCH=<arch>` for another GPU.
+    "-DSTEPPE_CUDA_ARCH=120",
 ]
 build.targets = ["_core"]
 wheel.packages = ["bindings/steppe"]

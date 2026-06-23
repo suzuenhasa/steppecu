@@ -27,6 +27,7 @@ __all__ = [
     "F3Result",
     "F4RatioResult",
     "read_f2",
+    "extract_f2",
     "qpadm",
     "qpwave",
     "f4",
@@ -383,6 +384,62 @@ def read_f2(directory: str, *, device: int = 0) -> F2Blocks:
     """Load an f2-dir (``f2.bin`` STPF2BK1 + ``pops.txt``) into an opaque F2Blocks handle.
     Does NOT upload to the GPU — the upload happens per fit call (mirroring the CLI)."""
     return F2Blocks(_core.read_f2(str(directory), device))
+
+
+def extract_f2(
+    prefix: Any,
+    *,
+    pops: list[str],
+    out: Optional[str] = None,
+    device: int = 0,
+    blgsize: float = 0.05,
+    maf: float = 0.0,
+    maxmiss: float = 0.0,
+    autosomes_only: bool = True,
+    drop_monomorphic: bool = False,
+    transversions_only: bool = False,
+    ploidy: str = "auto",
+    precision: Optional[str] = None,
+):
+    """Build an f2_blocks tensor from a genotype prefix on the GPU (M(py-2) extract-f2).
+
+    Reads ``<prefix>.{geno,snp,ind}`` directly and runs the SAME decode -> filter ->
+    assign_blocks -> tiered f2 compute -> to_host chain the CLI ``extract-f2`` command runs
+    (no duplicated compute). ``pops`` is the Explicit population subset (the P axis is that
+    selection SORTED ASC by label = ``pops.txt`` order). Defaults match the AT2 ``extract_f2``
+    convention so a bare extract reproduces the golden: ``autosomes_only=True`` (AT2
+    ``auto_only`` default), ``maxmiss=0`` (the AT2 POPULATION-axis coverage = the global
+    intersection, NOT the sample-axis predicate), per-sample ``ploidy="auto"`` (AT2
+    ``adjust_pseudohaploid``), ``blgsize=0.05`` Morgans.
+
+    TWO RETURN MODES (capsule/path idiom, NOT a giant disk round-trip):
+      * ``out`` is None (default): returns an :class:`F2Blocks` handle wrapping the host f2
+        tensor + labels (no disk write); feed it straight to :func:`qpadm` / :func:`f4` etc.
+      * ``out`` is a directory path: writes an STPF2BK1 f2-dir there (``f2.bin`` + ``pops.txt``
+        + ``meta.json``) and returns the path string (then ``read_f2(out)`` reloads it).
+
+    ``precision`` selects the f2-GEMM arithmetic: None (default) -> emulated FP64 (40-bit, the
+    f2 default), ``"fp64"``/``"native"`` -> native FP64 oracle, ``"emulated_fp64"``/``"emu"``,
+    ``"tf32"``. GPU-only: no CUDA device raises a clear ValueError. An unknown pop name or a
+    missing genotype file raises; every-SNP-filtered raises."""
+    h = _core.run_extract_f2(
+        str(prefix),
+        list(pops),
+        "" if out is None else str(out),
+        device,
+        blgsize,
+        maf,
+        maxmiss,
+        autosomes_only,
+        drop_monomorphic,
+        transversions_only,
+        ploidy,
+        precision,
+    )
+    # out= None -> a raw _core.F2Handle (wrap it); out= path -> the path string (return it).
+    if out is None:
+        return F2Blocks(h)
+    return h
 
 
 def qpadm(

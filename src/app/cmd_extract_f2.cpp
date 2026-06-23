@@ -37,37 +37,24 @@
 
 #include "app/f2_dir_writer.hpp"
 #include "core/config/exit_code.hpp"
-#include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
-#include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_tiered (CUDA-FREE)
-#include "core/internal/views.hpp"                // steppe::core::MatView
-#include "device/backend.hpp"                     // DecodeTileView, DecodeResult, BackendCapabilities (CUDA-FREE)
-#include "device/f2_blocks_out.hpp"               // F2BlocksOut (the unified tiered result; CUDA-FREE)
+#include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans (--dry-run sizing)
 #include "device/resources.hpp"                   // Resources, build_resources (CUDA-FREE)
 #include "device/tier_select.hpp"                 // resolve_output_tier, OutputTier, free_host_ram_bytes (CUDA-FREE, --dry-run)
 #include "steppe/config.hpp"                      // Precision, FilterConfig, kCentimorgansPerMorgan
 #include "steppe/error.hpp"                       // steppe::Status
+#include "steppe/extract.hpp"                     // run_extract_f2 + F2ExtractResult (the library entry; CUDA-FREE)
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
-#include "io/ploidy_detect.hpp"   // detect_sample_ploidy (AT2 adjust_pseudohaploid)
 #include "io/snp_reader.hpp"
-#include "io/filter/include_exclude.hpp"
-#include "io/filter/snp_filter.hpp"
 
 namespace steppe::app {
 
 namespace {
 
 namespace cfg = steppe::config;
-using steppe::core::MatView;
-namespace flt = steppe::io::filter;
-
-// AT2 ploidy values (mirror core::kPloidy{PseudoHaploid,Diploid}; the app names them
-// here so the resolved per-sample vector / forced-uniform fallback read clearly).
-constexpr int kPloidyPseudoHaploid = 1;
-constexpr int kPloidyDiploid = 2;
 
 // A human label for the resolved precision (recorded in meta.json; cli-bindings §4.3
 // — the ENGAGED tag). Mirrors result_emit's emu/fp64/tf32 vocabulary.
@@ -89,6 +76,17 @@ constexpr int kPloidyDiploid = 2;
         case device::OutputTier::Resident: return "resident";
         case device::OutputTier::HostRam:  return "host";
         case device::OutputTier::Disk:     return "disk";
+    }
+    return "resident";
+}
+
+// The same label over the CUDA-free ExtractTier mirror the library entry returns (the
+// post-run summary echoes the tier the tiered compute actually used).
+[[nodiscard]] const char* tier_label(steppe::ExtractTier t) {
+    switch (t) {
+        case steppe::ExtractTier::Resident: return "resident";
+        case steppe::ExtractTier::HostRam:  return "host";
+        case steppe::ExtractTier::Disk:     return "disk";
     }
     return "resident";
 }
@@ -203,28 +201,11 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
-    // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) ---
-    // Default --ploidy auto: detect each gathered sample's ploidy from the tile (a het
-    // call in the leading SNPs ⇒ diploid, none ⇒ pseudo-haploid) — AT2-parity per
-    // SAMPLE, so mixed-ploidy pops (Turkey_N/Serbia/Yamnaya/Karitiana) decode correctly.
-    // --ploidy 1/2 force a uniform vector (pseudo-haploid / diploid) for every sample.
-    // The vector is parallel to the gathered sample axis and fed to decode_af via
-    // DecodeTileView::sample_ploidy (per-sample weighting AC += code/(3-ploidy),
-    // N += ploidy). n_ph/n_dip are echoed below for observability.
-    std::vector<int> sample_ploidy;
+    // PER-SAMPLE PLOIDY (AT2 adjust_pseudohaploid) is detected INSIDE the library entry
+    // (steppe::run_extract_f2) now — the per-sample n_ph/n_dip observability counts come
+    // back on the F2ExtractResult for the post-run echo. The CLI no longer re-detects here
+    // (the up-front tile read above stays only for the dry-run sizing + validation).
     std::size_t n_ph = 0, n_dip = 0;
-    switch (config.ploidy()) {
-        case cfg::PloidyMode::Auto:
-            sample_ploidy = io::detect_sample_ploidy(tile);
-            break;
-        case cfg::PloidyMode::PseudoHaploid:
-            sample_ploidy.assign(tile.n_individuals, kPloidyPseudoHaploid);
-            break;
-        case cfg::PloidyMode::Diploid:
-            sample_ploidy.assign(tile.n_individuals, kPloidyDiploid);
-            break;
-    }
-    for (int pl : sample_ploidy) (pl == kPloidyPseudoHaploid ? n_ph : n_dip)++;
 
     // The engaged precision (the requested DeviceConfig.precision; the resident path
     // honors it or downgrades to native — recorded as the tag in meta.json).
@@ -320,15 +301,21 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         ~ThreadJoiner() { if (t.joinable()) t.join(); }
     } geno_hash_joiner{geno_hash_thread};
 
-    // ---- 5. Decode the tile on the GPU backend -> Q/V/N [P x M] -------------------
-    device::F2BlocksOut dev_f2;      // the UNIFIED tiered result (Resident / HostRam / Disk)
-    std::vector<double> Qk, Vk, Nk;  // the (possibly filtered) Q/V/N (own storage)
-    std::vector<int> chrom_kept;
-    std::vector<double> genpos_kept;
-    long M_kept = 0;
-    std::size_t n_kept = 0;
-    Precision engaged = precision;
-    device::OutputTier chosen_tier = device::OutputTier::Resident;  // overwritten by the tiered entry
+    // ---- 5-8b. THE GPU EXTRACT CHAIN -> host tensor (the LIBRARY entry; DRY) -------
+    // The decode -> filter (pop-axis maxmiss) -> assign_blocks ->
+    // compute_f2_blocks_multigpu_tiered -> to_host chain now lives ONCE in
+    // steppe::run_extract_f2 (include/steppe/extract.hpp / extract_f2_core.cpp); the CLI
+    // calls it so there is no duplicated math (the goldens are byte-identical — the lib
+    // body was lifted VERBATIM from this command). The CLI keeps stdout/stderr ownership:
+    // it MAPS the library's exceptions back to the CLI exit codes here (architecture.md
+    // §10 — the library throws, main() prints + returns a code). The decode/compute reads
+    // the SAME .geno/.snp/.ind triple again inside the lib (the io reads are tiny vs. the
+    // GPU work); the dry-run above used its own up-front read.
+    const ExtractPloidy lib_ploidy =
+        (config.ploidy() == cfg::PloidyMode::PseudoHaploid) ? ExtractPloidy::PseudoHaploid
+      : (config.ploidy() == cfg::PloidyMode::Diploid)       ? ExtractPloidy::Diploid
+                                                            : ExtractPloidy::Auto;
+    F2ExtractResult extracted;
     try {
         device::Resources resources = device::build_resources(config.device());
         if (resources.gpus.empty()) {
@@ -337,165 +324,25 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
                          "product; a CUDA-capable GPU is required)\n");
             return cfg::kExitRuntimeError;
         }
-        // The decode runs on the GPU backend bound to the first device.
-        steppe::ComputeBackend& backend = *resources.gpus.front().backend;
-
-        DecodeTileView view;
-        view.packed = tile.packed.data();
-        view.bytes_per_record = tile.bytes_per_record;
-        view.n_snp = tile.n_snp;
-        view.n_individuals = tile.n_individuals;
-        view.pop_offsets = tile.pop_offsets.data();
-        view.n_pop = P;
-        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid; the f2 pseudo-haploid fix):
-        // the decode folds it as AC += code/(3-ploidy), N += ploidy per sample, so
-        // mixed-ploidy pops are correct. sample_ploidy is always populated (auto /
-        // forced) above; the scalar fallback (kept diploid) is never reached here.
-        view.sample_ploidy = sample_ploidy.data();
-        view.ploidy = kPloidyDiploid;  // unused (sample_ploidy non-null), kept as the safe default
-        const DecodeResult dec = backend.decode_af(view);
-
-        // ---- 6. Filters: build the per-SNP keep mask, subset the SNP axis ---------
-        // The keep-mask path is parity-NEUTRAL by construction (test_filter_oracle's
-        // drop-equals-mask invariant). It handles the allele-class drops, MAF, the
-        // flag-gated drops, and autosomes_only (the extract-f2 default = AT2 extract_f2's
-        // default auto_only=TRUE = chr 1-22).
-        //
-        // THE maxmiss SEMANTIC (load-bearing; ROADMAP.md M2 line "AT2 maxmiss is
-        // POPULATION-axis"). AT2 extract_f2 keeps SNP s iff (fraction of POPULATIONS
-        // with NO genotyped individual at s) <= maxmiss — NOT the sample-axis missing
-        // fraction the FilterConfig::geno_max_missing predicate computes. maxmiss=0 is
-        // the GLOBAL POP INTERSECTION (every selected pop has data at s), which is the
-        // SNP set AT2's golden_fit0 f2 uses. So we apply the pop-coverage maxmiss as a
-        // SEPARATE per-SNP test here and force build_snp_keep_mask's geno_max_missing to
-        // the no-op (1.0) so the sample-axis predicate does not double-filter.
-        std::vector<std::size_t> pop_individuals(static_cast<std::size_t>(P));
-        for (int p = 0; p < P; ++p) {
-            pop_individuals[static_cast<std::size_t>(p)] =
-                tile.pop_offsets[static_cast<std::size_t>(p) + 1] -
-                tile.pop_offsets[static_cast<std::size_t>(p)];
-        }
-        flt::DecodedTileSummaryInput fin;
-        fin.q = dec.q.data();
-        fin.v = dec.v.data();
-        fin.n = dec.n.data();
-        fin.P = P;
-        fin.M = M;
-        fin.pop_individuals = pop_individuals;
-        // fin.ploidy is used ONLY by the SAMPLE-axis missing predicate
-        // (nonmissing_indiv = Σ N/ploidy), which the extract-f2 path DISABLES below
-        // (class_filter.geno_max_missing = 1.0 ⇒ no-op); the pooled MAF it also feeds
-        // is convention-invariant (Q·N/N). The AT2 pop-coverage maxmiss (applied
-        // separately on N>0) and the f2 het-correction N (now per-sample, via decode)
-        // do NOT read this. Kept diploid (a valid {1,2} value) for the disabled path;
-        // a future per-sample sample-axis maxmiss would need the per-sample vector here.
-        fin.ploidy = kPloidyDiploid;
-
-        FilterConfig class_filter = filter;
-        class_filter.geno_max_missing = 1.0;  // pop-coverage maxmiss is applied below
-        flt::SnpMembership mem(class_filter);
-        std::vector<bool> keep = flt::build_snp_keep_mask(fin, snptab, class_filter, mem);
-
-        // Pop-coverage maxmiss (AT2 population-axis): drop SNP s if the fraction of
-        // selected pops with N(pop,s)==0 (no data) exceeds maxmiss. maxmiss>=1 keeps
-        // every SNP (the pairwise-complete path); maxmiss==0 is the global intersection.
-        const double maxmiss = filter.geno_max_missing;
-        if (maxmiss < 1.0) {
-            for (long s = 0; s < M; ++s) {
-                if (!keep[static_cast<std::size_t>(s)]) continue;
-                int n_missing_pops = 0;
-                for (int p = 0; p < P; ++p) {
-                    const std::size_t off =
-                        static_cast<std::size_t>(p) + static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-                    if (dec.n[off] <= 0.0) ++n_missing_pops;
-                }
-                const double frac_missing_pops =
-                    static_cast<double>(n_missing_pops) / static_cast<double>(P);
-                if (frac_missing_pops > maxmiss) keep[static_cast<std::size_t>(s)] = false;
-            }
-        }
-
-        for (bool k : keep) n_kept += k ? 1u : 0u;
-        M_kept = static_cast<long>(n_kept);
-        if (M_kept <= 0) {
-            std::fprintf(stderr,
-                         "steppe extract-f2: every SNP was filtered out "
-                         "(0 of %ld kept) — relax the filters\n", M);
-            return cfg::kExitInvalidConfig;
-        }
-
-        // Subset Q/V/N AND the parallel chrom/genpos in LOCKSTEP (the SNP axis must
-        // stay aligned for assign_blocks; mirrors test_filter_oracle::drop_columns).
-        Qk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
-        Vk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
-        Nk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
-        chrom_kept.reserve(n_kept);
-        genpos_kept.reserve(n_kept);
-        std::size_t d = 0;
-        for (std::size_t s = 0; s < keep.size(); ++s) {
-            if (!keep[s]) continue;
-            for (int i = 0; i < P; ++i) {
-                const std::size_t src =
-                    static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * s;
-                const std::size_t dst =
-                    static_cast<std::size_t>(i) + static_cast<std::size_t>(P) * d;
-                Qk[dst] = dec.q[src];
-                Vk[dst] = dec.v[src];
-                Nk[dst] = dec.n[src];
-            }
-            chrom_kept.push_back(snptab.chrom[s]);
-            genpos_kept.push_back(snptab.genpos_morgans[s]);
-            ++d;
-        }
-
-        // ---- 7. assign_blocks over the KEPT SNP axis ------------------------------
-        const double bs_morgans =
-            steppe::core::block_size_cm_to_morgans(config.blgsize_cm());
-        const steppe::core::BlockPartition partition = steppe::core::assign_blocks(
-            std::span<const int>(chrom_kept), std::span<const double>(genpos_kept), bs_morgans);
-        if (partition.n_block <= 0) {
-            std::fprintf(stderr,
-                         "steppe extract-f2: assign_blocks produced 0 blocks "
-                         "(check --blgsize and the .snp genetic positions)\n");
-            return cfg::kExitInvalidConfig;
-        }
-
-        // ---- 8. compute_f2_blocks_multigpu_tiered (GPU; the UNIFIED adaptive entry) -
-        // ONE seam for every input size — NO if-big-else-small branch here. The tiered
-        // entry resolve_output_tier()s (config.force_tier from --tier > STEPPE_FORCE_TIER
-        // env > auto from the runtime free-VRAM/RAM probes) then: Resident -> the EXISTING
-        // device-resident compute UNCHANGED (so the small goldens stay byte-identical),
-        // HostRam/Disk -> the streamed SNP-tile input path (GPU peak independent of M, so
-        // high-P full-autosome runs that OOMd the resident 7·P·M feeder COMPLETE). The
-        // result lands in exactly one tier; .to_host() below is bit-identical across all
-        // three (architecture.md §12 PARITY LAW).
-        const MatView Q{Qk.data(), P, M_kept};
-        const MatView V{Vk.data(), P, M_kept};
-        const MatView N{Nk.data(), P, M_kept};
-        dev_f2 = steppe::core::compute_f2_blocks_multigpu_tiered(
-            resources, Q, V, N, partition, precision);
-        chosen_tier = dev_f2.tier;
-        // The engaged precision reflects what the backend HONORED (the compute path
-        // downgrades emu -> native if emulation is not honorable on this build/device).
-        engaged = precision;
-        (void)engaged;
+        extracted = steppe::run_extract_f2(
+            config.geno(), config.snp(), config.ind(), sel, filter, precision,
+            steppe::core::block_size_cm_to_morgans(config.blgsize_cm()), lib_ploidy,
+            resources);
+    } catch (const std::invalid_argument& e) {
+        // A config-level fault (unknown pop, empty selection, every SNP filtered).
+        std::fprintf(stderr, "steppe extract-f2: %s\n", e.what());
+        return cfg::kExitInvalidConfig;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe extract-f2: device error: %s\n", e.what());
         return cfg::kExitRuntimeError;
     }
 
-    // ---- 8b. Materialize -> host tensor with REAL f2 + vpair (tier-agnostic) -------
-    // F2BlocksOut::to_host() is bit-identical across all three tiers (architecture.md
-    // §12): Resident -> the ONE device-resident D2H; HostRam -> a copy of the streamed
-    // host tensor; Disk -> a pread of every block back from the cache file. The writer
-    // hand-off below is unchanged — it consumes the F2BlockTensor exactly as before.
-    F2BlockTensor host_f2;
-    try {
-        host_f2 = dev_f2.to_host();
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe extract-f2: materialize (read-back) failed: %s\n", e.what());
-        return cfg::kExitRuntimeError;
-    }
+    const F2BlockTensor& host_f2 = extracted.f2;
+    const long M_kept = extracted.n_snp_kept;
+    pop_labels = extracted.pop_labels;       // the lib's P-axis labels (= the up-front read's).
+    n_ph = extracted.n_pseudo_haploid;       // observability echo (the lib detected these).
+    n_dip = extracted.n_diploid;
+    const Precision engaged = precision;     // recorded tag (the lib honors/downgrades internally).
 
     // ---- 9. Write the f2_blocks dir (f2.bin REAL vpair + pops.txt + meta.json) -----
     F2DirMeta meta;
@@ -544,7 +391,7 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     std::printf("  P = %d populations, %d blocks, %ld of %ld SNPs kept\n",
                 host_f2.P, host_f2.n_block, M_kept, M);
     std::printf("  tier = %s (the f2_blocks result tier; resident = device-resident, "
-                "host/disk = SNP-tile input-streaming)\n", tier_label(chosen_tier));
+                "host/disk = SNP-tile input-streaming)\n", tier_label(extracted.tier));
     std::printf("  precision = %s, blgsize = %.4g Morgans (%.4g cM)\n",
                 precision_label(engaged),
                 config.blgsize_cm() / kCentimorgansPerMorgan, config.blgsize_cm());

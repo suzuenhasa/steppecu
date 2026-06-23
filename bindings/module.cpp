@@ -37,11 +37,13 @@
 #include <nanobind/stl/vector.h>
 
 #include "app/f2_dir_io.hpp"     // steppe::app::read_f2_dir / F2Dir (CUDA-FREE)
+#include "app/f2_dir_writer.hpp" // steppe::app::write_f2_dir / F2DirMeta (CUDA-FREE; the extract out= path)
 #include "app/pop_resolver.hpp"  // steppe::app::PopResolver (CUDA-FREE)
 #include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/config.hpp"            // steppe::DeviceConfig
 #include "steppe/dstat.hpp"             // run_dstat + DstatResult (qpDstat Part B genotype-path D)
+#include "steppe/extract.hpp"           // run_extract_f2 + F2ExtractResult (M(py-2) genotype->f2 extract)
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f3.hpp"                // run_f3 + F3Result (the standalone-f3 binding)
 #include "steppe/f4.hpp"                // run_f4 + F4Result (the standalone-f4 binding)
@@ -580,6 +582,134 @@ nb::dict run_dstat_py(const std::string& prefix,
     return dstat_to_dict(result, pops);
 }
 
+// run_extract_f2: the M(py-2) genotype->f2 EXTRACT binding. Reads the genotype TRIPLE
+// prefix.{geno,snp,ind} directly and builds the f2_blocks tensor (decode->filter->
+// assign_blocks->tiered f2 compute->to_host) through the CUDA-free steppe::run_extract_f2
+// seam (extract.hpp) — the SAME chain the CLI extract-f2 command runs (DRY). GPU-only:
+// builds Resources for `device`, fail-fasts on no-GPU with the same message as the CLI.
+//
+// TWO RETURN MODES (capsule/path idiom, NOT a giant disk round-trip): if `out` is given,
+// SERIALIZE the result to an STPF2BK1 dir via write_f2_dir and return the path STRING (the
+// user can then read_f2(path)); if `out` is empty, wrap the host F2BlockTensor + labels in
+// a NEW F2Handle and return it (rv_policy::take_ownership, like read_f2 — NO disk round-
+// trip). The F2Handle pointer return reuses read_f2's exact ownership transfer. Faults (no
+// device, unknown Explicit pop, missing file, every SNP filtered, an unwritable out dir)
+// raise (the library THROWS; the binding re-raises as a Python error — §1.3 / §5.2).
+//
+// `pops` -> PopSelection::Explicit{pops} (the named-subset case; the P axis is that
+// selection sorted ASC by label). `precision`: nullopt -> the EmulatedFp64 default (the
+// f2-GEMM default, matching the CLI); "fp64"/"native" -> native FP64 oracle; "emulated_fp64"
+// -> EmulatedFp64. `ploidy`: "auto" (AT2 adjust_pseudohaploid; the default), "1"/"pseudo"
+// -> pseudo-haploid, "2"/"diploid" -> diploid. Defaults match the CLI/AT2 extract_f2 so a
+// bare extract reproduces the golden (autosomes_only ON, maxmiss as the pop-axis semantic).
+nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::string>& pops,
+                             const std::string& out, int device, double blgsize,
+                             double maf, double maxmiss, bool autosomes_only,
+                             bool drop_monomorphic, bool transversions_only,
+                             const std::string& ploidy,
+                             std::optional<std::string> precision) {
+    if (pops.empty()) raise_value("extract_f2: pops needs at least one population name");
+    const std::string geno = prefix + ".geno";
+    const std::string snp = prefix + ".snp";
+    const std::string ind = prefix + ".ind";
+
+    // pops -> the Explicit selection (the P axis is read_ind(Explicit{pops}) sorted ASC).
+    steppe::io::PopSelection sel;
+    sel.mode = steppe::io::PopSelection::Mode::Explicit;
+    sel.labels = pops;
+
+    // The on-the-fly QC filter (the AT2 extract_f2 defaults; maxmiss is the POP-axis
+    // coverage semantic, reproduced inside run_extract_f2 — NOT the sample-axis predicate).
+    steppe::FilterConfig filter;
+    filter.maf_min = maf;
+    filter.geno_max_missing = maxmiss;      // AT2 pop-axis maxmiss (0 = global intersection).
+    filter.autosomes_only = autosomes_only; // AT2 extract_f2 default auto_only=TRUE.
+    filter.drop_monomorphic = drop_monomorphic;
+    filter.transversions_only = transversions_only;
+
+    // The precision policy (default EmulatedFp64 40-bit, the f2-GEMM default = the CLI).
+    steppe::Precision prec;  // defaults to Kind::EmulatedFp64, kDefaultMantissaBits.
+    if (precision.has_value()) {
+        const std::string& p = *precision;
+        if (p == "fp64" || p == "native") {
+            prec.kind = steppe::Precision::Kind::Fp64;
+        } else if (p == "emulated_fp64" || p == "emu") {
+            prec.kind = steppe::Precision::Kind::EmulatedFp64;
+        } else if (p == "tf32") {
+            prec.kind = steppe::Precision::Kind::Tf32;
+        } else {
+            raise_value("extract_f2: precision must be one of 'fp64'/'native', "
+                        "'emulated_fp64'/'emu', 'tf32' (got '" + p + "')");
+        }
+    }
+
+    steppe::ExtractPloidy ep = steppe::ExtractPloidy::Auto;
+    if (ploidy == "auto") {
+        ep = steppe::ExtractPloidy::Auto;
+    } else if (ploidy == "1" || ploidy == "pseudo" || ploidy == "pseudo_haploid") {
+        ep = steppe::ExtractPloidy::PseudoHaploid;
+    } else if (ploidy == "2" || ploidy == "diploid") {
+        ep = steppe::ExtractPloidy::Diploid;
+    } else {
+        raise_value("extract_f2: ploidy must be one of 'auto', '1'/'pseudo', '2'/'diploid' "
+                    "(got '" + ploidy + "')");
+    }
+
+    steppe::DeviceConfig cfg;
+    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    cfg.precision = prec;
+
+    steppe::F2ExtractResult result;
+    try {
+        sd::Resources resources = sd::build_resources(cfg);
+        if (resources.gpus.empty()) {
+            raise_value(
+                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
+                "required)");
+        }
+        result = steppe::run_extract_f2(geno, snp, ind, sel, filter, prec, blgsize, ep,
+                                        resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("extract_f2: ") + e.what());
+    }
+
+    // MODE A: out= given -> serialize an STPF2BK1 dir + return the path STRING.
+    if (!out.empty()) {
+        sa::F2DirMeta meta;
+        meta.precision_mantissa_bits = prec.mantissa_bits;
+        meta.precision_tag =
+            (result.precision_tag == steppe::Precision::Kind::EmulatedFp64) ? "emu"
+          : (result.precision_tag == steppe::Precision::Kind::Tf32)         ? "tf32"
+                                                                            : "fp64";
+        meta.blgsize_cm = blgsize * 100.0;  // Morgans -> centimorgans (meta records cM).
+        meta.n_block = result.f2.n_block;
+        meta.P = result.f2.P;
+        meta.n_snp_total = result.n_snp_total;
+        meta.n_snp_kept = result.n_snp_kept;
+        meta.maf_min = filter.maf_min;
+        meta.geno_max_missing = filter.geno_max_missing;
+        meta.autosomes_only = filter.autosomes_only;
+        meta.drop_monomorphic = filter.drop_monomorphic;
+        meta.transversions_only = filter.transversions_only;
+        meta.geno_path = geno;
+        meta.snp_path = snp;
+        meta.ind_path = ind;
+        meta.hash_source_files = false;  // the Python extract does not hash the big .geno.
+        const sa::F2DirWriteResult wr =
+            sa::write_f2_dir(out, result.f2, result.pop_labels, meta);
+        if (!wr.ok) raise_value("extract_f2: " + wr.error);
+        return nb::cast(out);
+    }
+
+    // MODE B: out= empty -> wrap the host tensor + labels in a new F2Handle (no disk
+    // round-trip). The pointer return uses rv_policy::take_ownership at the def site.
+    auto* h = new F2Handle();
+    h->tensor = std::move(result.f2);
+    h->pops = std::move(result.pop_labels);
+    h->device = device;
+    return nb::cast(h, nb::rv_policy::take_ownership);
+}
+
 // run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
 // BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
 // input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
@@ -791,6 +921,20 @@ NB_MODULE(_core, m) {
           "MORGANS (AT2 default 0.05). Returns a dict of parallel arrays {pop1,pop2,pop3,pop4,"
           "est,se,z,p} (the AT2 D sign/Z/p convention). Forced diploid + allsnps=TRUE + "
           "autosomes-only are pinned (AT2 qpdstat_geno parity).");
+
+    m.def("run_extract_f2", &run_extract_f2_py, "prefix"_a, "pops"_a, "out"_a = "",
+          "device"_a = 0, "blgsize"_a = 0.05, "maf"_a = 0.0, "maxmiss"_a = 0.0,
+          "autosomes_only"_a = true, "drop_monomorphic"_a = false,
+          "transversions_only"_a = false, "ploidy"_a = "auto",
+          "precision"_a = nb::none(),
+          "Build an f2_blocks tensor from a genotype prefix (GPU; M(py-2) extract-f2). "
+          "Reads <prefix>.{geno,snp,ind} directly and runs decode->filter->assign_blocks->"
+          "tiered f2 compute->to_host (the SAME chain as the CLI extract-f2). `pops` is the "
+          "Explicit population subset (the P axis is that selection sorted ASC by label); "
+          "`blgsize` is MORGANS (AT2 default 0.05); `maxmiss` is the AT2 POP-axis coverage "
+          "(0 = global intersection). If `out` is given, writes an STPF2BK1 dir there and "
+          "returns the path string; else returns a new F2Handle (no disk round-trip). "
+          "GPU-only: no CUDA device raises.");
 
     m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
           "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "
