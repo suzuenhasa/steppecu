@@ -744,6 +744,12 @@ target_link_libraries(bench_rotation_1240k
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(bench_rotation_1240k PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# --- f-stats (f4/f3/f4-ratio) SINGLE-GPU batched throughput bench (manual, not a gate) --
+add_executable(bench_fstats_1240k reference/bench_fstats_1240k.cu)
+target_link_libraries(bench_fstats_1240k
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(bench_fstats_1240k PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 # --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
 # HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
 # core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
