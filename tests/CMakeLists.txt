@@ -764,6 +764,24 @@ target_link_libraries(bench_fstats_1240k
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(bench_fstats_1240k PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# --- GPU OPTIMIZER SPIKE bench (manual, NOT a ctest gate) ---------------------------
+# Compares the two candidate qpGraph GPU optimizer shapes — IDEA1 batched-sequential
+# fleet (per-instance bounded projected-Newton/L-BFGS) vs IDEA2 batched-population
+# (per-instance CMA-ES/DE, curand-sampled) — on a REAL-f2-grounded nonlinear box-
+# constrained graph-GLS objective built from the committed 9-pop AADR fixture. BOTH
+# optimizers run entirely on-device (one batched launch each); the bench pins the
+# checkable optimum on the host oracle (small_linalg) and reports wall-clock /
+# obj-evals / convergence-quality / dispatch count at increasing N (the GPU-bound
+# proof). Self-contained: the spike-local fill_pwts + both optimizer kernels live IN
+# this TU (NOT the production qpGraph build). Links steppe::core_internal for the
+# host-pure small_linalg oracle + its src/ include root, and CUDA::curand for the
+# IDEA2 device-side Gaussian sampling (NEW link — no prior cuRAND usage). docs/research
+# qpgraph-gpu-design.md / new-tools-roadmap.md §6.
+add_executable(bench_optimizers reference/bench_optimizers.cu)
+target_link_libraries(bench_optimizers
+    PRIVATE steppe::core_internal steppe::api steppe::warnings CUDA::curand)
+set_target_properties(bench_optimizers PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
 # --- M4.5 SPMG combine GATE-LOGIC test (cleanup B3 / CT2 / config C-1/K-2; B4 / X6) --
 # HOST-PURE-LOGIC TU: drives the §4 capability-tier fork in
 # core::compute_f2_blocks_multigpu through a CUDA-FREE recording FakeBackend over a
