@@ -130,6 +130,38 @@ df = steppe.read_fstats("/tmp/sweep_out")   # survivor table -> pandas (the filt
 
 ---
 
+## 5b. The Python wheel — build, pip install, extract_f2 (M(py-2))
+```bash
+# Build ONE GPU wheel (Release, sm_120) — scikit-build-core, no CLI:
+cd /workspace/steppe && export PATH=/usr/local/cuda/bin:$PATH \
+  && export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+  && python3.12 -m build --wheel        # -> dist/steppe-0.1.0-cp312-cp312-linux_x86_64.whl
+
+# Install into a CLEAN venv (numpy is the ONLY hard dep; CUDA 13 is a SYSTEM requirement
+# resolved at load — _core.so DT_NEEDED libcudart.so.13/libcublas.so.13/libcusolver.so.12;
+# the toolkit is NOT bundled, so the box's CUDA 13 must be on the loader path):
+python3.12 -m venv /tmp/v && /tmp/v/bin/pip install dist/steppe-0.1.0-cp312-cp312-linux_x86_64.whl
+# optional: pandas for the .to_dataframe accessors -> pip install 'steppe[pandas]'
+```
+```python
+# extract_f2: genotypes -> f2 ON THE GPU (the same chain as the CLI extract-f2)
+import steppe
+# (A) in-memory handle (no disk round-trip) -> feed straight to qpadm:
+f2 = steppe.extract_f2("/workspace/data/aadr/raw/v66.p1_HO.aadr.patch.PUB",
+                       pops=["England_BellBeaker", "Turkey_N", "Mbuti", "Han"],
+                       device=0, blgsize=0.05, maxmiss=0.0)   # ploidy="auto" (AT2 per-sample)
+res = steppe.qpadm(f2, target="England_BellBeaker", left=["Turkey_N"], right=["Mbuti", "Han"])
+# (B) or write an STPF2BK1 dir + reload it (out=DIR returns the path string):
+path = steppe.extract_f2("/workspace/data/aadr/raw/v66.p1_HO.aadr.patch.PUB",
+                         pops=["England_BellBeaker", "Turkey_N", "Mbuti"], out="/tmp/ex_f2")
+f2b = steppe.read_f2(path)        # out=None vs read_f2(DIR) are bit-identical (the parity law)
+```
+NOTE (B3): steppe's decode is **TGENO-only**, so extract reads the raw HO TGENO prefix
+(`raw/v66.p1_HO.aadr.patch.PUB`) — the convertf-PA `v66_HO_pa` is SNP-major PACKEDANCESTRYMAP
+(`GENO` magic), unreadable by the decode path (same ind/snp axes — a lossless transcode).
+
+---
+
 ## 6. Full study end-to-end (Haak 2015, the exact run)
 ```bash
 # 1) build the f2 dir for the 15-pop union (no-hash, autosomes, maxmiss 0)
