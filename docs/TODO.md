@@ -138,7 +138,8 @@ The reusable convertf pipeline is on the box: `/workspace/AdmixTools_src/src/con
 
 ## ⏭️ Step 3 — Standalone f-stats (each WITH its own CLI/bindings)
 *After step 2. Refs: architecture.md (the "(planned)" standalone tools); `desirable-features-survey.md`.*
-- [ ] Standalone **f3** / **f4** statistics (direct from `f2_blocks`) + CLI + bindings.
+- [x] **STEP3 f4** (`271e302`) — standalone **f4**(p1,p2;p3,p4) `steppe f4` CLI + `steppe.f4` binding (direct from `f2_blocks`). SIBLING of `run_qpwave`, REUSES `assemble_f4` (four-slab AT2 identity, specialized nl=1,nr=1) + `jackknife_cov` (block-jackknife DIAGONAL SE, fudge=0) — ZERO new math, no ALS/rank. Batched on the m-axis (nl=N,nr=1); device-resident gather kernel (zero D2H of the f2 tensor) + CpuBackend oracle via a new `assemble_f4_quartets` seam. Regenerated **fixture-matched** golden `golden_fit0_f4_readf2.csv` (60 genuine quartets via `admixtools::f4(read_f2(...), comb=FALSE)` over the SAME committed `f2_fit0_9pop.bin`) — the old `golden_fit0_f4.csv` carried the qpadm-internal ALLSNPS/maximal-overlap normalization, a CONSTANT 1.1131993890x off; the regen removes that offset. `cli_f4` + 3 f4 pytests reproduce all 60 quartets at est/se/z/p **rtol 1e-6** (GPU path, real AADR, single GPU); full STEPPE_THOROUGH ctest **49/49** green.
+- [ ] Standalone **f3** statistic (direct from `f2_blocks`) + CLI + bindings. **← NEXT.**
 - [ ] **D-statistic / qpDstat** + CLI + bindings.
 - [ ] Non-negative constrained-weights qpAdm (the deferred F5 feature).
 
