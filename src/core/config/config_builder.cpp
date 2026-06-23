@@ -151,6 +151,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     if (!args.pop2.empty())  merged_.pop2  = args.pop2;
     if (!args.pop3.empty())  merged_.pop3  = args.pop3;
     if (!args.pop4.empty())  merged_.pop4  = args.pop4;
+    if (!args.pop5.empty())  merged_.pop5  = args.pop5;
 
     // Scalar option overrides (numeric / bool sentinels).
     const auto take_d = [](std::optional<double>& d, const std::optional<double>& s) { if (s) d = s; };
@@ -449,6 +450,7 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     cfg.pop2_  = merged_.pop2;
     cfg.pop3_  = merged_.pop3;
     cfg.pop4_  = merged_.pop4;
+    cfg.pop5_  = merged_.pop5;   // f4-ratio 5th row-aligned column (--pop5)
     cfg.pops_  = merged_.pops;   // f4 --pops 4-tuple convenience (raw labels, carried verbatim)
     if (merged_.out_file) cfg.out_file_ = *merged_.out_file;
     // --prefix P expands to the genotype triple P.{geno,snp,ind} (cli-bindings.md §4.2;

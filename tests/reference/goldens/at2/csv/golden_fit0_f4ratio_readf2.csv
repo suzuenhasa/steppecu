@@ -1,0 +1,11 @@
+"pop1","pop2","pop3","pop4","pop5","alpha","se","z"
+"England_BellBeaker","Mbuti","Czechia_EBA_CordedWare","Han","Turkey_N",1.21013580236935,0.0197398059118396,61.3043414800512
+"England_BellBeaker","Mbuti","Turkey_N","Han","Czechia_EBA_CordedWare",0.826126827377066,0.0134708207166103,61.3271340148118
+"Czechia_EBA_CordedWare","Mbuti","England_BellBeaker","Han","Turkey_N",1.3476207105495,0.0235955721193851,57.1132881936924
+"Czechia_EBA_CordedWare","Mbuti","Turkey_N","Han","Iran_GanjDareh_N",1.86304302513297,0.0946030424306458,19.6932675447386
+"Turkey_N","Mbuti","Israel_Natufian","Han","Iran_GanjDareh_N",1.77333977118355,0.095151410686236,18.6370307953834
+"Israel_Natufian","Mbuti","Turkey_N","Han","Iran_GanjDareh_N",3.23558008984568,0.277064770470941,11.6780638850114
+"England_BellBeaker","Mbuti","Czechia_EBA_CordedWare","Papuan","Turkey_N",1.15950666745709,0.0144725100769429,80.1178690698842
+"Turkey_N","Mbuti","Israel_Natufian","Karitiana","Iran_GanjDareh_N",2.13583332677324,0.170057603368968,12.5594697588393
+"Han","Mbuti","Karitiana","Papuan","Israel_Natufian",-1.00473064624981,0.0838364926932992,-11.9844069565915
+"Karitiana","Mbuti","Han","Papuan","Turkey_N",-3.17468931704846,0.567573141223895,-5.59344529623561

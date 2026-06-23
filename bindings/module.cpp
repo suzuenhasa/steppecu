@@ -43,6 +43,7 @@
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f3.hpp"                // run_f3 + F3Result (the standalone-f3 binding)
 #include "steppe/f4.hpp"                // run_f4 + F4Result (the standalone-f4 binding)
+#include "steppe/f4ratio.hpp"           // run_f4ratio + F4RatioResult (the standalone-f4-ratio binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
 
@@ -271,6 +272,35 @@ nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::string>& p
     return d;
 }
 
+// F4RatioResult -> a Python dict of parallel arrays {pop1..pop5 (names),alpha,se,z}. The
+// FIVE-column clone of f4_to_dict (add pop5; alpha replaces est, NO p column — AT2 qpf4ratio
+// emits only alpha/se/z). The result carries P-axis INDICES; `pops` is the handle's
+// name<->index map so the binding resolves them back to NAMES (the facade reshapes to a
+// DataFrame). NaN alpha/se/z (a degenerate tuple) ride through as numpy NaN.
+nb::dict f4ratio_to_dict(const steppe::F4RatioResult& r, const std::vector<std::string>& pops) {
+    nb::dict d;
+    const auto names = [&pops](const std::vector<int>& idx) {
+        std::vector<std::string> out;
+        out.reserve(idx.size());
+        for (int i : idx)
+            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
+                              ? pops[static_cast<std::size_t>(i)]
+                              : std::string());
+        return out;
+    };
+    d["pop1"] = names(r.p1);
+    d["pop2"] = names(r.p2);
+    d["pop3"] = names(r.p3);
+    d["pop4"] = names(r.p4);
+    d["pop5"] = names(r.p5);
+    d["alpha"] = r.alpha;
+    d["se"] = r.se;
+    d["z"] = r.z;
+    d["status"] = status_str(r.status);
+    d["precision"] = precision_str(r.precision_tag);
+    return d;
+}
+
 // ---- read_f2: the f2-dir loader -> the opaque F2Handle ----------------------------
 // Returns a raw heap pointer; the binding uses rv_policy::take_ownership so Python owns
 // the F2Handle and frees it (with its cached Resources) at GC. (F2Handle is move-only via
@@ -437,6 +467,45 @@ nb::dict run_f3_py(F2Handle& h,
     return f3_to_dict(result, h.pops);
 }
 
+// run_f4ratio: a list of (p1,p2,p3,p4,p5) 5-tuple NAME tuples against the SAME resident f2,
+// computed BATCHED (run_f4ratio). Returns ONE dict of parallel arrays {pop1..pop5,alpha,se,z}
+// in input order. The FIVE-column clone of run_f4_py: resolve names against pops.txt, build
+// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives only
+// here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+nb::dict run_f4ratio_py(F2Handle& h,
+                        const std::vector<std::array<std::string, 5>>& tuples) {
+    if (tuples.empty()) raise_value("f4-ratio: needs at least one (p1,p2,p3,p4,p5) tuple");
+
+    const sa::PopResolver resolver(h.pops);
+    if (!resolver.valid()) raise_value(resolver.error());
+
+    std::vector<std::array<int, 5>> idx_tuples;
+    idx_tuples.reserve(tuples.size());
+    for (const std::array<std::string, 5>& t : tuples) {
+        std::array<int, 5> ti{};
+        for (int c = 0; c < 5; ++c) {
+            const sa::ResolveResult rr = resolver.resolve(t[static_cast<std::size_t>(c)]);
+            if (!rr.ok) throw nb::key_error(("f4-ratio pop: " + rr.error).c_str());
+            ti[static_cast<std::size_t>(c)] = rr.index;
+        }
+        idx_tuples.push_back(ti);
+    }
+
+    steppe::QpAdmOptions opts;  // f4-ratio uses fudge=0 internally (run_f4ratio); opts default.
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::F4RatioResult result;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        result = steppe::run_f4ratio(
+            dev_f2, std::span<const std::array<int, 5>>(idx_tuples), opts, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
+    return f4ratio_to_dict(result, h.pops);
+}
+
 // qpadm_search: a list of explicit (left, right) models against the SAME resident f2,
 // fit BATCHED (run_qpadm_search). Returns one dict per model in INPUT order
 // (results[k].model_index resolves the k-th input; qpadm.hpp:190-191).
@@ -556,6 +625,11 @@ NB_MODULE(_core, m) {
     m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
           "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "
           "returns a dict of parallel arrays {pop1,pop2,pop3,est,se,z,p}.");
+
+    m.def("run_f4ratio", &run_f4ratio_py, "f2"_a, "tuples"_a,
+          "Standalone f4-ratio alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) (GPU). `tuples` is a "
+          "list of (p1,p2,p3,p4,p5) name tuples; returns a dict of parallel arrays "
+          "{pop1,pop2,pop3,pop4,pop5,alpha,se,z}.");
 
     m.def("run_qpadm_search", &run_qpadm_search_py, "f2"_a, "target"_a, "lefts"_a,
           "right"_a, "rank"_a = -1, "fudge"_a = 1e-4, "als_iterations"_a = 20,

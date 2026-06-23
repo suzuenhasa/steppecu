@@ -39,6 +39,7 @@ enum class Command {
     QpAdmRotate,
     F4,
     F3,
+    F4Ratio,
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
@@ -103,6 +104,13 @@ struct CliArgs {
     /// command (it reuses the `pops` field below, read in groups of 4), so a one-line f4
     /// needs no four flags.
     std::vector<std::string> pop1, pop2, pop3, pop4;
+
+    /// `--pop5` (the `f4-ratio` command only) — the 5th ROW-ALIGNED column (admixtools
+    /// ::qpf4ratio): tuple k = (pop1[k], pop2[k], pop3[k], pop4[k], pop5[k]); alpha =
+    /// f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4). All five columns must have the same length (the app
+    /// validates). The `--pops A,B,C,D,E` 5-tuple convenience (the `pops` field below, read in
+    /// groups of 5) is ALSO accepted by the f4-ratio command.
+    std::vector<std::string> pop5;
 
     // ---- QpAdmOptions overrides (default to the struct defaults; cli-bindings.md
     // §4.1 — flag names mirror QpAdmOptions so a bare invocation reproduces goldens).

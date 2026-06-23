@@ -75,6 +75,10 @@ public:
     [[nodiscard]] const std::vector<std::string>& pop2()  const noexcept { return pop2_; }
     [[nodiscard]] const std::vector<std::string>& pop3()  const noexcept { return pop3_; }
     [[nodiscard]] const std::vector<std::string>& pop4()  const noexcept { return pop4_; }
+    /// The `f4-ratio` command's 5th ROW-ALIGNED column (--pop5). tuple k = (pop1[k]..pop5[k]);
+    /// alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4). The `--pops` 5-tuple convenience rides on
+    /// pops() (read in groups of 5). Default empty.
+    [[nodiscard]] const std::vector<std::string>& pop5()  const noexcept { return pop5_; }
     /// The raw `--pops` labels (the f4 single-quartet convenience: 4 names = one quartet).
     /// Distinct from pop_selection() (which extract-f2 maps it into) — the f4 command reads
     /// these names directly, in groups of 4.
@@ -121,6 +125,7 @@ private:
     std::vector<std::string> right_;
     std::vector<std::string> pool_;
     std::vector<std::string> pop1_, pop2_, pop3_, pop4_;  // f4 row-aligned quartet columns
+    std::vector<std::string> pop5_;                       // f4-ratio 5th row-aligned column (--pop5)
     std::vector<std::string> pops_;                       // f4 --pops 4-tuple convenience (raw labels)
     std::string out_file_;
     std::string format_ = "csv";   // cli-bindings.md §4.4 default

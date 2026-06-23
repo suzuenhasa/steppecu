@@ -27,9 +27,10 @@
 #include <string>
 #include <vector>
 
-#include "steppe/f3.hpp"     // steppe::F3Result (the standalone-f3 emitter)
-#include "steppe/f4.hpp"     // steppe::F4Result (the standalone-f4 emitter)
-#include "steppe/qpadm.hpp"  // steppe::QpAdmResult
+#include "steppe/f3.hpp"      // steppe::F3Result (the standalone-f3 emitter)
+#include "steppe/f4.hpp"      // steppe::F4Result (the standalone-f4 emitter)
+#include "steppe/f4ratio.hpp" // steppe::F4RatioResult (the standalone-f4-ratio emitter)
+#include "steppe/qpadm.hpp"   // steppe::QpAdmResult
 
 namespace steppe::app {
 
@@ -123,6 +124,22 @@ void emit_f3_result(std::ostream& os, OutputFormat fmt,
                     const std::vector<std::string>& p1_labels,
                     const std::vector<std::string>& p2_labels,
                     const std::vector<std::string>& p3_labels);
+
+/// Serialize a STANDALONE f4-ratio result table (the `steppe f4-ratio` command) to `os` in
+/// `fmt` — ONE ROW PER 5-TUPLE, in input order, exactly the fixture-matched golden schema
+/// (golden_fit0_f4ratio_readf2.csv): columns pop1,pop2,pop3,pop4,pop5,alpha,se,z (NO p
+/// column — AT2 qpf4ratio emits only alpha/se/z). The FIVE-column clone of emit_f4_result
+/// (drop the est/p, add pop5 + alpha). `p1..p5 labels` are the resolved population names of
+/// each 5-tuple (len == result.alpha). REUSES the SAME OutputFormat / fmt_double / json_double
+/// / csv_quote / json_quote / status_str format primitives (no compute / no format
+/// duplicated). A domain-outcome row (NaN alpha/se) emits NA/null sentinels, never throws.
+void emit_f4ratio_result(std::ostream& os, OutputFormat fmt,
+                         const F4RatioResult& result,
+                         const std::vector<std::string>& p1_labels,
+                         const std::vector<std::string>& p2_labels,
+                         const std::vector<std::string>& p3_labels,
+                         const std::vector<std::string>& p4_labels,
+                         const std::vector<std::string>& p5_labels);
 
 }  // namespace steppe::app
 

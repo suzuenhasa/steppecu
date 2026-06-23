@@ -23,6 +23,7 @@
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
+#include "app/cmd_f4ratio.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpwave.hpp"
 #include "app/cmd_rotate.hpp"
@@ -211,6 +212,39 @@ void add_f3_triple_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
+// Bind the `f4-ratio` 5-tuple flags: the FIVE-column clone of add_f4_quartet_flags (add
+// --pop5). The ROW-ALIGNED --pop1..--pop5 columns (admixtools::qpf4ratio; tuple k =
+// (pop1[k]..pop5[k]), alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4)) AND the single-/multi-tuple
+// --pops convenience (names in groups of 5). All comma/space delimited. f4-ratio has NO
+// target/left/right (it is a bare ratio stat), so this is the ONE new flag helper the command
+// needs (cli-bindings.md §4.1; the rest is reused).
+void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
+            "5-tuple column 1 (p1), row-aligned with --pop2/3/4/5")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
+            "5-tuple column 2 (p2)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
+            "5-tuple column 3 (p3, the numerator 3rd slot)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop4", [&a](const std::vector<std::string>& v) { a.pop4 = v; },
+            "5-tuple column 4 (p4, the shared 4th slot)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pop5", [&a](const std::vector<std::string>& v) { a.pop5 = v; },
+            "5-tuple column 5 (p5, the denominator 3rd slot)")
+        ->delimiter(',');
+    sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
+            "Tuple(s) as names in groups of 5: p1,p2,p3,p4,p5[,...]")
+        ->delimiter(',');
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -227,6 +261,7 @@ int run_cli(int argc, char** argv) {
     CliArgs extract_args;
     CliArgs f4_args;
     CliArgs f3_args;
+    CliArgs f4ratio_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -308,6 +343,27 @@ int run_cli(int argc, char** argv) {
             // The real GPU f3 (read dir -> resolve triples -> upload -> run_f3 -> emit the
             // pop1,pop2,pop3,est,se,z,p table). Mirrors how `qpadm`/`qpwave`/`f4` dispatch.
             std::exit(run_f3_command(*config));
+        });
+    }
+
+    // ---- f4-ratio (standalone f4-ratio statistic; fit-engine §6) ----------------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "f4-ratio",
+            "Standalone f4-ratio alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) (alpha/se/z per 5-tuple)");
+        f4ratio_args.command = Command::F4Ratio;
+        add_f2_dir_flag(sub, f4ratio_args, "The f2_blocks directory");
+        // f4-ratio takes 5-TUPLES, not target/left/right: the row-aligned --pop1..--pop5
+        // columns OR the --pops 5-tuple convenience (the ONE new flag helper; cli-bindings §4.1).
+        add_f4ratio_flags(sub, f4ratio_args);
+        add_output_flags(sub, f4ratio_args);
+        add_common_flags(sub, f4ratio_args);
+        sub->callback([&]() {
+            auto config = build_config(f4ratio_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The real GPU f4-ratio (read dir -> resolve 5-tuples -> upload -> run_f4ratio ->
+            // emit the pop1..pop5,alpha,se,z table). Mirrors how `qpadm`/`f4`/`f3` dispatch.
+            std::exit(run_f4ratio_command(*config));
         });
     }
 

@@ -25,11 +25,13 @@ __all__ = [
     "QpWaveResult",
     "F4Result",
     "F3Result",
+    "F4RatioResult",
     "read_f2",
     "qpadm",
     "qpwave",
     "f4",
     "f3",
+    "f4ratio",
     "qpadm_search",
 ]
 
@@ -290,6 +292,48 @@ class F3Result:
         return f"F3Result(n_triples={len(self.est)}, status={self.status.name})"
 
 
+class F4RatioResult:
+    """A standalone f4-ratio result table (one row per 5-tuple), pandas-shaped. The FIVE-column
+    clone of F4Result (add pop5; alpha replaces est, NO p column). Built from the flat dict of
+    parallel arrays the compiled layer returns; ``.table`` is a tidy DataFrame with the golden
+    columns pop1,pop2,pop3,pop4,pop5,alpha,se,z (admixtools::qpf4ratio parity)."""
+
+    def __init__(self, d: dict):
+        self._d = d
+        self.pop1: list[str] = list(d["pop1"])
+        self.pop2: list[str] = list(d["pop2"])
+        self.pop3: list[str] = list(d["pop3"])
+        self.pop4: list[str] = list(d["pop4"])
+        self.pop5: list[str] = list(d["pop5"])
+        self.alpha: list[float] = list(d["alpha"])
+        self.se: list[float] = list(d["se"])
+        self.z: list[float] = list(d["z"])
+        self.status: Status = Status._from(d["status"])
+        self.precision: str = d["precision"]
+
+    @property
+    def table(self):  # -> pandas.DataFrame [pop1..pop5, alpha, se, z]
+        pd = _require_pandas()
+        return pd.DataFrame(
+            {
+                "pop1": list(self.pop1),
+                "pop2": list(self.pop2),
+                "pop3": list(self.pop3),
+                "pop4": list(self.pop4),
+                "pop5": list(self.pop5),
+                "alpha": list(self.alpha),
+                "se": list(self.se),
+                "z": list(self.z),
+            }
+        )
+
+    def __len__(self) -> int:
+        return len(self.alpha)
+
+    def __repr__(self) -> str:
+        return f"F4RatioResult(n_tuples={len(self.alpha)}, status={self.status.name})"
+
+
 class F2Blocks:
     """An opaque f2-dir handle: the host f2 tensor + the P pop labels (P-axis order).
     Wraps the compiled ``_core.F2Handle``; build_resources is cached on the handle so the
@@ -432,6 +476,36 @@ def f3(
 
     d = _core.run_f3(f2._h, trips)
     res = F3Result(d)
+    return res.table if as_dataframe else res
+
+
+def f4ratio(
+    f2: F2Blocks,
+    tuples: list[Any],
+    *,
+    as_dataframe: bool = False,
+):
+    """Standalone f4-ratio admixture proportion on the GPU — alpha/se/z per 5-tuple (NO ALS /
+    NO rank; the AT2 qpf4ratio weighted block-jackknife OF THE RATIO). The FIVE-tuple sibling
+    of f4/f3.
+
+    alpha = f4(p1,p2;p3,p4) / f4(p1,p2;p5,p4): the shared pops across num/den are p1,p2,p4;
+    only the 3rd slot swaps (p3 in the numerator, p5 in the denominator).
+
+    ``tuples`` is a list where each entry is a ``(p1, p2, p3, p4, p5)`` name tuple/list (or a
+    ``{"pop1":..,"pop2":..,"pop3":..,"pop4":..,"pop5":..}`` dict). Returns an ``F4RatioResult``
+    (or, when ``as_dataframe=True``, the tidy ``F4RatioResult.table`` DataFrame:
+    pop1,pop2,pop3,pop4,pop5,alpha,se,z). Unknown pop names raise a clean KeyError."""
+    quins: list[tuple[str, str, str, str, str]] = []
+    for t in tuples:
+        if isinstance(t, dict):
+            quins.append((t["pop1"], t["pop2"], t["pop3"], t["pop4"], t["pop5"]))
+        else:
+            p1, p2, p3, p4, p5 = t  # exactly 5 names (raises on a malformed tuple)
+            quins.append((p1, p2, p3, p4, p5))
+
+    d = _core.run_f4ratio(f2._h, quins)
+    res = F4RatioResult(d)
     return res.table if as_dataframe else res
 
 
