@@ -95,7 +95,42 @@ $S qpwave --f2-dir /tmp/f2_haak \
 
 ---
 
-## 5. Full study end-to-end (Haak 2015, the exact run)
+## 5. f-stats — f4 / f3 / f4-ratio / qpDstat (explicit) + the all-quartets SWEEP
+> Standalone f-statistics over an f2 dir, GPU-batched (reuse `assemble_f4_quartets` + the diagonal block-jackknife); `est/se/z/p` per item. All golden-gated; EmulatedFp64{40}, single-GPU.
+
+### explicit — a quartet/triple, or a list
+```bash
+# f4(p1,p2;p3,p4)
+$S f4 --f2-dir /tmp/f2_haak --pop1 England_BellBeaker --pop2 Czechia_EBA_CordedWare \
+   --pop3 Han --pop4 Iran_GanjDareh_N --format csv
+$S f4 --f2-dir DIR --pops A,B,C,D,E,F,G,H        # a list, names in groups of 4
+$S f3 --f2-dir DIR --pop1 Target --pop2 SrcA --pop3 SrcB     # f3(Target; SrcA, SrcB)
+$S f4-ratio --f2-dir DIR --pops ...              # admixture proportion alpha
+$S qpdstat --f2-dir DIR --pops A,B,C,D           # f2-path = f4 + Z/p (== AT2 f2-path qpdstat)
+$S qpdstat --prefix <geno-prefix> --pops A,B,C,D # genotype-path = the NORMALIZED D magnitude
+```
+
+### the all-quartets / all-triples SWEEP (GPU-only, memory-bounded)
+> Enumerates EVERY C(P,4)/C(P,3) **on the GPU** (unrank → f4 → diagonal jackknife → `|z|` filter → CUB compact), keeping only survivors. `--top-k` (default **1,000,000**) bounds the output to the K most-significant via a **device-side reservoir** — host RAM stays a few GB no matter how many billions are computed. `--min-z` is the alternative filter (but on real AADR ~70% pass `|z|>6`, so `--top-k` is usually what you want). `--sure` lifts the enumeration cap. `--shard-dir` writes the survivor CSV.
+```bash
+# the FULL C(500,4) = 2,573,031,125-quartet sweep, top-1M most-extreme |z|:
+$S f4 --all-quartets --f2-dir /workspace/data/f2_500 --top-k 1000000 --sure \
+   --shard-dir /tmp/sweep_out
+#  → one RTX 5090: ~177 s (2:57), ~14.5M quartets/sec, GPU ~100%, peak host RSS ~3.1 GB
+#    (bounded), VRAM ~14.6 GB. (top-K cut landed at |z|=140 — |z|>6 keeps ~1.8B, so top-K is the real bound)
+$S f3 --all-triples --f2-dir DIR --top-k 100000 --sure --shard-dir /tmp/f3_sweep
+$S f4 --all-quartets --f2-dir DIR --pops A,B,C,...  --min-z 8     # sweep a SUBSET, |z|>=8
+```
+
+### read the sweep output back (Python)
+```python
+import steppe
+df = steppe.read_fstats("/tmp/sweep_out")   # survivor table -> pandas (the filtered/top-K set fits in RAM)
+```
+
+---
+
+## 6. Full study end-to-end (Haak 2015, the exact run)
 ```bash
 # 1) build the f2 dir for the 15-pop union (no-hash, autosomes, maxmiss 0)
 $S extract-f2 --prefix $HO --out /tmp/haak \
@@ -111,7 +146,7 @@ Expect: Corded Ware ≈ 0.74 Yamnaya / 0.26 Anatolia_N; Bell Beaker ≈ 0.53/0.4
 
 ---
 
-## 6. Tests / gates (validation, not studies)
+## 7. Tests / gates (validation, not studies)
 ```bash
 # from /workspace/steppe, after a Release build:
 STEPPE_THOROUGH=1 ctest --test-dir build-rel --output-on-failure        # full suite (45 tests)

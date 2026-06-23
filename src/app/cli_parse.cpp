@@ -264,7 +264,7 @@ void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
         "Sweep: keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
     sub->add_option_function<int>(
         "--top-k", [&a](int v) { a.sweep_top_k = v; },
-        "Sweep: keep the K items with the largest |z| (device keeps all, host ranks). Excludes --min-z.");
+        "Sweep: keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.");
     sub->add_flag_function(
         "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
         "Sweep: lift the maxcomb cap (a sweep over more than the cap refuses without this).");
@@ -286,7 +286,7 @@ void add_sweep_flags(CLI::App* sub, CliArgs& a) {
         "Keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
     sub->add_option_function<int>(
         "--top-k", [&a](int v) { a.sweep_top_k = v; },
-        "Keep the K items with the largest |z| (device keeps all, host ranks). Excludes --min-z.");
+        "Keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.");
     sub->add_flag_function(
         "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
         "Lift the maxcomb cap (a sweep over more than the cap refuses without this).");

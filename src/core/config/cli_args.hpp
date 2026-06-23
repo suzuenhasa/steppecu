@@ -148,7 +148,7 @@ struct CliArgs {
     /// --min-z Z : keep items with |z| >= Z (the on-device filter; default 3.0). Mutually
     /// exclusive with --top-k.
     std::optional<double> sweep_min_z;
-    /// --top-k K : keep the K items with the largest |z| (device keeps all, host ranks).
+    /// --top-k K : keep the K items with the largest |z| (bounded device-side reservoir, ~K resident).
     std::optional<int>    sweep_top_k;
     /// --sure : lift the maxcomb cap (a sweep over more than kFstatMaxComb items refuses
     /// without it — the cap guards COMPUTE TIME, every item is computed to test the filter).
