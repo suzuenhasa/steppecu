@@ -152,6 +152,51 @@ struct GlsWeights {
     Status status = Status::Ok;
 };
 
+/// S4 DIAGONAL-only output: the per-item jackknife VARIANCE vector — the production-scale
+/// shape for the per-item f-stats (f4/f3), which read ONLY diag(Q) and NEVER invert Q.
+/// var[k] == JackknifeCov.Q[k + m*k] == (1/nb)·Σ_b xtau[k,b]², computed WITHOUT forming the
+/// dense m×m Q / its Cholesky inverse (O(m·nb) work, O(m) memory — no N² OOM at sweep scale).
+/// se[k] = sqrt(var[k]); the est is read separately from F4Blocks.x_total[k]. Native FP64 (it
+/// IS the diagonal jackknife_cov computes; a tiny per-item sum-of-squares — bit-equal to the
+/// deleted dense path BY CONSTRUCTION, so the f4/f3 goldens do not move). Mined from
+/// wip/fstats-massive-overbuild (backend.hpp JackknifeDiag).
+struct JackknifeDiag {
+    std::vector<double> var;  ///< [m] the per-item diagonal variance (== diag(Q)).
+    int m = 0;
+    Status status = Status::Ok;  ///< Ok always (no Q invert ⇒ no NonSpdCovariance).
+};
+
+/// GPU-ONLY f-stat SWEEP survivors (the CUDA-free seam between the core sweep driver and the
+/// CUDA backend's on-device pipeline). The backend enumerates+computes+filters+compacts EVERY
+/// C(P,k) item ON THE DEVICE and returns ONLY the survivors here (the full N-row table is never
+/// host-materialized). Parallel arrays, one slot per survivor; keys[r] holds the k P-axis
+/// indices of survivor r (k<=4; the unused slot is 0). `enumerated` is the total C(P,k) (echoed
+/// even when capped); `capped` ⇒ the maxcomb cap refused (no compute ran). Status is Ok unless
+/// capped (InvalidConfig). Native FP64 (the f-stat cancellation carve-out + the diagonal SE).
+struct SweepSurvivors {
+    std::vector<std::array<int, 4>> keys;  ///< survivor index tuples (k<=4; unused slot 0).
+    std::vector<double> est;               ///< f4/f3 point estimate per survivor.
+    std::vector<double> se;                ///< diagonal jackknife SE per survivor.
+    std::vector<double> z;                 ///< est/se per survivor.
+
+    std::size_t enumerated = 0;  ///< total C(P,k) the sweep would enumerate.
+    bool capped = false;         ///< refused by the maxcomb cap (no compute ran).
+    Status status = Status::Ok;
+};
+
+/// CUDA-FREE request carried INTO the backend sweep virtual (the public SweepRequest's device-
+/// facing twin; the core driver fills it from the public type so backend.hpp need not include
+/// the public sweep header). k is the arity (4 quartet / 3 triple). filter_mode: 0 = MinZ
+/// (on-device |z|>=min_z); 1 = keep-all (TopK/All — the device keeps every item, the host ranks
+/// the compacted set). pop_subset empty ⇒ sweep [0,P).
+struct SweepConfig {
+    int k = 4;                    ///< item arity (quartet/triple).
+    int filter_mode = 0;         ///< 0 = MinZ on-device flag; 1 = keep-all (TopK/All).
+    double min_z = 3.0;          ///< |z| threshold for filter_mode 0.
+    std::vector<int> pop_subset; ///< optional subset of f2 indices; empty ⇒ all P.
+    bool sure = false;           ///< lift the maxcomb cap.
+};
+
 /// S5 sweep output: the qpWave / qpAdm rank test over r = 0..rmax (rmax =
 /// min(nl,nr)-1). Per-rank chisq/dof; the AT2 res$rankdrop nested table; f4rank
 /// (the smallest non-rejected rank). All host-pure value data (CUDA-free seam).
@@ -743,6 +788,57 @@ public:
         (void)x; (void)block_sizes; (void)fudge; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::jackknife_cov: not implemented by this backend");
+    }
+
+    /// S4 DIAGONAL-only — the per-item jackknife VARIANCE (== diag(Q)) for the per-item
+    /// f-stats (f4/f3) that read only diag(Q) and never invert Q. The production-scale
+    /// shape (the OOM fix; a sweep of ~36k+ items would form a dense m×m Q in jackknife_cov
+    /// ⇒ ~10GB+ OOM). var[k] = (1/nb)·Σ_b xtau[k,b]² over the SAME est_to_loo / x_total /
+    /// tot_line xtau seam jackknife_cov uses — minus the dense SYRK + Cholesky inverse:
+    /// O(m·nb) work, O(m) memory. fudge is NOT consumed (a bare f-stat SE is the UNFUDGED
+    /// diagonal; the qpAdm ridge is a Q-invert concern only). Native FP64 (it IS the diagonal
+    /// jackknife_cov computes ⇒ bit-equal to the deleted dense path, golden-exact). NON-PURE:
+    /// base throws (the established backend.hpp pattern). Mined from wip/fstats-massive-overbuild.
+    [[nodiscard]] virtual JackknifeDiag jackknife_diag(const F4Blocks& x,
+                                                       std::span<const int> block_sizes,
+                                                       const Precision& precision) {
+        (void)x; (void)block_sizes; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::jackknife_diag: not implemented by this backend");
+    }
+
+    /// GPU-ONLY f-stat SWEEP (the production-scale fix for the CPU-bound host-enumeration
+    /// disaster). Enumerate EVERY C(P,k) item (k from cfg.k; subset from cfg.pop_subset),
+    /// compute its f4/f3 point estimate + diagonal jackknife SE + |z| ON THE DEVICE, filter
+    /// (on-device |z|>=min_z flag, or keep-all for TopK) + cub::DeviceSelect::Flagged stream-
+    /// compact ON THE DEVICE, and return ONLY the survivors. The HOST does NOT enumerate, NOT
+    /// filter, NOT loop per item — it drives ONLY the chunk loop + receives survivors. The
+    /// per-chunk pipeline REUSES the SAME device kernels as the explicit run_f4 path (the
+    /// unrank kernel WRITES the device quartet list assemble_f4_quartets_gather reads, then
+    /// loo/total/xtau/diag_var run verbatim) — NO forked compute. The maxcomb cap
+    /// (kFstatMaxComb) fires up-front (capped ⇒ no compute). `precision` engages the
+    /// emulated-FP64 policy where it applies (the f-stat combine + diagonal SE are the native
+    /// cancellation carve-out, so the sweep is native-by-carve-out end-to-end — consistent
+    /// with the policy, not a violation). NON-PURE: base throws (the established pattern; only
+    /// the CUDA backend overrides — the sweep is a GPU-only product, no CPU runtime).
+    [[nodiscard]] virtual SweepSurvivors f4_sweep(const steppe::device::DeviceF2Blocks& f2,
+                                                  const SweepConfig& cfg,
+                                                  const Precision& precision) {
+        (void)f2; (void)cfg; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::f4_sweep: not implemented by this backend "
+            "(the GPU-only sweep requires a CUDA backend)");
+    }
+
+    /// GPU-ONLY f3 sweep — the three-slab sibling of f4_sweep (cfg.k == 3; reuses the f3
+    /// triple gather instead of the quartet gather). Same on-device pipeline + cap + filter.
+    [[nodiscard]] virtual SweepSurvivors f3_sweep(const steppe::device::DeviceF2Blocks& f2,
+                                                  const SweepConfig& cfg,
+                                                  const Precision& precision) {
+        (void)f2; (void)cfg; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::f3_sweep: not implemented by this backend "
+            "(the GPU-only sweep requires a CUDA backend)");
     }
 
     /// S5 — rank test: chisq = vec(E)'·Qinv·vec(E), E = X_total - A·B, dof =

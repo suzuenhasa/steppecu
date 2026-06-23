@@ -36,6 +36,7 @@ add_executable(steppe_app
     cmd_f4.cpp         # Standalone f4 statistic (run_f4): est/se/z/p per quartet
     cmd_f3.cpp         # Standalone f3 statistic (run_f3): est/se/z/p per triple
     cmd_f4ratio.cpp    # Standalone f4-ratio (run_f4ratio): alpha/se/z per 5-tuple
+    cmd_fstat_sweep.cpp # GPU-only f4-sweep / f3-sweep: all C(P,k) on-device + |z|/top-k filter
     cmd_qpdstat.cpp    # qpDstat Part A: D-stat/f4 over an f2-dir (--f2-dir reports f4; reuses run_f4)
     cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
     cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command

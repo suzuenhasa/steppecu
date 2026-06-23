@@ -24,6 +24,7 @@
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
 #include "app/cmd_f4ratio.hpp"
+#include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpdstat.hpp"
 #include "app/cmd_qpwave.hpp"
@@ -246,6 +247,25 @@ void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
+// GPU-only f-stat SWEEP flags: an OPTIONAL --pops SUBSET to sweep (empty ⇒ the whole f2 dir),
+// the on-device filter (--min-z | --top-k), and the maxcomb-cap override (--sure). Reused by
+// both f4-sweep and f3-sweep.
+void add_sweep_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
+            "Population SUBSET to sweep all combinations of (names; empty ⇒ the whole f2 dir)")
+        ->delimiter(',');
+    sub->add_option_function<double>(
+        "--min-z", [&a](double v) { a.sweep_min_z = v; },
+        "Keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
+    sub->add_option_function<int>(
+        "--top-k", [&a](int v) { a.sweep_top_k = v; },
+        "Keep the K items with the largest |z| (device keeps all, host ranks). Excludes --min-z.");
+    sub->add_flag_function(
+        "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
+        "Lift the maxcomb cap (a sweep over more than the cap refuses without this).");
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -264,6 +284,8 @@ int run_cli(int argc, char** argv) {
     CliArgs f3_args;
     CliArgs f4ratio_args;
     CliArgs qpdstat_args;
+    CliArgs f4sweep_args;
+    CliArgs f3sweep_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -401,6 +423,40 @@ int run_cli(int argc, char** argv) {
             // The real GPU f4-ratio (read dir -> resolve 5-tuples -> upload -> run_f4ratio ->
             // emit the pop1..pop5,alpha,se,z table). Mirrors how `qpadm`/`f4`/`f3` dispatch.
             std::exit(run_f4ratio_command(*config));
+        });
+    }
+
+    // ---- f4-sweep (GPU-only all-combinations f4 sweep) --------------------------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "f4-sweep",
+            "GPU-only f4 sweep: every C(P,4) quartet, on-device |z|/top-k filter, survivors only");
+        f4sweep_args.command = Command::F4Sweep;
+        add_f2_dir_flag(sub, f4sweep_args, "The f2_blocks directory");
+        add_sweep_flags(sub, f4sweep_args);
+        add_output_flags(sub, f4sweep_args);
+        add_common_flags(sub, f4sweep_args);
+        sub->callback([&]() {
+            auto config = build_config(f4sweep_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            std::exit(run_f4_sweep_command(*config));
+        });
+    }
+
+    // ---- f3-sweep (GPU-only all-combinations f3 sweep) --------------------------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "f3-sweep",
+            "GPU-only f3 sweep: every C(P,3) triple, on-device |z|/top-k filter, survivors only");
+        f3sweep_args.command = Command::F3Sweep;
+        add_f2_dir_flag(sub, f3sweep_args, "The f2_blocks directory");
+        add_sweep_flags(sub, f3sweep_args);
+        add_output_flags(sub, f3sweep_args);
+        add_common_flags(sub, f3sweep_args);
+        sub->callback([&]() {
+            auto config = build_config(f3sweep_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            std::exit(run_f3_sweep_command(*config));
         });
     }
 

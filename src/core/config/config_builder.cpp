@@ -168,6 +168,9 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.se_require_p, args.se_require_p);
     take_i(merged_.min_sources, args.min_sources);
     take_i(merged_.max_sources, args.max_sources);
+    take_d(merged_.sweep_min_z, args.sweep_min_z);
+    take_i(merged_.sweep_top_k, args.sweep_top_k);
+    take_b(merged_.sweep_sure, args.sweep_sure);
     take_i(merged_.auto_top_k, args.auto_top_k);
     take_i(merged_.min_n, args.min_n);
     take_d(merged_.blgsize, args.blgsize);
@@ -440,6 +443,20 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     if (cfg.max_sources_ != -1 && cfg.max_sources_ < cfg.min_sources_) {
         return fail("--max-sources must be >= --min-sources");
     }
+
+    // ---- f4-sweep / f3-sweep filter knobs --------------------------------------
+    if (merged_.sweep_min_z.has_value()) {
+        if (*merged_.sweep_min_z < 0.0) return fail("--min-z must be >= 0");
+        cfg.sweep_min_z_ = *merged_.sweep_min_z;
+    }
+    if (merged_.sweep_top_k.has_value()) {
+        if (*merged_.sweep_top_k < 1) return fail("--top-k must be >= 1");
+        cfg.sweep_top_k_ = *merged_.sweep_top_k;
+    }
+    if (merged_.sweep_min_z.has_value() && merged_.sweep_top_k.has_value()) {
+        return fail("--min-z and --top-k are mutually exclusive (pick one sweep filter)");
+    }
+    if (merged_.sweep_sure.has_value()) cfg.sweep_sure_ = *merged_.sweep_sure;
 
     // ---- carry the verbatim I/O strings ----------------------------------------
     if (merged_.f2_dir)   cfg.f2_dir_ = *merged_.f2_dir;

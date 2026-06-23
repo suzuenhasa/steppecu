@@ -450,6 +450,20 @@ set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_parity
          COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- GPU-ONLY f-stat SWEEP parity test (the sweep acceptance gate) ----------------
+# CUDA TU: uploads the REAL 9-pop golden f2 fixture RESIDENT to VRAM, runs the GPU-only
+# run_f4_sweep / run_f3_sweep (on-device combinatorial unrank -> the SAME assemble gather +
+# diagonal jackknife the explicit run_f4/run_f3 use -> on-device |z| filter -> CUB compaction),
+# and asserts: every sweep survivor's est/se/z is BIT-EXACT to the explicit run_f4/run_f3 over
+# that item (proves NO compute fork); the |z|>=3 filter keeps exactly the explicit |z|>=3 items;
+# and an over-cap sweep REFUSES (capped, no compute) without --sure. SKIPs cleanly if no GPU.
+add_executable(test_fstat_sweep_parity reference/test_fstat_sweep_parity.cu)
+target_link_libraries(test_fstat_sweep_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_fstat_sweep_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME fstat_sweep_parity
+         COMMAND test_fstat_sweep_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- M(fit-6) S8 qpAdm ROTATION test (the model-space search acceptance gate) ----
 # CUDA TU: reads the REAL AT2 rotation golden (goldens/at2/golden_rot.json) + the
 # co-matching f2 fixture (fixtures/f2_rot.bin), uploads f2 RESIDENT to VRAM, and runs

@@ -96,6 +96,12 @@ public:
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
 
+    /// f4-sweep / f3-sweep filter knobs. sweep_top_k() > 0 ⇒ TopK mode (keep the K largest
+    /// |z|); else MinZ mode (keep |z| >= sweep_min_z()). sweep_sure() lifts the maxcomb cap.
+    [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
+    [[nodiscard]] int    sweep_top_k()          const noexcept { return sweep_top_k_; }
+    [[nodiscard]] bool   sweep_sure()           const noexcept { return sweep_sure_; }
+
     /// extract-f2 ploidy policy (--ploidy auto|1|2). Default Auto = AT2
     /// adjust_pseudohaploid per-sample auto-detection (the f2 pseudo-haploid fix).
     [[nodiscard]] PloidyMode ploidy()           const noexcept { return ploidy_; }
@@ -142,6 +148,9 @@ private:
     PloidyMode ploidy_ = PloidyMode::Auto;     // --ploidy default (AT2 adjust_pseudohaploid)
     int min_sources_ = 1;
     int max_sources_ = -1;          // -1 ⇒ "up to the whole pool" (app default)
+    double sweep_min_z_ = 3.0;      // f4/f3-sweep --min-z (MinZ filter threshold; default 3.0)
+    int sweep_top_k_ = -1;          // f4/f3-sweep --top-k (>0 ⇒ TopK mode; -1 ⇒ MinZ mode)
+    bool sweep_sure_ = false;       // f4/f3-sweep --sure (lift the maxcomb cap)
     bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)
     bool hash_source_ = false;      // --hash (extract-f2): source-provenance SHA opt-in (default OFF)
 };

@@ -108,6 +108,45 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
                     const int* d_block_sizes, int m, int nb, double n,
                     double* dXtau, cudaStream_t stream);
 
+/// S4 DIAGONAL-only jackknife variance (the per-item f-stat SE production shape; the OOM
+/// fix for the sweep). One thread per item k: var[k] = (1/nb)·Σ_b dXtau[k + m*b]² — EXACTLY
+/// the diagonal Q[k+m*k] = (xtau·xtauᵀ/nb)[k,k] that f4/f3 read, WITHOUT forming the dense
+/// m×m Q, the cublasDsyrk, the fudge diag, or the potrf/potri (O(m·nb) work, O(m) memory —
+/// no N²/OOM). dXtau is the SAME column-major (k + m*b) buffer launch_f4_xtau produces (native
+/// carve-out), so var[k] re-passes the existing FP64 goldens BY CONSTRUCTION. Native FP64.
+/// Mined from wip/fstats-massive-overbuild.
+void launch_f4_diag_var(const double* dXtau, int m, int nb, double* dVar,
+                        cudaStream_t stream);
+
+// ---- GPU-ONLY SWEEP kernels (the fix for the CPU-bound host-enumeration disaster) ----
+
+/// On-device combinatorial UNRANK of a CHUNK of QUARTETS: one thread per local item t in
+/// [0,C); global colex rank = c0 + t; writes dQuartets[4*t..4*t+3] = (c0<c1<c2<c3), the EXACT
+/// flat 4*C layout assemble_f4_quartets_gather reads as a DEVICE pointer. This REPLACES the
+/// per-chunk H2D of a host-enumerated quartet list — NO host enumeration. Native int math.
+void launch_sweep_unrank_quartets(long long c0, int C, int range, const int* d_subset,
+                                  int* dQuartets, cudaStream_t stream);
+
+/// On-device UNRANK of a CHUNK of TRIPLES (k=3) — the f3 sibling of the quartet unrank.
+void launch_sweep_unrank_triples(long long c0, int C, int range, const int* d_subset,
+                                 int* dTriples, cudaStream_t stream);
+
+/// On-device |z| FILTER for the sweep: one thread per item k computes est=dXtotal[k],
+/// se=sqrt(dVar[k]), z=est/se (written to dEst/dSe/dZ) and the survivor flag
+/// d_flags[k] = (mode==0 ? (|z|>=min_z) : 1) as uint8 0/1. mode 0 = MinZ filter on device;
+/// mode 1 = keep-all (TopK/All — selection ranked host-side on the compacted set). NaN z
+/// (degenerate var) flags 0 under MinZ (NaN compares false). Native FP64.
+void launch_sweep_zfilter(const double* dXtotal, const double* dVar, int C, int mode,
+                          double min_z, double* dEst, double* dSe, double* dZ,
+                          unsigned char* d_flags, cudaStream_t stream);
+
+/// Deinterleave the flat k-per-item device key array d_items[k*t+c] into k SEPARATE contiguous
+/// int columns d_c0..d_c3[t] so each can be CUB-stream-compacted with the SAME survivor flags
+/// (CUB Flagged takes one input iterator per call). k<=4; for k=3 the 4th column is set 0.
+void launch_sweep_deinterleave_keys(const int* d_items, int C, int k,
+                                    int* d_c0, int* d_c1, int* d_c2, int* d_c3,
+                                    cudaStream_t stream);
+
 /// Mirror the LOWER triangle of an n×n COLUMN-MAJOR matrix into the UPPER (so a
 /// SYRK/potri result that fills one triangle becomes the full symmetric matrix the
 /// CpuBackend writes both triangles of). In-place. One thread per (i,j), i>j writes

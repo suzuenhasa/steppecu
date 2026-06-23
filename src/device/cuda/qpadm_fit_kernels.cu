@@ -664,6 +664,133 @@ __global__ void assemble_f3_triples_gather_kernel(const double* __restrict__ f2,
     }
 }
 
+// ============================ GPU-ONLY SWEEP KERNELS =================================
+// The on-device sweep replaces the CPU-bound host enumeration (the rolled-back
+// wip/fstats-massive-overbuild next_combination loop, ~40k items/s, GPU-idle). A kernel
+// maps thread t -> the t-th k-combination of [0,P) by UNRANKING a global lex index (the
+// combinatorial number system), writing the SAME flat 4*N / 3*N int array the existing
+// assemble_f4_quartets_gather / assemble_f3_triples_gather kernels read as a DEVICE pointer
+// — so the unrank REPLACES the per-chunk H2D and EVERYTHING downstream (gather, loo/total,
+// xtau, diag_var) runs verbatim. NO host enumeration anywhere on this path.
+
+// Combination unranking via the combinatorial number system (COLEX order, closed form).
+// The r-th k-subset {c_0<c_1<...<c_{k-1}} of [0,P) in colexicographic order satisfies
+//   r = C(c_0,1) + C(c_1,2) + ... + C(c_{k-1},k).
+// We peel the largest index first: c_{k-1} is the largest c with C(c,k) <= r, then recurse
+// on r-=C(c_{k-1},k) with k-1. Each element is recovered independently of the others, so a
+// single thread closed-forms its whole quartet/triple with no inter-thread state. Device
+// __forceinline__ C(n, kk) for the small k (<=4) used here — exact in double up to the
+// sweep's P range (binomials of P<=~1e4 choose 4 fit well within 2^53).
+__device__ __forceinline__ double sweep_choose(int n, int kk) {
+    if (kk < 0 || n < kk) return 0.0;
+    double num = 1.0;
+    for (int i = 0; i < kk; ++i) num *= static_cast<double>(n - i);
+    double den = 1.0;
+    for (int i = 1; i <= kk; ++i) den *= static_cast<double>(i);
+    return num / den;
+}
+
+// Unrank one global colex rank `r` into the k indices c[0..k-1] (ascending: c[0]<...<c[k-1])
+// over [0,P). Peels the largest element first (binary-free linear scan — k<=4 and the scan
+// is short since indices cluster near the top). `to_f2` lets a caller map the [0,P) local
+// position to an actual f2 index (subset support); here it is identity (full [0,P) sweep).
+__device__ __forceinline__ void sweep_unrank(long long r, int P, int k, int* c) {
+    // Recover c[k-1], c[k-2], ..., c[0]. At step j (filling position kk=k-1-... ), find the
+    // largest v in [0,P) with C(v, kk+1) <= r, subtract, continue.
+    for (int pos = k - 1; pos >= 0; --pos) {
+        const int kk = pos + 1;  // choose kk
+        // Find the largest v with C(v,kk) <= r. v ranges in [kk-1 .. P-1]; scan downward from
+        // an upper bound. Since C is monotone in v, a simple increasing scan from kk-1 works,
+        // but a downward scan from the previous element bound is tighter. Use upward scan with
+        // an early exit (k tiny).
+        int v = kk - 1;
+        while (sweep_choose(v + 1, kk) <= static_cast<double>(r)) ++v;
+        c[pos] = v;
+        r -= static_cast<long long>(sweep_choose(v, kk));
+    }
+}
+
+// Map a [0,range) local position to its actual f2 index: identity when d_subset==nullptr
+// (full [0,P) sweep), else d_subset[pos] (the subset sweep). __forceinline__ device helper.
+__device__ __forceinline__ int sweep_to_f2(int pos, const int* d_subset) {
+    return d_subset ? d_subset[pos] : pos;
+}
+
+// Unrank a CHUNK of quartets: one thread per local item t in [0,C); global rank = c0 + t.
+// Writes the flat 4*C int array dQuartets[4*t + {0,1,2,3}] = the four f2 indices (ascending in
+// the LOCAL position; remapped through d_subset to the actual f2 index), the EXACT layout
+// assemble_f4_quartets_gather_kernel reads. This REPLACES the per-chunk H2D (cuda_backend.cu
+// :1622). `range` is the sweep population count (P or subset size). NO host enumeration.
+__global__ void sweep_unrank_quartets_kernel(long long c0, int C, int range,
+                                             const int* __restrict__ d_subset,
+                                             int* __restrict__ dQuartets) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= C) return;
+    int c[4];
+    sweep_unrank(c0 + static_cast<long long>(t), range, 4, c);
+    dQuartets[4 * t + 0] = sweep_to_f2(c[0], d_subset);
+    dQuartets[4 * t + 1] = sweep_to_f2(c[1], d_subset);
+    dQuartets[4 * t + 2] = sweep_to_f2(c[2], d_subset);
+    dQuartets[4 * t + 3] = sweep_to_f2(c[3], d_subset);
+}
+
+// Unrank a CHUNK of triples (k=3): the three-slab sibling of sweep_unrank_quartets_kernel.
+__global__ void sweep_unrank_triples_kernel(long long c0, int C, int range,
+                                            const int* __restrict__ d_subset,
+                                            int* __restrict__ dTriples) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= C) return;
+    int c[3];
+    sweep_unrank(c0 + static_cast<long long>(t), range, 3, c);
+    dTriples[3 * t + 0] = sweep_to_f2(c[0], d_subset);
+    dTriples[3 * t + 1] = sweep_to_f2(c[1], d_subset);
+    dTriples[3 * t + 2] = sweep_to_f2(c[2], d_subset);
+}
+
+// On-device |z| FILTER: one thread per item k. est[k] = dXtotal[k] (the AT2 jackknife $est),
+// se = sqrt(dVar[k]) (the diagonal jackknife SE), z = est/se. Writes dEst/dSe/dZ in place and
+// the survivor FLAG d_flags[k] = (mode==MinZ ? (|z|>=min_z) : 1) as uint8 0/1 (CUB normalizes
+// to 0/1). A NaN/degenerate var (var<=0) yields se=NaN, z=NaN, |z|>=min_z is FALSE (NaN
+// compares false) ⇒ a degenerate item is dropped by the MinZ filter (the honest behavior). For
+// the All / TopK modes every item flags 1 (TopK selection happens host-side on the compacted
+// set, which is bounded by the |z|>=0 pre-pass — here mode 0 = MinZ, 1 = keep-all).
+__global__ void sweep_zfilter_kernel(const double* __restrict__ dXtotal,
+                                     const double* __restrict__ dVar,
+                                     int C, int mode, double min_z,
+                                     double* __restrict__ dEst, double* __restrict__ dSe,
+                                     double* __restrict__ dZ,
+                                     unsigned char* __restrict__ d_flags) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= C) return;
+    const double est = dXtotal[k];
+    const double var = dVar[k];
+    const double se = (var > 0.0) ? sqrt(var) : nan("");
+    const double z = est / se;
+    dEst[k] = est;
+    dSe[k] = se;
+    dZ[k] = z;
+    // mode 0 = MinZ (|z|>=min_z); mode 1 = keep-all (TopK/All: select on device, rank host).
+    unsigned char keep = 1;
+    if (mode == 0) keep = (fabs(z) >= min_z) ? 1 : 0;  // NaN -> false -> dropped
+    d_flags[k] = keep;
+}
+
+// Deinterleave the flat k-per-item key array d_items[k*t + c] into k SEPARATE contiguous
+// columns d_cols[c][t] so each column can be CUB-stream-compacted with the SAME survivor
+// flags. One thread per item t. k<=4 (quartet); the unused columns are left untouched by the
+// caller. Native int copy. (CUB DeviceSelect::Flagged takes a single input iterator per call,
+// so the key columns are split here rather than compacting a strided/struct iterator.)
+__global__ void sweep_deinterleave_keys_kernel(const int* __restrict__ d_items, int C, int k,
+                                               int* __restrict__ d_c0, int* __restrict__ d_c1,
+                                               int* __restrict__ d_c2, int* __restrict__ d_c3) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= C) return;
+    d_c0[t] = d_items[k * t + 0];
+    d_c1[t] = d_items[k * t + 1];
+    d_c2[t] = d_items[k * t + 2];
+    d_c3[t] = (k >= 4) ? d_items[k * t + 3] : 0;  // f3 (k=3): 4th key unused (0).
+}
+
 // F1 / OQ-12 keep-mask: one thread per resident block b scans the [P×P] Vpair slab and
 // writes d_keep[b] = 0 iff the block is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair
 // Vpair>0) — AT2 read_f2's `!is.finite` drop. A fully-zero slab is the "no Vpair info"
@@ -734,6 +861,29 @@ __global__ void f4_xtau_kernel(const double* __restrict__ dLoo,
         const int b = static_cast<int>(idx / m);
         const double bl = static_cast<double>(d_block_sizes[b]);
         dXtau[idx] = f4_xtau_elem(dEst[k], dLoo[idx], dTotLine[k], bl, n);
+    }
+}
+
+// --- S4 DIAGONAL-only jackknife variance (the per-item f-stats production shape) ----
+// One thread per item k in 0..m-1. var[k] = (1/nb)·Σ_b dXtau[k + m*b]² — EXACTLY the
+// diagonal Q[k+m*k] = (xtau·xtauᵀ/nb)[k,k] that f4/f3 read today (f4.cpp:130, f3.cpp:128),
+// but computed WITHOUT forming the dense m×m Q, the cublasDsyrk, the fudge diag, or the
+// potrf/potri. O(m·nb) work, O(m) memory — no N²/OOM. Native FP64 (this IS the diagonal
+// jackknife_cov computes; a tiny per-item scalar sum-of-squares reduce, not matmul-heavy, so
+// the emulated-SYRK default offers no gain here — native keeps it bit-equal to the deleted
+// dense path). dXtau is the SAME column-major (k + m*b) buffer launch_f4_xtau produces (the
+// native carve-out, reused verbatim), so var[k] re-passes the existing FP64 goldens BY
+// CONSTRUCTION (no regen). Mined from wip/fstats-massive-overbuild.
+__global__ void f4_diag_var_kernel(const double* __restrict__ dXtau,
+                                   int m, int nb, double* __restrict__ dVar) {
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < m;
+         k += gridDim.x * blockDim.x) {
+        double acc = 0.0;  // native FP64 accumulate (well-conditioned sum of squares)
+        for (int b = 0; b < nb; ++b) {
+            const double x = dXtau[static_cast<long>(k) + static_cast<long>(m) * b];
+            acc += x * x;
+        }
+        dVar[k] = acc / static_cast<double>(nb);
     }
 }
 
@@ -1636,6 +1786,55 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
     const int grid = static_cast<int>((total + block - 1) / block);
     f4_xtau_kernel<<<grid, block, 0, stream>>>(dLoo, dEst, dTotLine, d_block_sizes,
                                                m, nb, n, dXtau);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_f4_diag_var(const double* dXtau, int m, int nb, double* dVar,
+                        cudaStream_t stream) {
+    if (m <= 0 || nb <= 0) return;
+    const int block = 256;
+    const int grid = (m + block - 1) / block;
+    f4_diag_var_kernel<<<grid, block, 0, stream>>>(dXtau, m, nb, dVar);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_unrank_quartets(long long c0, int C, int range, const int* d_subset,
+                                  int* dQuartets, cudaStream_t stream) {
+    if (C <= 0) return;
+    const int block = 256;
+    const int grid = (C + block - 1) / block;
+    sweep_unrank_quartets_kernel<<<grid, block, 0, stream>>>(c0, C, range, d_subset, dQuartets);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_unrank_triples(long long c0, int C, int range, const int* d_subset,
+                                 int* dTriples, cudaStream_t stream) {
+    if (C <= 0) return;
+    const int block = 256;
+    const int grid = (C + block - 1) / block;
+    sweep_unrank_triples_kernel<<<grid, block, 0, stream>>>(c0, C, range, d_subset, dTriples);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_zfilter(const double* dXtotal, const double* dVar, int C, int mode,
+                          double min_z, double* dEst, double* dSe, double* dZ,
+                          unsigned char* d_flags, cudaStream_t stream) {
+    if (C <= 0) return;
+    const int block = 256;
+    const int grid = (C + block - 1) / block;
+    sweep_zfilter_kernel<<<grid, block, 0, stream>>>(dXtotal, dVar, C, mode, min_z,
+                                                     dEst, dSe, dZ, d_flags);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_sweep_deinterleave_keys(const int* d_items, int C, int k,
+                                    int* d_c0, int* d_c1, int* d_c2, int* d_c3,
+                                    cudaStream_t stream) {
+    if (C <= 0) return;
+    const int block = 256;
+    const int grid = (C + block - 1) / block;
+    sweep_deinterleave_keys_kernel<<<grid, block, 0, stream>>>(d_items, C, k,
+                                                               d_c0, d_c1, d_c2, d_c3);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

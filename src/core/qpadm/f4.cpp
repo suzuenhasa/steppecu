@@ -23,9 +23,9 @@
 #include <vector>
 
 #include "core/qpadm/f4_quartets.hpp"  // run_f4 S3 driver (assemble_f4_quartets)
-#include "core/qpadm/jackknife.hpp"    // S4 driver (jackknife_cov) — REUSED verbatim
+#include "core/qpadm/jackknife.hpp"    // S4 driver (jackknife_diag) — the diagonal-only SE
 #include "core/qpadm/qpadm_fit.hpp"    // default_fit_precision(), honored_tag()
-#include "device/backend.hpp"          // ComputeBackend, F4Blocks, JackknifeCov
+#include "device/backend.hpp"          // ComputeBackend, F4Blocks, JackknifeDiag
 #include "device/device_f2_blocks.hpp" // device::DeviceF2Blocks (S3 device-resident input)
 #include "device/resources.hpp"        // device::Resources (the injected backend bundle)
 #include "steppe/config.hpp"           // Precision
@@ -106,28 +106,27 @@ F4Result run_f4_impl(ComputeBackend& be, const F2Src& f2,
         return res;
     }
 
-    // S4 — block-jackknife covariance over the whole m-batch. fudge = 0 (a bare f4 SE; the
-    // qpAdm 1e-4 ridge is a GLS Q-invert concern only). The UNFUDGED Q is JackknifeCov.Q;
-    // the per-quartet variance is its DIAGONAL Q[k + m*k] (Q is column-major m×m, so the
-    // diagonal index is layout-agnostic). jackknife_cov fills out.Q UNCONDITIONALLY (before
-    // any inversion), so the diagonal is ALWAYS valid — even when the full m×m Q is singular
-    // (which it is for a large correlated quartet batch: N quartets sharing pops produce a
-    // rank-deficient Q). A bare f4 SE NEVER inverts Q (only qpAdm's GLS does), so that full-
-    // matrix non-invertibility is IRRELEVANT to f4 and is NOT a domain failure — we read the
-    // valid diagonal and report Ok. (Compare run_qpwave, which DOES consume Qinv and so must
-    // propagate NonSpdCovariance; f4 deliberately does not, because it has no Qinv consumer.)
-    const JackknifeCov cov =
-        core::qpadm::jackknife_cov(be, X, std::span<const int>(X.block_sizes), 0.0, prec);
+    // S4 — block-jackknife DIAGONAL variance over the whole m-batch (the OOM fix). A bare f4
+    // SE reads ONLY the diagonal Q[k + m*k] of the jackknife covariance and NEVER inverts Q
+    // (only qpAdm's GLS does), so we use jackknife_diag — var[k] = (1/nb)·Σ_b xtau[k,b]², the
+    // EXACT diagonal jackknife_cov used to compute — WITHOUT forming the dense m×m Q + its
+    // Cholesky inverse. At sweep scale (m = N quartets, ~36k+) the dense m×m Q is ~10GB+ and
+    // OOMs; the diagonal is O(m·nb) work / O(m) memory and is bit-equal to the deleted dense
+    // diagonal BY CONSTRUCTION (same xtau, same FP64 op-order ⇒ the f4 golden does not move).
+    // fudge is not consumed (a bare f4 SE is the UNFUDGED diagonal; the qpAdm 1e-4 ridge is a
+    // GLS Q-invert concern only). NO NonSpdCovariance is possible (no Q invert) — f4 is always
+    // Ok once assemble succeeds.
+    const JackknifeDiag diag =
+        core::qpadm::jackknife_diag(be, X, std::span<const int>(X.block_sizes), prec);
 
     res.est.assign(static_cast<std::size_t>(N), 0.0);
     res.se.assign(static_cast<std::size_t>(N), 0.0);
     res.z.assign(static_cast<std::size_t>(N), 0.0);
     res.p.assign(static_cast<std::size_t>(N), 0.0);
-    const std::size_t m_sz = static_cast<std::size_t>(m);
     for (int k = 0; k < N; ++k) {
         const std::size_t ks = static_cast<std::size_t>(k);
         const double est = X.x_total[ks];
-        const double var = cov.Q[ks + m_sz * ks];  // the UNFUDGED diagonal variance.
+        const double var = diag.var[ks];  // the UNFUDGED diagonal variance (== diag(Q)).
         const double se = (var > 0.0) ? std::sqrt(var) : std::nan("");
         const double z = est / se;
         res.est[ks] = est;

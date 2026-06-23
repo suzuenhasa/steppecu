@@ -757,6 +757,50 @@ public:
         return out;
     }
 
+    /// S4 DIAGONAL-only jackknife variance — the per-item f-stat SE oracle (backend.hpp
+    /// jackknife_diag; the OOM fix for the sweep). The DIAGONAL of jackknife_cov's Q:
+    /// var[k] = (1/nb)·Σ_b xtau[k,b]², the SAME xtau ((est*h - loo*(h-1) - tot_line)/
+    /// sqrt(h-1)) on the SAME est_to_loo / x_total / tot_line — but WITHOUT forming the
+    /// dense m×m Q or its inverse (f4/f3 read only diag(Q); f4.cpp:12). Identical op-order
+    /// to jackknife_cov's diagonal entries (long-double accumulate, native-FP64 result) ⇒
+    /// bit-equal to the deleted dense path (golden-exact). Mined from wip/fstats-massive-overbuild.
+    [[nodiscard]] JackknifeDiag jackknife_diag(const F4Blocks& x,
+                                               std::span<const int> block_sizes,
+                                               const Precision& precision) override {
+        (void)precision;  // native FP64
+
+        const int m = x.nl * x.nr;
+        const int nb = x.n_block;
+        JackknifeDiag out;
+        out.m = m;
+        if (m <= 0 || nb <= 0) { out.status = Status::Ok; return out; }
+
+        long double n_ld = 0.0L;
+        for (int b = 0; b < nb; ++b) n_ld += static_cast<long double>(block_sizes[static_cast<std::size_t>(b)]);
+        const double n = static_cast<double>(n_ld);
+        const std::size_t m_sz = static_cast<std::size_t>(m);
+
+        // Per-item diagonal: build this item's xtau row, accumulate Σ xtau² in long double,
+        // divide by nb — the IDENTICAL formula + op-order as jackknife_cov's Q[k+m*k].
+        out.var.assign(m_sz, 0.0);
+        for (int k = 0; k < m; ++k) {
+            long double acc = 0.0L;
+            const double est = x.x_total[static_cast<std::size_t>(k)];
+            const double totline = tot_line_[static_cast<std::size_t>(k)];
+            for (int b = 0; b < nb; ++b) {
+                const double bl = static_cast<double>(block_sizes[static_cast<std::size_t>(b)]);
+                const double h = n / bl;
+                const double sqrt_h_minus_1 = std::sqrt(h - 1.0);
+                const double loo = x.x_loo[static_cast<std::size_t>(k) + m_sz * static_cast<std::size_t>(b)];
+                const double xtau = (est * h - loo * (h - 1.0) - totline) / sqrt_h_minus_1;
+                acc += static_cast<long double>(xtau) * static_cast<long double>(xtau);
+            }
+            out.var[static_cast<std::size_t>(k)] = static_cast<double>(acc / static_cast<long double>(nb));
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     /// S5 — rank test / SVD seed (design §4 S5). Seeds A,B from svd(x_total) at
     /// rank r and returns chisq = vec(E)'·Qinv·vec(E) for E = X - A·B with the
     /// seed factors. In M(fit-1) this is the ALS seed; the rank sweep is M(fit-2).

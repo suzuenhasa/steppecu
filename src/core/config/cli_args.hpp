@@ -41,6 +41,8 @@ enum class Command {
     F3,
     F4Ratio,
     Qpdstat,
+    F4Sweep,  ///< GPU-only all-combinations f4 sweep (every C(P,4); on-device filter).
+    F3Sweep,  ///< GPU-only all-combinations f3 sweep (every C(P,3); on-device filter).
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
@@ -136,6 +138,16 @@ struct CliArgs {
     // ---- qpadm-rotate pool-enumeration bounds (cli-bindings.md §4.1) -----------
     std::optional<int> min_sources;         ///< --min-sources
     std::optional<int> max_sources;         ///< --max-sources
+
+    // ---- f4-sweep / f3-sweep (GPU-only all-combinations f-stat sweep) ----------
+    /// --min-z Z : keep items with |z| >= Z (the on-device filter; default 3.0). Mutually
+    /// exclusive with --top-k.
+    std::optional<double> sweep_min_z;
+    /// --top-k K : keep the K items with the largest |z| (device keeps all, host ranks).
+    std::optional<int>    sweep_top_k;
+    /// --sure : lift the maxcomb cap (a sweep over more than kFstatMaxComb items refuses
+    /// without it — the cap guards COMPUTE TIME, every item is computed to test the filter).
+    std::optional<bool>   sweep_sure;
 
     // ---- extract-f2 inputs (cli-bindings.md §4.1; consumed in M(cli-4)) --------
     std::optional<std::string> prefix;      ///< --prefix (sets geno/snp/ind = PREFIX.{geno,snp,ind})

@@ -87,6 +87,11 @@ add_library(steppe_core STATIC
     # assemble_f4_quartets (ONE shared assemble for num+den); the ONE new math seam is the
     # per-block-RATIO weighted block-jackknife (AT2 qpf4ratio jack_mat_stats $est), host-pure.
     qpadm/f4ratio.cpp
+    # GPU-ONLY f-stat SWEEP (run_f4_sweep / run_f3_sweep): the production-scale sibling of
+    # run_f4/run_f3 — enumerate EVERY C(P,k) item ON THE DEVICE (combinatorial-unrank kernel),
+    # reuse assemble_f4_quartets + the diagonal jackknife, filter (|z|) + CUB-compact survivors
+    # on-device, return ONLY survivors. NO host enumeration/filter/per-item-loop; maxcomb cap.
+    qpadm/fstat_sweep.cpp
     # M(fit-6) S8 ROTATION: the model-space search orchestrator (run_qpadm_search +
     # the base fit_models_batched default) + the GPU-free model->device shard planner.
     qpadm/model_search.cpp

@@ -57,9 +57,14 @@
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <cuda_runtime.h>
+#include <cub/device/device_select.cuh>  // cub::DeviceSelect::Flagged — the GPU-only sweep
+                                         // survivor stream-compaction (CUDA 13.x / CCCL CUB;
+                                         // two-call temp-storage idiom, num_items NumItemsT,
+                                         // no debug_synchronous param — verified vs the docs)
 
 #include <algorithm>
 #include <climits>    // INT_MIN — the AT2 rankdrop "NA" sentinel (M(fit-2))
+#include <cstdlib>    // std::getenv / std::strtol — the STEPPE_FSTAT_CHUNK sweep chunk lever
 #include <cmath>      // std::numeric_limits / quiet_NaN for the rankdrop NA encoding (M(fit-2))
 #include <cstddef>
 #include <cstdint>
@@ -1441,6 +1446,253 @@ public:
         return surv;
     }
 
+    /// GPU-ONLY f-stat SWEEP core (shared by f4_sweep k=4 / f3_sweep k=3). The fix for the
+    /// CPU-bound host-enumeration disaster: the HOST drives ONLY the chunk loop; EVERYTHING
+    /// per item runs on the device. Per chunk [c0, c0+C):
+    ///   (1) UNRANK — launch_sweep_unrank_* maps thread t -> its quartet/triple (combinatorial
+    ///       number system) and WRITES the device index list (4*C / 3*C ints) — the EXACT
+    ///       buffer the gather reads; REPLACES the per-chunk H2D (NO host enumeration).
+    ///   (2) GATHER + loo/total + xtau + diag_var — the SAME device kernels the explicit
+    ///       run_f4 path runs, verbatim (zero fork). Native FP64 (the f-stat cancellation
+    ///       carve-out + the well-conditioned diagonal SE).
+    ///   (3) |z| FILTER — launch_sweep_zfilter writes est/se/z + the uint8 survivor flag.
+    ///   (4) COMPACT — cub::DeviceSelect::Flagged stream-compacts the survivor rows (est/se/z +
+    ///       the deinterleaved key columns) ON THE DEVICE (two-call temp-storage idiom; the
+    ///       num_selected count is written on device). NO host per-item filter.
+    ///   (5) D2H ONLY the compacted survivors (num_selected, small) across the CUDA-free seam.
+    /// The chunk is sized from free VRAM (bounds per-chunk VRAM + the host survivor mirror).
+    /// Single-GPU (multi-GPU PARKED). The maxcomb cap is enforced in the CUDA-free driver
+    /// BEFORE this is reached; this also re-checks for safety.
+    [[nodiscard]] SweepSurvivors run_fstat_sweep_device(
+        const steppe::device::DeviceF2Blocks& f2, const SweepConfig& cfg,
+        const Precision& precision, int k) {
+        (void)precision;  // native FP64 by the f-stat cancellation carve-out (consistent policy)
+        guard_device();
+
+        SweepSurvivors out;
+        const int P = f2.P;
+        const int nb_full = f2.n_block;
+        const int range = cfg.pop_subset.empty() ? P : static_cast<int>(cfg.pop_subset.size());
+
+        // Total enumerated C(range, k) (saturating; the host driver already capped, but echo it).
+        unsigned long long enumerated = 1ULL;
+        if (k < 0 || range < k) {
+            enumerated = 0ULL;
+        } else {
+            for (int i = 1; i <= k; ++i) {
+                const unsigned long long num = static_cast<unsigned long long>(range - k + i);
+                if (num != 0 && enumerated > (~0ULL) / num) { enumerated = ~0ULL; break; }
+                enumerated = enumerated * num / static_cast<unsigned long long>(i);
+            }
+        }
+        out.enumerated = static_cast<std::size_t>(
+            enumerated > static_cast<unsigned long long>(SIZE_MAX) ? SIZE_MAX : enumerated);
+
+        if (range < k || k < 1 || nb_full <= 0 || f2.f2_device() == nullptr || enumerated == 0ULL) {
+            out.status = Status::Ok;  // nothing to sweep — a clean empty Ok result.
+            return out;
+        }
+
+        // F1/OQ-12 SURVIVOR-block drop (ONCE for the whole sweep — block-missingness is a
+        // property of the f2, not the item). The gather/loo/xtau/diag_var all use nb_s.
+        const std::vector<int> surv = device_survivor_blocks(f2, nb_full, P);
+        const int nb_s = static_cast<int>(surv.size());
+        if (nb_s <= 0) { out.status = Status::Ok; return out; }
+        const bool dropped = (nb_s != nb_full);
+
+        // Survivor block sizes + n = Σ block_sizes (the jackknife weight total).
+        std::vector<int> surv_block_sizes(static_cast<std::size_t>(nb_s), 0);
+        long long n_ll = 0;
+        for (int bs = 0; bs < nb_s; ++bs) {
+            const int orig = surv[static_cast<std::size_t>(bs)];
+            const int sz = f2.block_sizes[static_cast<std::size_t>(orig)];
+            surv_block_sizes[static_cast<std::size_t>(bs)] = sz;
+            n_ll += sz;
+        }
+        const double n = static_cast<double>(n_ll);
+
+        // Persistent device buffers (uploaded ONCE): survivor block sizes + survivor map + subset.
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), surv_block_sizes.data(),
+                                          static_cast<std::size_t>(nb_s) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
+        if (dropped)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
+                                              static_cast<std::size_t>(nb_s) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+        const bool use_subset = !cfg.pop_subset.empty();
+        DeviceBuffer<int> dSubset(static_cast<std::size_t>(use_subset ? range : 1));
+        if (use_subset)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSubset.data(), cfg.pop_subset.data(),
+                                              static_cast<std::size_t>(range) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+
+        // CHUNK size from free VRAM. Per item the device holds: the k-int key (k·4B) + x_blocks
+        // (nb_s·8) + x_loo (nb_s·8) + xtau (nb_s·8) + est/loo-total/tot_line (3·8) + diag var
+        // (8) + est/se/z (3·8) + 4 key columns (4·4) + flag (1) + the compacted outputs (~7·8).
+        // Bound by 0.5·free to leave headroom for the CUB temp storage + the resident f2.
+        std::size_t free_b = 0, total_b = 0;
+        STEPPE_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        const std::size_t per_item_bytes =
+            static_cast<std::size_t>(k) * sizeof(int) +                       // dItems
+            static_cast<std::size_t>(nb_s) * sizeof(double) * 3 +             // dX + dLoo + dXtau
+            sizeof(double) * 4 +                                              // dTotal,dTotLine,dVar,(pad)
+            sizeof(double) * 3 +                                             // dEst,dSe,dZ
+            static_cast<std::size_t>(4) * sizeof(int) +                       // 4 key cols
+            sizeof(unsigned char) +                                          // flag
+            sizeof(double) * 4 + static_cast<std::size_t>(4) * sizeof(int);   // compacted outs
+        std::size_t budget = static_cast<std::size_t>(static_cast<double>(free_b) * 0.5);
+        if (budget < per_item_bytes) budget = per_item_bytes;  // at least one item
+        std::size_t chunk_sz = budget / (per_item_bytes == 0 ? 1 : per_item_bytes);
+        // Optional override (the chunk lever) via STEPPE_FSTAT_CHUNK.
+        if (const char* env = std::getenv("STEPPE_FSTAT_CHUNK")) {
+            const long v = std::strtol(env, nullptr, 10);
+            if (v > 0) chunk_sz = static_cast<std::size_t>(v);
+        }
+        if (chunk_sz < 1) chunk_sz = 1;
+        // Clamp a chunk to INT_MAX (CUB num_items + our int kernels) and to the total.
+        if (chunk_sz > static_cast<std::size_t>(0x40000000)) chunk_sz = 0x40000000;
+        if (static_cast<unsigned long long>(chunk_sz) > enumerated)
+            chunk_sz = static_cast<std::size_t>(enumerated);
+        const int C_max = static_cast<int>(chunk_sz);
+
+        // Allocate the per-chunk device working set ONCE (sized to C_max); reuse across chunks.
+        const std::size_t Cm = static_cast<std::size_t>(C_max);
+        const std::size_t kk = static_cast<std::size_t>(k);
+        DeviceBuffer<int> dItems(Cm * kk);
+        DeviceBuffer<double> dX(Cm * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dLoo(Cm * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dXtau(Cm * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dTotal(Cm);
+        DeviceBuffer<double> dTotLine(Cm);
+        DeviceBuffer<double> dVar(Cm);
+        DeviceBuffer<double> dEst(Cm), dSe(Cm), dZ(Cm);
+        DeviceBuffer<int> dC0(Cm), dC1(Cm), dC2(Cm), dC3(Cm);
+        DeviceBuffer<unsigned char> dFlags(Cm);
+        // Compacted outputs (survivors of ONE chunk; bounded by C_max).
+        DeviceBuffer<double> dEstSel(Cm), dSeSel(Cm), dZSel(Cm);
+        DeviceBuffer<int> dC0Sel(Cm), dC1Sel(Cm), dC2Sel(Cm), dC3Sel(Cm);
+        DeviceBuffer<int> dNumSel(1);
+
+        // CUB temp storage — size ONCE at C_max (the max num_items) and reuse. Two-call idiom:
+        // d_temp_storage=nullptr first to query temp_storage_bytes.
+        std::size_t cub_bytes = 0;
+        cub::DeviceSelect::Flagged(nullptr, cub_bytes, dEst.data(), dFlags.data(),
+                                   dEstSel.data(), dNumSel.data(), C_max, stream_.get());
+        DeviceBuffer<unsigned char> dCubTemp(cub_bytes == 0 ? 1 : cub_bytes);
+
+        // Host survivor accumulators (only the SMALL filtered set lands here).
+        const int zmode = cfg.filter_mode;  // 0 = MinZ on-device; 1 = keep-all (TopK ranked host).
+        std::vector<int> h_c0, h_c1, h_c2, h_c3;
+        std::vector<double> h_est, h_se, h_z;
+
+        // The HOST chunk loop: advance c0, run the chunk pipeline, D2H survivors. NO per-item
+        // host work (no enumeration, no filter — those are device kernels).
+        for (unsigned long long c0 = 0; c0 < enumerated; c0 += static_cast<unsigned long long>(C_max)) {
+            const unsigned long long remaining = enumerated - c0;
+            const int C = (remaining < static_cast<unsigned long long>(C_max))
+                              ? static_cast<int>(remaining) : C_max;
+            if (C <= 0) break;
+
+            // (1) UNRANK -> dItems (the device index list; NO host enumeration).
+            if (k == 4)
+                launch_sweep_unrank_quartets(static_cast<long long>(c0), C, range,
+                                             use_subset ? dSubset.data() : nullptr,
+                                             dItems.data(), stream_.get());
+            else
+                launch_sweep_unrank_triples(static_cast<long long>(c0), C, range,
+                                            use_subset ? dSubset.data() : nullptr,
+                                            dItems.data(), stream_.get());
+
+            // (2) GATHER (the SAME device kernel the explicit path uses) + loo/total + xtau +
+            // diag_var. nl=C, nr=1, m=C.
+            if (k == 4)
+                launch_assemble_f4_quartets_gather(f2.f2_device(), P, dItems.data(), C, nb_s,
+                                                   dropped ? dSurv.data() : nullptr,
+                                                   dX.data(), stream_.get());
+            else
+                launch_assemble_f3_triples_gather(f2.f2_device(), P, dItems.data(), C, nb_s,
+                                                  dropped ? dSurv.data() : nullptr,
+                                                  dX.data(), stream_.get());
+            launch_f4_loo_total(dX.data(), dBlockSizes.data(), C, nb_s, n,
+                                dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
+            launch_f4_xtau(dLoo.data(), dTotal.data(), dTotLine.data(), dBlockSizes.data(),
+                           C, nb_s, n, dXtau.data(), stream_.get());
+            launch_f4_diag_var(dXtau.data(), C, nb_s, dVar.data(), stream_.get());
+
+            // (3) |z| FILTER -> dEst/dSe/dZ + the uint8 survivor flag (device-side, no host).
+            launch_sweep_zfilter(dTotal.data(), dVar.data(), C, zmode, cfg.min_z,
+                                 dEst.data(), dSe.data(), dZ.data(), dFlags.data(),
+                                 stream_.get());
+
+            // Deinterleave the key columns for compaction.
+            launch_sweep_deinterleave_keys(dItems.data(), C, k,
+                                           dC0.data(), dC1.data(), dC2.data(), dC3.data(),
+                                           stream_.get());
+
+            // (4) COMPACT survivors ON THE DEVICE (CUB Flagged; num_selected written on device).
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dEst.data(), dFlags.data(),
+                                       dEstSel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dSe.data(), dFlags.data(),
+                                       dSeSel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dZ.data(), dFlags.data(),
+                                       dZSel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC0.data(), dFlags.data(),
+                                       dC0Sel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC1.data(), dFlags.data(),
+                                       dC1Sel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC2.data(), dFlags.data(),
+                                       dC2Sel.data(), dNumSel.data(), C, stream_.get());
+            cub::DeviceSelect::Flagged(dCubTemp.data(), cub_bytes, dC3.data(), dFlags.data(),
+                                       dC3Sel.data(), dNumSel.data(), C, stream_.get());
+
+            int num_sel = 0;
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&num_sel, dNumSel.data(), sizeof(int),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            if (num_sel <= 0) continue;
+
+            // (5) D2H ONLY the compacted survivors (num_sel, small) — the only host write.
+            const std::size_t base = h_est.size();
+            h_est.resize(base + static_cast<std::size_t>(num_sel));
+            h_se.resize(base + static_cast<std::size_t>(num_sel));
+            h_z.resize(base + static_cast<std::size_t>(num_sel));
+            h_c0.resize(base + static_cast<std::size_t>(num_sel));
+            h_c1.resize(base + static_cast<std::size_t>(num_sel));
+            h_c2.resize(base + static_cast<std::size_t>(num_sel));
+            h_c3.resize(base + static_cast<std::size_t>(num_sel));
+            const std::size_t db = static_cast<std::size_t>(num_sel) * sizeof(double);
+            const std::size_t ib = static_cast<std::size_t>(num_sel) * sizeof(int);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_est.data() + base, dEstSel.data(), db,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_se.data() + base, dSeSel.data(), db,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_z.data() + base, dZSel.data(), db,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c0.data() + base, dC0Sel.data(), ib,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c1.data() + base, dC1Sel.data(), ib,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c2.data() + base, dC2Sel.data(), ib,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_c3.data() + base, dC3Sel.data(), ib,
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        }
+
+        // Pack the survivor set onto the CUDA-free POD.
+        const std::size_t ns = h_est.size();
+        out.keys.resize(ns);
+        out.est = std::move(h_est);
+        out.se = std::move(h_se);
+        out.z = std::move(h_z);
+        for (std::size_t r = 0; r < ns; ++r)
+            out.keys[r] = {h_c0[r], h_c1[r], h_c2[r], (k >= 4 ? h_c3[r] : 0)};
+        out.status = Status::Ok;
+        return out;
+    }
+
     /// S3 — assemble the per-block f4 matrix X from DEVICE-RESIDENT f2 (zero D2H of
     /// the big tensor; the FROZEN CONTRACT §2a). The gather kernel reads
     /// f2.f2_device() in VRAM; the est_to_loo/x_total/tot_line reduction runs
@@ -1786,6 +2038,22 @@ public:
             "CpuBackend oracle door");
     }
 
+    /// GPU-ONLY f4 sweep — enumerate EVERY C(P,4) quartet on the device, compute f4 + diagonal
+    /// jackknife SE + |z|, filter + CUB-compact survivors ON THE DEVICE, return ONLY survivors.
+    /// k=4; delegates to the shared run_fstat_sweep_device. (The fix for the CPU-bound disaster.)
+    [[nodiscard]] SweepSurvivors f4_sweep(const steppe::device::DeviceF2Blocks& f2,
+                                          const SweepConfig& cfg,
+                                          const Precision& precision) override {
+        return run_fstat_sweep_device(f2, cfg, precision, /*k=*/4);
+    }
+
+    /// GPU-ONLY f3 sweep — the three-slab sibling (every C(P,3) triple). k=3.
+    [[nodiscard]] SweepSurvivors f3_sweep(const steppe::device::DeviceF2Blocks& f2,
+                                          const SweepConfig& cfg,
+                                          const Precision& precision) override {
+        return run_fstat_sweep_device(f2, cfg, precision, /*k=*/3);
+    }
+
     /// S4 — weighted block-jackknife covariance Q + Qinv on the GPU (the FROZEN
     /// CONTRACT §2b). xtau kernel (native; cancellation carve-out) → cublasDsyrk Q
     /// (well-conditioned matmul; ENGAGES `precision` — emulated{40} by default, auto-
@@ -1926,6 +2194,67 @@ public:
         launch_symmetrize_lower_to_full(dQf.data(), m, stream_.get());
         out.Qinv.assign(m_sz * m_sz, 0.0);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.Qinv.data(), dQf.data(), m_sz * m_sz * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.status = Status::Ok;
+        return out;
+    }
+
+    /// S4 DIAGONAL-only jackknife variance on the GPU (the per-item f-stat SE production
+    /// shape; the OOM fix for the sweep). REUSES the EXACT xtau seam of jackknife_cov (the
+    /// SAME launch_f4_xtau over the SAME loo/est/tot_line/block_sizes — native carve-out),
+    /// then reduces var[k] = (1/nb)·Σ_b xtau[k,b]² with launch_f4_diag_var. NO dense m×m Q,
+    /// NO cublasDsyrk, NO potrf/potri ⇒ O(m·nb) work, O(m) memory (no N²/OOM at sweep scale).
+    /// var[k] is the IDENTICAL FP64 arithmetic the deleted dense diagonal Q[k+m*k] computed,
+    /// so f4/f3 re-pass the existing goldens BY CONSTRUCTION. Native FP64 (this IS the
+    /// diagonal jackknife_cov computes; `precision` acknowledged, not consumed — the xtau
+    /// centering + sum-of-squares are the cancellation/well-conditioned carve-outs).
+    [[nodiscard]] JackknifeDiag jackknife_diag(const F4Blocks& x,
+                                               std::span<const int> block_sizes,
+                                               const Precision& precision) override {
+        (void)precision;  // native FP64 (the xtau centering + per-item sum-of-squares)
+        guard_device();
+
+        const int m = x.nl * x.nr;
+        const int nb = x.n_block;
+        JackknifeDiag out;
+        out.m = m;
+        if (m <= 0 || nb <= 0) { out.status = Status::Ok; return out; }
+        const std::size_t m_sz = static_cast<std::size_t>(m);
+
+        // n = Σ block_sizes.
+        long long n_ll = 0;
+        for (int b = 0; b < nb; ++b) n_ll += block_sizes[static_cast<std::size_t>(b)];
+        const double n = static_cast<double>(n_ll);
+
+        // Upload loo / est / tot_line / block_sizes; form xtau (col-major k + m*b) — the
+        // EXACT jackknife_cov prologue, minus the SYRK + Cholesky inverse below it.
+        DeviceBuffer<double> dLoo(m_sz * static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dEst(m_sz);
+        DeviceBuffer<double> dTotLine(m_sz);
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb));
+        DeviceBuffer<double> dXtau(m_sz * static_cast<std::size_t>(nb));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLoo.data(), x.x_loo.data(),
+                                          m_sz * static_cast<std::size_t>(nb) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dEst.data(), x.x_total.data(),
+                                          m_sz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotLine.data(), tot_line_.data(),
+                                          m_sz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
+                                          static_cast<std::size_t>(nb) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_f4_xtau(dLoo.data(), dEst.data(), dTotLine.data(), dBlockSizes.data(),
+                       m, nb, n, dXtau.data(), stream_.get());
+
+        // The DIAGONAL reduce: var[k] = (1/nb)·Σ_b xtau[k+m*b]² (O(m·nb) work, O(m) memory).
+        DeviceBuffer<double> dVar(m_sz);
+        launch_f4_diag_var(dXtau.data(), m, nb, dVar.data(), stream_.get());
+
+        out.var.assign(m_sz, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.var.data(), dVar.data(), m_sz * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         out.status = Status::Ok;

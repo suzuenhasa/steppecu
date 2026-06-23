@@ -43,6 +43,16 @@ namespace steppe {
 /// dynamic mantissa control is the rejected trap and is not selectable here.
 inline constexpr int kDefaultMantissaBits = 40;
 
+/// Maxcomb CAP on the f-stat SWEEP enumeration count: a sweep that would enumerate more
+/// than this many combinations C(P,k) REFUSES up front (before any compute or allocation)
+/// unless the caller passes --sure. The cap guards COMPUTE TIME, not just output memory:
+/// every enumerated item is computed on the GPU to TEST the |z|/top-K filter, so a
+/// billions-item sweep is hours of GPU work even when few survive — the filter bounds the
+/// OUTPUT, never the WORK. 1e8 is the working ceiling (a few minutes of GPU sweep at the
+/// measured rate); the user lifts it explicitly with --sure. A pure choose() compare, no
+/// allocation. The AT2 qpAdm `sure` analogue for the all-combinations f4/f3 sweep.
+inline constexpr unsigned long long kFstatMaxComb = 100000000ULL;  // 1e8
+
 /// Square thread-block edge for the elementwise f2 assemble/numerator kernels:
 /// a `dim3(kCdivBlock, kCdivBlock)` 2-D block over the [P × P] output.
 /// Replaces the spike's `dim3 block(16,16)` (f2_emu_spike.cu:311). The single
