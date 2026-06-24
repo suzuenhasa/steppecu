@@ -185,7 +185,25 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     res.topologies_per_s =
         res.fit_all_wall_ms > 0.0 ? (static_cast<double>(arenas.size()) / (res.fit_all_wall_ms / 1000.0)) : 0.0;
 
-    // ---- 5. GLOBAL-BEST argmin (deterministic reduction; NOT a fit) -------------
+    // ---- 5. PER-CANDIDATE scored vector (additive exposure; NOT new compute) ----
+    // Retain EVERY successfully-fit topology's {canonical hash, edges, best-of-restarts
+    // score} in enumeration order — the same per-(topology) data the argmin below reduces
+    // over. A candidate whose arena failed to build (a bad parse) is omitted (no score).
+    res.candidates.reserve(arenas.size());
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+        const int a = arena_of[i];
+        if (a < 0) continue;
+        QpGraphCandidate c;
+        c.nadmix = cands[i].nadmix;
+        c.id = cands[i].id;
+        c.hash = cands[i].hash;
+        c.score = fb.best_score[static_cast<std::size_t>(a)];
+        c.restart_spread = fb.restart_spread[static_cast<std::size_t>(a)];
+        c.edges = cands[i].edges;
+        res.candidates.push_back(std::move(c));
+    }
+
+    // ---- 5b. GLOBAL-BEST argmin (deterministic reduction; NOT a fit) ------------
     int best_arena = -1, second_arena = -1;
     double best_s = std::numeric_limits<double>::infinity();
     double second_s = std::numeric_limits<double>::infinity();

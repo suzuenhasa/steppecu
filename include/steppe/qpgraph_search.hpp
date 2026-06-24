@@ -63,6 +63,11 @@ struct QpGraphCandidate {
     int id = 0;                 ///< the stable enumeration index within its nadmix level.
     std::uint64_t hash = 0;     ///< the canonical graph_hash (the isomorphism / recovery key).
     double score = 0.0;         ///< the best (min over restarts) GLS fit score.
+    double restart_spread = 0.0;  ///< per-topology max-min score across restarts: the
+                                  ///< IDENTIFIABILITY witness. A tight spread (near 0) == a
+                                  ///< sharp, reproducible minimum (well-identified); a large
+                                  ///< spread == a flat / ill-conditioned objective (the
+                                  ///< poorly-identified, search-rejected graphs).
     std::vector<QpGraphEdge> edges;  ///< the topology edge list (parse_qpgraph-ready).
 };
 
@@ -77,6 +82,15 @@ struct QpGraphSearchResult {
     /// (3) GLOBAL-BEST: the deterministic argmin over the enumerated scores.
     QpGraphCandidate best;
     double second_best_score = 0.0;  ///< the runner-up score (the identifiability gap witness).
+
+    /// (1) PER-CANDIDATE: the FULL enumerated scored vector — EVERY successfully-fit
+    /// topology (its canonical graph_hash + edge list + best-of-restarts GLS score), in the
+    /// deterministic enumeration order (trees then admix1). This is the same per-(topology)
+    /// data the global-best argmin reduces over; exposing it (additive — the fit/score/
+    /// enumeration MATH is unchanged) lets a parity test look a candidate up by its canonical
+    /// hash/edges and diff its score against AT2 qpgraph() for the SAME canonical graph. A
+    /// candidate whose arena failed to build (a bad parse) is omitted (it has no score).
+    std::vector<QpGraphCandidate> candidates;
 
     /// The full single-graph FIT of the global-best (the cc9ff69-tier result the per-
     /// candidate parity gate diffs against AT2 qpgraph(best_edges)).

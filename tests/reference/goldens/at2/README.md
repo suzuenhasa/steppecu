@@ -40,6 +40,16 @@ synthetic data, no fabricated numbers.
 | `golden_fitNA.json` | **F1 / OQ-12 MISSING-BLOCK golden** (the ONE maxmiss>0 golden): qpAdm over an f2 set with a partially-covered block (a pop pair with Vpair==0). AT2 read_f2(remove_na=TRUE) DROPS that block; steppe reproduces the drop (NOT impute-0). weights/chisq/dof/p/rankdrop/popdrop + steppe-convention X. `test_qpadm_missing_block.cu` reads this. |
 | `fixtures/f2_fitNA.bin` | the RAW (pre-drop) f2 block tensor for the F1 golden (P=10, nb=710), with the NA pair stored as IEEE-754 NaN; steppe derives Vpair (0 iff NaN) + reproduces the keep-mask drop (1 block, id 534, dropped). |
 | `scripts/golden_fitNA_generate.R` | the F1 generation script (extract_f2 maxmiss=0.99 + the f2-OBJECT-path qpadm + the drop/impute-0 discriminator + the RAW f2 binary dump). |
+| `fixtures/at2_scores_5pop.csv` | **qpGraph topology-search PER-CANDIDATE oracle** (1590 rows: `nadmix,id,hash,score`). AT2 `qpgraph()` fit over steppe's OWN enumerated 5-pop graphs (105 trees + 1485 non-iso nadmix=1), keyed by the **canonical `graph_hash`** (all 1590 distinct — steppe's enumeration assigns the SAME hash, so it is a direct lookup, no edge-string re-hash). `test_qpgraph_search` (argmin) and `test_qpgraph_search_parity` (full per-candidate) both read it. |
+
+> **SUPERSESSION (toposearch spot-check):** `golden_qpgraph_toposearch_spotcheck.csv` (a 4-row
+> `cand,nadmix,score,edges,pops` spot-check) was **removed** — it was DEFECTIVE (3 of 4 rows had
+> the score mis-paired with the id/edges; e.g. its `tree_21`/`admix1_871` scores did not match the
+> trusted per-id scores). It is fully **superseded by `fixtures/at2_scores_5pop.csv`**, the
+> hash-keyed per-candidate oracle covering all 1590 enumerated graphs. The per-candidate parity
+> test (`test_qpgraph_search_parity`) keys off the trusted file by canonical hash — no edge-string
+> re-hash (a 1-WL re-hash of a foreign node-labeling can collide non-isomorphic trees; steppe's
+> enumeration hash, carried on each candidate, is the only key used).
 
 The CSV/JSON are the authoritative committed values. The `.rds`, `/tmp` transcripts,
 and the precomputed f2 blocks live on box5090 (too large / not source) at

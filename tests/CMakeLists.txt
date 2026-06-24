@@ -494,6 +494,25 @@ set_target_properties(test_qpgraph_search PROPERTIES CUDA_SEPARABLE_COMPILATION 
 add_test(NAME qpgraph_search
          COMMAND test_qpgraph_search "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- qpGraph topology-search PER-CANDIDATE parity (closes the argmin-anchored gap) --------
+# CUDA TU: runs the SAME exhaustive search, EXPOSES the full per-candidate scored vector
+# (QpGraphSearchResult::candidates), then for EVERY candidate looks steppe's per-candidate score
+# up BY THE CANONICAL graph_hash in the trusted oracle goldens/at2/fixtures/at2_scores_5pop.csv
+# (1590 rows = AT2 qpgraph() over steppe's OWN enumerated graphs, hash-keyed — steppe's
+# enumeration hash IS the file key, so it is a DIRECT lookup, no edge-string re-hash). The tier:
+# (a) the global-best + the well-identified (sharp low-score) candidates match AT2 at rtol 1e-6 /
+# atol 1e-9; (b) the global-best argmin hash == the AT2 argmin hash; (c) the full 1590 lie within
+# the documented ill-conditioning envelope (the flat poorly-identified graphs differ ~0.3-0.5%).
+# Additive: the fit/score/enumeration math is unchanged; the oracle is REUSED verbatim (no regen).
+# This SUPERSEDES the defective 4-row golden_qpgraph_toposearch_spotcheck.csv (mis-paired). BOTH
+# backends. Named .cu so it device-links the RDC kernels.
+add_executable(test_qpgraph_search_parity reference/test_qpgraph_search_parity.cu)
+target_link_libraries(test_qpgraph_search_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpgraph_search_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpgraph_search_parity
+         COMMAND test_qpgraph_search_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- qpfstats SMOOTHING-SOLVE CpuBackend==CudaBackend parity (the solve primitive) -------
 # CUDA TU: a numerical-equivalence unit test of the qpfstats_smooth solve primitive (A_shared
 # = x'x + ridge·I, Cholesky, the multi-column Dtrsm solve, the NaN-row downdate, all-NaN→b=0)
