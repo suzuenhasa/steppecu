@@ -503,6 +503,15 @@ struct DatesMoments {
     Status status = Status::Ok;
 };
 
+/// One DATES single-exponential fit outcome (date_gen + residual sd + ok), the result of
+/// dates_fit over ONE windowed corr curve. Batched: dates_fit fits n_curves curves and
+/// returns n_curves of these (the full-data fit + the n_chrom leave-one-chrom LOO fits).
+struct DatesExpFit {
+    double date_gen = 0.0;  ///< decay rate λ (generations); see fit_exp_decay.
+    double error_sd = 0.0;  ///< sqrt(rss / win_len) residual sd.
+    int ok = 0;             ///< 1 iff a decaying positive exponential was fit (date_gen>0).
+};
+
 class ComputeBackend;  // fwd for the fit_models_batched default delegate below
 
 namespace core::qpadm {
@@ -1084,6 +1093,55 @@ public:
             "ComputeBackend::dates_curve: not implemented by this backend "
             "(the cuFFT autocorrelation LD engine requires a CUDA backend; the "
             "CpuBackend provides the FFT-free reference oracle)");
+    }
+
+    /// M5 — DATES TARGET-GENOTYPE REPACK onto the kept SNP axis (host-compute audit; the
+    /// dates.cpp:296-313 host bit-shuffle as a backend seam). Per target individual i, per
+    /// kept SNP ks, read the 2-bit code at original (file-order) SNP index `kept_src[ks]`
+    /// from `src` record i and write it to dense bit position ks of dst record i. Produces
+    /// the dense per-target record `dst` (n_target · dst_bpr bytes), the SAME bytes the
+    /// host loop produced (INTEGER/BIT-EXACT). The CUDA backend runs the device gather
+    /// (no host bit-shuffle hot loop); the base runs the CUDA-FREE host oracle so the
+    /// CpuBackend repack is bit-identical (the parity anchor). NON-PURE delegate: the
+    /// base body lives in steppe_core (dates.cpp) so backend.hpp stays io-free.
+    /// @param src       FULL per-target packed records (n_target · src_bpr).
+    /// @param src_bpr   source per-record stride (the tile bytes_per_record).
+    /// @param kept_src  kept index ks -> original SNP index s, length M_kept.
+    /// @param M_kept    number of kept SNPs.
+    /// @param n_target  number of target individuals.
+    /// @param dst_bpr   dest per-record stride (packed_bytes(M_kept)).
+    /// @param dst       OUT: the dense repacked records (n_target · dst_bpr, sized by caller).
+    /// NON-PURE: the base throws (the established backend.hpp seam pattern — both real
+    /// backends override: CpuBackend with core::dates::dates_repack_default, CUDA with the
+    /// device gather). run_dates dispatches through the bound backend, never the base.
+    virtual void dates_repack(const std::uint8_t* src, std::size_t src_bpr,
+                              const long* kept_src, long M_kept, int n_target,
+                              std::size_t dst_bpr, std::uint8_t* dst) {
+        (void)src; (void)src_bpr; (void)kept_src; (void)M_kept; (void)n_target;
+        (void)dst_bpr; (void)dst;
+        throw std::runtime_error(
+            "ComputeBackend::dates_repack: not implemented by this backend "
+            "(CpuBackend uses core::dates::dates_repack_default; CUDA the device gather)");
+    }
+
+    /// M6 — DATES EXPONENTIAL-DECAY FIT, batched over the n_curves windowed corr curves
+    /// (host-compute audit; the dates.cpp fit_exp_decay host loop as a backend seam). Each
+    /// curve is `win_len` corr values, row-major in `curves` (curve c at [c*win_len ...]).
+    /// Fits A·v^i + c (affine adds the constant) by the EXACT DATES coarse-to-fine 1-D
+    /// search (4000-point v-grid + 200-iter ternary refine + the inner 2×2 normal-equation
+    /// solve), one fit per curve, writing n_curves DatesExpFit out. `step` is the bin width
+    /// in Morgans. The CUDA backend runs one thread per curve (the n_chrom+1 fits batched);
+    /// the base runs the CUDA-FREE host oracle. PRECISION: the inner normal-equation
+    /// accumulators are the cancellation carve-out — NATIVE FP64 on device (long double on
+    /// host). The DATES date golden is the LOOSE 2% tier (test_cli_dates.cpp:193), held by
+    /// either reduction. NON-PURE: the base throws (both real backends override — CpuBackend
+    /// with core::dates::dates_fit_default, CUDA with the one-thread-per-curve device fit).
+    virtual std::vector<DatesExpFit> dates_fit(const double* curves, int win_len,
+                                               int n_curves, double step, bool affine) {
+        (void)curves; (void)win_len; (void)n_curves; (void)step; (void)affine;
+        throw std::runtime_error(
+            "ComputeBackend::dates_fit: not implemented by this backend "
+            "(CpuBackend uses core::dates::dates_fit_default; CUDA the device fit)");
     }
 
     /// qpfstats SMOOTHING SOLVE (the genotype-path joint f2 smoother; the shared-factor

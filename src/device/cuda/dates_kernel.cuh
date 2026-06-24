@@ -77,6 +77,38 @@ void launch_dates_accumulate_bins(const double* d_dd00, const double* d_dd11,
                                   double* d_s0, double* d_s11, double* d_s12, double* d_s22,
                                   cudaStream_t stream);
 
+/// M5 — DEVICE TARGET-GENOTYPE REPACK onto the kept SNP axis (host-compute audit; the
+/// dates.cpp:296-313 host bit-shuffle, lifted to the device). One thread per (target
+/// individual i, kept SNP ks): read the 2-bit code from the SOURCE record `i` at source
+/// SNP position d_kept_src[ks], and write it to DEST bit position ks of the dense per-target
+/// record. INTEGER/BIT-EXACT — reproduces the dates.cpp:304-311 shift/OR body bit-for-bit,
+/// so the repacked tgt_packed is bit-identical to the host repack ⇒ dates_curve moments
+/// unchanged ⇒ the DATES date golden held exactly.
+/// @param d_src        the FULL per-target packed records (n_target · src_bpr bytes).
+/// @param src_bpr      source per-record stride (tile bytes_per_record).
+/// @param d_kept_src   kept index ks -> original (file-order) SNP index s, length M_kept.
+/// @param M_kept       number of kept SNPs (dense dest axis length).
+/// @param n_target     number of target individuals.
+/// @param dst_bpr      dest per-record stride (packed_bytes(M_kept)).
+/// @param d_dst        OUT: the dense repacked records (n_target · dst_bpr bytes, pre-zeroed).
+void launch_dates_repack_target(const std::uint8_t* d_src, std::size_t src_bpr,
+                                const long* d_kept_src, long M_kept, int n_target,
+                                std::size_t dst_bpr, std::uint8_t* d_dst,
+                                cudaStream_t stream);
+
+/// M6 — DATES EXPONENTIAL-DECAY FIT, batched over n_curves windowed corr curves (the
+/// dates.cpp fit_exp_decay host loop, lifted to the device). One thread per curve `c` reads
+/// d_curves[c*win_len .. +win_len) and fits A·v^i + c (affine adds the constant) by the EXACT
+/// DATES coarse-to-fine search: a 4000-point v-grid scan requiring co0>0 (with the any-sign
+/// fallback when no decaying fit is found), a 200-iter ternary refine, and the inner 2×2
+/// normal-equation solve. Writes d_date[c] = λ (generations), d_sd[c] = sqrt(rss/win_len),
+/// d_ok[c] = 1 iff a finite λ>0 was fit. NATIVE FP64 throughout (the device has no long
+/// double; the normal-eq accumulators are the cancellation carve-out — the DATES date golden
+/// is the loose 2% tier). `step` is the bin width in Morgans.
+void launch_dates_fit_curves(const double* d_curves, int win_len, int n_curves, double step,
+                             bool affine, double* d_date, double* d_sd, int* d_ok,
+                             cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_DATES_KERNEL_CUH

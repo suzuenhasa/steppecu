@@ -49,116 +49,11 @@ inline constexpr int kPloidyDiploid = 2;
 /// fine-grid cells are disjoint and the per-chrom FFT segments never overlap (dates.c:1140).
 inline constexpr double kInterChromGapMorgans = 5.0;
 
-/// One DATES single-exponential + affine fit over a curve (DATES dates_expfit / fitexp.c).
-/// Fits corr[i] ~ co0·v^i + c over the fit window [lo_idx, hi_idx), where i is the bin index
-/// from the window start and v = exp(-lambda·step) (step = binsize). The (co0, c) are LINEAR
-/// at fixed v (solve a 2×2 normal equation == dates_expfit scorit's regressit), so this is a
-/// 1-D search over v + a local refine. Returns the date in generations and the residual sd.
-/// step is in MORGANS (== binsize). lambda = log(2)/(halflife·step); halflife = the v-decay
-/// half-life in bins; date_gen = lambda (DATES: mean(generations) = log(2)/(hlife·step)).
-struct ExpFit {
-    double date_gen = std::nan("");
-    double error_sd = std::nan("");
-    bool ok = false;
-};
-
-/// Solve the 2×2 (or 1×1 non-affine) linear least squares for (co0, c) given the basis
-/// b[i] = v^i over the window, minimizing Σ (corr[i] - co0·b[i] - c)². Returns the residual
-/// sum of squares (NOT divided by n) and writes co0/c. Affine adds the constant column.
-double linfit_2x2(const std::vector<double>& y, double v, bool affine, double& co0, double& c) {
-    const std::size_t n = y.size();
-    // Normal equations for columns {v^i, (1)}: [Sbb Sb1; Sb1 S11] [co0; c] = [Sby; Sy].
-    long double Sbb = 0.0L, Sb1 = 0.0L, S11 = 0.0L, Sby = 0.0L, Sy = 0.0L;
-    double bi = 1.0;  // v^0
-    for (std::size_t i = 0; i < n; ++i) {
-        const long double b = static_cast<long double>(bi);
-        const long double yi = static_cast<long double>(y[i]);
-        Sbb += b * b;
-        Sby += b * yi;
-        if (affine) { Sb1 += b; S11 += 1.0L; Sy += yi; }
-        bi *= v;
-    }
-    if (affine) {
-        const long double det = Sbb * S11 - Sb1 * Sb1;
-        if (det == 0.0L) { co0 = std::nan(""); c = std::nan(""); return std::nan(""); }
-        co0 = static_cast<double>((Sby * S11 - Sb1 * Sy) / det);
-        c = static_cast<double>((Sbb * Sy - Sb1 * Sby) / det);
-    } else {
-        co0 = (Sbb != 0.0L) ? static_cast<double>(Sby / Sbb) : std::nan("");
-        c = 0.0;
-    }
-    // residual sum of squares
-    long double rss = 0.0L;
-    double bb = 1.0;
-    for (std::size_t i = 0; i < n; ++i) {
-        const double pred = co0 * bb + c;
-        const long double r = static_cast<long double>(y[i]) - pred;
-        rss += r * r;
-        bb *= v;
-    }
-    return static_cast<double>(rss);
-}
-
-/// Fit A·exp(-lambda·d)+c over the windowed curve. `y` is the corr values over the fit window
-/// (bin start at lo); `step` is the bin width in MORGANS. 1-D coarse-to-fine search over the
-/// per-bin decay factor v∈(0,1) (== DATES fitexp multi-start + GSL refine, reduced to the
-/// 1-exp case), with (co0,c) the inner 2×2 linear solve. date_gen = log(2)/(halflife·step),
-/// halflife = -log(2)/log(v) bins -> lambda = -log(v)/step -> date_gen = lambda (generations).
-ExpFit fit_exp_decay(const std::vector<double>& y, double step, bool affine) {
-    ExpFit out;
-    if (y.size() < 3 || step <= 0.0) return out;
-    // Coarse grid over v in (eps, 1-eps), then golden-ish local refine on the best.
-    auto score = [&](double v, double& co0, double& c) -> double {
-        if (!(v > 0.0) || !(v < 1.0)) return std::nan("");
-        return linfit_2x2(y, v, affine, co0, c);
-    };
-    double best_v = 0.5, best_rss = std::numeric_limits<double>::infinity(), best_co0 = 0.0, best_c = 0.0;
-    const int coarse = 4000;
-    for (int k = 1; k < coarse; ++k) {
-        const double v = static_cast<double>(k) / static_cast<double>(coarse);
-        double co0 = 0.0, c = 0.0;
-        const double rss = score(v, co0, c);
-        // require a DECAYING positive exponential (co0>0): the admixture-LD signal is positive
-        // and decays; reject negative-amplitude / growing fits (DATES sorts to a decay).
-        if (std::isnan(rss)) continue;
-        if (co0 <= 0.0) continue;
-        if (rss < best_rss) { best_rss = rss; best_v = v; best_co0 = co0; best_c = c; }
-    }
-    if (!std::isfinite(best_rss)) {
-        // fall back: allow any-sign amplitude (degenerate curve)
-        for (int k = 1; k < coarse; ++k) {
-            const double v = static_cast<double>(k) / static_cast<double>(coarse);
-            double co0 = 0.0, c = 0.0;
-            const double rss = score(v, co0, c);
-            if (std::isnan(rss)) continue;
-            if (rss < best_rss) { best_rss = rss; best_v = v; best_co0 = co0; best_c = c; }
-        }
-        if (!std::isfinite(best_rss)) return out;
-    }
-    // Local refine (ternary search) around best_v for a tighter v.
-    double lo = std::max(1e-9, best_v - 1.0 / static_cast<double>(coarse));
-    double hi = std::min(1.0 - 1e-9, best_v + 1.0 / static_cast<double>(coarse));
-    for (int it = 0; it < 200; ++it) {
-        const double m1 = lo + (hi - lo) / 3.0;
-        const double m2 = hi - (hi - lo) / 3.0;
-        double c1a = 0.0, c1b = 0.0, c2a = 0.0, c2b = 0.0;
-        const double r1 = score(m1, c1a, c1b);
-        const double r2 = score(m2, c2a, c2b);
-        const double rr1 = std::isnan(r1) ? std::numeric_limits<double>::infinity() : r1;
-        const double rr2 = std::isnan(r2) ? std::numeric_limits<double>::infinity() : r2;
-        if (rr1 < rr2) hi = m2; else lo = m1;
-    }
-    best_v = 0.5 * (lo + hi);
-    best_rss = score(best_v, best_co0, best_c);
-    if (std::isnan(best_rss) || !(best_v > 0.0) || !(best_v < 1.0)) return out;
-
-    // v = exp(-lambda·step) per bin -> lambda = -log(v)/step (generations since admixture).
-    const double lambda = -std::log(best_v) / step;
-    out.date_gen = lambda;
-    out.error_sd = std::sqrt(best_rss / static_cast<double>(y.size()));
-    out.ok = std::isfinite(out.date_gen) && out.date_gen > 0.0;
-    return out;
-}
+// M5/M6 host primitives (ExpFit, linfit_2x2, fit_exp_decay, dates_repack_host) moved to the
+// shared CUDA-FREE header core/internal/dates_fit.hpp so the CpuBackend reference oracle (in
+// steppe_device) reuses the SAME definitions WITHOUT steppe_device depending on steppe_core
+// (the one-way dependency: core -> device via ComputeBackend). The exp fit + the repack now
+// run through the be.dates_fit / be.dates_repack backend seams (device on the CUDA path).
 
 /// The DATES weighted block jackknife (statsubs.c weightjack/weightjackx). `mean` is the
 /// full-data date; jmean[k] the leave-one-chrom date; jwt[k] the SNP-count weight (total -
@@ -294,23 +189,16 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     if (M_kept <= 0) { res.status = Status::InvalidConfig; return res; }
 
     // Re-pack the target genotypes onto the kept SNP axis (dense per-individual record).
+    // M5 — ON-DEVICE GATHER (host-compute audit): the dates.cpp host bit-shuffle hot loop
+    // (O(n_target × M_kept)) is gone — the bound backend runs the repack (the CUDA backend
+    // a device gather; the CpuBackend the bit-exact host oracle). INTEGER/BIT-EXACT, so
+    // tgt_packed is bit-identical to the prior host repack ⇒ dates_curve moments unchanged.
     const std::size_t kept_bpr = io::packed_bytes(static_cast<std::size_t>(M_kept));
     std::vector<std::uint8_t> tgt_packed(static_cast<std::size_t>(n_target) * kept_bpr, 0);
-    for (int i = 0; i < n_target; ++i) {
-        const std::uint8_t* src_rec =
-            tile.packed.data() + (tgt_begin + static_cast<std::size_t>(i)) * tile.bytes_per_record;
-        std::uint8_t* dst_rec = tgt_packed.data() + static_cast<std::size_t>(i) * kept_bpr;
-        for (long ks = 0; ks < M_kept; ++ks) {
-            const long s = kept_src[static_cast<std::size_t>(ks)];
-            const std::size_t sb = static_cast<std::size_t>(s) / static_cast<std::size_t>(io::kCodesPerByte);
-            const int sp = static_cast<int>(s % io::kCodesPerByte);
-            const std::uint8_t code = io::code_in_byte(src_rec[sb], sp);
-            const std::size_t db = static_cast<std::size_t>(ks) / static_cast<std::size_t>(io::kCodesPerByte);
-            const int dp = static_cast<int>(ks % io::kCodesPerByte);
-            const int shift = (io::kCodesPerByte - 1 - dp) * io::kBitsPerCode;
-            dst_rec[db] = static_cast<std::uint8_t>(dst_rec[db] | (code << shift));
-        }
-    }
+    const std::uint8_t* tgt_src =
+        tile.packed.data() + tgt_begin * tile.bytes_per_record;
+    be.dates_repack(tgt_src, tile.bytes_per_record, kept_src.data(), M_kept, n_target,
+                    kept_bpr, tgt_packed.data());
 
     // ---- 3. setqbins: the fine genetic-map grid cell per kept SNP (dates.c:1128-1160) --
     // Cumulative genpos across SNPs (file order) with a +5 Morgan gap between chromosomes;
@@ -430,7 +318,30 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
         return w;
     };
 
-    const ExpFit full_fit = fit_exp_decay(windowed(full_curve), opts.binsize_morgans, opts.affine);
+    // M6 — BATCHED EXP FIT (host-compute audit): the n_chrom+1 single-exponential fits (the
+    // full-data fit + the per-chrom leave-one-out fits) run as ONE batched dates_fit call —
+    // the CUDA backend runs one thread per curve (the 4000-grid + ternary refine + 2×2 FP64
+    // normal solve on device), the CpuBackend the bit-exact host oracle. The host no longer
+    // runs the 4000×win_len×(n_chrom+1) fit arithmetic. DATES date golden is the loose 2%
+    // tier; the inner normal-eq accumulators are the FP64 cancellation carve-out on device.
+    // All curves share ONE window (same n_emit / loval / maxdis), so the batch is dense.
+    const std::vector<double> win_full = windowed(full_curve);
+    const int win_len = static_cast<int>(win_full.size());
+    const int n_curves = n_chrom + 1;  // [0] = full, [1..n_chrom] = LOO drop chrom kc.
+    std::vector<double> curves(static_cast<std::size_t>(n_curves) *
+                               static_cast<std::size_t>(win_len), 0.0);
+    auto copy_curve = [&](int c, const std::vector<double>& w) {
+        for (int j = 0; j < win_len && j < static_cast<int>(w.size()); ++j)
+            curves[static_cast<std::size_t>(c) * static_cast<std::size_t>(win_len) +
+                   static_cast<std::size_t>(j)] = w[static_cast<std::size_t>(j)];
+    };
+    copy_curve(0, win_full);
+    for (int kc = 0; kc < n_chrom; ++kc) copy_curve(kc + 1, windowed(total_corr_curve(kc)));
+
+    const std::vector<DatesExpFit> fits =
+        be.dates_fit(curves.data(), win_len, n_curves, opts.binsize_morgans, opts.affine);
+
+    const DatesExpFit& full_fit = fits.at(0);
     if (!full_fit.ok) { res.status = Status::RankDeficient; res.date_gen = std::nan(""); return res; }
     res.fit_error_sd = full_fit.error_sd;
 
@@ -448,8 +359,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     std::vector<double> jmean(static_cast<std::size_t>(n_chrom), std::nan(""));
     std::vector<double> jwt(static_cast<std::size_t>(n_chrom), 0.0);
     for (int kc = 0; kc < n_chrom; ++kc) {
-        const ExpFit f = fit_exp_decay(windowed(total_corr_curve(kc)), opts.binsize_morgans,
-                                       opts.affine);
+        const DatesExpFit& f = fits.at(static_cast<std::size_t>(kc + 1));
         jmean[static_cast<std::size_t>(kc)] = f.ok ? f.date_gen : std::nan("");
         jwt[static_cast<std::size_t>(kc)] =
             static_cast<double>(total_count - snp_count[static_cast<std::size_t>(kc)]);

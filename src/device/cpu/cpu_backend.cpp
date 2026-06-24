@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
+#include "core/internal/dates_fit.hpp"     // core::dates::dates_repack_host / fit_exp_decay (M5/M6 oracle)
 #include "core/internal/decode_af.hpp"     // genotype_code, accumulate_genotype, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/pchisq.hpp"        // core::internal::pchisq_upper (M(fit-2) rank-test p-value)
@@ -642,6 +643,38 @@ public:
             }
         }
         out.status = Status::Ok;
+        return out;
+    }
+
+    /// M5 — DATES target-genotype repack REFERENCE oracle (backend.hpp dates_repack). The
+    /// bit-exact host bit-shuffle (the SAME core::dates default body the run_dates host loop
+    /// used to inline); the CUDA backend's device gather is diffed against this. INTEGER/
+    /// BIT-EXACT ⇒ the repacked record is identical on both backends.
+    void dates_repack(const std::uint8_t* src, std::size_t src_bpr, const long* kept_src,
+                      long M_kept, int n_target, std::size_t dst_bpr, std::uint8_t* dst) override {
+        core::dates::dates_repack_host(src, src_bpr, kept_src, M_kept, n_target, dst_bpr, dst);
+    }
+
+    /// M6 — DATES exponential-fit REFERENCE oracle (backend.hpp dates_fit). The native
+    /// long-double 2×2 normal-equation fit_exp_decay per curve (the SHARED header oracle the
+    /// run_dates host loop also uses); the CUDA backend's FP64 device fit is held to the loose
+    /// 2% date golden against this.
+    [[nodiscard]] std::vector<DatesExpFit> dates_fit(const double* curves, int win_len,
+                                                     int n_curves, double step,
+                                                     bool affine) override {
+        std::vector<DatesExpFit> out(static_cast<std::size_t>(n_curves > 0 ? n_curves : 0));
+        for (int c = 0; c < n_curves; ++c) {
+            std::vector<double> y(static_cast<std::size_t>(win_len > 0 ? win_len : 0));
+            for (int j = 0; j < win_len; ++j)
+                y[static_cast<std::size_t>(j)] =
+                    curves[static_cast<std::size_t>(c) * static_cast<std::size_t>(win_len) +
+                           static_cast<std::size_t>(j)];
+            const core::dates::ExpFitHost f = core::dates::fit_exp_decay(y, step, affine);
+            DatesExpFit& o = out[static_cast<std::size_t>(c)];
+            o.date_gen = f.date_gen;
+            o.error_sd = f.error_sd;
+            o.ok = f.ok ? 1 : 0;
+        }
         return out;
     }
 

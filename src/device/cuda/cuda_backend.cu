@@ -1839,6 +1839,75 @@ public:
         return out;
     }
 
+    /// M5 — DATES target-genotype REPACK onto the kept SNP axis ON THE DEVICE (host-compute
+    /// audit; backend.hpp dates_repack). Replaces the dates.cpp host bit-shuffle hot loop
+    /// (O(n_target × M_kept)): upload the n_target FULL target records + the kept-index map
+    /// ONCE, run the device gather (one thread per dest byte, race-free; reads via the SAME
+    /// MSB-first core::genotype_code, writes the SAME shift/OR as the host), D2H only the
+    /// dense repacked buffer. INTEGER/BIT-EXACT ⇒ bit-identical to the CpuBackend repack ⇒
+    /// dates_curve moments unchanged ⇒ the DATES date golden held exactly.
+    void dates_repack(const std::uint8_t* src, std::size_t src_bpr, const long* kept_src,
+                      long M_kept, int n_target, std::size_t dst_bpr,
+                      std::uint8_t* dst) override {
+        guard_device();
+        if (n_target <= 0 || M_kept <= 0 || dst_bpr == 0) return;
+        const std::size_t src_bytes = static_cast<std::size_t>(n_target) * src_bpr;
+        const std::size_t dst_bytes = static_cast<std::size_t>(n_target) * dst_bpr;
+        DeviceBuffer<std::uint8_t> dSrc(src_bytes);
+        DeviceBuffer<long> dKept(static_cast<std::size_t>(M_kept));
+        DeviceBuffer<std::uint8_t> dDst(dst_bytes);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSrc.data(), src, src_bytes,
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dKept.data(), kept_src,
+                                          static_cast<std::size_t>(M_kept) * sizeof(long),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_dates_repack_target(dSrc.data(), src_bpr, dKept.data(), M_kept, n_target,
+                                   dst_bpr, dDst.data(), stream_.get());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst, dDst.data(), dst_bytes,
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+
+    /// M6 — DATES exponential-decay FIT ON THE DEVICE, batched over the n_curves windowed
+    /// corr curves (host-compute audit; backend.hpp dates_fit). One thread per curve runs
+    /// the EXACT DATES coarse-to-fine 1-D search (4000-point v-grid + 200-iter ternary
+    /// refine + the inner 2×2 FP64 normal-equation solve) — the host no longer runs the
+    /// 4000×win_len×(n_chrom+1) fit arithmetic. The inner normal-eq accumulators are the
+    /// NATIVE FP64 cancellation carve-out (the device has no long double; the DATES date
+    /// golden is the loose 2% tier, held by the FP64 fit). Upload curves once, D2H the
+    /// n_curves (date,sd,ok).
+    [[nodiscard]] std::vector<DatesExpFit> dates_fit(const double* curves, int win_len,
+                                                     int n_curves, double step,
+                                                     bool affine) override {
+        guard_device();
+        std::vector<DatesExpFit> out(static_cast<std::size_t>(n_curves > 0 ? n_curves : 0));
+        if (n_curves <= 0 || win_len <= 0 || !(step > 0.0)) return out;
+        const std::size_t nc = static_cast<std::size_t>(n_curves);
+        const std::size_t total = nc * static_cast<std::size_t>(win_len);
+        DeviceBuffer<double> dCurves(total);
+        DeviceBuffer<double> dDate(nc), dSd(nc);
+        DeviceBuffer<int> dOk(nc);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCurves.data(), curves, total * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_dates_fit_curves(dCurves.data(), win_len, n_curves, step, affine,
+                                dDate.data(), dSd.data(), dOk.data(), stream_.get());
+        std::vector<double> h_date(nc, 0.0), h_sd(nc, 0.0);
+        std::vector<int> h_ok(nc, 0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_date.data(), dDate.data(), nc * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_sd.data(), dSd.data(), nc * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_ok.data(), dOk.data(), nc * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        for (std::size_t c = 0; c < nc; ++c) {
+            out[c].date_gen = h_date[c];
+            out[c].error_sd = h_sd[c];
+            out[c].ok = h_ok[c];
+        }
+        return out;
+    }
+
     /// qpfstats SMOOTHING SOLVE on the GPU (the genotype-path joint f2 smoother; backend.hpp
     /// qpfstats_smooth / include/steppe/qpfstats.hpp). The shared-factor batched
     /// least-squares — AT2 qpfstats_regression REFORMULATED with NO host per-block loop
