@@ -15,18 +15,25 @@ reachable from there. The rest of this file is the fast re-orientation.
 
 Verify state: `cd /home/suzunik/steppe && git branch --show-current && git log --oneline -6`
 
-> **LATEST (`9ad33d9`, 2026-06-24) — device-resident DECODE SEAM, Stage 1 (regime-A: qpfstats + dstat).**
-> The host-compute audit's two CRITICAL violations (C1 the ~1.1 GB Q/V/N D2H + C2 the host per-SNP
-> keep-loop) and M3/M4 (the host lockstep Q/V subset + H2D re-upload) are CURED on the CUDA path for
-> qpfstats + dstat: `decode_af_compact_autosome` keeps Q/V/N resident, an on-device autosome keep-mask
-> (INTEGER-EXACT chr∈[1,22]) + `cub::DeviceSelect::Flagged`/`ExclusiveSum` scan-gather do the lockstep
-> compaction, and `dstat_block_reduce`/`qpfstats_blocks_smooth` got `DeviceDecodeResult` overloads that
-> read the resident Q/V. **nsys proof on 40-pop qpfstats:** D2H total dropped to 11.4 MB (was ~1.1 GB),
-> the Q/V H2D re-upload is gone, the decode flows into sustained-100% compute (mid-stream idle bounce
-> eliminated); only the io-side .geno H2D head remains (out of scope). All genotype goldens held
-> (STEPPE_THOROUGH 61/61; CpuBackend==CudaBackend). **STILL OPEN:** Stage 2 = extract_f2 regime-B
-> (FP-sensitive pooled-MAF/maxmiss filter + N compaction); Stage 3 = dates (gather-2-rows + target
-> bit-repack). See `docs/research/host-compute-audit.md` C1/C2/M3/M4.
+> **LATEST (`5fc808b`, 2026-06-24) — device-resident DECODE SEAM, Stage 2 (regime-B: extract_f2 FULL filter).**
+> The extract_f2 per-SNP filter (the FP-sensitive pooled-MAF + the pop-coverage maxmiss + the
+> allele-class drop) now runs ON-DEVICE, closing the decode-seam CRITICAL (C1/C2/M3/M4) for
+> extract_f2. `decode_af_compact_filter` (sibling of `decode_af_compact_autosome`) REUSES
+> `decode_af_resident` + the IDENTICAL `cub::ExclusiveSum`/`DeviceSelect::Flagged`/scan-gather idiom,
+> swaps in a regime-B keep-mask kernel (one thread/SNP ⇒ the across-pop Σ order is bit-identical to
+> the host), and adds the THIRD lockstep gather of N. The SHARED `__host__ __device__` pooled-MAF
+> reduction (`snp_summary_reduce.hpp`) is the single source for the host AND the kernel; its
+> FFMA-immune pin (`__dmul_rn`/`__dadd_rn` on device, two-step ISO C++ on host) makes the pooled-MAF
+> comparison bit-identical host==device. The host per-SNP filter loop + the full-tile Q/V/N D2H are
+> GONE from the production path (only the CpuBackend oracle keeps them). **Keep-set BIT-EXACT to host
+> on REAL v66 AADR** (P=50, M=100k, 6 configs incl. the FP-fragile pooled-MAF boundary;
+> `test_extract_f2_regimeB_parity` test #49), `cli_extract_qpadm` n_snp_kept = 351539 EXACT, all
+> goldens held (STEPPE_THOROUGH 62/62; CpuBackend==CudaBackend). **STILL OPEN:** Stage 3 = dates
+> (gather-2-rows + target bit-repack). See `docs/research/host-compute-audit.md` C1/C2/M3/M4.
+>
+> Prior: **`9ad33d9` Stage 1 (regime-A: qpfstats + dstat)** — `decode_af_compact_autosome` resident
+> Q/V/N + the INTEGER-EXACT autosome keep-mask + the scan-gather lockstep compaction; nsys proof on
+> 40-pop qpfstats: D2H total dropped to 11.4 MB (was ~1.1 GB), the Q/V H2D re-upload gone.
 
 ## State (as of this writing)
 - **`main`** @ `66280b7` (branch `phase2-fit-engine` may sit a few commits ahead — verify with `git rev-parse --short main phase2-fit-engine`). **Phase-1 PRECOMPUTE (S0–S2) COMPLETE THROUGH M5**; **Phase-2 qpAdm FIT ENGINE (S3–S8) BUILT + golden-gated**; big-refactor COMPLETE; **fit-engine BACKEND FINISHED**; **FULL AT2 END-TO-END PARITY achieved** (parity-chain block below); **all 5 goldens correct (convertf-PA)**; **CLI productized (extract-f2/qpadm/qpadm-rotate wired) + two studies reproduced + perf characterized on 1240K** (post-parity block below). **ctest 46/46.**
