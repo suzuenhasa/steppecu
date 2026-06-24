@@ -27,6 +27,7 @@
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpdstat.hpp"
+#include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
 #include "app/cmd_rotate.hpp"
 #include "core/config/cli_args.hpp"
@@ -312,6 +313,7 @@ int run_cli(int argc, char** argv) {
     CliArgs qpdstat_args;
     CliArgs f4sweep_args;
     CliArgs f3sweep_args;
+    CliArgs qpfstats_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -497,6 +499,36 @@ int run_cli(int argc, char** argv) {
             auto config = build_config(f3sweep_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
             std::exit(run_f3_sweep_command(*config));
+        });
+    }
+
+    // ---- qpfstats (genotype-path joint f2 SMOOTHER) -----------------------------
+    // Reads GENOTYPES (--prefix) + smooths over --pops -> a smoothed f2 DIR (--out-dir)
+    // that qpadm/f4/qpGraph consume. REUSES the qpDstat-B genotype seam + the dstat-
+    // numerator engine over the full f2/f3/f4 popcomb set + the on-device smoothing solve.
+    {
+        CLI::App* sub = app.add_subcommand(
+            "qpfstats",
+            "Genotype-path joint f2 smoother: --prefix genotypes + --pops -> a smoothed f2 dir");
+        qpfstats_args.command = Command::Qpfstats;
+        sub->add_option_function<std::string>(
+            "--prefix", [&](const std::string& v) { qpfstats_args.qpdstat_prefix = v; },
+            "Genotype triple prefix (reads PREFIX.{geno,snp,ind})");
+        sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&](const std::vector<std::string>& v) { qpfstats_args.pops = v; },
+            "Population set to smooth over (sorted ASC internally = the AT2 dimnames order)")
+            ->delimiter(',');
+        sub->add_option_function<std::string>(
+            "--out-dir", [&](const std::string& v) { qpfstats_args.out_dir = v; },
+            "Output smoothed f2_blocks dir (f2.bin + pops.txt + meta.json)");
+        sub->add_option_function<double>(
+            "--blgsize", [&](double v) { qpfstats_args.blgsize = v; },
+            "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
+        add_common_flags(sub, qpfstats_args);
+        sub->callback([&]() {
+            auto config = build_config(qpfstats_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            std::exit(run_qpfstats_command(*config));
         });
     }
 

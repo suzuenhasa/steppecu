@@ -40,3 +40,14 @@ target_compile_features(steppe_extract PUBLIC cxx_std_20)
 # The version string the writer stamps into meta.json (the same STEPPE_VERSION the CLI
 # command used to pass via STEPPE_VERSION; single-homed in the top-level project VERSION).
 target_compile_definitions(steppe_extract PRIVATE STEPPE_VERSION="${PROJECT_VERSION}")
+
+# It links steppe::device (CUDA_SEPARABLE_COMPILATION ON) PRIVATE, the SAME edge
+# steppe_core has, so it MUST mirror steppe_core's CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+# (src/core/CMakeLists.txt:134). The OFF property does NOT propagate from steppe_core
+# to this sibling target, so without this line CMake archives a cmake_device_link.o
+# into libsteppe_extract.a that registers cuda_backend.cu's fatbin; the final CUDA
+# executable (bin/steppe) then double-handles that registration and the host link
+# fails with `undefined reference to __fatbinwrap_..._cuda_backend_cu_...`. With OFF,
+# this stays a pure host archive and the consuming executable device-links
+# steppe::device once — the same path steppe_core and the CUDA tests use.
+set_target_properties(steppe_extract PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS OFF)

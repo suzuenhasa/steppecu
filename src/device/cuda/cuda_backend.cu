@@ -93,6 +93,7 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
+#include "device/cuda/qpfstats_kernel.cuh"  // launch_qpfstats_zero_nan_ymat / _add_ridge_diag (the smoother prep)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
@@ -1284,6 +1285,197 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(cnt, dCnt.data(), nb_out * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+
+    /// qpfstats SMOOTHING SOLVE on the GPU (the genotype-path joint f2 smoother; backend.hpp
+    /// qpfstats_smooth / include/steppe/qpfstats.hpp). The shared-factor batched
+    /// least-squares — AT2 qpfstats_regression REFORMULATED with NO host per-block loop
+    /// (the CPU-bound trap the R io.R CHUNK_SIZE=64 block loop is). The GPU-bound shape:
+    ///   A_shared = x'x + ridge·I   (ONE cublasDsyrk, EmulatedFp64 via the f2 policy)
+    ///   RHS = x' · [ymat_zeroed | y_zeroed]  (ONE cublasDgemm, [npairs × (n_block+1)])
+    ///   L = chol(A_shared)         (ONE cusolverDnDpotrf LOWER, native FP64 carve-out)
+    ///   solve over ALL (n_block+1) columns: a cublasDtrsm PAIR (forward L then back Lᵀ).
+    /// The NaN handling: zeroing the ymat NaN entries (launch_qpfstats_zero_nan_ymat) makes
+    /// an ALL-NaN block's RHS column 0 ⇒ the shared solve yields b=0 (the AT2 all-NaN→b=0
+    /// policy, EXACT, via A·b=0). A PARTIAL-NaN block (0 < k_i < npopcomb; ABSENT on the
+    /// real 9-pop golden — only block 536 is all-NaN) needs the per-row downdate
+    /// A_b = A_shared - x[nan]'x[nan]; those few blocks (if any) are re-solved with a
+    /// downdated A via the host small_linalg solve over ONLY the partial-NaN block set (NOT
+    /// a per-block loop over all blocks — zero host solves when no block is partial-NaN, the
+    /// production case). Native FP64 carve-out for the Cholesky + the Dtrsm + the downdate.
+    [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
+                                                 std::span<const double> ymat,
+                                                 std::span<const double> y,
+                                                 int npopcomb, int npairs,
+                                                 int n_block, double ridge,
+                                                 const Precision& precision) override {
+        guard_device();
+        QpfstatsSmooth out;
+        out.npairs = npairs;
+        out.n_block = n_block;
+        if (npopcomb <= 0 || npairs <= 0 || n_block <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t nc = static_cast<std::size_t>(npopcomb);
+        const std::size_t np = static_cast<std::size_t>(npairs);
+        const std::size_t nb = static_cast<std::size_t>(n_block);
+        const int ncols = n_block + 1;  // the n_block ymat columns + the bglob (y) column
+        const std::size_t ncols_sz = static_cast<std::size_t>(ncols);
+
+        // ---- Upload x [npopcomb × npairs] + the RHS source [npopcomb × ncols] -----------
+        // RHS source columns 0..n_block-1 = ymat; column n_block = y. NaN entries are zeroed
+        // on device (launch_qpfstats_zero_nan_ymat); the per-column NaN count rides back so
+        // the host can detect any PARTIAL-NaN column for the downdate fallback.
+        DeviceBuffer<double> dX(nc * np);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dX.data(), x.data(), nc * np * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        DeviceBuffer<double> dRhsSrc(nc * ncols_sz);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRhsSrc.data(), ymat.data(), nc * nb * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRhsSrc.data() + nc * nb, y.data(),
+                                          nc * sizeof(double), cudaMemcpyHostToDevice,
+                                          stream_.get()));
+        DeviceBuffer<int> dNanPerCol(ncols_sz);
+        launch_qpfstats_zero_nan_ymat(dRhsSrc.data(), npopcomb, ncols, dNanPerCol.data(),
+                                      stream_.get());
+        std::vector<int> nan_per_col(ncols_sz, 0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(nan_per_col.data(), dNanPerCol.data(),
+                                          ncols_sz * sizeof(int), cudaMemcpyDeviceToHost,
+                                          stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // ---- A_shared = x'x + ridge·I  (cublasDsyrk, EmulatedFp64 via the f2 policy) -----
+        // x is [npopcomb × npairs] COLUMN-MAJOR ⇒ x'x is the OP_T·OP_N gram = syrk(OP_T,
+        // n=npairs, k=npopcomb, A=dX lda=npopcomb). The well-conditioned gram ENGAGES
+        // `precision` exactly like the f2/jackknife SYRK (engage_f2_precision +
+        // MathModeScope; the §12 scoped emulated-FP64 pattern). Then symmetrize + add ridge.
+        DeviceBuffer<double> dA(np * np);
+        {
+            const double alpha = 1.0, beta = 0.0;
+            const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                     npairs, npopcomb, &alpha, dX.data(), npopcomb,
+                                     &beta, dA.data(), npairs));
+        }  // restores the math mode before the native Cholesky/Dtrsm
+        launch_symmetrize_lower_to_full(dA.data(), npairs, stream_.get());
+        launch_qpfstats_add_ridge_diag(dA.data(), npairs, ridge, stream_.get());
+
+        // ---- RHS = x' · RhsSrc  (cublasDgemm, [npairs × ncols], EmulatedFp64) -----------
+        // x' [npairs × npopcomb] · RhsSrc [npopcomb × ncols] = RHS [npairs × ncols].
+        DeviceBuffer<double> dRhs(np * ncols_sz);
+        {
+            const double alpha = 1.0, beta = 0.0;
+            const MathModeScope gemm_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_T, CUBLAS_OP_N,
+                                     npairs, ncols, npopcomb, &alpha,
+                                     dX.data(), npopcomb, dRhsSrc.data(), npopcomb,
+                                     &beta, dRhs.data(), npairs));
+        }
+
+        // ---- L = chol(A_shared)  (cusolverDnDpotrf LOWER; native FP64 carve-out) ---------
+        // A_shared = L·Lᵀ. The ill-conditioned solve DEFAULTS native (solve_precision_=Fp64);
+        // promotable via set_solve_precision under per-stage S8 validation (the f2-cache fit
+        // policy). The scope is local so it never leaks the mode to the next op.
+        const CusolverMathModeScope solve_scope =
+            engage_solver_precision(solver_.get(), solve_precision_, &emulation_honorable);
+        DeviceBuffer<int> dInfo(1);
+        int lwork = 0;
+        CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
+                                                   npairs, dA.data(), npairs, &lwork));
+        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+        CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
+                                        dA.data(), npairs, dWork.data(), lwork, dInfo.data()));
+        int info = 0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        if (info != 0) { out.status = Status::NonSpdCovariance; return out; }
+
+        // ---- The multi-column solve A·B = RHS via a cublasDtrsm PAIR (NOT potrsBatched,
+        // which is nrhs=1-only): A = L·Lᵀ ⇒ forward L·Z = RHS (lower, no-trans) then back
+        // Lᵀ·B = Z (lower, trans). ALL ncols columns in ONE Dtrsm each — the whole n_block
+        // axis in two calls, NO host per-block loop. dRhs is overwritten with the solution B.
+        {
+            const double one = 1.0;
+            CUBLAS_CHECK(cublasDtrsm(blas_.get(), CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                                     CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, npairs, ncols, &one,
+                                     dA.data(), npairs, dRhs.data(), npairs));
+            CUBLAS_CHECK(cublasDtrsm(blas_.get(), CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, npairs, ncols, &one,
+                                     dA.data(), npairs, dRhs.data(), npairs));
+        }
+
+        // ---- D2H the solution: b = columns 0..n_block-1, bglob = column n_block ----------
+        std::vector<double> sol(np * ncols_sz, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(sol.data(), dRhs.data(), np * ncols_sz * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.b.assign(np * nb, 0.0);
+        std::copy(sol.begin(), sol.begin() + static_cast<std::ptrdiff_t>(np * nb), out.b.begin());
+        out.bglob.assign(np, 0.0);
+        std::copy(sol.begin() + static_cast<std::ptrdiff_t>(np * nb), sol.end(),
+                  out.bglob.begin());
+
+        // ---- PARTIAL-NaN downdate fallback (0 < k_col < npopcomb): re-solve ONLY those
+        // columns with A_b = A_shared - x[nan]'x[nan]. ABSENT on the real golden (block 536
+        // is all-NaN, handled by the zero-RHS shared solve above) ⇒ this loop runs ZERO
+        // iterations in production. When present it is a host small_linalg solve over the few
+        // partial-NaN columns (NOT all blocks), the AT2 generic-solve branch — bit-faithful.
+        bool any_partial = false;
+        for (int col = 0; col < ncols; ++col)
+            if (nan_per_col[static_cast<std::size_t>(col)] > 0 &&
+                nan_per_col[static_cast<std::size_t>(col)] < npopcomb) { any_partial = true; break; }
+        if (any_partial) {
+            // A_shared (host): x'x + ridge·I (recompute on host; tiny npairs×npairs).
+            const auto xat = [&](int c, int p) -> double {
+                return x[static_cast<std::size_t>(c) + nc * static_cast<std::size_t>(p)];
+            };
+            std::vector<double> Abase(np * np, 0.0);
+            for (int i = 0; i < npairs; ++i)
+                for (int j = 0; j < npairs; ++j) {
+                    long double s = 0.0L;
+                    for (int c = 0; c < npopcomb; ++c)
+                        s += static_cast<long double>(xat(c, i)) * static_cast<long double>(xat(c, j));
+                    double v = static_cast<double>(s);
+                    if (i == j) v += ridge;
+                    Abase[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] = v;
+                }
+            std::vector<double> rhs(np), bcol, Adown;
+            for (int col = 0; col < ncols; ++col) {
+                const int kc = nan_per_col[static_cast<std::size_t>(col)];
+                if (kc <= 0 || kc >= npopcomb) continue;  // skip no-NaN + all-NaN (already correct)
+                // rhs = x' · (this column's source with NaN→0). The source is dRhsSrc col
+                // (already zeroed on device) — recompute from the host inputs (col<n_block:
+                // ymat; col==n_block: y), zeroing NaN, to match exactly.
+                std::fill(rhs.begin(), rhs.end(), 0.0);
+                Adown = Abase;
+                for (int c = 0; c < npopcomb; ++c) {
+                    const double sv = (col < n_block)
+                        ? ymat[nc * static_cast<std::size_t>(col) + static_cast<std::size_t>(c)]
+                        : y[static_cast<std::size_t>(c)];
+                    if (!std::isfinite(sv)) {
+                        // downdate A by this NaN row's outer product.
+                        for (int i = 0; i < npairs; ++i)
+                            for (int j = 0; j < npairs; ++j)
+                                Adown[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] -=
+                                    xat(c, i) * xat(c, j);
+                        continue;
+                    }
+                    for (int p = 0; p < npairs; ++p) rhs[static_cast<std::size_t>(p)] += xat(c, p) * sv;
+                }
+                const core::LinAlgStatus st = core::solve(Adown, npairs, rhs, bcol);
+                if (!st.ok) { out.status = Status::NonSpdCovariance; return out; }
+                if (col < n_block)
+                    std::copy(bcol.begin(), bcol.end(),
+                              out.b.begin() + static_cast<std::ptrdiff_t>(np * static_cast<std::size_t>(col)));
+                else
+                    out.bglob = bcol;
+            }
+        }
+
+        out.status = Status::Ok;
+        return out;
     }
 
     /// Probe the capability tier of THE device this backend is bound to (the

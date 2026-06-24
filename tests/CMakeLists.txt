@@ -450,6 +450,18 @@ set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_parity
          COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- qpfstats SMOOTHING-SOLVE CpuBackend==CudaBackend parity (the solve primitive) -------
+# CUDA TU: a numerical-equivalence unit test of the qpfstats_smooth solve primitive (A_shared
+# = x'x + ridge·I, Cholesky, the multi-column Dtrsm solve, the NaN-row downdate, all-NaN→b=0)
+# over a deterministic small design/RHS exercising EVERY branch (no-NaN, partial-NaN, all-NaN
+# blocks). CpuBackend (small_linalg LU oracle) == CudaBackend (cublasDsyrk + potrf + gemm +
+# Dtrsm pair + downdate) to ~1e-9. The GPU block SKIPs cleanly when no device is visible.
+add_executable(test_qpfstats_smooth_parity reference/test_qpfstats_smooth_parity.cu)
+target_link_libraries(test_qpfstats_smooth_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpfstats_smooth_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpfstats_smooth_parity COMMAND test_qpfstats_smooth_parity)
+
 # --- GPU-ONLY f-stat SWEEP parity test (the sweep acceptance gate) ----------------
 # CUDA TU: uploads the REAL 9-pop golden f2 fixture RESIDENT to VRAM, runs the GPU-only
 # run_f4_sweep / run_f3_sweep (on-device combinatorial unrank -> the SAME assemble gather +
@@ -1274,6 +1286,24 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_dstat_geno steppe_app)
   add_test(NAME cli_dstat_geno
            COMMAND test_cli_dstat_geno
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- `steppe qpfstats` genotype-path smoothed-f2-TENSOR golden gate --------------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpfstats --prefix
+  # <STEPPE_AADR_ROOT>/raw/v66.p1_HO.aadr.patch.PUB --pops <9 sorted fit0> --out-dir <tmp>`,
+  # reads the smoothed f2.bin (STPF2BK1), and diffs every (i,j,block) entry vs the AT2
+  # smoothed-f2 tensor golden (csv/golden_qpfstats_geno.csv; 9×9×711 upper-tri incl diag) at
+  # rtol 1e-6 — RUNNING ON THE GPU through the qpDstat-B numerator engine over the full
+  # f2/f3/f4 popcomb set + the on-device shared-factor smoothing solve (syrk + potrf + gemm +
+  # Dtrsm pair). The all-NaN block (536) is matched as 0. SKIPs cleanly (exit 0) when no CUDA
+  # device is visible OR the prefix / golden is absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_qpfstats cli/test_cli_qpfstats.cpp)
+  target_link_libraries(test_cli_qpfstats PRIVATE steppe::warnings)
+  add_dependencies(test_cli_qpfstats steppe_app)
+  add_test(NAME cli_qpfstats
+           COMMAND test_cli_qpfstats
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")

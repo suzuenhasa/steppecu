@@ -101,6 +101,12 @@ add_library(steppe_core STATIC
     # per-SNP D kernel (ComputeBackend::dstat_block_reduce, the .cu) + the num/den block-
     # jackknife (host-pure, the f4ratio ratio-jackknife FAMILY). NEVER reads the f2 cache.
     stats/dstat.cpp
+    # qpfstats (run_qpfstats): the GENOTYPE-PATH joint f2 SMOOTHER — REUSES the qpDstat-B
+    # genotype front-end (stats/dstat.cpp pattern: read_ind/read_snp/read_tile/decode_af/
+    # assign_blocks) + DRIVES the dstat_block_reduce f4-numerator engine over the FULL
+    # f2/f3/f4 popcomb set, then the on-device shared-factor smoothing solve
+    # (ComputeBackend::qpfstats_smooth) + scatter/recenter to a smoothed F2BlockTensor.
+    stats/qpfstats.cpp
     # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
     # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
     # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps

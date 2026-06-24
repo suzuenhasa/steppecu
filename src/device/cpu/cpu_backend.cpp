@@ -464,6 +464,134 @@ public:
         }
     }
 
+    /// qpfstats SMOOTHING SOLVE — the genotype-path joint f2 smoother REFERENCE oracle
+    /// (backend.hpp qpfstats_smooth / include/steppe/qpfstats.hpp). The native-FP64
+    /// shared-factor batched least-squares the GPU path is diffed against, reproducing AT2
+    /// qpfstats_regression() EXACTLY: A_shared = x'x + ridge·I; per block the NaN-comb-row
+    /// downdate A_b = A_shared - x[nan]'x[nan] then solve(A_b, x'·ymat_zeroed[:,blk]); an
+    /// all-NaN block → b=0; bglob = the SAME shared solve over the global jackknife-est y.
+    /// x / ymat are COLUMN-MAJOR ([npopcomb × npairs] / [npopcomb × n_block]); b is
+    /// COLUMN-MAJOR [npairs × n_block]. Native FP64 (ignores `precision`; LU solve oracle).
+    [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
+                                                 std::span<const double> ymat,
+                                                 std::span<const double> y,
+                                                 int npopcomb, int npairs,
+                                                 int n_block, double ridge,
+                                                 const Precision& precision) override {
+        (void)precision;  // native FP64 reference
+        QpfstatsSmooth out;
+        out.npairs = npairs;
+        out.n_block = n_block;
+        if (npopcomb <= 0 || npairs <= 0 || n_block <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t nc = static_cast<std::size_t>(npopcomb);
+        const std::size_t np = static_cast<std::size_t>(npairs);
+
+        // x accessor (column-major [npopcomb × npairs]): x(c, p) = x[c + npopcomb*p].
+        const auto xat = [&](int c, int p) -> double {
+            return x[static_cast<std::size_t>(c) + nc * static_cast<std::size_t>(p)];
+        };
+
+        // ---- A_shared = x'x + ridge·I  (npairs × npairs, column-major, symmetric) ----
+        std::vector<double> A_shared(np * np, 0.0);
+        for (int i = 0; i < npairs; ++i) {
+            for (int j = i; j < npairs; ++j) {
+                long double s = 0.0L;
+                for (int c = 0; c < npopcomb; ++c)
+                    s += static_cast<long double>(xat(c, i)) * static_cast<long double>(xat(c, j));
+                double v = static_cast<double>(s);
+                if (i == j) v += ridge;
+                A_shared[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] = v;
+                A_shared[static_cast<std::size_t>(j) + np * static_cast<std::size_t>(i)] = v;
+            }
+        }
+
+        // The SHARED solve over A_shared (reused for no-NaN blocks + bglob's no-NaN case).
+        // small_linalg::solve factors a COPY each call (the LU oracle; the GPU path shares
+        // ONE Cholesky factor — same answer to FP). For a column with NaN comb-rows we
+        // downdate A by the NaN rows' outer product, then LU-solve the downdated A.
+
+        // ---- per-block b[:,blk] = solve(A_blk, x' · ymat_zeroed[:,blk]) ----
+        out.b.assign(np * static_cast<std::size_t>(n_block), 0.0);
+        std::vector<int> nan_rows;        // reused scratch (the NaN comb-rows of this block)
+        std::vector<double> rhs(np, 0.0);
+        std::vector<double> A_blk(np * np, 0.0);
+        std::vector<double> bcol;
+        for (int blk = 0; blk < n_block; ++blk) {
+            // NaN mask + RHS = x' · (ymat[:,blk] with NaN→0)  (AT2 ymat_chunk[nan]=0).
+            nan_rows.clear();
+            std::fill(rhs.begin(), rhs.end(), 0.0);
+            for (int c = 0; c < npopcomb; ++c) {
+                const double yv = ymat[static_cast<std::size_t>(c) +
+                                       nc * static_cast<std::size_t>(blk)];
+                if (!std::isfinite(yv)) { nan_rows.push_back(c); continue; }
+                for (int p = 0; p < npairs; ++p)
+                    rhs[static_cast<std::size_t>(p)] += xat(c, p) * yv;
+            }
+            if (static_cast<int>(nan_rows.size()) == npopcomb) continue;  // all-NaN → b=0
+
+            // A_blk = A_shared (- x[nan]'x[nan] when this block has NaN comb-rows).
+            const double* Aptr = A_shared.data();
+            if (!nan_rows.empty()) {
+                A_blk = A_shared;
+                for (int i = 0; i < npairs; ++i) {
+                    for (int j = i; j < npairs; ++j) {
+                        long double s = 0.0L;
+                        for (int c : nan_rows)
+                            s += static_cast<long double>(xat(c, i)) *
+                                 static_cast<long double>(xat(c, j));
+                        const double d = static_cast<double>(s);
+                        A_blk[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] -= d;
+                        if (i != j)
+                            A_blk[static_cast<std::size_t>(j) + np * static_cast<std::size_t>(i)] -= d;
+                    }
+                }
+                Aptr = A_blk.data();
+            }
+            const std::vector<double> Acopy(Aptr, Aptr + np * np);
+            const core::LinAlgStatus st = core::solve(Acopy, npairs, rhs, bcol);
+            if (!st.ok) { out.status = Status::NonSpdCovariance; return out; }
+            for (int p = 0; p < npairs; ++p)
+                out.b[static_cast<std::size_t>(p) +
+                      np * static_cast<std::size_t>(blk)] = bcol[static_cast<std::size_t>(p)];
+        }
+
+        // ---- bglob = solve(A_y, x' · y_zeroed)  (A_y = A_shared - x[nan_y]'x[nan_y]) ----
+        out.bglob.assign(np, 0.0);
+        {
+            nan_rows.clear();
+            std::fill(rhs.begin(), rhs.end(), 0.0);
+            for (int c = 0; c < npopcomb; ++c) {
+                const double yv = y[static_cast<std::size_t>(c)];
+                if (!std::isfinite(yv)) { nan_rows.push_back(c); continue; }
+                for (int p = 0; p < npairs; ++p)
+                    rhs[static_cast<std::size_t>(p)] += xat(c, p) * yv;
+            }
+            if (static_cast<int>(nan_rows.size()) < npopcomb) {
+                std::vector<double> Ay = A_shared;
+                if (!nan_rows.empty()) {
+                    for (int i = 0; i < npairs; ++i)
+                        for (int j = i; j < npairs; ++j) {
+                            long double s = 0.0L;
+                            for (int c : nan_rows)
+                                s += static_cast<long double>(xat(c, i)) *
+                                     static_cast<long double>(xat(c, j));
+                            const double d = static_cast<double>(s);
+                            Ay[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] -= d;
+                            if (i != j)
+                                Ay[static_cast<std::size_t>(j) + np * static_cast<std::size_t>(i)] -= d;
+                        }
+                }
+                const core::LinAlgStatus st = core::solve(Ay, npairs, rhs, bcol);
+                if (!st.ok) { out.status = Status::NonSpdCovariance; return out; }
+                out.bglob = bcol;
+            }
+        }
+
+        out.status = Status::Ok;
+        return out;
+    }
+
     // =====================================================================
     // qpAdm fit-engine reference (S3/S4/S5/S6) — native FP64, AT2-exact.
     // The math reproduces ADMIXTOOLS 2 R/qpadm.R + R/resampling.R verbatim

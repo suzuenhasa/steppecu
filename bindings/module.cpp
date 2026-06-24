@@ -50,6 +50,7 @@
 #include "steppe/f4ratio.hpp"           // run_f4ratio + F4RatioResult (the standalone-f4-ratio binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
+#include "steppe/qpfstats.hpp"          // run_qpfstats + QpfstatsResult (the genotype-path joint f2 smoother)
 
 #include "io/geno_reader.hpp"           // io::GenoReader (qpDstat Part B P-axis order)
 #include "io/ind_reader.hpp"            // io::read_ind / PopSelection / IndPartition
@@ -710,6 +711,80 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     return nb::cast(h, nb::rv_policy::take_ownership);
 }
 
+// run_qpfstats: the genotype-path JOINT f2 SMOOTHER (include/steppe/qpfstats.hpp). Reads the
+// GENOTYPE TRIPLE prefix.{geno,snp,ind} directly, drives the qpDstat-B numerator engine over
+// the FULL f2/f3/f4 popcomb set, runs the on-device shared-factor smoothing solve, and
+// returns a SMOOTHED f2 — the SAME dual-return idiom as run_extract_f2: out= given ->
+// serialize an STPF2BK1 dir + return the path STRING; out= empty -> wrap the smoothed
+// F2BlockTensor + labels in a NEW F2Handle (so read_f2/run_f4/run_qpadm consume it). `pops`
+// is the smoothing pop set (sorted ASC internally = the AT2 dimnames order). `precision`:
+// nullopt -> EmulatedFp64 default (the matmul sub-steps); "fp64"/"native" -> native FP64.
+// Faults (no device, missing files, unknown pop, CUDA runtime) raise (§1.3 / §5.2).
+nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::string>& pops,
+                           const std::string& out, int device, double blgsize,
+                           std::optional<std::string> precision) {
+    if (pops.size() < 4) raise_value("qpfstats: pops needs at least 4 populations (the f4 basis)");
+    const std::string geno = prefix + ".geno";
+    const std::string snp = prefix + ".snp";
+    const std::string ind = prefix + ".ind";
+
+    steppe::Precision prec;  // defaults to Kind::EmulatedFp64, kDefaultMantissaBits.
+    if (precision.has_value()) {
+        const std::string& p = *precision;
+        if (p == "fp64" || p == "native") prec.kind = steppe::Precision::Kind::Fp64;
+        else if (p == "emulated_fp64" || p == "emu") prec.kind = steppe::Precision::Kind::EmulatedFp64;
+        else if (p == "tf32") prec.kind = steppe::Precision::Kind::Tf32;
+        else raise_value("qpfstats: precision must be 'fp64'/'native', 'emulated_fp64'/'emu', "
+                         "'tf32' (got '" + p + "')");
+    }
+
+    steppe::DeviceConfig cfg;
+    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    cfg.precision = prec;
+
+    steppe::QpfstatsResult result;
+    try {
+        sd::Resources resources = sd::build_resources(cfg);
+        if (resources.gpus.empty()) {
+            raise_value("no CUDA device available (steppe is a GPU product; a CUDA-capable "
+                        "GPU is required)");
+        }
+        result = steppe::run_qpfstats(geno, snp, ind, std::span<const std::string>(pops),
+                                      blgsize, prec, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("qpfstats: ") + e.what());
+    }
+    if (result.status != steppe::Status::Ok)
+        raise_value("qpfstats: could not build the smoothed f2 (check pops are all present)");
+
+    // MODE A: out= given -> serialize an STPF2BK1 dir + return the path STRING.
+    if (!out.empty()) {
+        sa::F2DirMeta meta;
+        meta.precision_mantissa_bits = prec.mantissa_bits;
+        meta.precision_tag =
+            (prec.kind == steppe::Precision::Kind::EmulatedFp64) ? "emu"
+          : (prec.kind == steppe::Precision::Kind::Tf32)         ? "tf32"
+                                                                 : "fp64";
+        meta.blgsize_cm = blgsize * 100.0;  // Morgans -> centimorgans (meta records cM).
+        meta.n_block = result.f2.n_block;
+        meta.P = result.f2.P;
+        meta.autosomes_only = true;
+        meta.geno_path = geno; meta.snp_path = snp; meta.ind_path = ind;
+        meta.pop_selection = "qpfstats-smoothed";
+        const sa::F2DirWriteResult wr =
+            sa::write_f2_dir(out, result.f2, result.pop_labels, meta);
+        if (!wr.ok) raise_value("qpfstats: " + wr.error);
+        return nb::cast(out);
+    }
+
+    // MODE B: out= empty -> wrap the smoothed tensor + labels in a new F2Handle.
+    auto* h = new F2Handle();
+    h->tensor = std::move(result.f2);
+    h->pops = std::move(result.pop_labels);
+    h->device = device;
+    return nb::cast(h, nb::rv_policy::take_ownership);
+}
+
 // run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
 // BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
 // input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
@@ -935,6 +1010,17 @@ NB_MODULE(_core, m) {
           "(0 = global intersection). If `out` is given, writes an STPF2BK1 dir there and "
           "returns the path string; else returns a new F2Handle (no disk round-trip). "
           "GPU-only: no CUDA device raises.");
+
+    m.def("run_qpfstats", &run_qpfstats_py, "prefix"_a, "pops"_a, "out"_a = "",
+          "device"_a = 0, "blgsize"_a = 0.05, "precision"_a = nb::none(),
+          "Genotype-path JOINT f2 SMOOTHER (GPU; admixtools::qpfstats). Reads "
+          "<prefix>.{geno,snp,ind} directly, drives the qpDstat-B numerator engine over the "
+          "FULL f2/f3/f4 popcomb set, runs the on-device shared-factor smoothing regression, "
+          "and returns a SMOOTHED per-block f2 tensor. `pops` is the smoothing pop set (sorted "
+          "ASC internally = the AT2 dimnames order); `blgsize` is MORGANS (AT2 default 0.05). "
+          "If `out` is given, writes an STPF2BK1 dir there and returns the path string; else "
+          "returns a new F2Handle (read_f2/run_f4/run_qpadm consume it). GPU-only: no CUDA "
+          "device raises.");
 
     m.def("run_f3", &run_f3_py, "f2"_a, "triples"_a,
           "Standalone f3(C;A,B) (GPU). `triples` is a list of (C,A,B) name tuples; "

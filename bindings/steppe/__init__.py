@@ -28,6 +28,7 @@ __all__ = [
     "F4RatioResult",
     "read_f2",
     "extract_f2",
+    "qpfstats",
     "qpadm",
     "qpwave",
     "f4",
@@ -437,6 +438,45 @@ def extract_f2(
         precision,
     )
     # out= None -> a raw _core.F2Handle (wrap it); out= path -> the path string (return it).
+    if out is None:
+        return F2Blocks(h)
+    return h
+
+
+def qpfstats(
+    prefix: Any,
+    *,
+    pops: list[str],
+    out: Optional[str] = None,
+    device: int = 0,
+    blgsize: float = 0.05,
+    precision: Optional[str] = None,
+):
+    """Genotype-path JOINT f2 SMOOTHER on the GPU (admixtools::qpfstats).
+
+    Reads ``<prefix>.{geno,snp,ind}`` directly, drives the qpDstat-B genotype-f4 numerator
+    engine over the FULL f2/f3/f4 population-comb set, runs the on-device shared-factor
+    smoothing regression, and returns a SMOOTHED per-block f2 tensor that ``qpadm`` / ``f4``
+    consume like any extract-f2 cache. ``pops`` is the smoothing pop set (SORTED ASC internally
+    = the AT2 dimnames order = ``pops.txt`` order); ``blgsize`` is MORGANS (AT2 default 0.05).
+
+    TWO RETURN MODES (the same idiom as :func:`extract_f2`):
+      * ``out`` is None (default): returns an :class:`F2Blocks` handle wrapping the smoothed f2
+        tensor + labels (no disk write); feed it straight to :func:`qpadm` / :func:`f4` etc.
+      * ``out`` is a directory path: writes an STPF2BK1 f2-dir there and returns the path
+        string (then ``read_f2(out)`` reloads it).
+
+    ``precision`` selects the matmul-substep arithmetic (the smoothing SYRK/GEMM): None
+    (default) -> emulated FP64 (the fit default), ``"fp64"``/``"native"`` -> native FP64. The
+    Cholesky/solve is native FP64 (the cancellation carve-out). GPU-only: no CUDA device raises."""
+    h = _core.run_qpfstats(
+        str(prefix),
+        list(pops),
+        "" if out is None else str(out),
+        device,
+        blgsize,
+        precision,
+    )
     if out is None:
         return F2Blocks(h)
     return h

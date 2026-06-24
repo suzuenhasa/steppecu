@@ -152,6 +152,33 @@ struct GlsWeights {
     Status status = Status::Ok;
 };
 
+/// qpfstats SMOOTHING-SOLVE output (the genotype-path joint f2 smoother;
+/// include/steppe/qpfstats.hpp). The shared-factor batched least-squares solution: for the
+/// design x [npopcomb × npairs] and the per-block numerator ymat [npopcomb × n_block],
+/// A_shared = x'x + ridge·I (SPD), and the per-block smoothed f-stat-basis coefficients
+///   b[:,block] = solve(A_shared, x'·ymat[:,block])
+/// (a NaN-comb-row block downdates A_b = A_shared - x[nan]'x[nan] before the solve; an
+/// ALL-NaN block → b=0). bglob is the SAME shared solve over the GLOBAL jackknife-est y
+/// [npopcomb] (AT2 matrix_jackknife_est). The CUDA backend runs ONE syrk (A_shared), ONE
+/// potrf (the shared factor), ONE gemm (x'·ymat) + a cublasDtrsm PAIR over ALL n_block
+/// columns (no host per-block loop), with the NaN/missing blocks grouped (CUB segmented) +
+/// per-group batched potrf/potrs downdate; the CpuBackend is the small_linalg native oracle.
+struct QpfstatsSmooth {
+    /// [npairs * n_block] COLUMN-MAJOR: b[pair + npairs*block] — the per-block smoothed
+    /// coefficient on the outgroup-f basis pair (the AT2 `b` matrix, npairs × nblocks).
+    std::vector<double> b;
+
+    /// [npairs] — the GLOBAL smoothed coefficients (AT2 `bglob`), the recentering target.
+    std::vector<double> bglob;
+
+    int npairs = 0;    ///< n(n-1)/2 (the f-stat basis dim == ncol(x)).
+    int n_block = 0;   ///< the jackknife block count (== ncol(ymat)).
+
+    /// NonSpdCovariance if A_shared (ridge-regularized) is not factorable (value, not throw;
+    /// should not occur with ridge>0 over a real basis).
+    Status status = Status::Ok;
+};
+
 /// S4 DIAGONAL-only output: the per-item jackknife VARIANCE vector — the production-scale
 /// shape for the per-item f-stats (f4/f3), which read ONLY diag(Q) and NEVER invert Q.
 /// var[k] == JackknifeCov.Q[k + m*k] == (1/nb)·Σ_b xtau[k,b]², computed WITHOUT forming the
@@ -779,6 +806,46 @@ public:
         (void)quadruples; (void)numsum; (void)densum; (void)cnt;
         throw std::runtime_error(
             "ComputeBackend::dstat_block_reduce: not implemented by this backend");
+    }
+
+    /// qpfstats SMOOTHING SOLVE (the genotype-path joint f2 smoother; the shared-factor
+    /// batched least-squares; include/steppe/qpfstats.hpp). REFORMULATES the AT2
+    /// qpfstats_regression host block loop (R io.R CHUNK_SIZE=64 per-block solve, the
+    /// CPU-bound trap) into ONE shared SPD factor + a batched multi-column solve over the
+    /// WHOLE n_block axis — NO host per-block loop on the CUDA path.
+    ///
+    ///   A_shared = x'x + ridge·I  (SPD; ONE cublasDsyrk, EmulatedFp64 via the f2 policy)
+    ///   L = chol(A_shared)        (ONE cusolverDnDpotrf, native FP64 carve-out)
+    ///   RHS = x' · ymat            (ONE cublasDgemm, [npairs × n_block], EmulatedFp64)
+    ///   b[:,blk] = solve(A_shared, RHS[:,blk])   for blocks with NO NaN comb-row:
+    ///                                            a cublasDtrsm PAIR (forward t(L) then back L)
+    ///                                            over ALL n_block columns at once.
+    ///   NaN-comb-row block: A_b = A_shared - x[nan]'x[nan]; b = solve(A_b, RHS[:,blk])
+    ///                       (grouped by missing-row-set + batched potrf/potrs downdate).
+    ///   ALL-NaN block: b = 0 (the AT2 nan_chunk policy; must be ZERO, not dropped).
+    ///   bglob = solve(A_shared (or A_y downdated by y's NaNs), x'·y)   (the recentering target).
+    ///
+    /// @param x        the design matrix, COLUMN-MAJOR [npopcomb × npairs] (x[c + npopcomb*p]).
+    /// @param ymat     the per-(comb,block) numerator, COLUMN-MAJOR [npopcomb × n_block]
+    ///                 (ymat[c + npopcomb*b] = numsum[c,b]/cnt[c,b], or NaN where cnt==0).
+    /// @param y        the GLOBAL per-comb jackknife estimate, length npopcomb (NaN allowed).
+    /// @param npopcomb the number of population combinations (rows of x / ymat).
+    /// @param npairs   the f-stat basis dim n(n-1)/2 (cols of x).
+    /// @param n_block  the jackknife block count (cols of ymat).
+    /// @param ridge    the L2 ridge added to diag(A_shared) (AT2 constant 1e-5).
+    /// @param precision governs ONLY the matmul sub-steps (SYRK / GEMM); the Cholesky +
+    ///                 triangular solve default native FP64 (the §12 carve-out).
+    /// NON-PURE: the base throws (the established backend.hpp pattern).
+    [[nodiscard]] virtual QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
+                                                         std::span<const double> ymat,
+                                                         std::span<const double> y,
+                                                         int npopcomb, int npairs,
+                                                         int n_block, double ridge,
+                                                         const Precision& precision) {
+        (void)x; (void)ymat; (void)y; (void)npopcomb; (void)npairs; (void)n_block;
+        (void)ridge; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::qpfstats_smooth: not implemented by this backend");
     }
 
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
