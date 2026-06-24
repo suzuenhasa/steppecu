@@ -188,6 +188,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.numstart, args.numstart);
     take_d(merged_.diag_f3, args.diag_f3);
     take_b(merged_.constrained, args.constrained);
+    take_i(merged_.max_nadmix, args.max_nadmix);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     // A --config on the CLI is the highest-precedence TOML request.
@@ -504,6 +505,7 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     if (merged_.numstart)    cfg.qpgraph_numstart_ = *merged_.numstart;
     if (merged_.diag_f3)     cfg.qpgraph_diag_f3_ = *merged_.diag_f3;
     if (merged_.constrained) cfg.qpgraph_constrained_ = *merged_.constrained;
+    if (merged_.max_nadmix)  cfg.qpgraph_max_nadmix_ = *merged_.max_nadmix;
 
     return cfg;
 }

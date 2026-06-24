@@ -322,6 +322,7 @@ int run_cli(int argc, char** argv) {
     // bound lambdas outlive parse.
     CliArgs qpadm_args;
     CliArgs qpgraph_args;
+    CliArgs qpgraphsearch_args;
     CliArgs qpwave_args;
     CliArgs rotate_args;
     CliArgs extract_args;
@@ -376,6 +377,42 @@ int run_cli(int argc, char** argv) {
             // RESIDENT -> run_qpgraph (the IDEA-1 fleet on-device) -> emit the edges +
             // admix weights + score). Mirrors how `qpadm` dispatches.
             std::exit(run_qpgraph_command(*config));
+        });
+    }
+
+    // ---- qpgraph-search (topology SEARCH v1: exhaustive bounded enumeration) -----------
+    {
+        CLI::App* sub = app.add_subcommand(
+            "qpgraph-search",
+            "qpGraph topology SEARCH (--f2-dir + --pops bounded leaf set; exhaustive enumeration "
+            "+ heterogeneous fleet, deterministic global-best)");
+        qpgraphsearch_args.command = Command::QpGraphSearch;
+        add_f2_dir_flag(sub, qpgraphsearch_args, "The f2_blocks directory (f2.bin + pops.txt)");
+        sub->add_option_function<std::vector<std::string>>(
+                "--pops", [&qpgraphsearch_args](const std::vector<std::string>& v) { qpgraphsearch_args.pops = v; },
+                "The bounded leaf pop-set the search enumerates topologies over (>= 3 names)")
+            ->delimiter(',');
+        sub->add_option_function<int>("--max-nadmix",
+                                      [&qpgraphsearch_args](int v) { qpgraphsearch_args.max_nadmix = v; },
+                                      "Bounded admixture-node ceiling (v1: 0 or 1; default 1)");
+        sub->add_option_function<int>("--numstart", [&qpgraphsearch_args](int v) { qpgraphsearch_args.numstart = v; },
+                                      "Per-candidate multistart restart count (the fleet axis; default 10)");
+        sub->add_option_function<double>("--diag-f3", [&qpgraphsearch_args](double v) { qpgraphsearch_args.diag_f3 = v; },
+                                         "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
+        sub->add_option_function<double>("--fudge", [&qpgraphsearch_args](double v) { qpgraphsearch_args.fudge = v; },
+                                         "AT2 cc edge-solve ridge (diag; default 1e-4)");
+        sub->add_flag_function("--constrained,!--no-constrained",
+                               [&qpgraphsearch_args](std::int64_t v) { qpgraphsearch_args.constrained = (v >= 0); },
+                               "Drift edges >= 0 (AT2 default on)");
+        add_output_flags(sub, qpgraphsearch_args);
+        add_common_flags(sub, qpgraphsearch_args);
+        sub->callback([&]() {
+            auto config = build_config(qpgraphsearch_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The GPU topology search: enumerate the bounded space -> the heterogeneous fleet
+            // (ONE launch fits ALL candidates) -> the deterministic global-best argmin + the
+            // heuristic recovery. Mirrors how `qpgraph` dispatches.
+            std::exit(run_qpgraph_search_command(*config));
         });
     }
 

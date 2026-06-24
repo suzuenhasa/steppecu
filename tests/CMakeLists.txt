@@ -468,6 +468,32 @@ set_target_properties(test_qpgraph_parity PROPERTIES CUDA_SEPARABLE_COMPILATION 
 add_test(NAME qpgraph_parity
          COMMAND test_qpgraph_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- qpGraph topology ENUMERATOR unit test (the exhaustive-coverage proof, host-only) ---
+# Plain C++ TU (NO CUDA): the host enumerator reproduces admixtools generate_all_trees /
+# generate_all_graphs EXACTLY — count (105 trees + 1485 non-iso nadmix=1) AND the canonical
+# graph_hash set == the committed AT2 fixture (fixtures/at2_enum_5pop.txt). The (2) oracle
+# leg: exhaustiveness proven 1:1 against AT2's own enumerator. Also checks every enumerated
+# topology parses through parse_qpgraph + the neighbor move set is connected.
+add_executable(test_qpgraph_enumerate reference/test_qpgraph_enumerate.cpp)
+target_link_libraries(test_qpgraph_enumerate
+    PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME qpgraph_enumerate
+         COMMAND test_qpgraph_enumerate "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+# --- qpGraph topology SEARCH v1 acceptance (oracle C, BOTH backends) ---------------------
+# CUDA TU: the exhaustive bounded-space search (run_qpgraph_search) on the committed real-AADR
+# 5-pop subset of the f2_fit0_FINAL dir. Gates (1) per-candidate fit == admixtools::qpgraph
+# (the AT2 scores of steppe's OWN 1590 enumerated graphs, fixtures/at2_scores_5pop.csv), (2)
+# the exhaustive count == AT2 (105/1485), (3) the deterministic global-best argmin == AT2's
+# argmin (same canonical hash, CpuBackend == CudaBackend), the heuristic recovers it, and the
+# heterogeneous fleet does the fits (GPU-bound). Named .cu so it device-links the RDC kernels.
+add_executable(test_qpgraph_search reference/test_qpgraph_search.cu)
+target_link_libraries(test_qpgraph_search
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpgraph_search PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpgraph_search
+         COMMAND test_qpgraph_search "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- qpfstats SMOOTHING-SOLVE CpuBackend==CudaBackend parity (the solve primitive) -------
 # CUDA TU: a numerical-equivalence unit test of the qpfstats_smooth solve primitive (A_shared
 # = x'x + ridge·I, Cholesky, the multi-column Dtrsm solve, the NaN-row downdate, all-NaN→b=0)

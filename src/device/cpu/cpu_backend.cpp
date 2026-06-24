@@ -2162,6 +2162,30 @@ private:
         else out.status = Status::NonSpdCovariance;
         return out;
     }
+
+    /// HETEROGENEOUS-TOPOLOGY FLEET oracle: the per-restart fleet looped over the batch (the
+    /// CpuBackend reference for the CUDA packed-arena fleet). Reads the SAME resident
+    /// f_obs/qinv for every topology (the pop-set-bound basis reuse). Per-topology best-of-
+    /// restarts + spread; the host driver does the global-best argmin over best_score.
+    [[nodiscard]] QpGraphFleetBatch qpgraph_fit_fleet_batch(
+        const std::vector<QpGraphTopoArena>& topos, std::span<const double> f_obs,
+        std::span<const double> qinv, int numstart, int maxit, double tol,
+        const Precision& precision) override {
+        QpGraphFleetBatch out;
+        out.best_score.reserve(topos.size());
+        out.restart_spread.reserve(topos.size());
+        for (const QpGraphTopoArena& topo : topos) {
+            const QpGraphFleet f =
+                qpgraph_fit_fleet(topo, f_obs, qinv, numstart, maxit, tol, precision);
+            // A degenerate inner solve at every restart ⇒ +inf (the candidate loses the
+            // argmin), NOT a hard fail — the search still ranks the well-identified set.
+            out.best_score.push_back(f.status == Status::Ok ? f.score
+                                                            : std::numeric_limits<double>::infinity());
+            out.restart_spread.push_back(f.restart_spread);
+        }
+        out.status = Status::Ok;
+        return out;
+    }
 };
 
 }  // namespace

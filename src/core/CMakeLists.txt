@@ -90,6 +90,13 @@ add_library(steppe_core STATIC
     # header-only (qpgraph_objective.hpp, used by the CpuBackend + the parity test).
     qpadm/qpgraph_model.cpp
     qpadm/qpgraph_fit.cpp
+    # qpGraph TOPOLOGY SEARCH v1 (run_qpgraph_search, oracle C): the host ENUMERATOR
+    # (reproduces admixtools generate_all_trees/generate_all_graphs 1:1 — count + canonical
+    # graph_hash set) + the exhaustive-bounded-space driver (resident pop-set-bound basis ->
+    # the HETEROGENEOUS-TOPOLOGY fleet seam, ONE launch fits ALL candidates -> the global-best
+    # argmin -> the mutation/hill-climb that recovers the exhaustive best). Host-pure, CUDA-free.
+    qpadm/qpgraph_enumerate.cpp
+    qpadm/qpgraph_search.cpp
     # Standalone f4-ratio (run_f4ratio): the SIBLING of run_f4/run_f3 — REUSES
     # assemble_f4_quartets (ONE shared assemble for num+den); the ONE new math seam is the
     # per-block-RATIO weighted block-jackknife (AT2 qpf4ratio jack_mat_stats $est), host-pure.

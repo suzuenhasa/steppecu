@@ -134,66 +134,8 @@ __device__ inline bool d_nnls(const double* A, const double* q, int n, double* b
     return true;
 }
 
-// ---- the per-thread scratch slab layout (all doubles except the int sub-arrays) ----
-// Sized to the topology at launch; offsets computed on host + passed via the struct.
-struct ScratchLayout {
-    // double sub-arrays (offsets into the per-thread double slab):
-    int pwts_c;    // nedge * (npop-1)
-    int ppwts;     // npair * nedge
-    int Wm;        // npair * nedge
-    int cc;        // nedge * nedge
-    int ccs;       // nedge * nedge
-    int sc;        // nedge
-    int q1;        // nedge
-    int bl;        // nedge
-    int res;       // npair
-    int path_w;    // npath
-    int qf;        // npair
-    // NNLS / solve scratch (doubles):
-    int nn_w;      // nedge
-    int nn_Ap;     // nedge * nedge
-    int nn_qp;     // nedge
-    int nn_z;      // nedge
-    int nn_lu;     // nedge * nedge
-    int nn_y;      // nedge
-    int dbl_total; // total doubles per thread
-    // int sub-arrays (offsets into the per-thread int slab):
-    int nn_P;      // nedge
-    int nn_piv;    // nedge
-    int nn_pass;   // nedge
-    int int_total; // total ints per thread
-};
-
-__host__ inline ScratchLayout make_layout(int npop, int nedge, int npair, int npath) {
-    ScratchLayout L{};
-    int o = 0;
-    auto take = [&](int sz) { int s = o; o += sz; return s; };
-    L.pwts_c = take(nedge * (npop - 1));
-    L.ppwts  = take(npair * nedge);
-    L.Wm     = take(npair * nedge);
-    L.cc     = take(nedge * nedge);
-    L.ccs    = take(nedge * nedge);
-    L.sc     = take(nedge);
-    L.q1     = take(nedge);
-    L.bl     = take(nedge);
-    L.res    = take(npair);
-    L.path_w = take(npath);
-    L.qf     = take(npair);
-    L.nn_w   = take(nedge);
-    L.nn_Ap  = take(nedge * nedge);
-    L.nn_qp  = take(nedge);
-    L.nn_z   = take(nedge);
-    L.nn_lu  = take(nedge * nedge);
-    L.nn_y   = take(nedge);
-    L.dbl_total = o;
-    int oi = 0;
-    auto takei = [&](int sz) { int s = oi; oi += sz; return s; };
-    L.nn_P    = takei(nedge);
-    L.nn_piv  = takei(nedge);
-    L.nn_pass = takei(nedge);
-    L.int_total = oi;
-    return L;
-}
+// (ScratchLayout + make_layout moved to qpgraph_fit_kernels.cuh — shared by the backend TU
+//  for the batch-MAX slab sizing.)
 
 // ---- device fill_pwts (the general path-table model; mirrors fill_pwts_centered) ----
 // theta [nadmix] -> pwts_c [nedge x (npop-1)] col-major into scratch.
@@ -358,20 +300,22 @@ __device__ inline double clamp01(double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1
 
 constexpr int kMaxThetaDev = 16;  // device theta cap (production nadmix; comfortably large)
 
-// ---- the FLEET kernel (one thread per restart; productized idea1_fleet_kernel) ----
-__global__ void qpgraph_fleet_kernel(QpGraphDeviceTopo t, int numstart, int maxit, double tol,
-                                     const double* f_obs, const double* qinv,
-                                     ScratchLayout L, double* g_dbl, int* g_int,
-                                     double* out_theta, double* out_score) {
-    const int inst = blockIdx.x * blockDim.x + threadIdx.x;
-    if (inst >= numstart) return;
+// ---- the SHARED per-restart fit (the whole multistart-instance loop in-kernel) ----
+// Runs ONE restart `inst` of topology `t`: deterministic splitmix theta init -> the
+// projected-Newton loop (per-dim forward-diff gradient + diagonal curvature, projected
+// trust-clamped step, 8-step backtracking). D==0 ⇒ a single objective eval (no theta).
+// Writes th[] (length D) on return; returns the converged score. DB/IB are this thread's
+// scratch slab; L is the layout (sized to the topology, or the batch-max — only the cell
+// OFFSETS that this topology uses are read, so a batch-max slab is safe). The shared body
+// of BOTH the single-topology fleet and the heterogeneous-topology batch fleet (no rebuild).
+__device__ inline double d_fit_one_restart(const QpGraphDeviceTopo& t, unsigned inst, int maxit,
+                                           double tol, const double* f_obs, const double* qinv,
+                                           const ScratchLayout& L, double* DB, int* IB,
+                                           double* th) {
     const int D = t.nadmix;
-    double* DB = g_dbl + static_cast<long>(inst) * L.dbl_total;
-    int* IB = g_int + static_cast<long>(inst) * L.int_total;
-
-    double th[kMaxThetaDev];
-    for (int d = 0; d < D; ++d) th[d] = clamp01(d_init_theta(static_cast<unsigned>(inst), d));
+    for (int d = 0; d < D; ++d) th[d] = clamp01(d_init_theta(inst, d));
     double s = d_qpgraph_score(t, th, f_obs, qinv, L, DB, IB);
+    if (D == 0) return s;  // pure tree: one eval, no theta axis (the in-kernel D==0 path).
     const double h = 1e-4;
     for (int it = 0; it < maxit; ++it) {
         double max_dx = 0.0, max_ds = 0.0;
@@ -410,7 +354,69 @@ __global__ void qpgraph_fleet_kernel(QpGraphDeviceTopo t, int numstart, int maxi
         }
         if (max_dx < tol * 1e-2 && max_ds < tol * 1e-3) break;
     }
+    return s;
+}
+
+// ---- the FLEET kernel (one thread per restart; productized idea1_fleet_kernel) ----
+__global__ void qpgraph_fleet_kernel(QpGraphDeviceTopo t, int numstart, int maxit, double tol,
+                                     const double* f_obs, const double* qinv,
+                                     ScratchLayout L, double* g_dbl, int* g_int,
+                                     double* out_theta, double* out_score) {
+    const int inst = blockIdx.x * blockDim.x + threadIdx.x;
+    if (inst >= numstart) return;
+    const int D = t.nadmix;
+    double* DB = g_dbl + static_cast<long>(inst) * L.dbl_total;
+    int* IB = g_int + static_cast<long>(inst) * L.int_total;
+    double th[kMaxThetaDev];
+    const double s = d_fit_one_restart(t, static_cast<unsigned>(inst), maxit, tol, f_obs, qinv,
+                                       L, DB, IB, th);
     for (int d = 0; d < D; ++d) out_theta[static_cast<long>(inst) * D + d] = th[d];
+    out_score[inst] = s;
+}
+
+// ---- the HETEROGENEOUS-TOPOLOGY FLEET kernel (the topology-search killer app) ----
+// inst flattens (topo,restart): topo_id = inst/numstart, restart = inst%numstart. Each
+// thread reconstructs its topology's QpGraphDeviceTopo from the packed-arena base pointers
+// + its view offsets, then runs the IDENTICAL d_fit_one_restart inner loop. Per-thread
+// scratch is the batch-MAX slab (Lmax). Output: out_score[inst] (per topo,restart) — the
+// host reduces to the per-topology best + the global argmin (a reduction, NOT a fit).
+__global__ void qpgraph_fleet_batch_kernel(const QpGraphDeviceTopoView* views, int ntopo,
+                                           int numstart, int maxit, double tol,
+                                           const double* g_pwts0, const int* g_pe_edge,
+                                           const int* g_pe_leaf, const int* g_pe_path,
+                                           const int* g_pae_path, const int* g_pae_admixedge,
+                                           const int* g_cmb1, const int* g_cmb2,
+                                           const double* f_obs, const double* qinv,
+                                           ScratchLayout Lmax, double* g_dbl, int* g_int,
+                                           double* out_score) {
+    const long inst = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = static_cast<long>(ntopo) * numstart;
+    if (inst >= total) return;
+    const int topo_id = static_cast<int>(inst / numstart);
+    const int restart = static_cast<int>(inst % numstart);
+    const QpGraphDeviceTopoView v = views[topo_id];
+
+    // reconstruct this topology's device view from the packed-arena bases + the offsets.
+    QpGraphDeviceTopo t{};
+    t.npop = v.npop; t.nedge_norm = v.nedge_norm; t.nadmix = v.nadmix; t.npair = v.npair;
+    t.npath = v.npath; t.base_leaf = v.base_leaf; t.n_pe = v.n_pe; t.n_pae = v.n_pae;
+    t.constrained = v.constrained; t.fudge = v.fudge;
+    t.pwts0 = g_pwts0 + v.off_pwts0;
+    t.pe_edge = g_pe_edge + v.off_pe; t.pe_leaf = g_pe_leaf + v.off_pe; t.pe_path = g_pe_path + v.off_pe;
+    t.pae_path = g_pae_path + v.off_pae; t.pae_admixedge = g_pae_admixedge + v.off_pae;
+    t.cmb1 = g_cmb1 + v.off_cmb; t.cmb2 = g_cmb2 + v.off_cmb;
+
+    // per-thread scratch slab (the batch-MAX layout — only the cells this topology uses are
+    // touched; make_layout offsets are computed at the batch max, so the slab is large
+    // enough for every topology). Build a per-topology layout (its OWN offsets) for the
+    // device objective, but index into the batch-MAX-sized slab.
+    double* DB = g_dbl + inst * Lmax.dbl_total;
+    int* IB = g_int + (Lmax.int_total > 0 ? inst * Lmax.int_total : 0);
+    const ScratchLayout L = make_layout(t.npop, t.nedge_norm, t.npair, t.npath);
+
+    double th[kMaxThetaDev];
+    const double s = d_fit_one_restart(t, static_cast<unsigned>(restart), maxit, tol, f_obs,
+                                       qinv, L, DB, IB, th);
     out_score[inst] = s;
 }
 
@@ -428,6 +434,33 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
     qpgraph_fleet_kernel<<<blocks, TPB, 0, stream>>>(topo, numstart, maxit, tol, d_fobs, d_qinv,
                                                      L, g_dbl.data(), g_int.data(),
                                                      d_out_theta, d_out_score);
+    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void launch_qpgraph_fleet_batch(const QpGraphDeviceTopoView* d_views, int ntopo,
+                                int numstart, int maxit, double tol, int dbl_per_thread,
+                                int int_per_thread, const double* d_pwts0,
+                                const int* d_pe_edge, const int* d_pe_leaf, const int* d_pe_path,
+                                const int* d_pae_path, const int* d_pae_admixedge,
+                                const int* d_cmb1, const int* d_cmb2,
+                                const double* d_fobs, const double* d_qinv,
+                                double* d_g_dbl, int* d_g_int, double* d_out_score,
+                                cudaStream_t stream) {
+    // The batch-MAX layout the per-thread slab is sized to (dbl_per_thread/int_per_thread are
+    // the caller's batch-max make_layout totals — passed so the kernel indexes the slab with
+    // the SAME stride the caller allocated). We re-derive dbl_total/int_total here from the
+    // passed totals (the layout's per-topology offsets are recomputed in-kernel).
+    ScratchLayout Lmax{};
+    Lmax.dbl_total = dbl_per_thread;
+    Lmax.int_total = int_per_thread;
+    const long total = static_cast<long>(ntopo) * static_cast<long>(numstart);
+    const int TPB = 64;
+    const long blocks = (total + TPB - 1) / TPB;
+    qpgraph_fleet_batch_kernel<<<static_cast<unsigned>(blocks), TPB, 0, stream>>>(
+        d_views, ntopo, numstart, maxit, tol, d_pwts0, d_pe_edge, d_pe_leaf, d_pe_path,
+        d_pae_path, d_pae_admixedge, d_cmb1, d_cmb2, d_fobs, d_qinv, Lmax, d_g_dbl, d_g_int,
+        d_out_score);
     STEPPE_CUDA_CHECK(cudaGetLastError());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
 }

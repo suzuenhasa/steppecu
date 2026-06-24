@@ -3632,6 +3632,128 @@ public:
         return out;
     }
 
+    /// HETEROGENEOUS-TOPOLOGY FLEET (the qpGraph topology SEARCH; qpgraph_search.hpp). Pack
+    /// EVERY candidate topology's path-table arena into ONE device buffer + a per-topology
+    /// index table, size the per-thread scratch to the BATCH-MAX layout, and fit ALL topos
+    /// in ONE launch reading the SAME resident f_obs/qinv (the basis is pop-set-bound, not
+    /// topology-bound — uploaded ONCE here). The host reduces the per-(topo,restart) scores
+    /// to the per-topology best + spread (a reduction, NOT a per-candidate host fit — the
+    /// AT2 optim()-per-candidate CPU trap designed out). D==0 trees are scored IN-KERNEL.
+    [[nodiscard]] QpGraphFleetBatch qpgraph_fit_fleet_batch(
+        const std::vector<QpGraphTopoArena>& topos, std::span<const double> f_obs,
+        std::span<const double> qinv, int numstart, int maxit, double tol,
+        const Precision& precision) override {
+        (void)precision;  // in-thread objective is native FP64 (the carve-out).
+        guard_device();
+        QpGraphFleetBatch out;
+        const int G = static_cast<int>(topos.size());
+        if (G == 0) { out.status = Status::Ok; return out; }
+        const int ns = numstart > 0 ? numstart : 1;
+        const int npair = topos.front().npair;  // the basis dim (pop-set-bound; same for all).
+
+        // ---- resident basis (uploaded ONCE; every candidate reads it) ----------------
+        DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), qinv.data(), qinv.size() * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // ---- pack every topology's arenas into contiguous host buffers + the view table -
+        std::vector<double> h_pwts0;
+        std::vector<int> h_pe_edge, h_pe_leaf, h_pe_path, h_pae_path, h_pae_edge, h_cmb1, h_cmb2;
+        std::vector<cuda::QpGraphDeviceTopoView> h_views(static_cast<std::size_t>(G));
+        int max_npop = 0, max_ne = 0, max_npair = 0, max_npath = 0;
+        for (int g = 0; g < G; ++g) {
+            const QpGraphTopoArena& t = topos[static_cast<std::size_t>(g)];
+            cuda::QpGraphDeviceTopoView v{};
+            v.npop = t.npop; v.nedge_norm = t.nedge_norm; v.nadmix = t.nadmix;
+            v.npair = t.npair; v.npath = t.npath; v.base_leaf = t.base_leaf;
+            v.n_pe = static_cast<int>(t.pe_edge.size());
+            v.n_pae = static_cast<int>(t.pae_path.size());
+            v.constrained = t.constrained ? 1 : 0;
+            v.fudge = t.fudge;
+            v.off_pwts0 = static_cast<long>(h_pwts0.size());
+            v.off_pe = static_cast<long>(h_pe_edge.size());
+            v.off_pae = static_cast<long>(h_pae_path.size());
+            v.off_cmb = static_cast<long>(h_cmb1.size());
+            h_pwts0.insert(h_pwts0.end(), t.pwts0.begin(), t.pwts0.end());
+            h_pe_edge.insert(h_pe_edge.end(), t.pe_edge.begin(), t.pe_edge.end());
+            h_pe_leaf.insert(h_pe_leaf.end(), t.pe_leaf.begin(), t.pe_leaf.end());
+            h_pe_path.insert(h_pe_path.end(), t.pe_path.begin(), t.pe_path.end());
+            h_pae_path.insert(h_pae_path.end(), t.pae_path.begin(), t.pae_path.end());
+            h_pae_edge.insert(h_pae_edge.end(), t.pae_admixedge.begin(), t.pae_admixedge.end());
+            h_cmb1.insert(h_cmb1.end(), t.cmb1.begin(), t.cmb1.end());
+            h_cmb2.insert(h_cmb2.end(), t.cmb2.begin(), t.cmb2.end());
+            h_views[static_cast<std::size_t>(g)] = v;
+            max_npop = std::max(max_npop, t.npop);
+            max_ne = std::max(max_ne, t.nedge_norm);
+            max_npair = std::max(max_npair, t.npair);
+            max_npath = std::max(max_npath, t.npath);
+        }
+        // the batch-MAX per-thread layout (every topology's scratch fits this slab).
+        const cuda::ScratchLayout Lmax = cuda::make_layout(max_npop, max_ne, max_npair, max_npath);
+
+        auto up_d = [&](const std::vector<double>& h) {
+            DeviceBuffer<double> d(h.size() ? h.size() : 1);
+            if (!h.empty())
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(double),
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+            return d;
+        };
+        auto up_i = [&](const std::vector<int>& h) {
+            DeviceBuffer<int> d(h.size() ? h.size() : 1);
+            if (!h.empty())
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(int),
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+            return d;
+        };
+        DeviceBuffer<double> dPwts0 = up_d(h_pwts0);
+        DeviceBuffer<int> dPeEdge = up_i(h_pe_edge), dPeLeaf = up_i(h_pe_leaf), dPePath = up_i(h_pe_path);
+        DeviceBuffer<int> dPaePath = up_i(h_pae_path), dPaeEdge = up_i(h_pae_edge);
+        DeviceBuffer<int> dCmb1 = up_i(h_cmb1), dCmb2 = up_i(h_cmb2);
+        DeviceBuffer<cuda::QpGraphDeviceTopoView> dViews(static_cast<std::size_t>(G));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dViews.data(), h_views.data(),
+                                          h_views.size() * sizeof(cuda::QpGraphDeviceTopoView),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // per-thread scratch slab (ntopo*numstart threads, each a batch-MAX slab) + the
+        // per-(topo,restart) score output.
+        const std::size_t threads = static_cast<std::size_t>(G) * static_cast<std::size_t>(ns);
+        DeviceBuffer<double> dGdbl(threads * static_cast<std::size_t>(Lmax.dbl_total));
+        DeviceBuffer<int> dGint(threads * static_cast<std::size_t>(Lmax.int_total > 0 ? Lmax.int_total : 1));
+        DeviceBuffer<double> dScore(threads);
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready.
+
+        // ---- the ONE launch (the fleet fits ALL candidates) -------------------------
+        cuda::launch_qpgraph_fleet_batch(
+            dViews.data(), G, ns, maxit, tol, Lmax.dbl_total, Lmax.int_total, dPwts0.data(),
+            dPeEdge.data(), dPeLeaf.data(), dPePath.data(), dPaePath.data(), dPaeEdge.data(),
+            dCmb1.data(), dCmb2.data(), dFobs.data(), dQinv.data(), dGdbl.data(), dGint.data(),
+            dScore.data(), stream_.get());
+
+        std::vector<double> h_score(threads);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_score.data(), dScore.data(), threads * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // ---- host reduction: per-topology best-of-restarts + spread (NOT a fit) ------
+        out.best_score.assign(static_cast<std::size_t>(G), std::numeric_limits<double>::infinity());
+        out.restart_spread.assign(static_cast<std::size_t>(G), 0.0);
+        for (int g = 0; g < G; ++g) {
+            double smin = std::numeric_limits<double>::infinity(), smax = -smin;
+            for (int r = 0; r < ns; ++r) {
+                const double s = h_score[static_cast<std::size_t>(g) * static_cast<std::size_t>(ns) + static_cast<std::size_t>(r)];
+                if (std::isfinite(s)) { if (s < smin) smin = s; if (s > smax) smax = s; }
+            }
+            out.best_score[static_cast<std::size_t>(g)] = smin;
+            out.restart_spread[static_cast<std::size_t>(g)] =
+                (std::isfinite(smax) && std::isfinite(smin)) ? (smax - smin) : 0.0;
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     /// GPU-ONLY f4 sweep — enumerate EVERY C(P,4) quartet on the device, compute f4 + diagonal
     /// jackknife SE + |z|, filter + CUB-compact survivors ON THE DEVICE, return ONLY survivors.
     /// k=4; delegates to the shared run_fstat_sweep_device. (The fix for the CPU-bound disaster.)

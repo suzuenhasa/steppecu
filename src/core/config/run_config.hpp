@@ -129,6 +129,8 @@ public:
     [[nodiscard]] int    qpgraph_numstart()    const noexcept { return qpgraph_numstart_; }
     [[nodiscard]] double qpgraph_diag_f3()     const noexcept { return qpgraph_diag_f3_; }
     [[nodiscard]] bool   qpgraph_constrained() const noexcept { return qpgraph_constrained_; }
+    /// --max-nadmix (qpgraph-search): the bounded admixture-node ceiling (v1 supports {0,1}).
+    [[nodiscard]] int    qpgraph_max_nadmix()  const noexcept { return qpgraph_max_nadmix_; }
 
 private:
     // ConfigBuilder is the ONLY constructor of a validated RunConfig (it sets these
@@ -172,6 +174,7 @@ private:
     int    qpgraph_numstart_   = 10;     // qpgraph --numstart (QpGraphOptions default)
     double qpgraph_diag_f3_    = 1e-5;   // qpgraph --diag-f3 (AT2 default)
     bool   qpgraph_constrained_ = true;  // qpgraph --constrained (AT2 default)
+    int    qpgraph_max_nadmix_ = 1;      // qpgraph-search --max-nadmix (bounded; v1 {0,1})
 };
 
 }  // namespace steppe::config

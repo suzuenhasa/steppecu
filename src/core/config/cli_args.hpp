@@ -45,6 +45,7 @@ enum class Command {
     F3Sweep,  ///< GPU-only all-combinations f3 sweep (every C(P,3); on-device filter).
     Qpfstats, ///< genotype-path joint f2 smoother (--prefix + --pops -> a smoothed f2 dir).
     QpGraph,  ///< single-graph qpGraph fit (--f2-dir + --graph edge-list -> the fit).
+    QpGraphSearch,  ///< topology SEARCH v1 (--f2-dir + --pops -> exhaustive bounded enumeration).
     Dates,    ///< admixture DATING (--prefix + --target + --left{2} -> the date + SE; cuFFT LD engine).
 };
 
@@ -124,6 +125,9 @@ struct CliArgs {
 
     /// `--constrained` / `--no-constrained` (qpgraph) — drift edges >= 0 (AT2 default TRUE).
     std::optional<bool> constrained;
+
+    /// `--max-nadmix N` (qpgraph-search) — the bounded admixture-node ceiling (v1: {0,1}).
+    std::optional<int> max_nadmix;
 
     /// `--prefix PATH` (the `qpdstat` command ONLY) — the genotype prefix for the
     /// normalized-D MAGNITUDE (Part B; not yet implemented). DISTINCT from `prefix` below

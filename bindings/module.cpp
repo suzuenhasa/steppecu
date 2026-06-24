@@ -52,6 +52,7 @@
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
 #include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options (the single-graph fit binding)
+#include "steppe/qpgraph_search.hpp"    // run_qpgraph_search (the topology SEARCH v1 binding)
 #include "steppe/qpfstats.hpp"          // run_qpfstats + QpfstatsResult (the genotype-path joint f2 smoother)
 
 #include "io/geno_reader.hpp"           // io::GenoReader (qpDstat Part B P-axis order)
@@ -481,6 +482,52 @@ nb::dict run_qpgraph_py(F2Handle& h,
         raise_value("qpgraph: the graph could not be fit (a leaf is not an f2 population, "
                     "or the topology is unrooted/cyclic/invalid)");
     return qpgraph_to_dict(result);
+}
+
+// run_qpgraph_search: the topology SEARCH v1 (oracle C). Enumerate every rooted topology on
+// the bounded `pops` leaf set (nadmix in {0..max_nadmix}), fit ALL in one heterogeneous-fleet
+// launch, return the deterministic global-best + the exhaustive-coverage count + the heuristic
+// recovery + the wall-clock. The host does only the cheap enumeration + the argmin.
+nb::dict run_qpgraph_search_py(F2Handle& h, const std::vector<std::string>& pops, int max_nadmix,
+                               int numstart, double fudge, double diag_f3, bool constrained,
+                               bool run_heuristic) {
+    if (pops.size() < 3) raise_value("qpgraph-search: need >= 3 population labels");
+    steppe::QpGraphSearchOptions opts;
+    opts.pops = pops;
+    opts.max_nadmix = max_nadmix;
+    opts.run_heuristic = run_heuristic;
+    opts.fit.numstart = numstart;
+    opts.fit.fudge = fudge;
+    opts.fit.diag_f3 = diag_f3;
+    opts.fit.constrained = constrained;
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::QpGraphSearchResult r;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        r = steppe::run_qpgraph_search(dev_f2, h.pops, opts, resources);
+    } catch (const std::exception& ex) {
+        raise_value(std::string("device error: ") + ex.what());
+    }
+    if (r.status == steppe::Status::InvalidConfig)
+        raise_value("qpgraph-search: invalid pop-set (a pop is not an f2 population, or < 3 leaves)");
+
+    nb::dict d;
+    d["n_trees"] = r.n_trees;
+    d["n_admix1"] = r.n_admix1;
+    d["n_candidates"] = r.n_candidates;
+    d["best_score"] = r.best.score;
+    d["second_best_score"] = r.second_best_score;
+    d["best_nadmix"] = r.best.nadmix;
+    d["best_hash"] = static_cast<std::uint64_t>(r.best.hash);
+    d["heuristic_recovered"] = r.heuristic_recovered;
+    d["fit_all_wall_ms"] = r.fit_all_wall_ms;
+    d["topologies_per_s"] = r.topologies_per_s;
+    nb::list be;
+    for (const auto& e : r.best.edges) be.append(nb::make_tuple(e.from, e.to));
+    d["best_edges"] = be;
+    return d;
 }
 
 // run_f4: a list of (p1,p2,p3,p4) quartet NAME tuples against the SAME resident f2,
@@ -1080,6 +1127,16 @@ NB_MODULE(_core, m) {
           "of (parent, child) name pairs; the leaves must be f2 populations. NOTE: qpGraph "
           "uses the AT2 afprod=FALSE f2 (read_f2 of an afprod=FALSE dir). Returns a flat "
           "dict {score, weight, admix_from/to, edge_length, edge_from/to, ...}.");
+
+    m.def("run_qpgraph_search", &run_qpgraph_search_py, "f2"_a, "pops"_a, "max_nadmix"_a = 1,
+          "numstart"_a = 10, "fudge"_a = 1e-4, "diag_f3"_a = 1e-5, "constrained"_a = true,
+          "run_heuristic"_a = true,
+          "qpGraph TOPOLOGY SEARCH v1 (GPU; the heterogeneous-topology fleet, ONE launch fits "
+          "ALL candidates). Exhaustively enumerates every rooted topology on the bounded `pops` "
+          "leaf set (nadmix in {0..max_nadmix}; reproduces admixtools generate_all_graphs 1:1) "
+          "and returns the deterministic global-best. Flat dict {n_trees, n_admix1, "
+          "n_candidates, best_score, second_best_score, best_nadmix, best_hash, best_edges, "
+          "heuristic_recovered, fit_all_wall_ms, topologies_per_s}.");
 
     m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
           "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "

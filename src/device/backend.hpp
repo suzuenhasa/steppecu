@@ -259,6 +259,16 @@ struct QpGraphFleet {
     Status status = Status::Ok;
 };
 
+/// HETEROGENEOUS-TOPOLOGY FLEET output (the topology-search fleet; qpgraph_search.hpp). The
+/// per-topology best-of-restarts GLS score for EVERY enumerated candidate, produced in ONE
+/// launch over the flattened (topo,restart) axis. The host does the global-best argmin +
+/// the per-topology bracket over these small arrays (a reduction, NOT a per-candidate fit).
+struct QpGraphFleetBatch {
+    std::vector<double> best_score;  ///< [G] the best (min over restarts) score per topology.
+    std::vector<double> restart_spread;  ///< [G] the per-topology max-min restart spread.
+    Status status = Status::Ok;
+};
+
 /// GPU-ONLY f-stat SWEEP survivors (the CUDA-free seam between the core sweep driver and the
 /// CUDA backend's on-device pipeline). The backend enumerates+computes+filters+compacts EVERY
 /// C(P,k) item ON THE DEVICE and returns ONLY the survivors here (the full N-row table is never
@@ -977,6 +987,27 @@ public:
         (void)precision;
         throw std::runtime_error(
             "ComputeBackend::qpgraph_fit_fleet: not implemented by this backend");
+    }
+
+    /// HETEROGENEOUS-TOPOLOGY FLEET (the qpGraph topology SEARCH; qpgraph_search.hpp). The
+    /// GENERALIZATION of qpgraph_fit_fleet from ONE topology to a BATCH: pack every
+    /// candidate topology's path-table arena into one device buffer + a per-topology index
+    /// table, flatten the launch over (topo,restart) [topo_id=inst/numstart], and fit ALL
+    /// `topos` in ONE launch reading the SAME resident f_obs/qinv (the basis is pop-set-
+    /// bound, NOT topology-bound — the key reuse). Per-thread scratch is sized to the BATCH-
+    /// MAX (npop,nedge,npair,npath). D==0 (pure-tree) candidates are handled in-kernel
+    /// (the host-side D==0 carve-out is dropped — no host fit loop). Returns the per-topology
+    /// best-of-restarts score (the host does the global-best argmin). NON-PURE: the base
+    /// throws (the established backend.hpp pattern); the CpuBackend is the small_linalg
+    /// oracle (the same per-restart fleet, looped over topos).
+    [[nodiscard]] virtual QpGraphFleetBatch qpgraph_fit_fleet_batch(
+        const std::vector<QpGraphTopoArena>& topos, std::span<const double> f_obs,
+        std::span<const double> qinv, int numstart, int maxit, double tol,
+        const Precision& precision) {
+        (void)topos; (void)f_obs; (void)qinv; (void)numstart; (void)maxit; (void)tol;
+        (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::qpgraph_fit_fleet_batch: not implemented by this backend");
     }
 
     /// qpDstat Part B (the genotype-path NORMALIZED-D reduction; include/steppe/dstat.hpp).

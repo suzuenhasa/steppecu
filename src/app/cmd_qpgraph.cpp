@@ -24,6 +24,7 @@
 #include "device/resources.hpp"         // CUDA-FREE
 #include "steppe/error.hpp"
 #include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options
+#include "steppe/qpgraph_search.hpp"    // run_qpgraph_search (the topology SEARCH v1)
 
 namespace steppe::app {
 
@@ -203,6 +204,115 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
             return cfg::kExitIoError;
         }
         emit(out, fmt, result);
+    }
+    return cfg::exit_code_for(result.status);
+}
+
+namespace {
+
+/// Emit the topology-search result (CSV/TSV or JSON): the exhaustive-coverage count, the
+/// global-best (nadmix / score / edges), the second-best gap, the heuristic recovery, the
+/// wall-clock + topologies/s, and the best graph's fitted edges/weights.
+void emit_search(std::ostream& os, OutputFormat fmt, const steppe::QpGraphSearchResult& r) {
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    const auto edges_str = [&](const std::vector<steppe::QpGraphEdge>& e) {
+        std::string s;
+        for (std::size_t i = 0; i < e.size(); ++i) {
+            s += e[i].from; s += '>'; s += e[i].to;
+            if (i + 1 < e.size()) s += ';';
+        }
+        return s;
+    };
+    if (fmt == OutputFormat::Json) {
+        os << "{\n";
+        os << "  \"n_trees\": " << r.n_trees << ",\n";
+        os << "  \"n_admix1\": " << r.n_admix1 << ",\n";
+        os << "  \"n_candidates\": " << r.n_candidates << ",\n";
+        os << "  \"best_score\": " << r.best.score << ",\n";
+        os << "  \"second_best_score\": " << r.second_best_score << ",\n";
+        os << "  \"best_nadmix\": " << r.best.nadmix << ",\n";
+        os << "  \"best_hash\": \"" << r.best.hash << "\",\n";
+        os << "  \"best_edges\": \"" << edges_str(r.best.edges) << "\",\n";
+        os << "  \"heuristic_recovered\": " << (r.heuristic_recovered ? "true" : "false") << ",\n";
+        os << "  \"fit_all_wall_ms\": " << r.fit_all_wall_ms << ",\n";
+        os << "  \"topologies_per_s\": " << r.topologies_per_s << "\n}\n";
+        return;
+    }
+    os << "# section: search\n";
+    os << "n_trees" << sep << "n_admix1" << sep << "n_candidates" << sep << "best_score" << sep
+       << "second_best_score" << sep << "best_nadmix" << sep << "heuristic_recovered" << sep
+       << "fit_all_wall_ms" << sep << "topologies_per_s\n";
+    os << r.n_trees << sep << r.n_admix1 << sep << r.n_candidates << sep << r.best.score << sep
+       << r.second_best_score << sep << r.best.nadmix << sep << (r.heuristic_recovered ? 1 : 0)
+       << sep << r.fit_all_wall_ms << sep << r.topologies_per_s << "\n";
+    os << "# section: best_edges\n" << edges_str(r.best.edges) << "\n";
+}
+
+}  // namespace
+
+int run_qpgraph_search_command(const cfg::RunConfig& config) {
+    if (config.f2_dir().empty()) {
+        std::fprintf(stderr, "steppe qpgraph-search: --f2-dir is required\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (config.pops().size() < 3) {
+        std::fprintf(stderr,
+                     "steppe qpgraph-search: --pops needs >= 3 population labels (the bounded "
+                     "leaf set the search enumerates topologies over)\n");
+        return cfg::kExitInvalidConfig;
+    }
+    const F2DirResult dir = read_f2_dir(config.f2_dir());
+    if (!dir.ok) {
+        std::fprintf(stderr, "steppe qpgraph-search: %s\n", dir.error.c_str());
+        return cfg::kExitIoError;
+    }
+
+    steppe::QpGraphSearchOptions opts;
+    opts.pops = config.pops();
+    opts.max_nadmix = config.qpgraph_max_nadmix();
+    opts.fit.fudge = config.qpadm_options().fudge;
+    opts.fit.diag_f3 = config.qpgraph_diag_f3();
+    opts.fit.numstart = config.qpgraph_numstart();
+    opts.fit.constrained = config.qpgraph_constrained();
+
+    steppe::QpGraphSearchResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (resources.gpus.empty()) {
+            std::fprintf(stderr, "steppe qpgraph-search: no CUDA device available\n");
+            return cfg::kExitRuntimeError;
+        }
+        const int device_id = resources.gpus.front().device_id;
+        device::DeviceF2Blocks dev_f2 =
+            device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
+        result = run_qpgraph_search(dev_f2, dir.dir.pop_labels, opts, resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe qpgraph-search: device error: %s\n", e.what());
+        return cfg::kExitRuntimeError;
+    }
+    if (result.status == steppe::Status::InvalidConfig) {
+        std::fprintf(stderr,
+                     "steppe qpgraph-search: invalid pop-set (a pop is not an f2 population, or "
+                     "< 3 leaves)\n");
+        return cfg::kExitInvalidConfig;
+    }
+
+    OutputFormat fmt = OutputFormat::Csv;
+    if (!parse_output_format(config.format(), fmt)) {
+        std::fprintf(stderr, "steppe qpgraph-search: unknown --format '%s' (csv|tsv|json)\n",
+                     config.format().c_str());
+        return cfg::kExitInvalidConfig;
+    }
+    if (config.out_file().empty()) {
+        emit_search(std::cout, fmt, result);
+    } else {
+        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "steppe qpgraph-search: cannot open --out file: %s\n",
+                         config.out_file().c_str());
+            return cfg::kExitIoError;
+        }
+        emit_search(out, fmt, result);
     }
     return cfg::exit_code_for(result.status);
 }

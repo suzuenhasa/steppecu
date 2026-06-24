@@ -19,6 +19,13 @@ namespace steppe::app {
 /// code. Owns its stdout/stderr.
 [[nodiscard]] int run_qpgraph_command(const config::RunConfig& config);
 
+/// Run the qpGraph TOPOLOGY SEARCH v1 (oracle C: exhaustive bounded enumeration) for the
+/// frozen config (--f2-dir + --pops the bounded leaf set + --max-nadmix) and return the
+/// process exit code. Enumerates every rooted topology on the pop-set (nadmix in {0..max}),
+/// fits ALL in one heterogeneous-fleet launch, emits the deterministic global-best + the
+/// exhaustive-coverage count + the heuristic recovery + the wall-clock. Owns stdout/stderr.
+[[nodiscard]] int run_qpgraph_search_command(const config::RunConfig& config);
+
 }  // namespace steppe::app
 
 #endif  // STEPPE_APP_CMD_QPGRAPH_HPP
