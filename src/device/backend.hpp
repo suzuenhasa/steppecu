@@ -439,6 +439,33 @@ struct BackendCapabilities {
     bool emulated_fp64_honorable = false;
 };
 
+/// DATES weighted-LD moment sufficient-statistics (include/steppe/dates.hpp; the cuFFT
+/// autocorrelation LD engine output). The per-(chromosome, output-bin) DATES CORR
+/// sufficient statistics summed over EVERY admixed sample — the tiny reduced result the host
+/// finishes the date with (fixjcorr leave-one-chrom + the corr curve + the exp fit). The
+/// ~10^12 SNP-pair object is NEVER formed: these are the IFFT(|FFT|^2) autocorrelation
+/// moments (dates.c ddadd/ddcorr -> addcorr2). ROW-MAJOR [n_chrom × n_bin] per moment.
+/// Chromosomes are indexed 0..n_chrom-1 in the SAME order as the caller's `chrom_present`
+/// list (the per-chrom segmentation), bins 0..n_bin-1 are the output distance bins
+/// (bin s spans [s*binsize, (s+1)*binsize) Morgans). The six moments map to the DATES CORR
+/// struct accumulators (addcorr2(corr, dd00, dd01, dd10, dd11, dd02, dd20)):
+///   s0  += dd00 (count autocorr  = the per-lag pair COUNT, the denominator)
+///   s1  += dd01, s2 += dd10 (count×signal cross — for the mean terms, unused at mode 1)
+///   s12 += dd11 (signal autocorr = the covariance NUMERATOR)
+///   s11 += dd02, s22 += dd20 (count×signal² cross — the variance moments)
+/// The reported curve is corr = (s12/s0)/sqrt((s11/s0)*(s22/s0)) (calccorr mode 1, datacol 3).
+struct DatesMoments {
+    int n_chrom = 0;  ///< number of present chromosomes (== chrom_present length).
+    int n_bin = 0;    ///< number of output distance bins.
+    std::vector<double> s0;   ///< [n_chrom × n_bin] Σ dd00 (pair-count autocorr / denominator).
+    std::vector<double> s1;   ///< [n_chrom × n_bin] Σ dd01.
+    std::vector<double> s2;   ///< [n_chrom × n_bin] Σ dd10.
+    std::vector<double> s11;  ///< [n_chrom × n_bin] Σ dd02 (signal² variance moment).
+    std::vector<double> s12;  ///< [n_chrom × n_bin] Σ dd11 (signal autocorr / covariance numerator).
+    std::vector<double> s22;  ///< [n_chrom × n_bin] Σ dd20 (signal² variance moment).
+    Status status = Status::Ok;
+};
+
 class ComputeBackend;  // fwd for the fit_models_batched default delegate below
 
 namespace core::qpadm {
@@ -859,6 +886,68 @@ public:
         (void)quadruples; (void)numsum; (void)densum; (void)cnt;
         throw std::runtime_error(
             "ComputeBackend::dstat_block_reduce: not implemented by this backend");
+    }
+
+    /// DATES weighted-LD CURVE — the cuFFT autocorrelation LD engine (include/steppe/dates.hpp).
+    /// The whole GPU-bound per-admixed-sample pipeline reduced to the tiny per-(chrom,bin)
+    /// CORR sufficient statistics, with the ~10^12 SNP-pair object NEVER materialized (the
+    /// ALDER FFT trick: cov(d=lag) = IFFT(|FFT(signal-grid)|²) / IFFT(|FFT(count-grid)|²)).
+    /// Summed over EVERY admixed-target sample (DATES per-sample main loop, dates.c:585-740):
+    ///   1. per sample i, per valid SNP s: regress dosage w0 = genotype(i,s)/2 on the two
+    ///      source freqs {w1=Q[src1,s], w2=Q[src2,s]}: y = Σ(w0-w2)(w1-w2)/Σ(w1-w2)², residual
+    ///      res = w0 - (y·w1 + (1-y)·w2); the per-SNP scattered value is res·wt,
+    ///      wt = w1-w2 (the population-delta weight; native FP64 cancellation carve-out).
+    ///   2. scatter-add onto the FINE per-chrom grid at cell grid_cell[s] (spacing binsize/qbin):
+    ///      z0q[g] += 1, z1q[g] += res·wt, z2q[g] += (res·wt)².
+    ///   3. batched cuFFT autocorrelation over each chrom's grid segment -> the six dd moments
+    ///      (fftauto/fftcv2; native double FFT, UNNORMALIZED so an explicit 1/n scale matches
+    ///      the FFTW reference bit-for-bit), accumulated per chrom.
+    ///   4. re-bin lag d (distance d·binsize/qbin) to the output bin s = floor(d·dbinsize/binsize)
+    ///      and add the six moments into the per-(chrom, bin) DatesMoments (dates.c ddcorr +
+    ///      addcorr2). The host finishes: fixjcorr leave-one-chrom + the corr curve + the fit.
+    ///
+    /// INPUTS (device-resident on the CUDA path; the host never loops over SNP pairs):
+    /// @param src1_freq  per-SNP source-1 allele freq Q[src1,s], length M (decode_af row).
+    /// @param src2_freq  per-SNP source-2 allele freq Q[src2,s], length M.
+    /// @param src_valid  per-SNP validity (1.0 iff BOTH sources valid at s), length M.
+    /// @param packed     the admixed-target packed genotype bytes (TGENO/GENO individual-major
+    ///                   sub-tile for the target samples), length n_target·bytes_per_record.
+    /// @param bytes_per_record  per-target-individual record stride in `packed`.
+    /// @param n_target   number of admixed-target individuals (the per-sample loop count).
+    /// @param target_ploidy per-target-sample ploidy (length n_target; dosage = code/ploidy·...)
+    ///                   — DATES uses g/2 (diploid); a pseudo-haploid sample is folded the same
+    ///                   way the decode does. NULL ⇒ uniform diploid.
+    /// @param grid_cell  per-SNP fine-grid cell index (DATES setqbins tagnumber; cumulative
+    ///                   genpos/qb with a +5 Morgan inter-chrom gap), length M.
+    /// @param M          number of (autosome-kept) SNPs.
+    /// @param chrom_first per-present-chromosome first grid cell (slo), length n_chrom.
+    /// @param chrom_last  per-present-chromosome last grid cell (shi), length n_chrom.
+    /// @param n_chrom    number of present chromosomes.
+    /// @param numqbins   total fine-grid length (max grid_cell + 1).
+    /// @param n_bin      number of output distance bins (== round(maxdis/binsize)).
+    /// @param diffmax    max FFT lag = round(qbin·maxdis/binsize).
+    /// @param binsize    output bin width (Morgans).
+    /// @param qbin       fine-grid refinement factor (dbinsize = binsize/qbin).
+    /// @param precision  governs ONLY any matmul-heavy sub-step; the cuFFT + the weight/residual
+    ///                   accumulation are NATIVE double (FFT well-conditioned; weight is the
+    ///                   cancellation carve-out). The §12 invariant.
+    /// NON-PURE: the base throws (the established backend.hpp pattern). The CpuBackend gives the
+    /// native FFT-free direct-autocorrelation oracle; the CUDA backend the batched cuFFT path.
+    [[nodiscard]] virtual DatesMoments dates_curve(
+        const double* src1_freq, const double* src2_freq, const double* src_valid,
+        const std::uint8_t* packed, std::size_t bytes_per_record, int n_target,
+        const int* target_ploidy, const int* grid_cell, long M,
+        const int* chrom_first, const int* chrom_last, int n_chrom,
+        int numqbins, int n_bin, int diffmax, double binsize, int qbin,
+        const Precision& precision) {
+        (void)src1_freq; (void)src2_freq; (void)src_valid; (void)packed;
+        (void)bytes_per_record; (void)n_target; (void)target_ploidy; (void)grid_cell;
+        (void)M; (void)chrom_first; (void)chrom_last; (void)n_chrom; (void)numqbins;
+        (void)n_bin; (void)diffmax; (void)binsize; (void)qbin; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::dates_curve: not implemented by this backend "
+            "(the cuFFT autocorrelation LD engine requires a CUDA backend; the "
+            "CpuBackend provides the FFT-free reference oracle)");
     }
 
     /// qpfstats SMOOTHING SOLVE (the genotype-path joint f2 smoother; the shared-factor

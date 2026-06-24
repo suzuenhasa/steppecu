@@ -27,6 +27,7 @@
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpgraph.hpp"
+#include "app/cmd_dates.hpp"
 #include "app/cmd_qpdstat.hpp"
 #include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
@@ -331,6 +332,7 @@ int run_cli(int argc, char** argv) {
     CliArgs f4sweep_args;
     CliArgs f3sweep_args;
     CliArgs qpfstats_args;
+    CliArgs dates_args;
 
     // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
     {
@@ -374,6 +376,33 @@ int run_cli(int argc, char** argv) {
             // RESIDENT -> run_qpgraph (the IDEA-1 fleet on-device) -> emit the edges +
             // admix weights + score). Mirrors how `qpadm` dispatches.
             std::exit(run_qpgraph_command(*config));
+        });
+    }
+
+    // ---- dates (admixture DATING via the weighted ancestry-covariance decay) -----------
+    // The DATES tool: --prefix genotypes + --target (admixed) + --left{2} (the two reference
+    // sources) -> the date in generations + the leave-one-chromosome block-jackknife SE, via
+    // the cuFFT autocorrelation LD engine (NEVER the f2 cache, NEVER a host O(M²) SNP-pair
+    // loop). The .snp MUST carry a real genetic map (cM). Mirrors how qpfstats binds --prefix.
+    {
+        CLI::App* sub = app.add_subcommand(
+            "dates",
+            "Admixture dating: --prefix genotypes + --target + --left{2 sources} -> date + SE");
+        dates_args.command = Command::Dates;
+        sub->add_option_function<std::string>(
+            "--prefix", [&](const std::string& v) { dates_args.qpdstat_prefix = v; },
+            "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; .snp needs a real cM map)");
+        add_target_flag(sub, dates_args);
+        add_left_flag(sub, dates_args,
+                      "The TWO reference source populations (the ancestral pops; exactly two)");
+        add_output_flags(sub, dates_args);
+        add_common_flags(sub, dates_args);
+        sub->callback([&]() {
+            auto config = build_config(dates_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The real GPU DATES run (decode front-end -> the cuFFT autocorrelation LD engine
+            // -> the exp-decay fit + leave-one-chrom jackknife). Mirrors how `qpadm` dispatches.
+            std::exit(run_dates_command(*config));
         });
     }
 

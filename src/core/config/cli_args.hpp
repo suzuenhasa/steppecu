@@ -45,6 +45,7 @@ enum class Command {
     F3Sweep,  ///< GPU-only all-combinations f3 sweep (every C(P,3); on-device filter).
     Qpfstats, ///< genotype-path joint f2 smoother (--prefix + --pops -> a smoothed f2 dir).
     QpGraph,  ///< single-graph qpGraph fit (--f2-dir + --graph edge-list -> the fit).
+    Dates,    ///< admixture DATING (--prefix + --target + --left{2} -> the date + SE; cuFFT LD engine).
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid

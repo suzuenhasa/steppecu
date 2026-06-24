@@ -55,6 +55,7 @@
 // place a host caller meets the GPU f2 path; `core` reaches it solely through the
 // CUDA-free ComputeBackend interface in device/backend.hpp.
 #include <cublas_v2.h>
+#include <cufft.h>
 #include <cusolverDn.h>
 #include <cuda_runtime.h>
 #include <cub/device/device_select.cuh>  // cub::DeviceSelect::Flagged — the GPU-only sweep
@@ -93,6 +94,7 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
+#include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
 #include "device/cuda/qpfstats_kernel.cuh"  // launch_qpfstats_zero_nan_ymat / _add_ridge_diag (the smoother prep)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
@@ -1303,6 +1305,208 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(cnt, dCnt.data(), nb_out * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+
+    /// DATES weighted-LD CURVE on the GPU — the cuFFT autocorrelation LD engine (backend.hpp
+    /// dates_curve / include/steppe/dates.hpp). The whole per-admixed-sample pipeline, GPU-bound
+    /// and FLAT in M: the ~10^12 SNP-pair object is NEVER formed (cov(lag) = IFFT(|FFT(grid)|²),
+    /// the ALDER FFT trick). Device-resident inputs; the host drives only the per-sample loop
+    /// (n_target ~ 100) + the ONE-TIME plan setup. PER sample: scatter onto the fine per-chrom
+    /// grid (weight/residual kernels), then batched cufftExecD2Z over all chroms -> |F|²/cross
+    /// power kernels -> batched cufftExecZ2D inverse -> extract+accumulate lags into the per-chrom
+    /// dd moments (summed across samples). Then re-bin lag->output-bin into the per-(chrom,bin)
+    /// CORR sufficient statistics. Native double FFT (cuFFT UNNORMALIZED -> explicit /n_fft,
+    /// IDENTICAL to the FFTW reference). The weight/residual is the §12 cancellation carve-out.
+    [[nodiscard]] DatesMoments dates_curve(
+        const double* src1_freq, const double* src2_freq, const double* src_valid,
+        const std::uint8_t* packed, std::size_t bytes_per_record, int n_target,
+        const int* target_ploidy, const int* grid_cell, long M,
+        const int* chrom_first, const int* chrom_last, int n_chrom,
+        int numqbins, int n_bin, int diffmax, double binsize, int qbin,
+        const Precision& precision) override {
+        (void)target_ploidy;  // DATES dosage = code/2 (ploidy-independent); see dates.c getgtypes.
+        (void)binsize;        // the output-bin width is folded into the lag->bin re-bin (floor(d/qbin)).
+        (void)precision;      // native double FFT + native weight carve-out (§12).
+        guard_device();
+        DatesMoments out;
+        out.n_chrom = n_chrom;
+        out.n_bin = n_bin;
+        if (n_chrom <= 0 || n_bin <= 0 || M <= 0 || n_target <= 0 || numqbins <= 0 ||
+            diffmax <= 0) {
+            out.status = Status::Ok;
+            return out;
+        }
+
+        // ---- FFT length: pad ALL chroms to a COMMON power-of-2 n_fft >= 2·max_len so ONE
+        // cufftPlanMany batches every chrom. The linear autocorrelation Σ_g W[g]·W[g+lag]
+        // (lag<len) is INDEPENDENT of n_fft once n_fft >= 2·len (zero-pad avoids circular
+        // wrap), and the /n_fft scale matches the FFTW reference — DATES uses a per-chrom
+        // 2^(ceil(log2(len))+1); a common larger n is bit-equivalent for the autocorr values.
+        int max_len = 1;
+        for (int kc = 0; kc < n_chrom; ++kc) {
+            const int slo = chrom_first[kc], shi = chrom_last[kc];
+            if (slo >= 0 && shi >= slo) max_len = std::max(max_len, shi - slo + 1);
+        }
+        // ensure n_fft covers the linear autocorr support AND the requested lags.
+        long need = std::max<long>(2L * max_len, static_cast<long>(diffmax) + 1L);
+        int n_fft = 1;
+        while (static_cast<long>(n_fft) < need) n_fft <<= 1;
+        const int n_cplx = n_fft / 2 + 1;
+
+        // ---- cuFFT plans (created ONCE, reused across samples): batched D2Z + Z2D over n_chrom.
+        auto cufft_ok = [](cufftResult r, const char* what) {
+            if (r != CUFFT_SUCCESS)
+                throw std::runtime_error(std::string("cuFFT error in ") + what + ": code " +
+                                         std::to_string(static_cast<int>(r)));
+        };
+        cufftHandle plan_fwd = 0, plan_inv = 0;
+        int n_dim = n_fft;
+        cufft_ok(cufftPlanMany(&plan_fwd, 1, &n_dim, nullptr, 1, n_fft, nullptr, 1, n_cplx,
+                               CUFFT_D2Z, n_chrom), "cufftPlanMany(D2Z)");
+        cufft_ok(cufftPlanMany(&plan_inv, 1, &n_dim, nullptr, 1, n_cplx, nullptr, 1, n_fft,
+                               CUFFT_Z2D, n_chrom), "cufftPlanMany(Z2D)");
+        cufft_ok(cufftSetStream(plan_fwd, stream_.get()), "cufftSetStream(fwd)");
+        cufft_ok(cufftSetStream(plan_inv, stream_.get()), "cufftSetStream(inv)");
+
+        // ---- device-resident inputs + scratch ----
+        const std::size_t Mu = static_cast<std::size_t>(M);
+        const std::size_t nq = static_cast<std::size_t>(numqbins);
+        const std::size_t pad = static_cast<std::size_t>(n_chrom) * static_cast<std::size_t>(n_fft);
+        const std::size_t cpx = static_cast<std::size_t>(n_chrom) * static_cast<std::size_t>(n_cplx);
+        const std::size_t dm = static_cast<std::size_t>(n_chrom) *
+                               (static_cast<std::size_t>(diffmax) + 1);
+        const std::size_t cb = static_cast<std::size_t>(n_chrom) * static_cast<std::size_t>(n_bin);
+        const std::size_t pk = static_cast<std::size_t>(n_target) * bytes_per_record;
+
+        DeviceBuffer<double> dS1(Mu), dS2(Mu), dValid(Mu);
+        DeviceBuffer<std::uint8_t> dPacked(pk);
+        DeviceBuffer<int> dCell(Mu), dCfirst(static_cast<std::size_t>(n_chrom)),
+            dClast(static_cast<std::size_t>(n_chrom));
+        DeviceBuffer<double> dZ0(nq), dZ1(nq), dZ2(nq);
+        DeviceBuffer<double> dPad0(pad), dPad1(pad), dPad2(pad);
+        DeviceBuffer<double> dInv(pad);
+        // complex scratch (cufftDoubleComplex == double2): forward outs for z0,z1,z2 + power.
+        DeviceBuffer<double2> dF0(cpx), dF1(cpx), dF2(cpx), dPow(cpx);
+        // per-chrom dd lag moments (summed across samples): dd00,dd11,dd02,dd20.
+        DeviceBuffer<double> dDd00(dm), dDd11(dm), dDd02(dm), dDd20(dm);
+        // output corr sufficient stats.
+        DeviceBuffer<double> dS0(cb), dS11(cb), dS12(cb), dS22(cb);
+        DeviceBuffer<double> dDot12(1), dDot22(1);
+
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dS1.data(), src1_freq, Mu * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dS2.data(), src2_freq, Mu * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dValid.data(), src_valid, Mu * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), packed, pk,
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCell.data(), grid_cell, Mu * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCfirst.data(), chrom_first,
+                                          static_cast<std::size_t>(n_chrom) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dClast.data(), chrom_last,
+                                          static_cast<std::size_t>(n_chrom) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd00.data(), 0, dm * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd11.data(), 0, dm * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd02.data(), 0, dm * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd20.data(), 0, dm * sizeof(double), stream_.get()));
+
+        auto fft_fwd = [&](double* in, double2* fr) {
+            cufft_ok(cufftExecD2Z(plan_fwd, in, reinterpret_cast<cufftDoubleComplex*>(fr)),
+                     "cufftExecD2Z");
+        };
+        auto fft_inv = [&](double2* fr, double* outr) {
+            cufft_ok(cufftExecZ2D(plan_inv, reinterpret_cast<cufftDoubleComplex*>(fr), outr),
+                     "cufftExecZ2D");
+        };
+
+        // ---- per-sample loop (host-driven; the FFT/scatter are GPU-bound) -----------------
+        for (int i = 0; i < n_target; ++i) {
+            STEPPE_CUDA_CHECK(cudaMemsetAsync(dDot12.data(), 0, sizeof(double), stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemsetAsync(dDot22.data(), 0, sizeof(double), stream_.get()));
+            launch_dates_regress_dots(dS1.data(), dS2.data(), dValid.data(), dPacked.data(),
+                                      bytes_per_record, i, M, dDot12.data(), dDot22.data(),
+                                      stream_.get());
+            double h_dot12 = 0.0, h_dot22 = 0.0;
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&h_dot12, dDot12.data(), sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&h_dot22, dDot22.data(), sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            const double yreg = (h_dot22 != 0.0) ? (h_dot12 / h_dot22) : 0.0;
+
+            STEPPE_CUDA_CHECK(cudaMemsetAsync(dZ0.data(), 0, nq * sizeof(double), stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemsetAsync(dZ1.data(), 0, nq * sizeof(double), stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemsetAsync(dZ2.data(), 0, nq * sizeof(double), stream_.get()));
+            launch_dates_scatter(dS1.data(), dS2.data(), dValid.data(), dPacked.data(),
+                                 bytes_per_record, i, M, dCell.data(), yreg, dZ0.data(),
+                                 dZ1.data(), dZ2.data(), stream_.get());
+
+            // pack chrom segments -> FFT rows (z0,z1,z2).
+            launch_dates_pack_segments(dZ0.data(), dCfirst.data(), dClast.data(), n_chrom,
+                                       numqbins, n_fft, dPad0.data(), stream_.get());
+            launch_dates_pack_segments(dZ1.data(), dCfirst.data(), dClast.data(), n_chrom,
+                                       numqbins, n_fft, dPad1.data(), stream_.get());
+            launch_dates_pack_segments(dZ2.data(), dCfirst.data(), dClast.data(), n_chrom,
+                                       numqbins, n_fft, dPad2.data(), stream_.get());
+
+            // forward transforms.
+            fft_fwd(dPad0.data(), dF0.data());
+            fft_fwd(dPad1.data(), dF1.data());
+            fft_fwd(dPad2.data(), dF2.data());
+
+            // dd00 = autocorr(z0) = IFFT(|F0|²)/n.
+            launch_dates_power_spectrum(dF0.data(), n_cplx, n_chrom, dPow.data(), stream_.get());
+            fft_inv(dPow.data(), dInv.data());
+            launch_dates_extract_lags(dInv.data(), n_fft, n_chrom, diffmax, dDd00.data(),
+                                      stream_.get());
+            // dd11 = autocorr(z1).
+            launch_dates_power_spectrum(dF1.data(), n_cplx, n_chrom, dPow.data(), stream_.get());
+            fft_inv(dPow.data(), dInv.data());
+            launch_dates_extract_lags(dInv.data(), n_fft, n_chrom, diffmax, dDd11.data(),
+                                      stream_.get());
+            // dd02 = crosscorr(z0,z2) = IFFT(conj(F0)·F2)/n.
+            launch_dates_cross_power(dF0.data(), dF2.data(), n_cplx, n_chrom, dPow.data(),
+                                     stream_.get());
+            fft_inv(dPow.data(), dInv.data());
+            launch_dates_extract_lags(dInv.data(), n_fft, n_chrom, diffmax, dDd02.data(),
+                                      stream_.get());
+            // dd20 = crosscorr(z2,z0) = IFFT(conj(F2)·F0)/n.
+            launch_dates_cross_power(dF2.data(), dF0.data(), n_cplx, n_chrom, dPow.data(),
+                                     stream_.get());
+            fft_inv(dPow.data(), dInv.data());
+            launch_dates_extract_lags(dInv.data(), n_fft, n_chrom, diffmax, dDd20.data(),
+                                      stream_.get());
+        }
+
+        // ---- re-bin lag -> output bin into the corr sufficient stats ----------------------
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dS0.data(), 0, cb * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dS11.data(), 0, cb * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dS12.data(), 0, cb * sizeof(double), stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dS22.data(), 0, cb * sizeof(double), stream_.get()));
+        launch_dates_accumulate_bins(dDd00.data(), dDd11.data(), dDd02.data(), dDd20.data(),
+                                     n_chrom, diffmax, n_bin, qbin, dS0.data(), dS11.data(),
+                                     dS12.data(), dS22.data(), stream_.get());
+
+        out.s0.assign(cb, 0.0);  out.s1.assign(cb, 0.0);  out.s2.assign(cb, 0.0);
+        out.s11.assign(cb, 0.0); out.s12.assign(cb, 0.0); out.s22.assign(cb, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s0.data(), dS0.data(), cb * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s11.data(), dS11.data(), cb * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s12.data(), dS12.data(), cb * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s22.data(), dS22.data(), cb * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        cufftDestroy(plan_fwd);
+        cufftDestroy(plan_inv);
+        out.status = Status::Ok;
+        return out;
     }
 
     /// qpfstats SMOOTHING SOLVE on the GPU (the genotype-path joint f2 smoother; backend.hpp

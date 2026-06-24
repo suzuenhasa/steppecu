@@ -467,6 +467,183 @@ public:
         }
     }
 
+    /// DATES weighted-LD CURVE — the cuFFT autocorrelation LD engine REFERENCE oracle
+    /// (backend.hpp dates_curve / include/steppe/dates.hpp). The native, FFT-FREE direct
+    /// autocorrelation the GPU cuFFT path is diffed against. The pairwise double-sum at lag d
+    /// over a chrom segment IS the autocorrelation of the genetic-map-binned grid:
+    ///   autocorr(W)[lag] = Σ_g W[g]·W[g+lag] == IFFT(|FFT(W)|²)[lag]
+    /// — ALGEBRAICALLY identical to the cuFFT result, so this is the within-codebase parity
+    /// pin AND reproduces DATES dates.c ddadd/ddcorr/addcorr2 exactly. The ~10^12 SNP-pair
+    /// object is NEVER formed (we autocorr the GRID, length numqbins, not the SNP pairs).
+    /// Native FP64 (ignores `precision`; the weight is the §12 cancellation carve-out, the FFT
+    /// is native double). Mirrors dates.c:585-740 (per-sample weight/residual/scatter) +
+    /// ddadd (the six dd moments) + ddcorr (the lag->bin re-bin into the CORR sufficient stats).
+    [[nodiscard]] DatesMoments dates_curve(
+        const double* src1_freq, const double* src2_freq, const double* src_valid,
+        const std::uint8_t* packed, std::size_t bytes_per_record, int n_target,
+        const int* target_ploidy, const int* grid_cell, long M,
+        const int* chrom_first, const int* chrom_last, int n_chrom,
+        int numqbins, int n_bin, int diffmax, double binsize, int qbin,
+        const Precision& precision) override {
+        (void)precision;  // native FP64 reference; FFT is native double; weight is the carve-out
+        DatesMoments out;
+        out.n_chrom = n_chrom;
+        out.n_bin = n_bin;
+        if (n_chrom <= 0 || n_bin <= 0 || M <= 0 || n_target <= 0 || numqbins <= 0) {
+            out.status = Status::Ok;
+            return out;
+        }
+        const std::size_t cb = static_cast<std::size_t>(n_chrom) * static_cast<std::size_t>(n_bin);
+        out.s0.assign(cb, 0.0);  out.s1.assign(cb, 0.0);  out.s2.assign(cb, 0.0);
+        out.s11.assign(cb, 0.0); out.s12.assign(cb, 0.0); out.s22.assign(cb, 0.0);
+
+        const std::size_t nq = static_cast<std::size_t>(numqbins);
+        // Per-chrom accumulated dd moment arrays over fine-grid lags [0..diffmax]
+        // (ddcbins[k] in dates.c). Summed across samples, finalized into the output bins below.
+        const std::size_t dm = static_cast<std::size_t>(diffmax) + 1;
+        std::vector<double> dd00(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+        std::vector<double> dd11(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+        std::vector<double> dd01(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+        std::vector<double> dd10(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+        std::vector<double> dd02(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+        std::vector<double> dd20(static_cast<std::size_t>(n_chrom) * dm, 0.0);
+
+        // Per-sample scratch: the fine-grid moment arrays (z0q/z1q/z2q) + per-SNP regression.
+        std::vector<double> z0q(nq), z1q(nq), z2q(nq);
+        std::vector<double> w0(static_cast<std::size_t>(M)), res(static_cast<std::size_t>(M)),
+                            wt(static_cast<std::size_t>(M));
+        std::vector<long> xindex(static_cast<std::size_t>(M));  // valid-SNP -> SNP index map
+
+        for (int i = 0; i < n_target; ++i) {
+            // ---- per-sample: collect valid SNPs, weight, dosage (dates.c:585-606) ----------
+            const std::uint8_t* rec = packed + static_cast<std::size_t>(i) * bytes_per_record;
+            const int pl = (target_ploidy != nullptr) ? target_ploidy[i] : 2;
+            long numx = 0;
+            // accumulators for the regression: ww1=w0-w2, ww2=w1-w2
+            long double dot12 = 0.0L, dot22 = 0.0L;
+            for (long s = 0; s < M; ++s) {
+                if (src_valid[s] == 0.0) continue;
+                const std::size_t byte_in_rec =
+                    static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+                const int pos = static_cast<int>(s % core::kCodesPerByte);
+                const std::uint8_t code = core::genotype_code(rec[byte_in_rec], pos);
+                if (code == core::kMissingGenotypeCode) continue;  // getgtypes g<0 -> skip
+                // dosage g/2 (DATES w0 = g/2.0; g = ref-allele copies). A pseudo-haploid
+                // sample (ploidy 1) yields code 0/2; g/2 still applies (DATES uses /2.0 flat).
+                (void)pl;
+                const double g = static_cast<double>(code);
+                const double w1 = src1_freq[s];  // cauc_freq (source 1)
+                const double w2v = src2_freq[s]; // af_freq   (source 2)
+                const double w0v = g / 2.0;
+                w0[static_cast<std::size_t>(numx)] = w0v;
+                wt[static_cast<std::size_t>(numx)] = w1 - w2v;  // population-delta weight
+                const double a = w0v - w2v;   // ww1
+                const double b = w1 - w2v;    // ww2
+                dot12 += static_cast<long double>(a) * static_cast<long double>(b);
+                dot22 += static_cast<long double>(b) * static_cast<long double>(b);
+                // stash w1,w2 in res temporarily? No — recompute below; store src idx.
+                xindex[static_cast<std::size_t>(numx)] = s;
+                ++numx;
+            }
+            if (numx == 0) continue;
+            const double yreg = (dot22 != 0.0L)
+                                    ? static_cast<double>(dot12 / dot22)
+                                    : 0.0;  // regression coeff (dates.c:626)
+
+            // ---- residual + scatter onto the fine grid (dates.c:627-665) -------------------
+            std::fill(z0q.begin(), z0q.end(), 0.0);
+            std::fill(z1q.begin(), z1q.end(), 0.0);
+            std::fill(z2q.begin(), z2q.end(), 0.0);
+            for (long k1 = 0; k1 < numx; ++k1) {
+                const long s = xindex[static_cast<std::size_t>(k1)];
+                const double w1 = src1_freq[s];
+                const double w2v = src2_freq[s];
+                const double pred = yreg * w1 + (1.0 - yreg) * w2v;  // ww1 prediction
+                const double r = w0[static_cast<std::size_t>(k1)] - pred;  // residual
+                const double y = r * wt[static_cast<std::size_t>(k1)];     // signal = res·wt
+                const int cell = grid_cell[s];
+                const std::size_t cc = static_cast<std::size_t>(cell);
+                z0q[cc] += 1.0;
+                z1q[cc] += y;
+                z2q[cc] += y * y;
+            }
+
+            // ---- per-chrom DIRECT autocorrelation == IFFT(|FFT|²) (dates.c ddadd) ----------
+            for (int kc = 0; kc < n_chrom; ++kc) {
+                const int slo = chrom_first[kc];
+                const int shi = chrom_last[kc];
+                if (slo < 0 || shi < slo) continue;
+                const int len = shi - slo + 1;
+                if (len <= 1) continue;
+                double* a00 = dd00.data() + static_cast<std::size_t>(kc) * dm;
+                double* a11 = dd11.data() + static_cast<std::size_t>(kc) * dm;
+                double* a01 = dd01.data() + static_cast<std::size_t>(kc) * dm;
+                double* a10 = dd10.data() + static_cast<std::size_t>(kc) * dm;
+                double* a02 = dd02.data() + static_cast<std::size_t>(kc) * dm;
+                double* a20 = dd20.data() + static_cast<std::size_t>(kc) * dm;
+                const double* p0 = z0q.data() + static_cast<std::size_t>(slo);
+                const double* p1 = z1q.data() + static_cast<std::size_t>(slo);
+                const double* p2 = z2q.data() + static_cast<std::size_t>(slo);
+                const int lmax = (diffmax < len - 1) ? diffmax : len - 1;
+                // fftauto / fftcv2 give the full +lag correlations; lag>len-1 contributes 0
+                // (the grids are zero beyond the segment). Σ_g a[g]·b[g+lag].
+                for (int lag = 0; lag <= lmax; ++lag) {
+                    long double c00 = 0.0L, c11 = 0.0L, c01 = 0.0L, c10 = 0.0L,
+                                c02 = 0.0L, c20 = 0.0L;
+                    const int n_pair = len - lag;
+                    for (int g = 0; g < n_pair; ++g) {
+                        const double z0a = p0[g], z0b = p0[g + lag];
+                        const double z1a = p1[g], z1b = p1[g + lag];
+                        const double z2a = p2[g], z2b = p2[g + lag];
+                        c00 += static_cast<long double>(z0a) * z0b;  // count autocorr (dd00)
+                        c11 += static_cast<long double>(z1a) * z1b;  // signal autocorr (dd11)
+                        c01 += static_cast<long double>(z0a) * z1b;  // z0×z1 (dd01)
+                        c10 += static_cast<long double>(z1a) * z0b;  // z1×z0 (dd10)
+                        c02 += static_cast<long double>(z0a) * z2b;  // z0×z2 (dd02)
+                        c20 += static_cast<long double>(z2a) * z0b;  // z2×z0 (dd20)
+                    }
+                    const std::size_t li = static_cast<std::size_t>(lag);
+                    a00[li] += static_cast<double>(c00);
+                    a11[li] += static_cast<double>(c11);
+                    a01[li] += static_cast<double>(c01);
+                    a10[li] += static_cast<double>(c10);
+                    a02[li] += static_cast<double>(c02);
+                    a20[li] += static_cast<double>(c20);
+                }
+            }
+        }  // per sample
+
+        // ---- ddcorr: re-bin fine-grid lag d -> output bin s, add to CORR stats -------------
+        // dbinsize = binsize/qbin; output bin s = floor(d·dbinsize/binsize) = floor(d/qbin).
+        // addcorr2(corr, dd00, dd01, dd10, dd11, dd02, dd20):
+        //   S0+=dd00, S1+=dd01, S2+=dd10, S12+=dd11, S11+=dd02, S22+=dd20 (ldsubs.c addcorr2).
+        const double dbinsize = binsize / static_cast<double>(qbin);
+        for (int kc = 0; kc < n_chrom; ++kc) {
+            const double* a00 = dd00.data() + static_cast<std::size_t>(kc) * dm;
+            const double* a11 = dd11.data() + static_cast<std::size_t>(kc) * dm;
+            const double* a01 = dd01.data() + static_cast<std::size_t>(kc) * dm;
+            const double* a10 = dd10.data() + static_cast<std::size_t>(kc) * dm;
+            const double* a02 = dd02.data() + static_cast<std::size_t>(kc) * dm;
+            const double* a20 = dd20.data() + static_cast<std::size_t>(kc) * dm;
+            for (int d = 1; d <= diffmax; ++d) {  // lag 0 skipped (dates.c ddcorr d=1..)
+                if (a00[static_cast<std::size_t>(d)] < 0.5) continue;
+                const double ys = static_cast<double>(d) * dbinsize;
+                const int s = static_cast<int>(ys / binsize);
+                if (s < 0 || s >= n_bin) continue;
+                const std::size_t o = static_cast<std::size_t>(kc) * static_cast<std::size_t>(n_bin) +
+                                      static_cast<std::size_t>(s);
+                out.s0[o]  += a00[static_cast<std::size_t>(d)];
+                out.s1[o]  += a01[static_cast<std::size_t>(d)];
+                out.s2[o]  += a10[static_cast<std::size_t>(d)];
+                out.s12[o] += a11[static_cast<std::size_t>(d)];
+                out.s11[o] += a02[static_cast<std::size_t>(d)];
+                out.s22[o] += a20[static_cast<std::size_t>(d)];
+            }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     /// qpfstats SMOOTHING SOLVE — the genotype-path joint f2 smoother REFERENCE oracle
     /// (backend.hpp qpfstats_smooth / include/steppe/qpfstats.hpp). The native-FP64
     /// shared-factor batched least-squares the GPU path is diffed against, reproducing AT2

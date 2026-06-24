@@ -38,6 +38,7 @@ __all__ = [
     "f4ratio",
     "qpdstat",
     "dstat",
+    "dates",
     "qpadm_search",
 ]
 
@@ -693,6 +694,33 @@ def dstat(
     d = _core.run_dstat(str(prefix), quads, blgsize, device)
     res = F4Result(d)
     return res.table if as_dataframe else res
+
+
+def dates(
+    prefix: Any,
+    target: str,
+    source1: str,
+    source2: str,
+    *,
+    device: int = 0,
+):
+    """Admixture DATING on the GPU — the DATES tool (the time since admixture, in generations).
+
+    Reads the GENOTYPE TRIPLE ``<prefix>.{geno,snp,ind}`` directly (NOT the f2 cache) and
+    infers the date from the weighted ancestry-covariance decay vs genetic distance: the
+    covariance between SNP pairs decays as ``A*exp(-lambda*d)+c`` with the genetic distance d,
+    and ``lambda`` is the generations since admixture. The covariance curve is computed with
+    the ALDER FFT reformulation (the cuFFT autocorrelation LD engine) — NO host O(M^2)
+    SNP-pair loop. ``target`` is the admixed population; ``source1``/``source2`` are the two
+    reference sources (the weight is ``freq(source1) - freq(source2)``). The ``.snp`` MUST
+    carry a real cM genetic map.
+
+    Returns a dict ``{target, source1, source2, date_gen, se, fit_error_sd, curve_cm,
+    curve_corr, status}``: ``date_gen`` is the generations since admixture, ``se`` the
+    leave-one-chromosome block-jackknife standard error, and ``curve_cm``/``curve_corr`` the
+    binned covariance-decay curve (cM vs the normalized correlation). A missing genotype file
+    raises a ValueError."""
+    return _core.run_dates(str(prefix), target, source1, source2, device)
 
 
 def f3(

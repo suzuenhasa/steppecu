@@ -480,6 +480,19 @@ target_link_libraries(test_qpfstats_smooth_parity
 set_target_properties(test_qpfstats_smooth_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME qpfstats_smooth_parity COMMAND test_qpfstats_smooth_parity)
 
+# --- DATES cuFFT LD-engine parity test (the within-codebase FFT-engine gate) -------
+# CUDA TU: drives BOTH production backends and asserts the CudaBackend cuFFT autocorrelation
+# path (ComputeBackend::dates_curve) matches the CpuBackend FFT-FREE direct-autocorrelation
+# oracle on the moment sufficient statistics that drive the corr curve — Σ_g W[g]·W[g+lag] ==
+# IFFT(|FFT(W)|²)/n, the within-codebase pin for the GPU FFT engine (the external DATES date
+# golden is cli_dates / py_dates). CONSTRUCTED small inputs (a within-codebase numerical-
+# equivalence test, NOT a reported result). SKIPs/fails fast with no GPU.
+add_executable(test_dates_parity reference/test_dates_parity.cu)
+target_link_libraries(test_dates_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_dates_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME dates_parity COMMAND test_dates_parity)
+
 # --- GPU-ONLY f-stat SWEEP parity test (the sweep acceptance gate) ----------------
 # CUDA TU: uploads the REAL 9-pop golden f2 fixture RESIDENT to VRAM, runs the GPU-only
 # run_f4_sweep / run_f3_sweep (on-device combinatorial unrank -> the SAME assemble gather +
@@ -1307,6 +1320,23 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- `steppe dates` DATES admixture-dating golden gate --------------------------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe dates --prefix
+  # <STEPPE_AADR_ROOT>/raw/v66.p1_HO.aadr.patch.PUB --target PUR --left CEU,YRI` and asserts
+  # the inferred admixture date (generations) reproduces the DATES reference golden (9.742 gen,
+  # SE 0.317; tests/reference/goldens/dates/aadr_PUR_CEU_YRI) — RUNNING ON THE GPU through the
+  # cuFFT autocorrelation LD engine (NEVER the f2 cache, NEVER a host O(M²) SNP-pair loop). The
+  # date is gated at rtol 2% (the raw TGENO's 584131 SNPs vs the reference's convertf-filtered
+  # 579720 perturb it marginally), the SE at atol 0.10. SKIPs cleanly (exit 0) when no CUDA
+  # device is visible OR the raw AADR is absent. NO SYNTHETIC DATA (memory real-data-only).
+  add_executable(test_cli_dates cli/test_cli_dates.cpp)
+  target_link_libraries(test_cli_dates PRIVATE steppe::warnings)
+  add_dependencies(test_cli_dates steppe_app)
+  add_test(NAME cli_dates
+           COMMAND test_cli_dates
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}")
 
   # --- `steppe qpfstats` genotype-path smoothed-f2-TENSOR golden gate --------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpfstats --prefix

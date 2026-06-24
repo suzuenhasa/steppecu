@@ -26,6 +26,7 @@ add_library(steppe_device STATIC
     cuda/qpgraph_fit_kernels.cu   # qpGraph: the on-device IDEA-1 fleet (one thread/restart; the path-table fill_pwts + GLS objective + NNLS edge solve)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/dstat_kernel.cu          # qpDstat Part B: per-block per-quadruple normalized-D reduction (the S2 divergence)
+    cuda/dates_kernel.cu          # DATES: the cuFFT autocorrelation LD engine kernels (weight/residual/scatter + |F|²/cross-power + lag re-bin)
     cuda/qpfstats_kernel.cu       # qpfstats: zero-NaN-in-ymat + add-ridge-diag + NaN-row-downdate (the smoothing-solve prep kernels)
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
@@ -55,7 +56,7 @@ target_include_directories(steppe_device PUBLIC
 
 target_link_libraries(steppe_device
     PUBLIC  steppe::api steppe::core_internal     # public, CUDA-FREE seam + shared helpers
-    PRIVATE steppe::warnings CUDA::cudart CUDA::cublas CUDA::cusolver)  # CUDA stays PRIVATE → layering
+    PRIVATE steppe::warnings CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cufft)  # CUDA stays PRIVATE → layering (cufft: the DATES autocorrelation LD engine)
 
 # Fixed-slice Ozaki engagement symbols (cublasSetEmulationStrategy /
 # cublasSetFixedPointEmulationMantissaControl /

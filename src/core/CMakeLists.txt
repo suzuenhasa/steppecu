@@ -114,6 +114,13 @@ add_library(steppe_core STATIC
     # f2/f3/f4 popcomb set, then the on-device shared-factor smoothing solve
     # (ComputeBackend::qpfstats_smooth) + scatter/recenter to a smoothed F2BlockTensor.
     stats/qpfstats.cpp
+    # DATES (run_dates): the GENOTYPE-PATH admixture-DATING tool — REUSES the qpDstat-B
+    # genotype front-end (read_ind/read_snp/read_tile/decode_af + the per-SNP genpos seam)
+    # + DIVERGES into the cuFFT autocorrelation LD engine (ComputeBackend::dates_curve, the
+    # .cu / the CpuBackend FFT-free oracle) -> the weighted-LD covariance decay curve, the
+    # exp+affine fit, and the leave-one-chrom weighted block jackknife. NEVER the f2 cache,
+    # NEVER a host O(M^2) SNP-pair loop (the FFT reformulation designs the trap out).
+    stats/dates.cpp
     # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
     # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
     # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps

@@ -43,6 +43,7 @@
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/config.hpp"            // steppe::DeviceConfig
 #include "steppe/dstat.hpp"             // run_dstat + DstatResult (qpDstat Part B genotype-path D)
+#include "steppe/dates.hpp"             // run_dates + DatesResult/DatesOptions (the DATES dating tool)
 #include "steppe/extract.hpp"           // run_extract_f2 + F2ExtractResult (M(py-2) genotype->f2 extract)
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f3.hpp"                // run_f3 + F3Result (the standalone-f3 binding)
@@ -639,6 +640,48 @@ nb::dict run_dstat_py(const std::string& prefix,
     return dstat_to_dict(result, pops);
 }
 
+// run_dates: the DATES admixture-dating binding. Reads the genotype TRIPLE prefix.{geno,snp,ind}
+// directly (the cuFFT autocorrelation LD engine; NEVER the f2 cache, NEVER a host O(M²) SNP-pair
+// loop) and returns the date in generations + the leave-one-chromosome block-jackknife SE.
+// `target` is the admixed population; `source1`/`source2` are the two reference sources (the
+// weight is wt = freq(source1) - freq(source2)). The .snp MUST carry a real genetic map (cM).
+// Returns a dict {target, source1, source2, date_gen, se, fit_error_sd, curve_cm, curve_corr,
+// status}. Faults (no device, missing files) raise (§1.3 / §5.2).
+nb::dict run_dates_py(const std::string& prefix, const std::string& target,
+                      const std::string& source1, const std::string& source2, int device) {
+    const std::string geno = prefix + ".geno";
+    const std::string snp = prefix + ".snp";
+    const std::string ind = prefix + ".ind";
+
+    steppe::DeviceConfig cfg;
+    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    steppe::DatesOptions opts;  // defaults == the DATES reference par.dates.
+    steppe::DatesResult result;
+    try {
+        sd::Resources resources = sd::build_resources(cfg);
+        if (resources.gpus.empty()) {
+            raise_value(
+                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
+                "required)");
+        }
+        result = steppe::run_dates(geno, snp, ind, target, source1, source2, opts, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("input/device error: ") + e.what());
+    }
+
+    nb::dict d;
+    d["target"] = target;
+    d["source1"] = source1;
+    d["source2"] = source2;
+    d["date_gen"] = result.date_gen;
+    d["se"] = result.se;
+    d["fit_error_sd"] = result.fit_error_sd;
+    d["curve_cm"] = result.curve_cm;
+    d["curve_corr"] = result.curve_corr;
+    d["status"] = (result.status == steppe::Status::Ok) ? "ok" : "error";
+    return d;
+}
+
 // run_extract_f2: the M(py-2) genotype->f2 EXTRACT binding. Reads the genotype TRIPLE
 // prefix.{geno,snp,ind} directly and builds the f2_blocks tensor (decode->filter->
 // assign_blocks->tiered f2 compute->to_host) through the CUDA-free steppe::run_extract_f2
@@ -1059,6 +1102,17 @@ NB_MODULE(_core, m) {
           "MORGANS (AT2 default 0.05). Returns a dict of parallel arrays {pop1,pop2,pop3,pop4,"
           "est,se,z,p} (the AT2 D sign/Z/p convention). Forced diploid + allsnps=TRUE + "
           "autosomes-only are pinned (AT2 qpdstat_geno parity).");
+
+    m.def("run_dates", &run_dates_py, "prefix"_a, "target"_a, "source1"_a, "source2"_a,
+          "device"_a = 0,
+          "Admixture DATING (GPU; the DATES tool). Reads the genotype triple "
+          "<prefix>.{geno,snp,ind} directly (NOT the f2 cache) and infers the time since "
+          "admixture from the weighted ancestry-covariance decay vs genetic distance (the cuFFT "
+          "autocorrelation LD engine; NO host O(M^2) SNP-pair loop). `target` is the admixed "
+          "population; `source1`/`source2` are the two reference sources (weight = "
+          "freq(source1)-freq(source2)). The .snp must carry a real cM genetic map. Returns a "
+          "dict {target,source1,source2,date_gen,se,fit_error_sd,curve_cm,curve_corr,status}; "
+          "date_gen is generations since admixture, se the leave-one-chromosome block jackknife.");
 
     m.def("run_extract_f2", &run_extract_f2_py, "prefix"_a, "pops"_a, "out"_a = "",
           "device"_a = 0, "blgsize"_a = 0.05, "maf"_a = 0.0, "maxmiss"_a = 0.0,
