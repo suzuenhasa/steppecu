@@ -104,6 +104,45 @@ namespace {
     return pairwise_sum(a, h) + pairwise_sum(a + h, n - h);
 }
 
+/// S7 SE ORACLE — sample-covariance DIAGONAL of an (nrows × ncols) row-major data
+/// matrix `w` (w[i*ncols + c]), matching R's cov(): divides by (nrows - 1), columns
+/// are the variables. Returns the ncols-length diagonal (the only part SE needs).
+/// MOVED VERBATIM from core/qpadm/nested_models.cpp (the M7 on-device move): this is
+/// now the CpuBackend-ONLY long-double ORACLE (the CUDA backend runs the on-device
+/// native-FP64 SE kernel instead). The long double accumulator is the test oracle —
+/// extra precision for the sum-of-squares to match AT2 cov() (§3.3 never narrow
+/// accumulators), NOT a host-compute violation (CpuBackend is test-only).
+[[nodiscard]] std::vector<double> se_sample_cov_diag(const std::vector<double>& w,
+                                                     int nrows, int ncols) {
+    // Hoist the column-stride widening once (§3.3: keep the widening, fold the boilerplate);
+    // the (i,c)->w[i*ncols+c] row-major access then lives in one accessor used by both loops
+    // (§4 one concept = one spelling — a divergent index edit can no longer miss a copy).
+    const std::size_t nc = static_cast<std::size_t>(ncols);
+    const auto row_major_at = [&w, nc](int i, int c) -> double {
+        return w[static_cast<std::size_t>(i) * nc + static_cast<std::size_t>(c)];
+    };
+
+    std::vector<double> mean(nc, 0.0);
+    for (int i = 0; i < nrows; ++i)
+        for (int c = 0; c < ncols; ++c)
+            mean[static_cast<std::size_t>(c)] += row_major_at(i, c);
+    for (int c = 0; c < ncols; ++c) mean[static_cast<std::size_t>(c)] /= static_cast<double>(nrows);
+
+    std::vector<double> diag(nc, 0.0);
+    for (int c = 0; c < ncols; ++c) {
+        const double mc = mean[static_cast<std::size_t>(c)];  // loop-invariant w.r.t. inner i
+        // long double accumulator: extra precision for the sum-of-squares to match AT2 cov()
+        // (§3.3 never narrow accumulators — keep long double, the rest is double-by-design).
+        long double acc = 0.0L;
+        for (int i = 0; i < nrows; ++i) {
+            const double d = row_major_at(i, c) - mc;
+            acc += static_cast<long double>(d) * static_cast<long double>(d);
+        }
+        diag[static_cast<std::size_t>(c)] = static_cast<double>(acc / static_cast<long double>(nrows - 1));
+    }
+    return diag;
+}
+
 /// F1 / OQ-12 — the host-side SURVIVOR-block id list (AT2 read_f2(remove_na=TRUE)
 /// `which(apply(f2,3,sum(!is.finite)==0))`). Returns the ASCENDING original block
 /// ids `b` for which NO loaded pop pair has Vpair == 0 (`pair_block_is_missing`,
@@ -1626,6 +1665,32 @@ public:
                     (i < static_cast<int>(gw.w.size())) ? gw.w[static_cast<std::size_t>(i)] : 0.0;
         }
         return wmat;
+    }
+
+    /// S7 SE ORACLE — the FULL leave-one-block-out SE reduction (M7). UNCHANGED MATH:
+    /// run the host gls_weights_loo_batched per-block re-fit loop (above) to get the
+    /// nb×nl wmat, apply the AT2 (nb-1)/sqrt(nb) scale, then the long-double
+    /// se_sample_cov_diag ORACLE, return sqrt(diag) — the nl-length SCALED se. This is
+    /// exactly the body that lived in core/qpadm/nested_models.cpp's se_from_loo before
+    /// M7 moved the reduction on-device; it is now the CpuBackend test ORACLE (the CUDA
+    /// backend runs the native-FP64 on-device kernel). The long double accumulator stays
+    /// — it is the test oracle, not a host-compute violation. Native FP64 elsewhere.
+    [[nodiscard]] std::vector<double> se_from_wmat(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) override {
+        const int nl = x.nl, nb = x.n_block;
+        std::vector<double> se(static_cast<std::size_t>(nl < 0 ? 0 : nl), 0.0);
+        constexpr int kMinJackknifeBlocks = 2;
+        if (nb < kMinJackknifeBlocks || nl <= 0) return se;
+        // The nb×nl replicate matrix (the host per-block re-fit ORACLE loop).
+        std::vector<double> wmat = gls_weights_loo_batched(x, cov, r, opts, precision);
+        // AT2 (!boot): wmat <- wmat * (numreps-1)/sqrt(numreps); se = sqrt(diag(cov(wmat))).
+        const double scale = static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));
+        for (double& v : wmat) v *= scale;
+        const std::vector<double> diag = se_sample_cov_diag(wmat, nb, nl);
+        for (int i = 0; i < nl; ++i)
+            se[static_cast<std::size_t>(i)] = std::sqrt(diag[static_cast<std::size_t>(i)]);
+        return se;
     }
 
 private:

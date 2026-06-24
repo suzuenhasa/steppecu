@@ -4416,17 +4416,85 @@ public:
     [[nodiscard]] std::vector<double> gls_weights_loo_batched(
         const F4Blocks& x, const JackknifeCov& cov, int r,
         const QpAdmOptions& opts, const Precision& precision) override {
-        (void)precision;
         guard_device();
-        const int nl = x.nl, nr = x.nr, m = nl * nr, nb = x.n_block;
-        const bool small = model_fits_small_path(nl, nr, r);
+        const int nl = x.nl, nb = x.n_block;
+        const int m = nl * x.nr;
         std::vector<double> wmat(static_cast<std::size_t>(nb < 0 ? 0 : nb) *
                                  static_cast<std::size_t>(nl), 0.0);
         if (m <= 0 || nb <= 0 || nl <= 0) return wmat;
+        // Populate the resident dWmat (the shared producer; M7 carves this out so the
+        // SE reduction in se_from_wmat can consume the SAME resident dWmat WITHOUT a
+        // D2H bounce). Here (the backend-primitive caller) we keep the D2H — this seam
+        // is no longer on the se_from_loo hot path, but stays as a reusable primitive.
+        DeviceBuffer<double> dWmat(static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl));
+        populate_loo_wmat_resident(x, cov, r, opts, precision, dWmat);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(wmat.data(), dWmat.data(),
+                                          static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return wmat;
+    }
+
+    /// S7 — the on-device leave-one-block-out SE reduction (M7 — the LAST host-compute
+    /// move). Keeps the resident dWmat that populate_loo_wmat_resident produces and runs
+    /// the EXISTING qpadm_se_from_wmat kernel (n_models=1, native FP64 — the §1.4
+    /// cancellation carve-out; emulated/Ozaki is matmul-only and would not help a
+    /// cancellation-sensitive reduction) — NO dWmat D2H, NO host long-double reduction.
+    /// The single-model dWmat is UNSCALED (qpadm_fit_kernels.cu:1292 small / loo_large
+    /// :1216 large); SE is LINEAR in the wmat scale (var(s·w)=s²·var(w) ⇒
+    /// sqrt(var(s·w)/(nb-1)) = s·sqrt(var(w)/(nb-1)) EXACTLY), so the AT2
+    /// s=(nb-1)/sqrt(nb) factor is reintroduced as a final multiply on the nl-length
+    /// OUTPUT se (algebraically exact; the variance reduction itself stays FULLY on the
+    /// device — only nl scalars are scaled host-side, NO dWmat bounce, NO new kernel).
+    /// Returns the nl-length SCALED se. Native FP64.
+    [[nodiscard]] std::vector<double> se_from_wmat(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) override {
+        guard_device();
+        const int nl = x.nl, nb = x.n_block;
+        const int m = nl * x.nr;
+        std::vector<double> se(static_cast<std::size_t>(nl < 0 ? 0 : nl), 0.0);
+        constexpr int kMinJackknifeBlocks = 2;
+        if (m <= 0 || nb < kMinJackknifeBlocks || nl <= 0) return se;
+
+        DeviceBuffer<double> dWmat(static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl));
+        populate_loo_wmat_resident(x, cov, r, opts, precision, dWmat);
+        // Reduce the resident (UNSCALED) dWmat on-device with the EXISTING SE kernel
+        // (the same kernel the S8 batched path uses), n_models=1. Only the nl-length se
+        // is D2H'd — the sum-of-squares variance reduction never leaves the device.
+        DeviceBuffer<double> dSe(static_cast<std::size_t>(nl));
+        launch_qpadm_se_from_wmat_batched(dWmat.data(), nl, nb, /*n_models=*/1,
+                                          dSe.data(), stream_.get());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(se.data(), dSe.data(),
+                                          static_cast<std::size_t>(nl) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        // Reintroduce the AT2 (nb-1)/sqrt(nb) scale the UNSCALED single-model dWmat lacks
+        // (exact, linear — see the method note). Same expression as the S8 path / the
+        // pre-M7 host se_from_loo scale.
+        const double scale = static_cast<double>(nb - 1) / std::sqrt(static_cast<double>(nb));
+        for (double& v : se) v *= scale;
+        return se;
+    }
+
+private:
+    /// S7 PRODUCER — fill the resident dWmat[nb*nl] (row-major b*nl+i) with the UNSCALED
+    /// per-block leave-one-out weights, REUSING cov.Qinv unchanged (the AT2 parity pin).
+    /// Uploads x_loo + Qinv ONCE; the small path runs launch_qpadm_loo_batched, the large
+    /// (NRBIG) path the two-stage cuSOLVER-gesvd-seed + parallel loo_large kernel. This is
+    /// the body that used to live inline in gls_weights_loo_batched — carved out (M7) so
+    /// se_from_wmat consumes the SAME resident dWmat WITHOUT a D2H. Enqueues on stream_;
+    /// the caller syncs. Native FP64.
+    void populate_loo_wmat_resident(const F4Blocks& x, const JackknifeCov& cov, int r,
+                                    const QpAdmOptions& opts, const Precision& precision,
+                                    DeviceBuffer<double>& dWmat) {
+        (void)precision;
+        const int nl = x.nl, nr = x.nr, m = nl * nr, nb = x.n_block;
+        const bool small = model_fits_small_path(nl, nr, r);
+        if (m <= 0 || nb <= 0 || nl <= 0) return;
 
         DeviceBuffer<double> dLoo(static_cast<std::size_t>(m) * static_cast<std::size_t>(nb));
         DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
-        DeviceBuffer<double> dWmat(static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLoo.data(), x.x_loo.data(),
                                           static_cast<std::size_t>(m) * static_cast<std::size_t>(nb) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
@@ -4527,13 +4595,12 @@ public:
                 static_cast<long>(dbl_refit), static_cast<long>(int_refit),
                 dScratch.data(), dIntScratch.data(), dWmat.data(), stream_.get());
         }
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(wmat.data(), dWmat.data(),
-                                          static_cast<std::size_t>(nb) * static_cast<std::size_t>(nl) * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-        return wmat;
+        // Producer-only: enqueue on stream_, no D2H, no sync. The dWmat is left RESIDENT
+        // for the caller (gls_weights_loo_batched D2Hs it; se_from_wmat reduces it
+        // on-device). The caller owns the cudaStreamSynchronize.
     }
 
+public:
     /// S8 — the BATCHED MODEL-SPACE ROTATION on the GPU (the M(fit-6) deliverable; the
     /// FROZEN CONTRACT §2.2). Fits a BUCKET of same-shape SMALL-path models (nl<=5,
     /// nr<=10, r<=4 — the rotation common case) in ONE batched dispatch:

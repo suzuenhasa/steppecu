@@ -62,24 +62,28 @@ namespace {
 
 int g_failures = 0;
 
-// NRBIG (nl=2, nr=39, nb=710) PRE-FIX (serial large-LOO) GPU jackknife se/z — the
-// BIT-IDENTITY anchor for the parallel large-LOO. Captured from the BEFORE run on
-// box5090 (serial host nb-loop). The parallel kernel reuses the SAME cuSOLVER SVD
-// seed + the SAME als_large/weight math (only the loop parallelizes) ⇒ the post-fix
-// GPU se/z MUST equal these EXACTLY (rtol=atol=0). See the gate at the NRBIG block.
-// Captured from the BEFORE (serial large-LOO) GPU run on box5090 (cuSOLVER gesvd
-// seed path, qpadm_parity = 369.79 s). The GPU differs from the CpuBackend ORACLE
-// (Jacobi seed) at the ~2e-11 SVD-seed localizer level — so the anchor is the GPU
-// SERIAL value, the one the parallel kernel (same cuSOLVER seed) must reproduce EXACTLY.
-// CORRECTED convertf-PA NRBIG anchors (710 blocks). These are the GPU large-LOO se/z the
-// parallel kernel must reproduce EXACTLY (the cuSOLVER-gesvd-seed value, which differs from
-// the AT2/golden se ~0.01385 at the SVD-seed level — the anchor is the GPU's own value, the
-// one the parallel kernel must match bit-for-bit). CAPTURED from the post-regen GPU run on
-// box5090 (the [INFO] NRBIG GPU se/z line).
-constexpr double kNrbigPreSe0 = 0.013841499254064424;
-constexpr double kNrbigPreSe1 = 0.013841499254064468;
-constexpr double kNrbigPreZ0  = 60.300645525138961;
-constexpr double kNrbigPreZ1  = 11.945863443631822;
+// NRBIG (nl=2, nr=39, nb=710) GPU jackknife se/z — the steppe-INTERNAL BIT-IDENTITY
+// DETERMINISM anchor for the large-LOO SE path. This is NOT an AT2 golden (there is NO
+// AT2 SE reference for the nr=39 NRBIG model; the GPU value differs from the AT2/golden
+// se ~0.01385 at the SVD-seed level). The anchor pins the GPU's OWN deterministic value
+// so a regression in the atomics-free fixed-order LOO + SE reduction is caught
+// bit-for-bit (rtol=atol=0). The producer (cuSOLVER gesvd seed + als_large/weight) and
+// the SE reducer (qpadm_se_from_wmat_kernel, fixed ascending-b sum, no atomics) are
+// deterministic ⇒ the value is byte-identical across runs (VERIFIED by a double-run).
+//
+// RE-CAPTURED at M7 (the LAST host-compute move): the S7 SE variance reduction moved
+// from the host long-double sample_cov_diag (in se_from_loo) to the on-device
+// native-FP64 qpadm_se_from_wmat_kernel (the CUDA se_from_wmat override). Same math
+// (scale-then-reduce, AT2 (nb-1)/sqrt(nb)), different precision (long double → FP64), so
+// the anchor moved ~4e-17 (se) / ~2e-13 (z) — exactly the long-double-vs-FP64 delta.
+// The re-capture is VALID because the AT2 rtol-1e-3 SE gate (se[CordedWare]/[Turkey_N]
+// vs g_se) independently HOLDS (it is the real correctness guard); this anchor is the
+// determinism pin, NOT a correctness golden. CAPTURED from the post-M7 GPU run on
+// box5090 (the [INFO] NRBIG GPU se/z line; bit-identical across two runs).
+constexpr double kNrbigPreSe0 = 0.013841499254064466;
+constexpr double kNrbigPreSe1 = 0.013841499254064481;
+constexpr double kNrbigPreZ0  = 60.300645525138783;
+constexpr double kNrbigPreZ1  = 11.94586344363181;
 
 void check_close(const char* what, double got, double want, double rtol, double atol) {
     const double tol = atol + rtol * std::fabs(want);

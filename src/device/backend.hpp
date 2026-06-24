@@ -1491,6 +1491,26 @@ public:
             "ComputeBackend::gls_weights_loo_batched: not implemented by this backend");
     }
 
+    /// S7 — the FULL leave-one-block-out SE reduction (design §1.2 S7; AT2
+    /// get_weights_covariance). Subsumes gls_weights_loo_batched + the AT2
+    /// (nb-1)/sqrt(nb) wmat scale + the sample-covariance-diagonal variance reduction
+    /// (se[i] = sqrt(diag(cov(scale*wmat))[i])) into ONE backend call so the reduction
+    /// stays on the device that produced the resident wmat (no dWmat D2H). Returns the
+    /// nl-length SCALED se (the (nb-1)/sqrt(nb) factor folded in). The CUDA backend
+    /// keeps the resident dWmat and runs the EXISTING qpadm_se_from_wmat kernel
+    /// (native FP64; the §1.4 cancellation carve-out — emulated/Ozaki is matmul-only
+    /// and would not help a cancellation-sensitive reduction); the CpuBackend overrides
+    /// with the long-double sample_cov_diag ORACLE. z is host-derived (weight/se) in
+    /// se_from_loo, unchanged. NON-PURE: the base throws (the established backend.hpp
+    /// pattern). Native FP64 on the GPU.
+    [[nodiscard]] virtual std::vector<double> se_from_wmat(
+        const F4Blocks& x, const JackknifeCov& cov, int r,
+        const QpAdmOptions& opts, const Precision& precision) {
+        (void)x; (void)cov; (void)r; (void)opts; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::se_from_wmat: not implemented by this backend");
+    }
+
     /// S8 — BATCHED qpAdm fit over MANY same-shape models against ONE device-resident
     /// f2 (the rotation primitive; design §1.6 / the M(fit-6) FROZEN CONTRACT §2.2).
     /// Fits all `models` (a bucket of identical (nl,nr,r)) WHOLLY on this backend's
