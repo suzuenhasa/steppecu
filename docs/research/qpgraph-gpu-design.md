@@ -97,6 +97,16 @@ forward-finite-difference gradients (nadmix+1 objective evals) feeding a
 device-side projected-gradient / L-BFGS-B step — so the host NEVER calls back a
 host objective.
 
+> **OPTIMIZER DECISION (2026-06-23, settled by the spike `docs/research/optimizer-comparison.md`,
+> commit `932d108`):** qpGraph uses the **IDEA-1 batched-sequential fleet** (the on-device
+> projected-gradient / L-BFGS-B per `(graph,restart)` thread) as its **single, default optimizer**.
+> A fair re-race against an IDEA-2 batched-population (CMA-ES, λ-across-warp-lanes) showed IDEA 1
+> wins the production large-N envelope (~15× at 1M, ~9–20× fewer evals, 100% converged); IDEA 2's
+> only edge is small-N *occupancy* (≤~1k), **not** robustness (the multimodal-robustness hypothesis
+> was a measured null — the real surface is gradient-friendly). **A second optimizer codepath is
+> not worth a small-N occupancy win, so IDEA 2 is PARKED** (the CMA bench code remains as the
+> comparison record, not productized). The fleet is the standard.
+
 ## 2. GPU-first, GPU-bound pipeline (single-GPU --device 0)
 
 The GPU-bound product here is the `(graph x restart x optimizer-iteration)`

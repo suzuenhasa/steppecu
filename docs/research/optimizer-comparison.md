@@ -198,23 +198,27 @@ NOT the optimizer; the <10% GPU samples coincide with exactly those host phases)
   surface (a reportable null): nadmix=2/3 are non-separable but gradient-friendly, so
   IDEA1 stays 100% converged.
 
-## Recommendation for the qpGraph build
+## DECISION (2026-06-23): IDEA 1 fleet is THE qpGraph optimizer — IDEA 2 is PARKED
 
-Adopt the **IDEA 1 batched-sequential fleet** as the DEFAULT qpGraph optimizer SHAPE —
-the production S8 envelope is large N (thousands–millions of small fits batched), where
-IDEA1 dominates (≥10k crossover, widening with N) and is the most eval-efficient.
+**The qpGraph build uses the IDEA 1 batched-sequential fleet as the single, default optimizer.
+IDEA 2 (the CMA-ES / DE population) is PARKED — not productized.** Rationale (user decision):
 
-But the crossover is now a real, exploitable boundary, so:
+- The production envelope is **large N** (the S8 scale: thousands–millions of small fits
+  batched), where IDEA 1 wins decisively (~15× at 1M, ~9–20× fewer evals) and converges 100%.
+- IDEA 2's only win is **small N (≤ ~1k), and it is pure OCCUPANCY** (it fills the GPU the
+  fleet under-fills there) — **NOT a convergence-quality/robustness advantage** (the
+  hypothesized multimodal-robustness win did not materialize; the real surface is
+  gradient-friendly, IDEA 1 stays 100% converged). A small-N speedup is not worth a **second
+  optimizer codepath** to build, test, and maintain.
+- One calculation path beats two. Standardize on the fleet.
 
-- **Small-batch / interactive path (N ≲ a few thousand):** dispatch the **IDEA2-CMA
-  block-cooperative shape** (one warp per instance). At small N it is 2.4–4.5× faster
-  because it saturates the GPU the fleet underfills; it is also derivative-free insurance
-  for any future topology where the gradient is uninformative.
-- **Fallback escalation:** run IDEA1 by default and escalate stalled instances (the
-  per-instance done/stall flag already distinguishes them) to IDEA2-CMA — now that IDEA2
-  is genuinely parallel, the escalation kernel saturates the GPU even on the small stalled
-  subset.
-- Production gates (deferred to the qpGraph build, not the spike): route the matmul-heavy
+The IDEA-2 CMA/DE bench code stays in `bench_optimizers.cu` as the **comparison record only**
+(reproduces the tables above); it is **not** wired into qpGraph. If a future, genuinely
+gradient-hostile topology ever appears, the parked CMA shape is the documented escape hatch —
+but the default and the only maintained path is the fleet.
+
+### Production gates for the IDEA 1 fleet (deferred to the qpGraph build, not the spike):
+- Route the matmul-heavy
   `ppwts/cc` assembly through the EmulatedFp64{40} GEMM seam (`engage_f2_precision`) once
   it moves to `cublasDgemmStridedBatched` at production graph sizes (the in-thread spike
   objective is too small to exercise it); keep the inner SPD solve's native-FP64 carve-out

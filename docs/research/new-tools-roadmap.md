@@ -73,7 +73,11 @@ optimizer for qpGraph makes DATES' fitter nearly free.
    new piece and is self-contained.
 2. **qpGraph SECOND.** It forces the GENERAL on-device nonlinear optimizer into
    existence — the single most reusable new asset — plus the graph/path-algebra
-   data model. Build the optimizer as a CpuBackend oracle first (against AT2),
+   data model. **Optimizer SETTLED (spike `932d108`, `optimizer-comparison.md`): the
+   IDEA-1 batched-sequential fleet (on-device projected-gradient / L-BFGS-B per
+   `(graph,restart)` thread) is THE optimizer — single codepath; the IDEA-2 CMA-ES
+   population is PARKED (its only edge was small-N occupancy, not robustness — not
+   worth a 2nd path).** Build the fleet as a CpuBackend oracle first (against AT2),
    then port to the device kernel. Single-graph fit first, golden-gated; topology
    search deferred.
 3. **DATES THIRD (or alongside qpGraph's optimizer).** It is the highest-new but
