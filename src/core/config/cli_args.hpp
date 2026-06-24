@@ -44,6 +44,7 @@ enum class Command {
     F4Sweep,  ///< GPU-only all-combinations f4 sweep (every C(P,4); on-device filter).
     F3Sweep,  ///< GPU-only all-combinations f3 sweep (every C(P,3); on-device filter).
     Qpfstats, ///< genotype-path joint f2 smoother (--prefix + --pops -> a smoothed f2 dir).
+    QpGraph,  ///< single-graph qpGraph fit (--f2-dir + --graph edge-list -> the fit).
 };
 
 /// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
@@ -108,6 +109,20 @@ struct CliArgs {
     /// command (it reuses the `pops` field below, read in groups of 4), so a one-line f4
     /// needs no four flags.
     std::vector<std::string> pop1, pop2, pop3, pop4;
+
+    /// `--graph FILE` (the `qpgraph` command ONLY) — the admixture-graph edge-list file
+    /// (admixtools format: 2 whitespace/comma-separated columns parent child per line; a
+    /// header row "from,to" and #-comments are skipped). The leaves must be f2 pops.
+    std::optional<std::string> graph;
+
+    /// `--numstart N` (qpgraph) — the multistart restart count (the fleet parallel axis).
+    std::optional<int> numstart;
+
+    /// `--diag-f3 X` (qpgraph) — the f3 covariance regularization (AT2 diag_f3 default 1e-5).
+    std::optional<double> diag_f3;
+
+    /// `--constrained` / `--no-constrained` (qpgraph) — drift edges >= 0 (AT2 default TRUE).
+    std::optional<bool> constrained;
 
     /// `--prefix PATH` (the `qpdstat` command ONLY) — the genotype prefix for the
     /// normalized-D MAGNITUDE (Part B; not yet implemented). DISTINCT from `prefix` below

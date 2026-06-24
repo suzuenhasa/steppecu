@@ -122,6 +122,14 @@ public:
     /// command overlaps the big geno hash with the GPU pipeline on a background thread.
     [[nodiscard]] bool hash_source()            const noexcept { return hash_source_; }
 
+    // ---- qpgraph (single-graph fit) -------------------------------------------
+    /// --graph FILE: the admixture-graph edge-list file path (empty ⇒ unset).
+    [[nodiscard]] const std::string& graph_file() const noexcept { return graph_file_; }
+    /// --numstart / --diag-f3 / --constrained (qpgraph; defaults == QpGraphOptions / AT2).
+    [[nodiscard]] int    qpgraph_numstart()    const noexcept { return qpgraph_numstart_; }
+    [[nodiscard]] double qpgraph_diag_f3()     const noexcept { return qpgraph_diag_f3_; }
+    [[nodiscard]] bool   qpgraph_constrained() const noexcept { return qpgraph_constrained_; }
+
 private:
     // ConfigBuilder is the ONLY constructor of a validated RunConfig (it sets these
     // fields after build()-validation). Friendship keeps the fields const-after-build
@@ -160,6 +168,10 @@ private:
     std::string shard_dir_;         // --shard-dir (survivor CSV destination; empty ⇒ stdout/--out)
     bool dry_run_ = false;          // --dry-run (extract-f2 planning aid, §4.5)
     bool hash_source_ = false;      // --hash (extract-f2): source-provenance SHA opt-in (default OFF)
+    std::string graph_file_;        // qpgraph --graph (the edge-list file path)
+    int    qpgraph_numstart_   = 10;     // qpgraph --numstart (QpGraphOptions default)
+    double qpgraph_diag_f3_    = 1e-5;   // qpgraph --diag-f3 (AT2 default)
+    bool   qpgraph_constrained_ = true;  // qpgraph --constrained (AT2 default)
 };
 
 }  // namespace steppe::config

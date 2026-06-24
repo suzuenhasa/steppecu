@@ -32,6 +32,7 @@ add_executable(steppe_app
     main.cpp
     cli_parse.cpp
     cmd_qpadm.cpp      # M(cli-1): the qpAdm GPU fit command
+    cmd_qpgraph.cpp    # qpGraph single-graph fit (--f2-dir + --graph edge-list -> the fit)
     cmd_qpwave.cpp     # M(cli-2): the qpWave rank-sweep command (no target; left[0]=ref)
     cmd_f4.cpp         # Standalone f4 statistic (run_f4): est/se/z/p per quartet
     cmd_f3.cpp         # Standalone f3 statistic (run_f3): est/se/z/p per triple

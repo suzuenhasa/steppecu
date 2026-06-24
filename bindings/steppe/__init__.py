@@ -31,6 +31,8 @@ __all__ = [
     "qpfstats",
     "qpadm",
     "qpwave",
+    "qpgraph",
+    "QpGraphResult",
     "f4",
     "f3",
     "f4ratio",
@@ -522,6 +524,81 @@ def qpwave(
     there is NO target argument (the distinguishing qpWave invocation)."""
     d = _core.run_qpwave(f2._h, list(left), list(right), fudge, rank_alpha)
     return QpWaveResult(d, left=left)
+
+
+class QpGraphResult:
+    """The single-graph qpGraph fit result (the productized IDEA-1 fleet). ``.score`` is
+    the GLS fit score; ``.weights`` the per-admixture-node mixture weights; ``.edges`` the
+    fitted drift edge lengths (both as tidy DataFrames when pandas is available)."""
+
+    def __init__(self, d: dict):
+        self._d = d
+
+    @property
+    def score(self) -> float:
+        return float(self._d["score"])
+
+    @property
+    def restart_spread(self) -> float:
+        return float(self._d["restart_spread"])
+
+    @property
+    def status(self) -> "Status":
+        return Status._from(self._d["status"])
+
+    @property
+    def worst_residual_z(self) -> float:
+        return float(self._d["worst_residual_z"])
+
+    @property
+    def weights(self):  # -> DataFrame [from, to, weight, low, high]
+        pd = _require_pandas()
+        return pd.DataFrame({
+            "from": list(self._d["admix_from"]),
+            "to": list(self._d["admix_to"]),
+            "weight": list(self._d["weight"]),
+            "low": list(self._d["weight_lo"]),
+            "high": list(self._d["weight_hi"]),
+        })
+
+    @property
+    def edges(self):  # -> DataFrame [from, to, length]
+        pd = _require_pandas()
+        return pd.DataFrame({
+            "from": list(self._d["edge_from"]),
+            "to": list(self._d["edge_to"]),
+            "length": list(self._d["edge_length"]),
+        })
+
+    def __repr__(self) -> str:
+        return (f"QpGraphResult(score={self.score:.6f}, "
+                f"nadmix={len(self._d['weight'])}, "
+                f"nedge={len(self._d['edge_length'])}, status={self.status.name})")
+
+
+def qpgraph(
+    f2: F2Blocks,
+    edges: list[Any],
+    *,
+    numstart: int = 10,
+    fudge: float = 1e-4,
+    diag_f3: float = 1e-5,
+    constrained: bool = True,
+) -> QpGraphResult:
+    """Fit a FIXED admixture graph to the f2 on the GPU (the productized IDEA-1 fleet,
+    on-device). ``edges`` is a list of ``(parent, child)`` name pairs (the admixtools edge
+    list); the leaves must be f2 populations.
+
+    NOTE: qpGraph uses the AT2 ``afprod=FALSE`` f2 (DIFFERENT from qpadm's ``afprod=TRUE``);
+    the ``f2`` handle must come from ``read_f2`` of an afprod=FALSE f2 dir."""
+    edge_pairs: list[tuple[str, str]] = []
+    for e in edges:
+        if isinstance(e, dict):
+            edge_pairs.append((str(e["from"]), str(e["to"])))
+        else:
+            edge_pairs.append((str(e[0]), str(e[1])))
+    d = _core.run_qpgraph(f2._h, edge_pairs, numstart, fudge, diag_f3, constrained)
+    return QpGraphResult(d)
 
 
 def f4(

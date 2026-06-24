@@ -83,6 +83,13 @@ add_library(steppe_core STATIC
     # Standalone f3 statistic (run_f3): the THREE-slab SIBLING of run_f4 — REUSES
     # jackknife_cov (fit-engine §6), no ALS/rank; the ONE new math seam is the 3-slab combine.
     qpadm/f3.cpp
+    # qpGraph single-graph fit (run_qpgraph): the topology DATA MODEL (parse edge list ->
+    # path-table fill_pwts model, the ONE new piece generalizing the optimizer-spike's fixed
+    # fill_pwts) + the fit driver (resident f3 basis via assemble_f3_triples + jackknife_cov
+    # -> the on-device IDEA-1 fleet seam -> the result). The fleet objective oracle is
+    # header-only (qpgraph_objective.hpp, used by the CpuBackend + the parity test).
+    qpadm/qpgraph_model.cpp
+    qpadm/qpgraph_fit.cpp
     # Standalone f4-ratio (run_f4ratio): the SIBLING of run_f4/run_f3 — REUSES
     # assemble_f4_quartets (ONE shared assemble for num+den); the ONE new math seam is the
     # per-block-RATIO weighted block-jackknife (AT2 qpf4ratio jack_mat_stats $est), host-pure.

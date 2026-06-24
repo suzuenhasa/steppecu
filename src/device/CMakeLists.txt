@@ -23,6 +23,7 @@ add_library(steppe_device STATIC
     cuda/f2_block_kernel.cu       # 3-GEMM reformulation + fixed-slice Ozaki + assemble (single block)
     cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
+    cuda/qpgraph_fit_kernels.cu   # qpGraph: the on-device IDEA-1 fleet (one thread/restart; the path-table fill_pwts + GLS objective + NNLS edge solve)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
     cuda/dstat_kernel.cu          # qpDstat Part B: per-block per-quadruple normalized-D reduction (the S2 divergence)
     cuda/qpfstats_kernel.cu       # qpfstats: zero-NaN-in-ymat + add-ridge-diag + NaN-row-downdate (the smoothing-solve prep kernels)

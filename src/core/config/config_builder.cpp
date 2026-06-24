@@ -138,6 +138,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.format,      args.format);
     take(merged_.prefix,      args.prefix);
     take(merged_.qpdstat_prefix, args.qpdstat_prefix);
+    take(merged_.graph,       args.graph);
     take(merged_.geno,        args.geno);
     take(merged_.snp,         args.snp);
     take(merged_.ind,         args.ind);
@@ -184,6 +185,9 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.transversions_only, args.transversions_only);
     take_b(merged_.dry_run, args.dry_run);
     take_b(merged_.hash_source, args.hash_source);
+    take_i(merged_.numstart, args.numstart);
+    take_d(merged_.diag_f3, args.diag_f3);
+    take_b(merged_.constrained, args.constrained);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     // A --config on the CLI is the highest-precedence TOML request.
@@ -495,6 +499,11 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     if (merged_.out_dir)  cfg.out_dir_ = *merged_.out_dir;
     if (merged_.dry_run)     cfg.dry_run_ = *merged_.dry_run;
     if (merged_.hash_source) cfg.hash_source_ = *merged_.hash_source;
+    // qpgraph (single-graph fit) inputs/options.
+    if (merged_.graph)       cfg.graph_file_ = *merged_.graph;
+    if (merged_.numstart)    cfg.qpgraph_numstart_ = *merged_.numstart;
+    if (merged_.diag_f3)     cfg.qpgraph_diag_f3_ = *merged_.diag_f3;
+    if (merged_.constrained) cfg.qpgraph_constrained_ = *merged_.constrained;
 
     return cfg;
 }

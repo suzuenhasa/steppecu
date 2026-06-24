@@ -50,6 +50,7 @@
 #include "steppe/f4ratio.hpp"           // run_f4ratio + F4RatioResult (the standalone-f4-ratio binding)
 #include "steppe/fstats.hpp"            // steppe::F2BlockTensor
 #include "steppe/qpadm.hpp"             // run_qpadm / run_qpwave / run_qpadm_search + value types
+#include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options (the single-graph fit binding)
 #include "steppe/qpfstats.hpp"          // run_qpfstats + QpfstatsResult (the genotype-path joint f2 smoother)
 
 #include "io/geno_reader.hpp"           // io::GenoReader (qpDstat Part B P-axis order)
@@ -424,6 +425,61 @@ nb::dict run_qpwave_py(F2Handle& h, const std::vector<std::string>& left,
         raise_value(std::string("device error: ") + e.what());
     }
     return qpwave_to_dict(result);
+}
+
+// QpGraphResult -> a flat Python dict (the facade re-shapes to a tidy edge table).
+nb::dict qpgraph_to_dict(const steppe::QpGraphResult& r) {
+    nb::dict d;
+    d["score"] = r.score;
+    d["restart_spread"] = r.restart_spread;
+    d["worst_residual_z"] = r.worst_residual_z;
+    d["worst_pop2"] = r.worst_pop2;
+    d["worst_pop3"] = r.worst_pop3;
+    d["status"] = status_str(r.status);
+    d["weight"] = r.weight;
+    d["weight_lo"] = r.weight_lo;
+    d["weight_hi"] = r.weight_hi;
+    d["admix_from"] = r.admix_from;
+    d["admix_to"] = r.admix_to;
+    d["edge_length"] = r.edge_length;
+    d["edge_from"] = r.edge_from;
+    d["edge_to"] = r.edge_to;
+    d["leaves"] = r.leaves;
+    return d;
+}
+
+// run_qpgraph: fit a FIXED admixture graph (an edge list of (parent, child) name pairs)
+// to the resident f2. The leaves must be f2 populations. Mirrors run_qpwave_py: build
+// (cached) resources, upload the host tensor INSIDE the call, run the CUDA-free seam,
+// marshal. NOTE: qpGraph uses the AT2 afprod=FALSE f2 (DIFFERENT from qpadm's afprod=TRUE);
+// the f2 dir handed to read_f2 must be the afprod=FALSE one (the facade documents this).
+nb::dict run_qpgraph_py(F2Handle& h,
+                        const std::vector<std::array<std::string, 2>>& edges,
+                        int numstart, double fudge, double diag_f3, bool constrained) {
+    if (edges.empty()) raise_value("qpgraph: the graph edge list is empty");
+    std::vector<steppe::QpGraphEdge> e;
+    e.reserve(edges.size());
+    for (const auto& pr : edges) e.push_back({pr[0], pr[1]});
+
+    steppe::QpGraphOptions opts;
+    opts.numstart = numstart;
+    opts.fudge = fudge;
+    opts.diag_f3 = diag_f3;
+    opts.constrained = constrained;
+
+    sd::Resources& resources = ensure_resources(h);
+    steppe::QpGraphResult result;
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        result = steppe::run_qpgraph(dev_f2, e, h.pops, opts, resources);
+    } catch (const std::exception& ex) {
+        raise_value(std::string("device error: ") + ex.what());
+    }
+    if (result.status == steppe::Status::InvalidConfig)
+        raise_value("qpgraph: the graph could not be fit (a leaf is not an f2 population, "
+                    "or the topology is unrooted/cyclic/invalid)");
+    return qpgraph_to_dict(result);
 }
 
 // run_f4: a list of (p1,p2,p3,p4) quartet NAME tuples against the SAME resident f2,
@@ -974,6 +1030,13 @@ NB_MODULE(_core, m) {
     m.def("run_qpwave", &run_qpwave_py, "f2"_a, "left"_a, "right"_a, "fudge"_a = 1e-4,
           "rank_alpha"_a = 0.05,
           "qpWave rank-sufficiency sweep (GPU; left[0] is the reference). Flat dict.");
+
+    m.def("run_qpgraph", &run_qpgraph_py, "f2"_a, "edges"_a, "numstart"_a = 10,
+          "fudge"_a = 1e-4, "diag_f3"_a = 1e-5, "constrained"_a = true,
+          "Single-graph qpGraph fit (GPU; the IDEA-1 fleet on-device). `edges` is a list "
+          "of (parent, child) name pairs; the leaves must be f2 populations. NOTE: qpGraph "
+          "uses the AT2 afprod=FALSE f2 (read_f2 of an afprod=FALSE dir). Returns a flat "
+          "dict {score, weight, admix_from/to, edge_length, edge_from/to, ...}.");
 
     m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
           "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "

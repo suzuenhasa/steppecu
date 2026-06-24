@@ -193,6 +193,35 @@ struct JackknifeDiag {
     Status status = Status::Ok;  ///< Ok always (no Q invert ⇒ no NonSpdCovariance).
 };
 
+/// qpGraph TOPOLOGY ARENAS carried INTO the fleet virtual (the CUDA-free device-facing
+/// twin of core::qpadm::QpGraphModel — backend.hpp need not include the model header).
+/// All flat int/double arenas, uploaded ONCE per topology (the qpAdm per-model index-
+/// arena pattern). The device kernel runs the SAME fill_pwts (path tables) -> centered
+/// pwts -> ppwts_2d -> native SPD edge solve -> GLS quadratic form per (restart) thread.
+struct QpGraphTopoArena {
+    int npop = 0, nedge_norm = 0, nadmix = 0, npair = 0, npath = 0, base_leaf = 0;
+    std::vector<double> pwts0;          ///< [nedge_norm x npop] col-major (theta-independent).
+    std::vector<int> pe_edge, pe_leaf, pe_path;        ///< fill_pwts path-edge table.
+    std::vector<int> pae_path, pae_admixedge;          ///< fill_pwts path-admixedge table.
+    std::vector<int> cmb1, cmb2;        ///< [npair] centered-column pair indices (0-based).
+    bool constrained = true;            ///< drift>=0 (the box-constrained edge solve).
+    double fudge = 1e-4;                ///< the cc trace-scaled ridge (AT2 `diag`).
+};
+
+/// qpGraph FLEET output: the best-of-restarts {score, theta} + the per-weight restart
+/// bracket + the fitted edge lengths at the optimum. NonSpdCovariance/RankDeficient ⇒
+/// a degenerate inner solve at every restart (value, not throw).
+struct QpGraphFleet {
+    std::vector<double> theta;       ///< [nadmix] the best restart's mixture weights.
+    std::vector<double> theta_lo;    ///< [nadmix] min over restarts (the bracket low).
+    std::vector<double> theta_hi;    ///< [nadmix] max over restarts (the bracket high).
+    std::vector<double> edge_length; ///< [nedge_norm] the fitted drift edge lengths at theta.
+    std::vector<double> f3_fit;      ///< [npair] the fitted f3 (ppwts_2d * edge_length).
+    double score = 0.0;              ///< the best (min) GLS score.
+    double restart_spread = 0.0;     ///< max-min score across restarts (convergence witness).
+    Status status = Status::Ok;
+};
+
 /// GPU-ONLY f-stat SWEEP survivors (the CUDA-free seam between the core sweep driver and the
 /// CUDA backend's on-device pipeline). The backend enumerates+computes+filters+compacts EVERY
 /// C(P,k) item ON THE DEVICE and returns ONLY the survivors here (the full N-row table is never
@@ -771,6 +800,30 @@ public:
         (void)f2; (void)triples; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::assemble_f3_triples(host): not implemented by this backend");
+    }
+
+    /// qpGraph FLEET (the productized IDEA-1 optimizer spike + the path-algebra
+    /// objective; docs/research/qpgraph-gpu-design.md). Given the resident f3 basis
+    /// (f_obs[npair] + qinv[npair*npair] col-major, assembled ONCE by the core driver via
+    /// assemble_f3_triples + jackknife_cov and kept device-resident on the CUDA path) and
+    /// the topology arenas, run `numstart` projected-Newton restarts. On the CUDA backend
+    /// each restart is ONE GPU thread running the WHOLE multistart x maxit loop in-kernel
+    /// (the GPU-BOUND shape: NO host objective per iteration — the AT2 optim() host-loop
+    /// trap designed out); the host launches ONCE and gets back only {score, theta,
+    /// edges}. The CpuBackend is the native small_linalg fleet oracle (the bit-exact diff
+    /// reference). `precision` governs the (production-scale) cc design GEMM; the inner SPD
+    /// edge solve + the GLS form are native FP64 (the cancellation carve-out). NON-PURE:
+    /// the base throws (the established backend.hpp pattern).
+    [[nodiscard]] virtual QpGraphFleet qpgraph_fit_fleet(const QpGraphTopoArena& topo,
+                                                         std::span<const double> f_obs,
+                                                         std::span<const double> qinv,
+                                                         int numstart, int maxit,
+                                                         double tol,
+                                                         const Precision& precision) {
+        (void)topo; (void)f_obs; (void)qinv; (void)numstart; (void)maxit; (void)tol;
+        (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::qpgraph_fit_fleet: not implemented by this backend");
     }
 
     /// qpDstat Part B (the genotype-path NORMALIZED-D reduction; include/steppe/dstat.hpp).

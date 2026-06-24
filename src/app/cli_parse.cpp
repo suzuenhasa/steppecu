@@ -26,6 +26,7 @@
 #include "app/cmd_f4ratio.hpp"
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
+#include "app/cmd_qpgraph.hpp"
 #include "app/cmd_qpdstat.hpp"
 #include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
@@ -122,6 +123,21 @@ void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
     sub->add_flag_function("--se-require-p",
                            [&a](std::int64_t) { a.se_require_p = true; },
                            "Feasible-only also requires p >= --p-se-threshold");
+}
+
+// qpgraph-specific flags: --graph (the edge-list file) + --numstart / --diag-f3 /
+// --constrained (the AT2 qpgraph defaults). --fudge (the AT2 `diag` cc ridge) is REUSED
+// from add_qpadm_option_flags' --fudge (QpAdmOptions::fudge) so the same flag drives both.
+void add_qpgraph_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option_function<std::string>("--graph", [&a](const std::string& v) { a.graph = v; },
+                                          "The admixture-graph edge-list file (parent child per line)");
+    sub->add_option_function<int>("--numstart", [&a](int v) { a.numstart = v; },
+                                  "Multistart restart count (the fleet axis; default 10)");
+    sub->add_option_function<double>("--diag-f3", [&a](double v) { a.diag_f3 = v; },
+                                     "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
+    sub->add_flag_function("--constrained,!--no-constrained",
+                           [&a](std::int64_t v) { a.constrained = (v >= 0); },
+                           "Drift edges >= 0 (AT2 default on)");
 }
 
 // Bind --f2-dir (the f2_blocks directory) into `a.f2_dir`. Shared by qpadm / qpwave /
@@ -304,6 +320,7 @@ int run_cli(int argc, char** argv) {
     // the chosen args carry the user's input. We hold them in stable storage so the
     // bound lambdas outlive parse.
     CliArgs qpadm_args;
+    CliArgs qpgraph_args;
     CliArgs qpwave_args;
     CliArgs rotate_args;
     CliArgs extract_args;
@@ -335,6 +352,28 @@ int run_cli(int argc, char** argv) {
             // emit CSV/JSON). qpadm-rotate + extract-f2 are likewise wired; only
             // qpwave (M(cli-2)) remains a scaffold no-op.
             std::exit(run_qpadm_command(*config));
+        });
+    }
+
+    // ---- qpgraph (single-graph admixture-graph fit) ----------------------------
+    {
+        CLI::App* sub = app.add_subcommand("qpgraph", "Single-graph qpGraph fit (--f2-dir + --graph edge-list)");
+        qpgraph_args.command = Command::QpGraph;
+        add_f2_dir_flag(sub, qpgraph_args, "The f2_blocks directory (f2.bin + pops.txt)");
+        add_qpgraph_flags(sub, qpgraph_args);
+        // --fudge (the AT2 `diag` cc ridge) is shared with qpadm; bind ONLY that one option
+        // (not the whole qpadm option set) so qpgraph's --help shows only its flags.
+        sub->add_option_function<double>("--fudge", [&qpgraph_args](double v) { qpgraph_args.fudge = v; },
+                                         "AT2 cc edge-solve ridge (diag; default 1e-4)");
+        add_output_flags(sub, qpgraph_args);
+        add_common_flags(sub, qpgraph_args);
+        sub->callback([&]() {
+            auto config = build_config(qpgraph_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            // The real GPU qpGraph fit (read dir + graph -> resolve leaves -> upload f2
+            // RESIDENT -> run_qpgraph (the IDEA-1 fleet on-device) -> emit the edges +
+            // admix weights + score). Mirrors how `qpadm` dispatches.
+            std::exit(run_qpgraph_command(*config));
         });
     }
 

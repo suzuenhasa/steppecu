@@ -102,6 +102,8 @@
 #include "device/f2_blocks_out.hpp"         // M5: DiskF2Blocks (the Disk descriptor DiskSink populates)
 #include "device/cuda/handles.hpp"          // CublasHandle, CusolverDnHandle (RAII)
 #include "device/cuda/qpadm_fit_kernels.cuh" // M(fit-4): f4 gather + loo/total + xtau + small-LA launch wrappers
+#include "device/cuda/qpgraph_fit_kernels.cuh" // qpGraph: the on-device IDEA-1 fleet launcher
+#include "core/qpadm/qpgraph_objective.hpp" // qpGraph host edge-recovery at the best theta (ONE eval, not per-iteration)
 #include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
@@ -222,6 +224,22 @@ void fill_rankdrop(int rmax,
 }  // namespace
 
 /// GPU compute backend. The 3-GEMM f2 reformulation; one CublasHandle created
+/// Rebuild the minimal core::qpadm::QpGraphModel the host edge-recovery objective
+/// consumes from the CUDA-free arena (the final ONE-eval edge solve at the winning theta;
+/// NOT the per-iteration objective — that runs on-device in the fleet kernel).
+namespace {
+[[nodiscard]] core::qpadm::QpGraphModel topo_to_model(const QpGraphTopoArena& topo) {
+    core::qpadm::QpGraphModel m;
+    m.npop = topo.npop; m.nedge_norm = topo.nedge_norm; m.nadmix = topo.nadmix;
+    m.npair = topo.npair; m.npath = topo.npath; m.base_leaf = topo.base_leaf;
+    m.pwts0 = topo.pwts0;
+    m.pe_edge = topo.pe_edge; m.pe_leaf = topo.pe_leaf; m.pe_path = topo.pe_path;
+    m.pae_path = topo.pae_path; m.pae_admixedge = topo.pae_admixedge;
+    m.cmb1 = topo.cmb1; m.cmb2 = topo.cmb2;
+    return m;
+}
+}  // namespace
+
 /// once (architecture.md §7) and reused, with its workspace set for emulated-FP64
 /// determinism. Move-only via the ComputeBackend base (architecture.md §8).
 class CudaBackend final : public ComputeBackend {
@@ -2355,6 +2373,130 @@ public:
             "CudaBackend::assemble_f3_triples(host): the GPU path reads DEVICE-RESIDENT "
             "f2 (assemble_f3_triples(DeviceF2Blocks)); the host-tensor overload is the "
             "CpuBackend oracle door");
+    }
+
+    /// qpGraph FLEET — the PRODUCTION GPU path (the productized IDEA-1 optimizer spike).
+    /// The resident f3 basis (f_obs[npair] + qinv[npair*npair], assembled by the core
+    /// driver via assemble_f3_triples + jackknife_cov) + the topology arenas upload to
+    /// VRAM; the fleet kernel runs `numstart` restarts, ONE thread each, the WHOLE
+    /// multistart x maxit projected-Newton loop ON-DEVICE (GPU-BOUND: ONE launch, NO host
+    /// objective per iteration — the AT2 optim() host-loop trap designed out). Only the
+    /// per-restart {theta, score} come back; the best-of-restarts + the bracket + the final
+    /// edge-length recovery (ONE host eval at the winning theta) are tiny host work. The
+    /// inner SPD edge solve + the GLS form are native FP64 (the cancellation carve-out).
+    [[nodiscard]] QpGraphFleet qpgraph_fit_fleet(const QpGraphTopoArena& topo,
+                                                 std::span<const double> f_obs,
+                                                 std::span<const double> qinv,
+                                                 int numstart, int maxit, double tol,
+                                                 const Precision& precision) override {
+        (void)precision;  // the in-thread objective is native FP64 (the carve-out); the
+                          // emulated GEMM seam is the production batched-cc path.
+        guard_device();
+        QpGraphFleet out;
+        const int D = topo.nadmix;
+        const int npair = topo.npair, ne = topo.nedge_norm;
+
+        // ---- upload the resident basis + the topology arenas ----------------------
+        DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
+        DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), qinv.data(), qinv.size() * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        DeviceBuffer<double> dPwts0(topo.pwts0.size());
+        DeviceBuffer<int> dPeEdge(topo.pe_edge.size() ? topo.pe_edge.size() : 1);
+        DeviceBuffer<int> dPeLeaf(topo.pe_leaf.size() ? topo.pe_leaf.size() : 1);
+        DeviceBuffer<int> dPePath(topo.pe_path.size() ? topo.pe_path.size() : 1);
+        DeviceBuffer<int> dPaePath(topo.pae_path.size() ? topo.pae_path.size() : 1);
+        DeviceBuffer<int> dPaeEdge(topo.pae_admixedge.size() ? topo.pae_admixedge.size() : 1);
+        DeviceBuffer<int> dCmb1(topo.cmb1.size());
+        DeviceBuffer<int> dCmb2(topo.cmb2.size());
+        auto up_d = [&](DeviceBuffer<double>& d, const std::vector<double>& h) {
+            if (!h.empty()) STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(double),
+                                                              cudaMemcpyHostToDevice, stream_.get()));
+        };
+        auto up_i = [&](DeviceBuffer<int>& d, const std::vector<int>& h) {
+            if (!h.empty()) STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(int),
+                                                              cudaMemcpyHostToDevice, stream_.get()));
+        };
+        up_d(dPwts0, topo.pwts0);
+        up_i(dPeEdge, topo.pe_edge); up_i(dPeLeaf, topo.pe_leaf); up_i(dPePath, topo.pe_path);
+        up_i(dPaePath, topo.pae_path); up_i(dPaeEdge, topo.pae_admixedge);
+        up_i(dCmb1, topo.cmb1); up_i(dCmb2, topo.cmb2);
+
+        cuda::QpGraphDeviceTopo dt{};
+        dt.npop = topo.npop; dt.nedge_norm = ne; dt.nadmix = D; dt.npair = npair;
+        dt.npath = topo.npath; dt.base_leaf = topo.base_leaf;
+        dt.n_pe = static_cast<int>(topo.pe_edge.size());
+        dt.n_pae = static_cast<int>(topo.pae_path.size());
+        dt.constrained = topo.constrained ? 1 : 0;
+        dt.fudge = topo.fudge;
+        dt.pwts0 = dPwts0.data();
+        dt.pe_edge = dPeEdge.data(); dt.pe_leaf = dPeLeaf.data(); dt.pe_path = dPePath.data();
+        dt.pae_path = dPaePath.data(); dt.pae_admixedge = dPaeEdge.data();
+        dt.cmb1 = dCmb1.data(); dt.cmb2 = dCmb2.data();
+
+        const int ns = numstart > 0 ? numstart : 1;
+        DeviceBuffer<double> dTheta(static_cast<std::size_t>(ns) * static_cast<std::size_t>(D > 0 ? D : 1));
+        DeviceBuffer<double> dScore(static_cast<std::size_t>(ns));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready
+
+        if (D == 0) {
+            // pure tree: no fleet — one host edge solve (the GPU fleet adds nothing at D=0).
+            core::qpadm::QpGraphModel m = topo_to_model(topo);
+            std::vector<double> bl, fit(static_cast<std::size_t>(npair), 0.0);
+            const double sc = core::qpadm::qpgraph_score(m, nullptr,
+                std::vector<double>(f_obs.begin(), f_obs.end()),
+                std::vector<double>(qinv.begin(), qinv.end()), topo.fudge, topo.constrained, &bl, &fit);
+            out.score = sc; out.edge_length = bl; out.f3_fit = fit;
+            out.status = std::isfinite(sc) ? Status::Ok : Status::NonSpdCovariance;
+            return out;
+        }
+
+        // ---- the on-device fleet (ONE launch; whole multistart x maxit in-kernel) ---
+        cuda::launch_qpgraph_fleet(dt, ns, maxit, tol, dFobs.data(), dQinv.data(),
+                                   dTheta.data(), dScore.data(), stream_.get());
+
+        std::vector<double> h_theta(static_cast<std::size_t>(ns) * static_cast<std::size_t>(D));
+        std::vector<double> h_score(static_cast<std::size_t>(ns));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_theta.data(), dTheta.data(), h_theta.size() * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_score.data(), dScore.data(), h_score.size() * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // best-of-restarts + the per-weight bracket (tiny host work over ns rows).
+        double best = std::numeric_limits<double>::infinity();
+        double smin = best, smax = -best;
+        int best_i = 0;
+        std::vector<double> thmin(static_cast<std::size_t>(D), 1.0), thmax(static_cast<std::size_t>(D), 0.0);
+        for (int i = 0; i < ns; ++i) {
+            const double s = h_score[static_cast<std::size_t>(i)];
+            if (std::isfinite(s)) { if (s < smin) smin = s; if (s > smax) smax = s; }
+            for (int d = 0; d < D; ++d) {
+                const double v = h_theta[static_cast<std::size_t>(i) * static_cast<std::size_t>(D) + static_cast<std::size_t>(d)];
+                if (v < thmin[static_cast<std::size_t>(d)]) thmin[static_cast<std::size_t>(d)] = v;
+                if (v > thmax[static_cast<std::size_t>(d)]) thmax[static_cast<std::size_t>(d)] = v;
+            }
+            if (s < best) { best = s; best_i = i; }
+        }
+        out.score = best;
+        out.restart_spread = (std::isfinite(smax) && std::isfinite(smin)) ? (smax - smin) : 0.0;
+        out.theta.assign(static_cast<std::size_t>(D), 0.0);
+        for (int d = 0; d < D; ++d)
+            out.theta[static_cast<std::size_t>(d)] = h_theta[static_cast<std::size_t>(best_i) * static_cast<std::size_t>(D) + static_cast<std::size_t>(d)];
+        out.theta_lo = thmin; out.theta_hi = thmax;
+
+        // recover the edge lengths + f3_fit at the best theta (ONE host eval; the same
+        // native FP64 objective the kernel runs — a localization the test diffs to 1e-6).
+        core::qpadm::QpGraphModel m = topo_to_model(topo);
+        std::vector<double> bl, fit(static_cast<std::size_t>(npair), 0.0);
+        const double sc_final = core::qpadm::qpgraph_score(m, out.theta.data(),
+            std::vector<double>(f_obs.begin(), f_obs.end()),
+            std::vector<double>(qinv.begin(), qinv.end()), topo.fudge, topo.constrained, &bl, &fit);
+        if (std::isfinite(sc_final)) { out.edge_length = bl; out.f3_fit = fit; out.status = Status::Ok; }
+        else { out.edge_length.assign(static_cast<std::size_t>(ne), 0.0); out.f3_fit.assign(static_cast<std::size_t>(npair), 0.0); out.status = Status::NonSpdCovariance; }
+        return out;
     }
 
     /// GPU-ONLY f4 sweep — enumerate EVERY C(P,4) quartet on the device, compute f4 + diagonal

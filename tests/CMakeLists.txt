@@ -450,6 +450,24 @@ set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON
 add_test(NAME qpadm_parity
          COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 
+# --- qpGraph single-graph-fit parity test (the qpGraph acceptance gate, BOTH backends) --
+# Reads the committed 9-pop f2 fixture + the WELL-IDENTIFIED golden topology
+# (goldens/at2/golden_qpgraph_topology.csv) and runs the single-graph qpGraph fit
+# (steppe::run_qpgraph: the topology data model -> the resident f3 basis via
+# assemble_f3_triples + jackknife_cov -> the productized IDEA-1 fleet) on BOTH backends:
+# the CpuBackend ORACLE (native FP64, the bit-exact diff reference + no-GPU fallback) AND
+# the CUDA backend (the PRODUCTION GPU path — f3 basis RESIDENT in VRAM, the fleet on-
+# device). Gates score (tight) + the admix weight keyed by parent NAME (pSteppe->aCW) +
+# the restart spread (the identifiability witness) vs the admixtools 2.0.10 golden, AND
+# CpuBackend == CudaBackend. The GPU block SKIPs cleanly when no device is visible. Named
+# .cu so it device-links steppe_device's RDC kernels and can construct a real CudaBackend.
+add_executable(test_qpgraph_parity reference/test_qpgraph_parity.cu)
+target_link_libraries(test_qpgraph_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpgraph_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpgraph_parity
+         COMMAND test_qpgraph_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
 # --- qpfstats SMOOTHING-SOLVE CpuBackend==CudaBackend parity (the solve primitive) -------
 # CUDA TU: a numerical-equivalence unit test of the qpfstats_smooth solve primitive (A_shared
 # = x'x + ridge·I, Cholesky, the multi-column Dtrsm solve, the NaN-row downdate, all-NaN→b=0)
@@ -1320,6 +1338,21 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_f3 steppe_app)
   add_test(NAME cli_f3
            COMMAND test_cli_f3
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- `steppe qpgraph` single-graph-fit golden gate -----------------------------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpgraph` over the COMMITTED real-AADR
+  # afprod=FALSE 9-pop f2 fixture (fixtures/f2_qpgraph_9pop.bin) for the WELL-IDENTIFIED golden
+  # topology (golden_qpgraph_topology.csv) and asserts the CSV `summary` score + the `edges`
+  # admix weight (pSteppe->aCW) match the admixtools 2.0.10 golden — RUNNING ON THE GPU. SKIPs
+  # cleanly (exit 0) when no CUDA device is visible.
+  add_executable(test_cli_qpgraph cli/test_cli_qpgraph.cpp)
+  target_link_libraries(test_cli_qpgraph
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_qpgraph steppe_app)
+  add_test(NAME cli_qpgraph
+           COMMAND test_cli_qpgraph
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 

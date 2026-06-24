@@ -1,0 +1,210 @@
+// src/app/cmd_qpgraph.cpp — the `steppe qpgraph` command (single-graph fit).
+//
+// Mirrors cmd_qpadm.cpp: read the f2_blocks dir -> build_resources(DeviceConfig) ->
+// upload_f2_blocks_to_device -> run_qpgraph(DeviceF2Blocks, edges, leaf_names, opts) ->
+// emit the result. The graph is read from --graph (an admixtools-format 2-column edge
+// list). The leaf_names map is the f2 dir's pops.txt order (the P-axis). PLAIN C++20, no
+// CUDA header (the §4 layering): the GPU is reached only via the CUDA-free seams.
+#include "app/cmd_qpgraph.hpp"
+
+#include <cctype>
+#include <cstdio>
+#include <exception>
+#include <fstream>
+#include <iostream>
+#include <ostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "app/f2_dir_io.hpp"
+#include "app/result_emit.hpp"          // OutputFormat / parse_output_format
+#include "core/config/exit_code.hpp"
+#include "device/device_f2_blocks.hpp"  // CUDA-FREE
+#include "device/resources.hpp"         // CUDA-FREE
+#include "steppe/error.hpp"
+#include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options
+
+namespace steppe::app {
+
+namespace {
+
+namespace cfg = steppe::config;
+
+/// Parse an admixtools-format edge-list file: each non-blank, non-comment line has TWO
+/// whitespace- OR comma-separated tokens (parent child). A leading header row "from,to"
+/// (case-insensitive) and #-comments are skipped. Surrounding quotes are stripped (the R
+/// write.csv format quotes the labels). Returns false (with `err`) on a malformed line.
+[[nodiscard]] bool read_edge_list(const std::string& path,
+                                  std::vector<steppe::QpGraphEdge>& edges, std::string& err) {
+    std::ifstream f(path);
+    if (!f) { err = "cannot open --graph file: " + path; return false; }
+    const auto strip = [](std::string s) {
+        // trim whitespace
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) s.erase(s.begin());
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
+        // strip surrounding double quotes (R write.csv)
+        if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+        return s;
+    };
+    std::string line;
+    int lineno = 0;
+    bool first_data = true;
+    while (std::getline(f, line)) {
+        ++lineno;
+        // replace commas with spaces so split is uniform.
+        for (char& c : line) if (c == ',') c = ' ';
+        std::istringstream ss(line);
+        std::string a, b, extra;
+        if (!(ss >> a)) continue;       // blank line
+        if (a.size() && a[0] == '#') continue;  // comment
+        if (!(ss >> b)) { err = "malformed edge at line " + std::to_string(lineno) + " (need 2 columns)"; return false; }
+        a = strip(a); b = strip(b);
+        // skip a header row.
+        if (first_data) {
+            std::string al = a, bl = b;
+            for (char& c : al) c = static_cast<char>(std::tolower(c));
+            for (char& c : bl) c = static_cast<char>(std::tolower(c));
+            first_data = false;
+            if ((al == "from" && bl == "to") || (al == "parent" && bl == "child")) continue;
+        }
+        edges.push_back({a, b});
+    }
+    if (edges.empty()) { err = "--graph file has no edges: " + path; return false; }
+    return true;
+}
+
+/// Emit the qpGraph fit result (CSV/TSV or JSON). CSV/TSV: an `edges` section
+/// (from,to,type,weight) for every edge (admix rows carry the mixture weight; drift rows
+/// the fitted length) + a `summary` section (score,restart_spread,worst_z,status). JSON: a
+/// single object. Self-contained (no shared format primitive needed).
+void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    const auto stat = [&](steppe::Status s) -> const char* {
+        switch (s) {
+            case steppe::Status::Ok: return "ok";
+            case steppe::Status::NonSpdCovariance: return "nonspd";
+            case steppe::Status::RankDeficient: return "rankdeficient";
+            case steppe::Status::InvalidConfig: return "invalid_graph";
+            default: return "error";
+        }
+    };
+    if (fmt == OutputFormat::Json) {
+        os << "{\n";
+        os << "  \"score\": " << r.score << ",\n";
+        os << "  \"restart_spread\": " << r.restart_spread << ",\n";
+        os << "  \"worst_residual_z\": " << r.worst_residual_z << ",\n";
+        os << "  \"worst_pair\": [\"" << r.worst_pop2 << "\", \"" << r.worst_pop3 << "\"],\n";
+        os << "  \"status\": \"" << stat(r.status) << "\",\n";
+        os << "  \"admix\": [\n";
+        for (std::size_t j = 0; j < r.weight.size(); ++j) {
+            os << "    {\"from\": \"" << r.admix_from[j] << "\", \"to\": \"" << r.admix_to[j]
+               << "\", \"weight\": " << r.weight[j]
+               << ", \"low\": " << (j < r.weight_lo.size() ? r.weight_lo[j] : r.weight[j])
+               << ", \"high\": " << (j < r.weight_hi.size() ? r.weight_hi[j] : r.weight[j]) << "}"
+               << (j + 1 < r.weight.size() ? "," : "") << "\n";
+        }
+        os << "  ],\n  \"edges\": [\n";
+        for (std::size_t e = 0; e < r.edge_length.size(); ++e) {
+            os << "    {\"from\": \"" << r.edge_from[e] << "\", \"to\": \"" << r.edge_to[e]
+               << "\", \"length\": " << r.edge_length[e] << "}"
+               << (e + 1 < r.edge_length.size() ? "," : "") << "\n";
+        }
+        os << "  ]\n}\n";
+        return;
+    }
+    // CSV/TSV.
+    os << "# section: edges\n";
+    os << "from" << sep << "to" << sep << "type" << sep << "weight\n";
+    for (std::size_t j = 0; j < r.weight.size(); ++j)
+        os << r.admix_from[j] << sep << r.admix_to[j] << sep << "admix" << sep << r.weight[j] << "\n";
+    for (std::size_t e = 0; e < r.edge_length.size(); ++e)
+        os << r.edge_from[e] << sep << r.edge_to[e] << sep << "edge" << sep << r.edge_length[e] << "\n";
+    os << "# section: summary\n";
+    os << "score" << sep << "restart_spread" << sep << "worst_z" << sep << "worst_pop2" << sep
+       << "worst_pop3" << sep << "status\n";
+    os << r.score << sep << r.restart_spread << sep << r.worst_residual_z << sep
+       << r.worst_pop2 << sep << r.worst_pop3 << sep << stat(r.status) << "\n";
+}
+
+}  // namespace
+
+int run_qpgraph_command(const cfg::RunConfig& config) {
+    // ---- 1. f2_blocks dir + the graph file --------------------------------------
+    if (config.f2_dir().empty()) {
+        std::fprintf(stderr, "steppe qpgraph: --f2-dir is required\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (config.graph_file().empty()) {
+        std::fprintf(stderr, "steppe qpgraph: --graph (the edge-list file) is required\n");
+        return cfg::kExitInvalidConfig;
+    }
+    const F2DirResult dir = read_f2_dir(config.f2_dir());
+    if (!dir.ok) {
+        std::fprintf(stderr, "steppe qpgraph: %s\n", dir.error.c_str());
+        return cfg::kExitIoError;
+    }
+    std::vector<steppe::QpGraphEdge> edges;
+    std::string err;
+    if (!read_edge_list(config.graph_file(), edges, err)) {
+        std::fprintf(stderr, "steppe qpgraph: %s\n", err.c_str());
+        return cfg::kExitInvalidConfig;
+    }
+
+    // ---- 2. options (defaults == the AT2 golden's) ------------------------------
+    steppe::QpGraphOptions opts;
+    opts.fudge = config.qpadm_options().fudge;      // --fudge (shared QpAdmOptions::fudge == AT2 diag)
+    opts.diag_f3 = config.qpgraph_diag_f3();
+    opts.numstart = config.qpgraph_numstart();
+    opts.constrained = config.qpgraph_constrained();
+
+    // ---- 3. build_resources -> upload f2 RESIDENT -> run_qpgraph (GPU path) ------
+    steppe::QpGraphResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (resources.gpus.empty()) {
+            std::fprintf(stderr,
+                         "steppe qpgraph: no CUDA device available (steppe is a GPU "
+                         "product; a CUDA-capable GPU is required)\n");
+            return cfg::kExitRuntimeError;
+        }
+        const int device_id = resources.gpus.front().device_id;
+        device::DeviceF2Blocks dev_f2 =
+            device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
+        result = run_qpgraph(dev_f2, edges, dir.dir.pop_labels, opts, resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe qpgraph: device error: %s\n", e.what());
+        return cfg::kExitRuntimeError;
+    }
+
+    if (result.status == steppe::Status::InvalidConfig) {
+        // A graph parse / structural domain outcome (e.g. a leaf not in the f2 set, an
+        // unrooted / cyclic graph). Surface as InvalidConfig (a clear fault, not a silent row).
+        std::fprintf(stderr,
+                     "steppe qpgraph: the graph could not be fit (a leaf is not an f2 "
+                     "population, or the topology is unrooted/cyclic/invalid)\n");
+        return cfg::kExitInvalidConfig;
+    }
+
+    // ---- 4. Emit ---------------------------------------------------------------
+    OutputFormat fmt = OutputFormat::Csv;
+    if (!parse_output_format(config.format(), fmt)) {
+        std::fprintf(stderr, "steppe qpgraph: unknown --format '%s' (csv|tsv|json)\n",
+                     config.format().c_str());
+        return cfg::kExitInvalidConfig;
+    }
+    if (config.out_file().empty()) {
+        emit(std::cout, fmt, result);
+    } else {
+        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "steppe qpgraph: cannot open --out file: %s\n",
+                         config.out_file().c_str());
+            return cfg::kExitIoError;
+        }
+        emit(out, fmt, result);
+    }
+    return cfg::exit_code_for(result.status);
+}
+
+}  // namespace steppe::app

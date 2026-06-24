@@ -45,6 +45,7 @@
 // `import steppe` work without a GPU and is the correctness anchor the GPU is
 // diffed against (architecture.md §8, §13).
 
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -61,6 +62,8 @@
 #include "core/internal/small_linalg.hpp"  // core::solve/inverse/jacobi_svd (the qpAdm reference solvers)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
 #include "core/qpadm/qpadm_bounds.hpp"     // core::qpadm::qpadm_dof — the single-source (nl-r)*(nr-r) dof
+#include "core/qpadm/qpgraph_model.hpp"    // core::qpadm::QpGraphModel (rebuilt from the arena for the fleet oracle)
+#include "core/qpadm/qpgraph_objective.hpp" // core::qpadm::qpgraph_score / opt_edge_lengths (the host fleet body)
 #include "device/backend.hpp"              // steppe::ComputeBackend, steppe::F2Result, DecodeResult, F4Blocks/...
 #include "device/backend_factory.hpp"      // steppe::device::make_cpu_backend (the single-source decl, X-9/B8)
 #include "device/device_f2_blocks.hpp"     // steppe::device::DeviceF2Blocks (the S3 device-resident input)
@@ -1452,6 +1455,127 @@ private:
             acc += static_cast<long double>(e[static_cast<std::size_t>(a)]) * row;
         }
         return static_cast<double>(acc);
+    }
+
+    // ---- qpGraph FLEET (the host reference for the IDEA-1 optimizer spike) -------
+    /// The native small_linalg fleet ORACLE: per restart, the SAME projected-Newton loop
+    /// the device kernel runs (per-dim forward-diff gradient + diagonal 3-point curvature,
+    /// projected trust-clamped step, backtracking), each eval = core::qpadm::qpgraph_score
+    /// (fill_pwts -> ppwts -> the AT2 constrained edge solve -> the GLS quadratic form).
+    /// Best-of-restarts + the per-weight restart bracket. This is the bit-exact diff oracle
+    /// the CudaBackend fleet is validated against (same math, native FP64).
+    [[nodiscard]] QpGraphFleet qpgraph_fit_fleet(const QpGraphTopoArena& topo,
+                                                 std::span<const double> f_obs,
+                                                 std::span<const double> qinv,
+                                                 int numstart, int maxit, double tol,
+                                                 const Precision& precision) override {
+        (void)precision;  // native FP64 reference
+        using core::qpadm::QpGraphModel;
+        // Rebuild the minimal model the objective consumes from the arena.
+        QpGraphModel m;
+        m.npop = topo.npop; m.nedge_norm = topo.nedge_norm; m.nadmix = topo.nadmix;
+        m.npair = topo.npair; m.npath = topo.npath; m.base_leaf = topo.base_leaf;
+        m.pwts0 = topo.pwts0;
+        m.pe_edge = topo.pe_edge; m.pe_leaf = topo.pe_leaf; m.pe_path = topo.pe_path;
+        m.pae_path = topo.pae_path; m.pae_admixedge = topo.pae_admixedge;
+        m.cmb1 = topo.cmb1; m.cmb2 = topo.cmb2;
+        const std::vector<double> fobs(f_obs.begin(), f_obs.end());
+        const std::vector<double> ppinv(qinv.begin(), qinv.end());
+        const int D = m.nadmix;
+        const double fudge = topo.fudge;
+        const bool constrained = topo.constrained;
+
+        QpGraphFleet out;
+        if (D == 0) {
+            // A pure tree: no theta — one edge solve.
+            std::vector<double> bl, fit(static_cast<std::size_t>(m.npair), 0.0);
+            const double sc = core::qpadm::qpgraph_score(m, nullptr, fobs, ppinv, fudge,
+                                                         constrained, &bl, &fit);
+            out.score = sc; out.restart_spread = 0.0; out.edge_length = bl; out.f3_fit = fit;
+            out.status = std::isfinite(sc) ? Status::Ok : Status::NonSpdCovariance;
+            return out;
+        }
+
+        const auto clamp01 = [](double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); };
+        // deterministic splitmix multistart (the spike's d_init_theta), so the fleet is
+        // reproducible and basin-diverse (the well-identified optimum is unique).
+        const auto init_theta = [](unsigned inst, int dim) -> double {
+            unsigned long long z = (static_cast<unsigned long long>(inst) * 0x100000001B3ULL) +
+                                   (static_cast<unsigned long long>(dim) * 0x9E3779B97F4A7C15ULL) +
+                                   0xD1B54A32D192ED03ULL;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            z = z ^ (z >> 31);
+            return static_cast<double>(z & 0xFFFFFFFFFFFFFULL) / static_cast<double>(0x10000000000000ULL);
+        };
+        const auto sco = [&](const std::vector<double>& th) {
+            return core::qpadm::qpgraph_score(m, th.data(), fobs, ppinv, fudge, constrained);
+        };
+
+        double best_score = std::numeric_limits<double>::infinity();
+        std::vector<double> best_theta(static_cast<std::size_t>(D), 0.0);
+        double smin = std::numeric_limits<double>::infinity(), smax = -std::numeric_limits<double>::infinity();
+        std::vector<double> thmin(static_cast<std::size_t>(D), 1.0), thmax(static_cast<std::size_t>(D), 0.0);
+
+        const double h = 1e-4;
+        for (int inst = 0; inst < numstart; ++inst) {
+            std::vector<double> th(static_cast<std::size_t>(D));
+            for (int d = 0; d < D; ++d) th[static_cast<std::size_t>(d)] = clamp01(init_theta(static_cast<unsigned>(inst), d));
+            double s = sco(th);
+            for (int it = 0; it < maxit; ++it) {
+                double max_dx = 0.0, max_ds = 0.0;
+                for (int d = 0; d < D; ++d) {
+                    const double w = th[static_cast<std::size_t>(d)];
+                    const double wp = std::min(1.0, w + h), wm = std::max(0.0, w - h);
+                    std::vector<double> thp = th, thm = th;
+                    thp[static_cast<std::size_t>(d)] = wp; thm[static_cast<std::size_t>(d)] = wm;
+                    const double sp = sco(thp), sm = sco(thm);
+                    const double dwp = wp - w, dwm = w - wm;
+                    double g, curv;
+                    if (dwp > 0.0 && dwm > 0.0) {
+                        g = (sp - sm) / (dwp + dwm);
+                        curv = (sp - 2.0 * s + sm) / (0.5 * (dwp + dwm) * (dwp + dwm) + 1e-30);
+                    } else if (dwp > 0.0) { g = (sp - s) / dwp; curv = 1.0; }
+                    else { g = (s - sm) / dwm; curv = 1.0; }
+                    double step = (curv > 1e-8) ? (g / curv) : (g * 0.5);
+                    if (step > 0.5) step = 0.5;
+                    if (step < -0.5) step = -0.5;
+                    double wn = clamp01(w - step);
+                    std::vector<double> thn = th; thn[static_cast<std::size_t>(d)] = wn;
+                    double sn = sco(thn);
+                    int bt = 0;
+                    while (sn > s && bt < 8) {
+                        wn = 0.5 * (wn + w); thn[static_cast<std::size_t>(d)] = wn; sn = sco(thn); ++bt;
+                    }
+                    const double dx = std::fabs(wn - w), ds = std::fabs(sn - s);
+                    if (sn <= s) { th[static_cast<std::size_t>(d)] = wn; s = sn; }
+                    if (dx > max_dx) max_dx = dx;
+                    if (ds > max_ds) max_ds = ds;
+                }
+                if (max_dx < tol * 1e-2 && max_ds < tol * 1e-3) break;
+            }
+            if (s < smin) smin = s;
+            if (s > smax) smax = s;
+            for (int d = 0; d < D; ++d) {
+                if (th[static_cast<std::size_t>(d)] < thmin[static_cast<std::size_t>(d)]) thmin[static_cast<std::size_t>(d)] = th[static_cast<std::size_t>(d)];
+                if (th[static_cast<std::size_t>(d)] > thmax[static_cast<std::size_t>(d)]) thmax[static_cast<std::size_t>(d)] = th[static_cast<std::size_t>(d)];
+            }
+            if (s < best_score) { best_score = s; best_theta = th; }
+        }
+
+        out.score = best_score;
+        out.restart_spread = (std::isfinite(smax) && std::isfinite(smin)) ? (smax - smin) : 0.0;
+        out.theta = best_theta;
+        out.theta_lo = thmin; out.theta_hi = thmax;
+        // recover the edge lengths + f3_fit at the best theta.
+        out.edge_length.assign(static_cast<std::size_t>(m.nedge_norm), 0.0);
+        out.f3_fit.assign(static_cast<std::size_t>(m.npair), 0.0);
+        std::vector<double> bl, fit(static_cast<std::size_t>(m.npair), 0.0);
+        const double sc_final = core::qpadm::qpgraph_score(m, best_theta.data(), fobs, ppinv,
+                                                           fudge, constrained, &bl, &fit);
+        if (std::isfinite(sc_final)) { out.edge_length = bl; out.f3_fit = fit; out.status = Status::Ok; }
+        else out.status = Status::NonSpdCovariance;
+        return out;
     }
 };
 
