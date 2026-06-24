@@ -31,15 +31,21 @@ Verify state: `cd /home/suzunik/steppe && git branch --show-current && git log -
 > goldens held (STEPPE_THOROUGH 62/62; CpuBackend==CudaBackend). See `docs/research/host-compute-audit.md`
 > C1/C2/M3/M4.
 >
-> **HOST-COMPUTE AUDIT MEDIUM TAIL CLOSED (`f9cb042`, 2026-06-24).** M5 (DATES target repack →
-> on-device gather `launch_dates_repack_target`, bit-exact) + M6 (DATES exp-fit → batched on-device
-> `launch_dates_fit_curves`, native-FP64 carve-out) LANDED — the dates host repack/fit hot loops no
-> longer run in production. **M7 (single-model qpAdm SE) DEFERRED** — bit-identity-gated: the existing
-> FP64-double `qpadm_se_from_wmat_kernel` cannot reproduce the host long-double `sample_cov_diag`
-> bit-identically for the NRBIG `rtol=atol=0.0` anchor (cancellation regime), and no-new-kernel +
-> no-golden-shift + no-revert leave no on-device path. GOLDENS HELD: DATES date 9.733545 vs 9.742;
-> qpadm 9-pop se |d|=1.748e-05; NRBIG GPU se/z bit-identical |d|=0.000e+00; full ctest 62/62.
-> **Remaining host-audit work: only L1-L4 (bounded per-model/per-run tidy-ups).**
+> **HOST-COMPUTE AUDIT COMPLETE (bar L1-L4) — M7 LANDED (`061d80f`, 2026-06-24).** M5/M6 (DATES
+> repack + exp-fit) landed earlier (`f9cb042`). **M7 (single-model qpAdm SE) is now ON-DEVICE** —
+> the LAST host-compute violation closed. `se_from_loo`'s host long-double `sample_cov_diag` is GONE
+> from production: a new backend `se_from_wmat` virtual; the CUDA override keeps the resident dWmat
+> (`populate_loo_wmat_resident`) and reduces it via the EXISTING `launch_qpadm_se_from_wmat_batched`
+> (`qpadm_se_from_wmat_kernel`, native FP64, n_models=1 — NO new kernel, the S8-path kernel), D2H'ing
+> ONLY the nl-length se; the AT2 `(nb-1)/sqrt(nb)` scale is an exact final multiply on the nl output
+> scalars. The long-double reduction moved verbatim into the CpuBackend test oracle. The prior
+> "bit-identity-gated, deferred" framing was a category error: `kNrbigPreSe0/1` is a steppe-INTERNAL
+> DETERMINISM anchor (NOT an AT2 golden), so it was RE-CAPTURED to the on-device FP64 value — VALID
+> because the AT2 rtol-1e-3 SE gate (the real correctness guard) independently HOLDS (|d|=1.748e-05 <
+> tol 2.482e-05, both CPU oracle + GPU production) and the new value is bit-DETERMINISTIC (byte-
+> identical NRBIG se/z across two box5090 runs). GOLDENS HELD: qpadm 9-pop se |d|=1.748e-05; NRBIG GPU
+> se/z bit-identical |d|=0.000e+00; CpuBackend(long-double)==CudaBackend(FP64) SE ~1e-9; full
+> STEPPE_THOROUGH ctest 62/62. **Remaining host-audit work: only L1-L4 (bounded tidy-ups).**
 >
 > Prior: **`9ad33d9` Stage 1 (regime-A: qpfstats + dstat)** — `decode_af_compact_autosome` resident
 > Q/V/N + the INTEGER-EXACT autosome keep-mask + the scan-gather lockstep compaction; nsys proof on

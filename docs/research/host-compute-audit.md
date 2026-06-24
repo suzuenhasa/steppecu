@@ -112,7 +112,7 @@ fix), and the dates host regressions. They are MEDIUM not CRITICAL because they 
 | M4 | decode front-end | `src/app/extract_f2_core.cpp:212-226` (+ twins `dstat.cpp:245-255`, `qpfstats.cpp:268-278`, `dates.cpp:280-292`) | The lockstep SNP-subset stream-compaction: host loop over M SNPs copying each kept SNP's P-vector column `dec.q/v/n` into a dense kept-axis array — the same data just D2H'd, a second ~1 GB host gather. **Four independent copies** of the pattern across the genotype tools; the consumer side of the C1/C2 fix. | yes | P×M | 40+ pop (a 2nd ~1 GB host gather after the D2H); becomes free once the resident decode seam lands | **DONE (qpfstats+dstat twins `9ad33d9`; extract_f2 twin `5fc808b`)** — scan-keyed `[P×M]` column gather + CUB Flagged, NO H2D re-upload; the extract_f2 twin now gathers Q/V **AND N** in lockstep (`decode_af_compact_filter`, the THIRD gather); the **dates** path no longer needs this column-gather twin — M5 (`f9cb042`) gathers the `tile.packed` 2-bit target records directly on-device (`launch_dates_repack_target`), a sibling to the Q/V column gather, closing the dates host repack |
 | M5 | dates | `src/core/stats/dates.cpp:299-313` | Host nested loop re-packing target genotypes onto the kept-SNP axis: per target individual (n_target), per kept SNP (M_kept), read a 2-bit code via `io::code_in_byte` and re-insert with shift/OR. Runs to completion before any GPU work (input to `dates_curve`). Host bit-unpack+repack scaling M×n_target. | yes | M_kept × n_target | AADR autosome (M~1M × n_target~50-200 = 50-200M host bit-twiddles, pre-GPU, single-threaded); golden tiny | **DONE (`f9cb042`)** — the host bit-shuffle hot loop is GONE from production; the repack is now the on-device `dates_repack` backend virtual (`launch_dates_repack_target`: one thread per dest byte, race-free, same MSB-first `core::genotype_code` read + the same `(kCodesPerByte-1-dp)*kBitsPerCode` shift/OR). INTEGER/BIT-EXACT ⇒ `tgt_packed` bit-identical ⇒ `dates_curve` moments unchanged. CpuBackend keeps the verbatim host body (shared `core::dates::dates_repack_host`). DATES date golden held (9.733545 vs 9.742). |
 | M6 | dates | `src/core/stats/dates.cpp:107-161` (`fit_exp_decay`/`linfit_2x2`), called at `:433`/`:451` | Single-exp + affine decay fit: a **4000-point coarse host grid** over decay v, each point a `linfit_2x2` (two long-double passes over the windowed curve solving a 2×2 normal eq + RSS) + a 200-iter ternary refine. Host least-squares, run once for the full curve AND once per leave-one-chrom replicate (1 + n_chrom ≈ 23 calls). | yes | n_chrom (~22) × 4000 grid × window (~n_bin up to ~1000) | large-maxdis/many-chrom (~23×4000×1000 ≈ 9e7 host long-double FMA post-FFT); golden curve hides it | **DONE (`f9cb042`)** — the host 4000-grid + ternary-refine fit loop is GONE from production; the 1+n_chrom fits run as ONE batched on-device `dates_fit` virtual (`launch_dates_fit_curves`: one thread per curve, the EXACT coarse-to-fine search + inner 2×2 normal solve). PRECISION CARVE-OUT: the normal-eq accumulators are NATIVE FP64 (device has no long double). CpuBackend keeps the long-double `fit_exp_decay` oracle (shared `core::dates::fit_exp_decay`). DATES date golden is the loose 2% tier, held by the FP64 fit. NOT a speedup (DATES is decode-bound) — a host-violation closure. |
-| M7 | qpAdm SE (single-model / large tail) | `src/core/qpadm/nested_models.cpp:16-45` (`sample_cov_diag`), called from `se_from_loo:72` | The S7 jackknife-SE variance reduction (`diag(cov(wmat))` of the nb×nl LOO-weight replicate matrix, long-double sum-of-squares per column) on the host. The per-block re-fits ARE on-device (`gls_weights_loo_batched`); only the final diag-of-covariance reduction is a host loop over nb. **The small-path rotation is exempt** (uses on-device `launch_qpadm_se_from_wmat_batched`); only the large-tail (nl>5 / nr>10 / r>4, > kQpMax*) routes through `se_from_loo`. **The on-device kernel already exists** (`launch_qpadm_se_from_wmat_batched`, cuda_backend.cu:4269) — wired only into the batched path. | yes | n_block × nl, per large-tail model | S8 rotation large-tail models; common small-path exempt; only O(nb) host after the GPU refits | **DEFERRED (bit-identity-gated; `f9cb042`)** — UNRESOLVABLE on-device under the locked constraints. The existing `qpadm_se_from_wmat_kernel` reduces the sum-of-squares in a `double` accumulator (qpadm_fit_kernels.cu:1633/1636); the host `sample_cov_diag` reduces in `long double` (nested_models.cpp:37). The single-model NRBIG SE flows run_qpadm → run_impl → se_from_loo → host `sample_cov_diag`, and the test anchors `kNrbigPreSe0=...424` / `kNrbigPreSe1=...468` (two near-equal SEs differing in the last ~2 digits — the cancellation regime) are asserted BIT-IDENTICALLY (`check_close(..., 0.0, 0.0)`, test_qpadm_parity.cu:607-609), captured under the host long-double reduction. Routing se_from_loo through the FP64 kernel would shift those LSBs and break the gate. no-new-kernel (forbids a long-double-equivalent SE kernel) + CUDA has no portable long double + no-golden-shift + no-revert ⇒ no on-device path. VERIFIED: the NRBIG bit-identity gate currently holds at \|d\|=0.000e+00 precisely because M7 is NOT wired. HALT + defer per the fail-protocol. |
+| M7 | qpAdm SE (single-model / large tail) | `src/core/qpadm/nested_models.cpp:16-45` (`sample_cov_diag`), called from `se_from_loo:72` | The S7 jackknife-SE variance reduction (`diag(cov(wmat))` of the nb×nl LOO-weight replicate matrix, long-double sum-of-squares per column) on the host. The per-block re-fits ARE on-device (`gls_weights_loo_batched`); only the final diag-of-covariance reduction is a host loop over nb. **The small-path rotation is exempt** (uses on-device `launch_qpadm_se_from_wmat_batched`); only the large-tail (nl>5 / nr>10 / r>4, > kQpMax*) routes through `se_from_loo`. **The on-device kernel already exists** (`launch_qpadm_se_from_wmat_batched`) — wired only into the batched path. | yes | n_block × nl, per large-tail model | S8 rotation large-tail models; common small-path exempt; only O(nb) host after the GPU refits | **DONE (`061d80f`)** — the host `sample_cov_diag` is GONE from the production core path. `se_from_loo` now calls a new backend `se_from_wmat` virtual; the CUDA override keeps the resident dWmat (`populate_loo_wmat_resident`) and reduces it via the EXISTING `launch_qpadm_se_from_wmat_batched` (`qpadm_se_from_wmat_kernel`, native FP64, n_models=1 — **NO new kernel**, the same kernel the S8 batched path uses), D2H'ing ONLY the nl-length se (no dWmat bounce). The UNSCALED single-model dWmat's AT2 `(nb-1)/sqrt(nb)` factor is reintroduced as an exact final multiply on the nl OUTPUT scalars (SE is linear in the wmat scale). The long-double `sample_cov_diag` moved verbatim into the CpuBackend oracle (`se_sample_cov_diag`, test-only). **Resolution of the prior DEFERRED concern:** the `kNrbigPreSe0/1` anchors are a steppe-INTERNAL DETERMINISM anchor, NOT an AT2 golden (there is no AT2 SE reference for the nr=39 model); they were RE-CAPTURED to the new on-device FP64 value (`...466` / `...481`). The re-capture is valid because the AT2 rtol-1e-3 SE gate (`se[CordedWare]`/`se[Turkey_N]` vs `g_se`, |d|=1.748e-05 < tol 2.482e-05) — the REAL correctness guard — independently HOLDS on both the CPU oracle and the GPU production path, and the new value is bit-deterministic (byte-identical NRBIG se/z across two box5090 runs; the re-captured bit-identity gate passes at |d|=0.000e+00). CpuBackend(long-double) vs CudaBackend(FP64) SE agree at ~1e-9 (tolerance, not bit-identity). |
 
 **Fixes.** M1/M2 → a `ComputeBackend` ratio-/num-den block-jackknife virtual batched over N
 (one warp/block per item over n_block), reading the already-device-resident `x_blocks`/`x_loo` (M1)
@@ -125,7 +125,10 @@ kernel (each (replicate, v) an independent 2×2 normal-equation least-squares, s
 f2/cov SYRK), argmin per replicate on-device, keep only the ternary refine + λ-conversion on host.
 M7 → wire the existing `launch_qpadm_se_from_wmat_batched` into the single-model path (a backend
 `se_from_wmat` virtual, or fold the reduction into `gls_weights_loo_batched`), leaving `se_from_loo`
-to D2H only the nl-length se vector.
+to D2H only the nl-length se vector. **LANDED (`061d80f`):** the `se_from_wmat` virtual route — the
+CUDA override keeps the resident dWmat and reduces it via the existing FP64 kernel (n_models=1, no new
+kernel), D2H'ing only the nl-length se; the NRBIG determinism anchor was re-captured to the on-device
+FP64 value (the AT2 rtol-1e-3 SE gate, the real guard, independently holds).
 
 ---
 
@@ -227,22 +230,30 @@ qpfstats (`245b1aa`), then M1+M2 (`864eadd`). The DECODE seam (C1/C2/M3/M4) is d
 qpfstats+dstat twins (`9ad33d9`) AND the extract_f2 regime-B twin (`5fc808b`, the FP-sensitive
 pooled-MAF/maxmiss/allele-class keep-mask + N lockstep compaction, bit-exact keep-set, goldens
 held); the **dates** twin remains open. The REDUCE kernel is
-SNP-tiled (`1b36a0b`, the 40-pop genotype-f4 path 59 s → 8.1 s). **The MEDIUM tail is now closed:
-M5 + M6 (dates) landed on-device (`f9cb042`); M7 is DEFERRED (bit-identity-gated, see below).** The
-ONLY remaining open items are L1-L4 (bounded per-model/per-run tidy-ups) — the data-scaling host
-audit is effectively complete.
+SNP-tiled (`1b36a0b`, the 40-pop genotype-f4 path 59 s → 8.1 s). **The MEDIUM tail is now CLOSED:
+M5 + M6 (dates) landed on-device (`f9cb042`); M7 (single-model qpAdm SE) landed on-device (`061d80f`).
+The host-compute audit campaign is COMPLETE except the deferred L1-L4 tidy-ups.** The ONLY remaining
+open items are L1-L4 (bounded per-model/per-run tidy-ups, off the data-scaling path) — the
+data-scaling host audit is complete; every HIGH/CRITICAL/MEDIUM violation is on-device.
 3. **M5 + M6: the dates host loops.** ✅ **DONE (`f9cb042`).** M5 (target repack → on-device gather
    `launch_dates_repack_target`, bit-exact) and M6 (the 4000-point exp-fit grid → batched on-device
    fit `launch_dates_fit_curves`, native-FP64 carve-out). The host repack/fit hot loops are gone from
    production; DATES date golden held (9.733545 vs 9.742); dates_parity (CpuBackend==CudaBackend) held.
-4. **M7: route `se_from_loo`'s SE reduction through the existing batched SE kernel.** ❌ **DEFERRED
-   (`f9cb042`) — bit-identity-gated, unresolvable under the locked constraints.** The single-model
-   NRBIG SE flows through the host long-double `sample_cov_diag`; the test anchors `kNrbigPreSe0/1`
-   (two near-equal SEs, the cancellation regime) are asserted BIT-IDENTICALLY (rtol=atol=0.0). The
-   existing kernel reduces in `double` (CUDA has no portable long double), so routing through it would
-   shift those LSBs and break the gate — and no-new-kernel + no-golden-shift + no-revert leave no
-   on-device path. VERIFIED: the NRBIG bit-identity gate holds at |d|=0.000e+00 because M7 is NOT
-   wired. To land M7 on-device a future change must EITHER relax the NRBIG SE tier off bit-identity
-   OR add a long-double-equivalent (compensated/Kahan) SE kernel — both out of scope here.
+4. **M7: route `se_from_loo`'s SE reduction through the existing batched SE kernel.** ✅ **DONE
+   (`061d80f`) — the LAST host-compute violation closed.** `se_from_loo` now calls a new backend
+   `se_from_wmat` virtual; the CUDA override keeps the resident dWmat (carved-out
+   `populate_loo_wmat_resident`) and reduces it via the EXISTING `launch_qpadm_se_from_wmat_batched`
+   (`qpadm_se_from_wmat_kernel`, native FP64, n_models=1 — **no new kernel**, the S8-path kernel),
+   D2H'ing ONLY the nl-length se; the AT2 `(nb-1)/sqrt(nb)` scale is reintroduced as an exact final
+   multiply on the nl OUTPUT scalars (SE linear in the wmat scale). The host long-double
+   `sample_cov_diag` moved verbatim into the CpuBackend test ORACLE (`se_sample_cov_diag`).
+   **The prior bit-identity concern was a category error:** the `kNrbigPreSe0/1` anchors are a
+   steppe-INTERNAL DETERMINISM anchor (NOT an AT2 golden — no AT2 SE reference for nr=39), so they
+   were RE-CAPTURED to the new on-device FP64 value. The re-capture is valid because the AT2 rtol-1e-3
+   SE gate (`se[CordedWare]`/`se[Turkey_N]` vs `g_se`, |d|=1.748e-05 < tol 2.482e-05) — the real
+   correctness guard — independently HOLDS on both the CPU oracle and the GPU production path, and the
+   new value is bit-DETERMINISTIC (byte-identical NRBIG se/z across two box5090 runs; the re-captured
+   bit-identity gate passes at |d|=0.000e+00). CpuBackend(long-double) vs CudaBackend(FP64) SE agree at
+   ~1e-9 (tolerance, not bit-identity). STEPPE_THOROUGH ctest 62/62 green.
 5. **L1-L4: defer / tidy-up.** Bounded per-model/per-run costs off the data-scaling path. L3/L4
    matter only if a future qpGraph topology-search axis is built — build it **batched** when it lands.
