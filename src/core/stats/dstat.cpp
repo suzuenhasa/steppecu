@@ -231,27 +231,42 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.data();  // forced diploid (the AT2 plain /2 pin).
     view.ploidy = kPloidyDiploid;
-    const DecodeResult dec = be.decode_af(view);
-
-    // Autosome keep-mask + lockstep subset of Q/V + chrom/genpos (PARITY PIN (3); chr<=22).
-    // DATES seam: per-SNP genpos retained, unused by D.
+    // ---- 1. Decode + the AUTOSOME keep + the lockstep Q/V subset (PARITY PIN (3); chr 1..22).
+    // DEVICE-RESIDENT seam (host-compute audit C1/C2/M3/M4 cure): on the CUDA backend the decode
+    // → autosome keep-mask → CUB/scan-gather Q/V compaction all run ON-DEVICE; the resident
+    // compacted Q/V + the small kept chrom/genpos escape in `ddr` (NO ~1.1GB Q/V/N D2H, NO host
+    // filter loop, NO Q/V H2D re-upload). The CpuBackend (device_count==0, the parity oracle)
+    // keeps the host path. BOTH produce the IDENTICAL kept SET, kept ORDER, and chrom_kept/
+    // genpos_kept → identical assign_blocks/golden. (DATES seam: per-SNP genpos retained, unused by D.)
+    const bool resident = (be.capabilities().device_count > 0);
+    steppe::device::DeviceDecodeResult ddr;
     std::vector<double> Qk, Vk;
     std::vector<int> chrom_kept;
-    std::vector<double> genpos_kept;  // DATES seam: per-SNP genpos retained, unused by D.
-    Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-    Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-    chrom_kept.reserve(static_cast<std::size_t>(M));
-    genpos_kept.reserve(static_cast<std::size_t>(M));
-    for (long s = 0; s < M; ++s) {
-        const int chr = snptab.chrom[static_cast<std::size_t>(s)];
-        if (chr < 1 || chr > 22) continue;  // AT2 auto_only: autosomes 1..22.
-        const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-        for (int p = 0; p < P; ++p) {
-            Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
-            Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+    std::vector<double> genpos_kept;
+    if (resident) {
+        ddr = be.decode_af_compact_autosome(
+            view, std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
+            std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
+            kAutosomeChromMin, kAutosomeChromMax);
+        chrom_kept = ddr.chrom_kept;
+        genpos_kept = ddr.genpos_kept;
+    } else {
+        const DecodeResult dec = be.decode_af(view);
+        Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
+        Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
+        chrom_kept.reserve(static_cast<std::size_t>(M));
+        genpos_kept.reserve(static_cast<std::size_t>(M));
+        for (long s = 0; s < M; ++s) {
+            const int chr = snptab.chrom[static_cast<std::size_t>(s)];
+            if (chr < 1 || chr > 22) continue;  // AT2 auto_only: autosomes 1..22.
+            const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+            for (int p = 0; p < P; ++p) {
+                Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
+                Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+            }
+            chrom_kept.push_back(chr);
+            genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
         }
-        chrom_kept.push_back(chr);
-        genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
     }
     const long M_kept = static_cast<long>(chrom_kept.size());
     if (M_kept <= 0) {
@@ -282,8 +297,14 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     // tiny [N × n_block] row-major.
     const std::size_t nb_out = static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
     std::vector<double> numsum(nb_out, 0.0), densum(nb_out, 0.0), cnt(nb_out, 0.0);
-    be.dstat_block_reduce(Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(), n_block,
-                          std::span<const int>(flat), numsum.data(), densum.data(), cnt.data());
+    if (resident)
+        be.dstat_block_reduce(ddr, partition.block_id.data(), n_block,
+                              std::span<const int>(flat), numsum.data(), densum.data(),
+                              cnt.data());
+    else
+        be.dstat_block_reduce(Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(),
+                              n_block, std::span<const int>(flat), numsum.data(),
+                              densum.data(), cnt.data());
 
     // ---- 4. The num/den block-jackknife per quadruple (host-pure; the f4ratio FAMILY) --
     res.est.assign(static_cast<std::size_t>(N), 0.0);

@@ -1,0 +1,103 @@
+// src/device/cuda/decode_compact_kernel.cu
+//
+// The DEVICE-RESIDENT decode-and-compact kernels (host-compute audit C2/M3/M4 cure).
+// Regime (A) autosome-only: the per-SNP keep predicate + the [P×M] column gather
+// that, paired with CUB DeviceSelect::Flagged on the parallel chrom/genpos, replaces
+// the host autosome keep loop + lockstep Q/V subset (qpfstats.cpp:268-278 /
+// dstat.cpp:245-255) with a GPU-bound, device-resident compaction.
+//
+// PARITY (architecture.md §12; the seam's GOLDEN-EXACT requirement): the autosome
+// predicate is INTEGER (chrom is an int from .snp), so the kept SET is bit-identical
+// to the host. The gather is keyed by the EXCLUSIVE scan of the keep flags, which is
+// monotone over the file-ordered SNP axis — so the compacted Q/V columns preserve
+// FILE ORDER exactly, identical to the host lockstep push_back. Q/V VALUES are the
+// same doubles decode_af already wrote (a pure copy, no arithmetic). assign_blocks
+// over the identically-compacted chrom/genpos thus reproduces the host block_id.
+//
+// This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4).
+#include "device/cuda/decode_compact_kernel.cuh"
+
+#include <cstddef>
+#include <cstdint>
+
+#include <cuda_runtime.h>
+
+#include "core/internal/launch_config.hpp"   // cdiv, kMaxGridX
+#include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
+
+namespace steppe::device {
+
+namespace {
+
+constexpr int kKeepBlock = 256;
+
+/// One thread per SNP s; the autosome keep predicate, INTEGER-EXACT (matches the
+/// host `if (chr < 1 || chr > 22) continue;`). Writes the uint8 CUB flag.
+__global__ void autosome_keep_mask_kernel(const int* __restrict__ chrom, long M,
+                                          int chrom_min, int chrom_max,
+                                          std::uint8_t* __restrict__ flags) {
+    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (s >= M) return;
+    const int chr = chrom[s];
+    flags[s] = (chr >= chrom_min && chr <= chrom_max) ? std::uint8_t{1} : std::uint8_t{0};
+}
+
+/// One thread per (population i, source SNP s): if SNP s is kept, copy its whole
+/// P-length column from d_in[i + P·s] to d_out[i + P·keep_idx[s]]. keep_idx is the
+/// exclusive scan of the flags (the compacted column position). FILE ORDER preserved.
+__global__ void compact_columns_gather_kernel(const double* __restrict__ in, int P,
+                                              long M,
+                                              const std::uint8_t* __restrict__ flags,
+                                              const long* __restrict__ keep_idx,
+                                              double* __restrict__ out) {
+    const long s = static_cast<long>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
+    if (s >= M || i >= P) return;
+    if (flags[s] == 0) return;
+    const std::size_t src = static_cast<std::size_t>(i) +
+                            static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+    const std::size_t dst = static_cast<std::size_t>(i) +
+                            static_cast<std::size_t>(P) *
+                                static_cast<std::size_t>(keep_idx[s]);
+    out[dst] = in[src];
+}
+
+}  // namespace
+
+void launch_autosome_keep_mask(const int* d_chrom, long M, int chrom_min,
+                               int chrom_max, std::uint8_t* d_flags,
+                               cudaStream_t stream) {
+    if (M <= 0) return;
+    const long grid_x = core::cdiv(M, static_cast<long>(kKeepBlock));
+    STEPPE_ASSERT(grid_x >= 0 &&
+                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
+                  "autosome keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
+                  "(architecture.md §7) — tile the SNP axis");
+    autosome_keep_mask_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
+        d_chrom, M, chrom_min, chrom_max, d_flags);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_compact_columns_gather(const double* d_in, int P, long M,
+                                   const std::uint8_t* d_flags,
+                                   const long* d_keep_idx, double* d_out,
+                                   cudaStream_t stream) {
+    if (P <= 0 || M <= 0) return;
+    // Block: x rides the POPULATION axis (unit stride in the column-major [P×M]
+    // arena, so adjacent lanes touch adjacent addresses — coalesced); y rides the
+    // SNP axis. 32×8 = 256 threads, the same shape family as the decode kernel.
+    const int bx = 32, by = 8;
+    const long grid_x = core::cdiv(M, static_cast<long>(by));
+    STEPPE_ASSERT(grid_x >= 0 &&
+                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
+                  "compact-columns gridDim.x (SNP axis) exceeds kMaxGridX "
+                  "(architecture.md §7) — tile the SNP axis");
+    const dim3 block(static_cast<unsigned>(bx), static_cast<unsigned>(by));
+    const dim3 grid(static_cast<unsigned>(grid_x),
+                    static_cast<unsigned>(core::grid_for(P, bx)));
+    compact_columns_gather_kernel<<<grid, block, 0, stream>>>(d_in, P, M, d_flags,
+                                                              d_keep_idx, d_out);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+}  // namespace steppe::device

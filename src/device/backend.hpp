@@ -39,6 +39,7 @@
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
+#include "device/device_decode_result.hpp"  // steppe::device::DeviceDecodeResult (CUDA-free opaque autosome-compacted Q/V resident handle)
 #include "device/stream_f2_blocks.hpp"  // steppe::device::StreamTarget (CUDA-free M5 streamed-tier request)
 
 namespace steppe {
@@ -703,6 +704,41 @@ public:
     ///         single FP64 divide ⇒ exact is the goal/gate).
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
 
+    /// DEVICE-RESIDENT decode + AUTOSOME compaction (the host-compute audit C1/C2/
+    /// M3/M4 cure for the regime-(A) consumers qpfstats / dstat). Decodes the tile
+    /// to Q/V/N RESIDENT in VRAM (NO full host D2H — the C1 ~1.1GB copy is GONE),
+    /// runs the on-device per-SNP autosome keep-mask (chr in [kAutosomeChromMin,
+    /// kAutosomeChromMax] — the INTEGER-EXACT host predicate `if (chr<1||chr>22)
+    /// continue;`, the C2 host filter loop GONE), and stream-compacts Q/V onto the
+    /// kept axis (CUB DeviceSelect::Flagged for the 1-D chrom/genpos + a scan-keyed
+    /// column gather for the [P×M] Q/V — the M3/M4 host lockstep subset + H2D
+    /// re-upload GONE). Only the small kept chrom/genpos cross to host (for the
+    /// CUDA-free assign_blocks, unchanged → identical block_id parity).
+    ///
+    /// PARITY (GOLDEN-EXACT): the autosome predicate is INTEGER (chrom is an int
+    /// from .snp), CUB Flagged preserves the file-order relative ordering, and Q/V
+    /// values are the same doubles decode_af writes (a pure copy). So the kept SET,
+    /// kept ORDER, and assign_blocks over the compacted axis are bit-identical to
+    /// the host autosome loop (qpfstats.cpp:268-278 / dstat.cpp:245-255).
+    ///
+    /// @param tile         the packed tile + population partition + ploidy.
+    /// @param chrom        per-SNP chromosome (length tile.n_snp, from snptab.chrom).
+    /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
+    /// @param chrom_min    autosome lower bound (kAutosomeChromMin = 1).
+    /// @param chrom_max    autosome upper bound (kAutosomeChromMax = 22).
+    /// @return DeviceDecodeResult: the resident compacted Q/V [P × M_kept] + the
+    ///         small file-ordered kept chrom/genpos for assign_blocks.
+    /// NON-PURE: the base throws (the established backend.hpp pattern; the CPU oracle
+    /// uses decode_af + the host autosome loop directly, never this resident entry).
+    [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_autosome(
+        const DecodeTileView& tile, std::span<const int> chrom,
+        std::span<const double> genpos, int chrom_min, int chrom_max) {
+        (void)tile; (void)chrom; (void)genpos; (void)chrom_min; (void)chrom_max;
+        throw std::runtime_error(
+            "ComputeBackend::decode_af_compact_autosome: not implemented by this backend "
+            "(the device-resident decode seam requires a CUDA backend)");
+    }
+
     // -----------------------------------------------------------------------
     // qpAdm fit-engine virtuals (design §1.7 + the M(fit-1) FROZEN CONTRACT §2).
     // BATCHED-CAPABLE by signature (a leading n_block / model axis) so the CUDA
@@ -894,6 +930,25 @@ public:
             "ComputeBackend::dstat_block_reduce: not implemented by this backend");
     }
 
+    /// DEVICE-RESIDENT dstat_block_reduce — the SAME math as the host-pointer form,
+    /// but reading Q/V already RESIDENT in VRAM from a DeviceDecodeResult (the
+    /// host-compute audit M4 cure: drops the Q/V H2D the host-pointer overload does
+    /// at cuda_backend.cu:1286-1289). dec.q_device()/v_device() are the compacted
+    /// [P × M_kept] from decode_af_compact_autosome; M is dec.M_kept; block_id is
+    /// the host assign_blocks output over dec.chrom_kept/genpos_kept (H2D'd small).
+    /// Outputs the tiny [N × n_block] numsum/densum/cnt to host (the only D2H).
+    /// NON-PURE: the base throws (the established backend.hpp pattern).
+    virtual void dstat_block_reduce(const steppe::device::DeviceDecodeResult& dec,
+                                    const int* block_id, int n_block,
+                                    std::span<const int> quadruples,
+                                    double* numsum, double* densum, double* cnt) {
+        (void)dec; (void)block_id; (void)n_block;
+        (void)quadruples; (void)numsum; (void)densum; (void)cnt;
+        throw std::runtime_error(
+            "ComputeBackend::dstat_block_reduce(DeviceDecodeResult): not implemented "
+            "by this backend (the device-resident decode seam requires a CUDA backend)");
+    }
+
     /// DATES weighted-LD CURVE — the cuFFT autocorrelation LD engine (include/steppe/dates.hpp).
     /// The whole GPU-bound per-admixed-sample pipeline reduced to the tiny per-(chrom,bin)
     /// CORR sufficient statistics, with the ~10^12 SNP-pair object NEVER materialized (the
@@ -1034,6 +1089,25 @@ public:
         (void)x; (void)npopcomb; (void)npairs; (void)block_sizes; (void)ridge; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::qpfstats_blocks_smooth: not implemented by this backend");
+    }
+
+    /// DEVICE-RESIDENT qpfstats_blocks_smooth — the SAME fused reduce→jackknife→
+    /// smooth→recenter math as the host-pointer form, but reading Q/V already
+    /// RESIDENT in VRAM from a DeviceDecodeResult (the host-compute audit M4 cure:
+    /// drops the Q/V H2D the host-pointer overload does at cuda_backend.cu:1753-1756).
+    /// dec.q_device()/v_device() are the compacted [P × M_kept] from
+    /// decode_af_compact_autosome; M is dec.M_kept; block_id is the host
+    /// assign_blocks output over dec.chrom_kept/genpos_kept (H2D'd small). Only the
+    /// small b/bglob/recenter_shift cross back. NON-PURE: the base throws.
+    [[nodiscard]] virtual QpfstatsSmooth qpfstats_blocks_smooth(
+        const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) {
+        (void)dec; (void)block_id; (void)n_block; (void)quadruples;
+        (void)x; (void)npopcomb; (void)npairs; (void)block_sizes; (void)ridge; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::qpfstats_blocks_smooth(DeviceDecodeResult): not implemented "
+            "by this backend (the device-resident decode seam requires a CUDA backend)");
     }
 
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and

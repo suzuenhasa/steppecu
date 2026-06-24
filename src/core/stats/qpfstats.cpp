@@ -255,26 +255,43 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.data();
     view.ploidy = kPloidyDiploid;
-    const DecodeResult dec = be.decode_af(view);
 
-    // Autosome keep-mask + lockstep subset of Q/V + chrom/genpos (AT2 auto_only; chr<=22).
+    // ---- 1. Decode + the AUTOSOME keep + the lockstep Q/V subset (AT2 auto_only; chr 1..22).
+    // DEVICE-RESIDENT seam (host-compute audit C1/C2/M3/M4 cure): on the CUDA backend the
+    // decode → autosome keep-mask → CUB/scan-gather Q/V compaction all run ON-DEVICE and the
+    // resident compacted Q/V + the small kept chrom/genpos escape in `ddr` (NO ~1.1GB Q/V/N D2H,
+    // NO host filter loop, NO H2D re-upload). The CpuBackend (device_count==0, the parity oracle)
+    // keeps the host path: decode_af → the host autosome loop → host Q/V subset. BOTH produce the
+    // IDENTICAL kept SET, kept ORDER, and chrom_kept/genpos_kept → identical assign_blocks/golden.
+    const bool resident = (be.capabilities().device_count > 0);
+    steppe::device::DeviceDecodeResult ddr;
     std::vector<double> Qk, Vk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
-    Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-    Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-    chrom_kept.reserve(static_cast<std::size_t>(M));
-    genpos_kept.reserve(static_cast<std::size_t>(M));
-    for (long s = 0; s < M; ++s) {
-        const int chr = snptab.chrom[static_cast<std::size_t>(s)];
-        if (chr < 1 || chr > 22) continue;
-        const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-        for (int p = 0; p < P; ++p) {
-            Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
-            Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+    if (resident) {
+        ddr = be.decode_af_compact_autosome(
+            view, std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
+            std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
+            kAutosomeChromMin, kAutosomeChromMax);
+        chrom_kept = ddr.chrom_kept;
+        genpos_kept = ddr.genpos_kept;
+    } else {
+        const DecodeResult dec = be.decode_af(view);
+        Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
+        Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
+        chrom_kept.reserve(static_cast<std::size_t>(M));
+        genpos_kept.reserve(static_cast<std::size_t>(M));
+        for (long s = 0; s < M; ++s) {
+            const int chr = snptab.chrom[static_cast<std::size_t>(s)];
+            if (chr < 1 || chr > 22) continue;
+            const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+            for (int p = 0; p < P; ++p) {
+                Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
+                Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+            }
+            chrom_kept.push_back(chr);
+            genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
         }
-        chrom_kept.push_back(chr);
-        genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
     }
     const long M_kept = static_cast<long>(chrom_kept.size());
     if (M_kept <= 0) { res.status = Status::Ok; return res; }
@@ -321,10 +338,15 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     // default); the jackknives + the Cholesky/solve are native FP64 (the §12 carve-out). The
     // recenter weights are block_lengths (the AT2 f2() block_sizes). Only b/bglob/recenter_shift
     // cross back. The CpuBackend composes its existing oracles (unchanged reference math).
-    const QpfstatsSmooth sm = be.qpfstats_blocks_smooth(
-        Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(), n_block,
-        std::span<const int>(flat), std::span<const double>(x), npopcomb, npairs,
-        std::span<const int>(block_lengths), kRidge, precision);
+    const QpfstatsSmooth sm = resident
+        ? be.qpfstats_blocks_smooth(
+              ddr, partition.block_id.data(), n_block,
+              std::span<const int>(flat), std::span<const double>(x), npopcomb, npairs,
+              std::span<const int>(block_lengths), kRidge, precision)
+        : be.qpfstats_blocks_smooth(
+              Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(), n_block,
+              std::span<const int>(flat), std::span<const double>(x), npopcomb, npairs,
+              std::span<const int>(block_lengths), kRidge, precision);
     if (sm.status != Status::Ok) { res.status = sm.status; return res; }
 
     // ---- 7-8. Scatter b → f2blocks[npop,npop,n_block] (off-diagonal, symmetric) + the

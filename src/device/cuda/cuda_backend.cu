@@ -66,6 +66,9 @@
                                              // bounded device top-K reservoir compaction
                                              // (KeyT=double |z|, ValueT=int perm index; classic
                                              // stream overload, two-call idiom, NumItemsT 64-bit)
+#include <cub/device/device_scan.cuh>        // cub::DeviceScan::ExclusiveSum — the decode-seam
+                                             // keep-flag → compacted-column-index prefix sum
+                                             // (CUDA 13.x / CCCL CUB; two-call temp-storage idiom)
 
 #include <algorithm>
 #include <climits>    // INT_MIN — the AT2 rankdrop "NA" sentinel (M(fit-2))
@@ -92,8 +95,11 @@
 #include "device/cuda/device_partial_impl.cuh" // DevicePartial::Impl (the DeviceBuffer<double> owners)
 #include "device/device_f2_blocks.hpp"      // steppe::device::DeviceF2Blocks (the M4.5 device-resident FULL result handle)
 #include "device/cuda/device_f2_blocks_impl.cuh" // DeviceF2Blocks::Impl (the DeviceBuffer<double> owners)
+#include "device/device_decode_result.hpp"  // steppe::device::DeviceDecodeResult (the device-resident autosome-compacted Q/V handle)
+#include "device/cuda/device_decode_result_impl.cuh" // DeviceDecodeResult::Impl (the DeviceBuffer<double> q/v owners)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
+#include "device/cuda/decode_compact_kernel.cuh" // launch_autosome_keep_mask / _compact_columns_gather (the device-resident decode seam)
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
 #include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
 #include "device/cuda/qpfstats_kernel.cuh"  // launch_qpfstats_zero_nan_ymat / _add_ridge_diag (the smoother prep)
@@ -1181,6 +1187,53 @@ public:
         sink.finish();
     }
 
+    /// Shared decode front-end: upload the packed tile + partition (+ per-sample
+    /// ploidy when supplied) and run launch_decode_af into the caller's RESIDENT
+    /// dQ/dV/dN [P × M]. NO D2H — the caller decides whether the result crosses the
+    /// CUDA-free seam (decode_af: full D2H, host/oracle path) or STAYS resident
+    /// (decode_af_compact_autosome: the device-resident seam). The packed/offsets/
+    /// ploidy uploads are local RAII (freed on return); dQ/dV/dN are caller-owned.
+    void decode_af_resident(const DecodeTileView& tile, int P, long M,
+                            DeviceBuffer<double>& dQ, DeviceBuffer<double>& dV,
+                            DeviceBuffer<double>& dN) {
+        // Only tile-sized and [P×M] buffers — never a [SNP×ind] decode-all
+        // (architecture.md §11.1; tile-shaped for the M5 loop).
+        const std::size_t packed_bytes =
+            tile.n_individuals * tile.bytes_per_record;
+        const std::size_t n_off = static_cast<std::size_t>(P) + 1u;
+        DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
+        DeviceBuffer<std::size_t> dOffsets(n_off);
+
+        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid): upload the per-sample vector
+        // when the caller supplied one (the auto-detect path); when NULL the kernel
+        // falls back to the uniform scalar tile.ploidy (the legacy all-diploid path),
+        // and we pass a null device pointer (no alloc/copy). A zero-length DeviceBuffer
+        // yields a null .data(), so the same handle serves both cases.
+        const bool have_sample_ploidy = (tile.sample_ploidy != nullptr);
+        DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
+
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
+                                          packed_bytes * sizeof(std::uint8_t),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
+                                          n_off * sizeof(std::size_t),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        if (have_sample_ploidy) {
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSamplePloidy.data(), tile.sample_ploidy,
+                                              tile.n_individuals * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+        }
+
+        // S0 unpack + S1 segmented reduction → Q/V/N (RESIDENT).
+        launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
+                         P, M, tile.ploidy,
+                         have_sample_ploidy ? dSamplePloidy.data() : nullptr,
+                         dQ.data(), dV.data(), dN.data(), stream_.get());
+        // dPacked/dOffsets/dSamplePloidy are still in-flight uploads; they free at
+        // scope exit. The decode kernel and the uploads are all on stream_, so the
+        // ordering is correct and the caller's later stream_ work observes dQ/dV/dN.
+    }
+
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
         guard_device();
         const int P = tile.n_pop;
@@ -1196,50 +1249,140 @@ public:
         out.n.assign(pm, 0.0);
         if (P <= 0 || M <= 0) return out;
 
-        // ---- Device allocations (RAII; freed on scope exit) ------------------
-        // Packed tile bytes + the P+1 segment offsets + the three [P×M] outputs.
-        // Only tile-sized and [P×M] buffers — never a [SNP×ind] decode-all
-        // (architecture.md §11.1; tile-shaped for the M5 loop).
-        const std::size_t packed_bytes =
-            tile.n_individuals * tile.bytes_per_record;
-        const std::size_t n_off = static_cast<std::size_t>(P) + 1u;
-        DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
-        DeviceBuffer<std::size_t> dOffsets(n_off);
+        // Decode → dQ/dV/dN RESIDENT (the shared front-end), then the C1 full D2H
+        // across the CUDA-free seam (this is the host/oracle path; the resident
+        // device-resident seam, decode_af_compact_autosome, drops this D2H).
         DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
-
-        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid): upload the per-sample vector
-        // when the caller supplied one (the auto-detect path); when NULL the kernel
-        // falls back to the uniform scalar tile.ploidy (the legacy all-diploid path),
-        // and we pass a null device pointer (no alloc/copy). A zero-length DeviceBuffer
-        // yields a null .data(), so the same handle serves both cases.
-        const bool have_sample_ploidy = (tile.sample_ploidy != nullptr);
-        DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
-
-        // ---- Upload the packed tile + the population partition ---------------
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
-                                          packed_bytes * sizeof(std::uint8_t),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
-                                          n_off * sizeof(std::size_t),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        if (have_sample_ploidy) {
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSamplePloidy.data(), tile.sample_ploidy,
-                                              tile.n_individuals * sizeof(int),
-                                              cudaMemcpyHostToDevice, stream_.get()));
-        }
-
-        // ---- Decode (S0 unpack + S1 segmented reduction → Q/V/N) -------------
-        launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
-                         P, M, tile.ploidy,
-                         have_sample_ploidy ? dSamplePloidy.data() : nullptr,
-                         dQ.data(), dV.data(), dN.data(), stream_.get());
-
-        // ---- Copy results back across the CUDA-free seam ---------------------
+        decode_af_resident(tile, P, M, dQ, dV, dN);
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.q.data(), dQ.data(), pm * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.v.data(), dV.data(), pm * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.n.data(), dN.data(), pm * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
+    /// DEVICE-RESIDENT decode + AUTOSOME compaction (the host-compute audit C1/C2/
+    /// M3/M4 cure for qpfstats / dstat — regime (A)). Decodes the tile to dQ/dV/dN
+    /// RESIDENT (NO C1 D2H), runs the on-device per-SNP autosome keep-mask
+    /// (INTEGER-EXACT, the C2 host loop GONE), and stream-compacts Q/V onto the kept
+    /// axis: CUB DeviceSelect::Flagged compacts the 1-D chrom/genpos (reusing the
+    /// sweep's two-call idiom, whose documented "maintain their original relative
+    /// ordering" pins FILE ORDER), and a CUB ExclusiveSum + a scan-keyed column
+    /// gather compacts the [P×M] Q/V (Flagged is 1-D; the [P×M] tensor uses
+    /// scan+gather, cleaner and still device-resident). Only the small kept
+    /// chrom/genpos cross to host (for the CUDA-free assign_blocks). The resident
+    /// compacted Q/V ESCAPE in the returned DeviceDecodeResult.
+    [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_autosome(
+        const DecodeTileView& tile, std::span<const int> chrom,
+        std::span<const double> genpos, int chrom_min, int chrom_max) override {
+        guard_device();
+        steppe::device::DeviceDecodeResult out;
+        out.device_id = device_id_;
+        const int P = tile.n_pop;
+        const long M = static_cast<long>(tile.n_snp);
+        out.P = P;
+        if (P <= 0 || M <= 0) { out.M_kept = 0; return out; }
+
+        const std::size_t pm =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t Mz = static_cast<std::size_t>(M);
+
+        // ---- 1. Decode → dQ/dV/dN RESIDENT (dN is decoded but the regime-(A) Q/V
+        // consumers ignore it; it is NOT compacted/kept). NO host D2H. ----------
+        DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
+        decode_af_resident(tile, P, M, dQ, dV, dN);
+
+        // ---- 2. The per-SNP autosome keep-mask (INTEGER-EXACT) → d_flags. -------
+        DeviceBuffer<int> dChrom(Mz);
+        DeviceBuffer<double> dGenpos(Mz);
+        DeviceBuffer<std::uint8_t> dFlags(Mz);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dChrom.data(), chrom.data(), Mz * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_autosome_keep_mask(dChrom.data(), M, chrom_min, chrom_max, dFlags.data(),
+                                  stream_.get());
+
+        // ---- 3. The compacted column index = EXCLUSIVE prefix sum of d_flags, and
+        // the kept count M_kept = keep_idx[M-1] + flags[M-1] (CUB DeviceScan). -----
+        DeviceBuffer<long> dKeepIdx(Mz);
+        DeviceBuffer<int> dNumSel(1);
+        {
+            // ExclusiveSum over the uint8 flags into a long index buffer (the
+            // compacted column position). Two-call temp-storage idiom (CUDA 13.x
+            // CCCL CUB; d_temp_storage=nullptr query then the sized buffer).
+            std::size_t scan_bytes = 0;
+            cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, dFlags.data(),
+                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
+                                          stream_.get());
+            DeviceBuffer<unsigned char> dScanTemp(scan_bytes == 0 ? 1 : scan_bytes);
+            std::size_t sb = scan_bytes;
+            cub::DeviceScan::ExclusiveSum(dScanTemp.data(), sb, dFlags.data(),
+                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
+                                          stream_.get());
+        }
+
+        // ---- 4. Compact the 1-D chrom/genpos with CUB DeviceSelect::Flagged
+        // (the SAME idiom run_fstat_sweep_device uses; ordering preserved). The
+        // num_selected_out is M_kept — read it back small. ----------------------
+        DeviceBuffer<int> dChromKept(Mz);
+        DeviceBuffer<double> dGenposKept(Mz);
+        {
+            // CUB DeviceSelect::Flagged temp size depends on the VALUE TYPE (the
+            // internal tile-state carries the data type), so query BOTH the int
+            // (chrom) and double (genpos) calls and size dSelTemp to the MAX — the
+            // double query is the larger; reusing an int-sized temp for the double
+            // Flagged silently undersizes it (the observed all-zero genpos bug).
+            std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
+            cub::DeviceSelect::Flagged(nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
+                                       dChromKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            cub::DeviceSelect::Flagged(nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
+                                       dGenposKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            const std::size_t sel_bytes = std::max(sel_bytes_i, sel_bytes_d);
+            DeviceBuffer<unsigned char> dSelTemp(sel_bytes == 0 ? 1 : sel_bytes);
+            std::size_t sb = sel_bytes;
+            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
+                                       dChromKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            sb = sel_bytes;
+            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
+                                       dGenposKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+        }
+
+        // Read M_kept back (one int) — needed to size the resident Q/V buffers.
+        int m_kept = 0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&m_kept, dNumSel.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.M_kept = static_cast<long>(m_kept);
+        if (m_kept <= 0) return out;
+
+        // ---- 5. Allocate the RESIDENT compacted Q/V [P × M_kept] and gather the
+        // kept columns (scan-keyed; FILE ORDER preserved). The handle ESCAPES. ---
+        const std::size_t pmk =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(m_kept);
+        out.impl = std::make_unique<steppe::device::DeviceDecodeResult::Impl>();
+        out.impl->q = DeviceBuffer<double>(pmk);
+        out.impl->v = DeviceBuffer<double>(pmk);
+        launch_compact_columns_gather(dQ.data(), P, M, dFlags.data(), dKeepIdx.data(),
+                                      out.impl->q.data(), stream_.get());
+        launch_compact_columns_gather(dV.data(), P, M, dFlags.data(), dKeepIdx.data(),
+                                      out.impl->v.data(), stream_.get());
+
+        // ---- 6. The small kept chrom/genpos D2H (for the CUDA-free assign_blocks). --
+        out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
+        out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
@@ -1252,11 +1395,16 @@ public:
     /// assign_blocks), runs the SNP-tile-batched kernel (one thread per (quadruple, block)
     /// cell), and copies the tiny [N × n_block] numsum/densum/cnt back. Device-resident
     /// (the deliverable): Q/V live in VRAM; the output is row-major like F4Blocks::x_blocks.
-    void dstat_block_reduce(const double* Q, const double* V, int P, long M,
-                            const int* block_id, int n_block,
-                            std::span<const int> quadruples,
-                            double* numsum, double* densum, double* cnt) override {
-        guard_device();
+    /// The dstat_block_reduce CORE over ALREADY-RESIDENT device Q/V pointers (the
+    /// single-source body both the host-pointer and the DeviceDecodeResult overloads
+    /// share). Builds the block begin/size layout from block_id (H2D small), runs
+    /// the kernel, D2Hs the tiny numsum/densum/cnt. dQ/dV are borrowed device
+    /// pointers (NOT freed here): the host overload owns DeviceBuffers it uploaded;
+    /// the device overload passes the resident DeviceDecodeResult Q/V — NO Q/V H2D.
+    void dstat_block_reduce_device(const double* dQ, const double* dV, int P, long M,
+                                   const int* block_id, int n_block,
+                                   std::span<const int> quadruples,
+                                   double* numsum, double* densum, double* cnt) {
         const int N = static_cast<int>(quadruples.size() / 4);
         if (P <= 0 || M <= 0 || N <= 0 || n_block <= 0) return;
 
@@ -1273,20 +1421,14 @@ public:
             size[static_cast<std::size_t>(b)]  = static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
         }
 
-        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
         const std::size_t nq = static_cast<std::size_t>(N) * 4u;
         const std::size_t nb_out = static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
 
-        DeviceBuffer<double> dQ(pm), dV(pm);
         DeviceBuffer<int> dQuad(nq);
         DeviceBuffer<int> dBegin(static_cast<std::size_t>(n_block));
         DeviceBuffer<int> dSize(static_cast<std::size_t>(n_block));
         DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
 
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(),
@@ -1296,7 +1438,7 @@ public:
                                           static_cast<std::size_t>(n_block) * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
 
-        launch_dstat_block_reduce(dQ.data(), dV.data(), P, M, dQuad.data(), N,
+        launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
                                   dBegin.data(), dSize.data(), n_block,
                                   dNum.data(), dDen.data(), dCnt.data(), stream_.get());
 
@@ -1307,6 +1449,40 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(cnt, dCnt.data(), nb_out * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+
+    void dstat_block_reduce(const double* Q, const double* V, int P, long M,
+                            const int* block_id, int n_block,
+                            std::span<const int> quadruples,
+                            double* numsum, double* densum, double* cnt) override {
+        guard_device();
+        const int N = static_cast<int>(quadruples.size() / 4);
+        if (P <= 0 || M <= 0 || N <= 0 || n_block <= 0) return;
+        // Host-pointer path (the CpuBackend-parity entry / non-resident callers): H2D
+        // Q/V into resident buffers, then the shared core. The DeviceDecodeResult
+        // overload below SKIPS this H2D (the M4 cure).
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        DeviceBuffer<double> dQ(pm), dV(pm);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        dstat_block_reduce_device(dQ.data(), dV.data(), P, M, block_id, n_block,
+                                  quadruples, numsum, densum, cnt);
+    }
+
+    /// DEVICE-RESIDENT dstat_block_reduce — reads Q/V already RESIDENT in VRAM from
+    /// a DeviceDecodeResult (the M4 cure: NO Q/V H2D). Math byte-identical to the
+    /// host-pointer overload (the SAME launch_dstat_block_reduce over the SAME Q/V
+    /// the decode wrote, compacted onto the autosome axis).
+    void dstat_block_reduce(const steppe::device::DeviceDecodeResult& dec,
+                            const int* block_id, int n_block,
+                            std::span<const int> quadruples,
+                            double* numsum, double* densum, double* cnt) override {
+        guard_device();
+        if (dec.empty() || dec.q_device() == nullptr) return;
+        dstat_block_reduce_device(dec.q_device(), dec.v_device(), dec.P, dec.M_kept,
+                                  block_id, n_block, quadruples, numsum, densum, cnt);
     }
 
     /// DATES weighted-LD CURVE on the GPU — the cuFFT autocorrelation LD engine (backend.hpp
@@ -1713,11 +1889,63 @@ public:
     /// solved dRhs → dShift). The ~1.7GB-each numsum/cnt D2H is ELIMINATED; only the small
     /// b[npairs×n_block] / bglob[npairs] / recenter_shift[npairs] cross back. matmul sub-steps
     /// run `precision`; the jackknives + Cholesky/solve are native FP64.
+    ///
+    /// HOST-POINTER overload (the CpuBackend-parity entry / non-resident callers): H2D
+    /// Q/V into resident buffers, then the shared core. The DeviceDecodeResult overload
+    /// SKIPS this H2D (the M4 cure — Q/V already resident from decode_af_compact_autosome).
     [[nodiscard]] QpfstatsSmooth qpfstats_blocks_smooth(
         const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
         std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
         std::span<const int> block_sizes, double ridge, const Precision& precision) override {
         guard_device();
+        if (npopcomb <= 0 || npairs <= 0 || n_block <= 0 || P <= 0 || M <= 0 ||
+            quadruples.size() < 4) {
+            QpfstatsSmooth out;
+            out.npairs = npairs;
+            out.n_block = n_block;
+            out.status = Status::Ok;
+            return out;
+        }
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        DeviceBuffer<double> dQ(pm), dV(pm);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        return qpfstats_blocks_smooth_device(dQ.data(), dV.data(), P, M, block_id, n_block,
+                                             quadruples, x, npopcomb, npairs, block_sizes,
+                                             ridge, precision);
+    }
+
+    /// DEVICE-RESIDENT overload — reads Q/V already RESIDENT in VRAM from a
+    /// DeviceDecodeResult (the M4 cure: NO Q/V H2D). Math byte-identical to the
+    /// host-pointer overload (the SAME fused core over the SAME compacted Q/V).
+    [[nodiscard]] QpfstatsSmooth qpfstats_blocks_smooth(
+        const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) override {
+        guard_device();
+        if (dec.empty() || dec.q_device() == nullptr) {
+            QpfstatsSmooth out;
+            out.npairs = npairs;
+            out.n_block = n_block;
+            out.status = Status::Ok;
+            return out;
+        }
+        return qpfstats_blocks_smooth_device(dec.q_device(), dec.v_device(), dec.P,
+                                             dec.M_kept, block_id, n_block, quadruples, x,
+                                             npopcomb, npairs, block_sizes, ridge, precision);
+    }
+
+    /// The qpfstats_blocks_smooth CORE over ALREADY-RESIDENT device Q/V pointers
+    /// (the single-source fused body both the host-pointer and the DeviceDecodeResult
+    /// overloads share). dQ/dV are borrowed device pointers (NOT freed here): the
+    /// host overload owns DeviceBuffers it uploaded; the device overload passes the
+    /// resident DeviceDecodeResult Q/V — NO Q/V H2D (the M4 cure). Math byte-identical.
+    [[nodiscard]] QpfstatsSmooth qpfstats_blocks_smooth_device(
+        const double* dQ, const double* dV, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) {
         QpfstatsSmooth out;
         out.npairs = npairs;
         out.n_block = n_block;
@@ -1743,17 +1971,13 @@ public:
             size[static_cast<std::size_t>(b)]  = static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
         }
 
-        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
         const std::size_t nq = static_cast<std::size_t>(N) * 4u;
 
-        // ---- Upload Q/V + the quad table + block layout + the design x (col-major). --------
-        DeviceBuffer<double> dQ(pm), dV(pm);
+        // ---- Upload the quad table + block layout + the design x (col-major). Q/V are
+        // BORROWED resident pointers (the host overload uploaded them; the device
+        // overload passes the resident DeviceDecodeResult Q/V — NO Q/V H2D here). ----
         DeviceBuffer<int> dQuad(nq), dBegin(nbb), dSize(nbb);
         DeviceBuffer<double> dX(nc * np);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
                                           cudaMemcpyHostToDevice, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(), nbb * sizeof(int),
@@ -1765,7 +1989,7 @@ public:
 
         // ---- 1. The genotype-f4 numerator reduce → dNum/dCnt RESIDENT (densum ignored). ----
         DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
-        launch_dstat_block_reduce(dQ.data(), dV.data(), P, M, dQuad.data(), N,
+        launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
                                   dBegin.data(), dSize.data(), n_block,
                                   dNum.data(), dDen.data(), dCnt.data(), stream_.get());
 

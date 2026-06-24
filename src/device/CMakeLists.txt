@@ -25,6 +25,7 @@ add_library(steppe_device STATIC
     cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
     cuda/qpgraph_fit_kernels.cu   # qpGraph: the on-device IDEA-1 fleet (one thread/restart; the path-table fill_pwts + GLS objective + NNLS edge solve)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
+    cuda/decode_compact_kernel.cu # device-resident decode seam: autosome keep-mask + [P×M] column gather (C2/M3/M4 cure)
     cuda/dstat_kernel.cu          # qpDstat Part B: per-block per-quadruple normalized-D reduction (the S2 divergence)
     cuda/dates_kernel.cu          # DATES: the cuFFT autocorrelation LD engine kernels (weight/residual/scatter + |F|²/cross-power + lag re-bin)
     cuda/qpfstats_kernel.cu       # qpfstats: zero-NaN-in-ymat + add-ridge-diag + NaN-row-downdate (the smoothing-solve prep kernels)
@@ -32,6 +33,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
+    cuda/device_decode_result.cu  # device-resident decode seam: DeviceDecodeResult — autosome-compacted Q/V resident handle (special members + accessors)
     cuda/p2p_combine.cu           # M4.5: combine_f2_partials_resident — device-resident cudaMemcpyPeer disjoint placement combine
     cuda/block_sink.cu            # M5: HostRamSink + DiskSink — triple-buffered persistent-pinned block spill (TIER 1/2)
     cuda/f2_blocks_out.cu         # M5: F2BlocksOut tier-agnostic read-back (to_host/read_block_to_host) + DiskF2Blocks members
