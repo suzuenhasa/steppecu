@@ -15,6 +15,19 @@ reachable from there. The rest of this file is the fast re-orientation.
 
 Verify state: `cd /home/suzunik/steppe && git branch --show-current && git log --oneline -6`
 
+> **LATEST (`9ad33d9`, 2026-06-24) — device-resident DECODE SEAM, Stage 1 (regime-A: qpfstats + dstat).**
+> The host-compute audit's two CRITICAL violations (C1 the ~1.1 GB Q/V/N D2H + C2 the host per-SNP
+> keep-loop) and M3/M4 (the host lockstep Q/V subset + H2D re-upload) are CURED on the CUDA path for
+> qpfstats + dstat: `decode_af_compact_autosome` keeps Q/V/N resident, an on-device autosome keep-mask
+> (INTEGER-EXACT chr∈[1,22]) + `cub::DeviceSelect::Flagged`/`ExclusiveSum` scan-gather do the lockstep
+> compaction, and `dstat_block_reduce`/`qpfstats_blocks_smooth` got `DeviceDecodeResult` overloads that
+> read the resident Q/V. **nsys proof on 40-pop qpfstats:** D2H total dropped to 11.4 MB (was ~1.1 GB),
+> the Q/V H2D re-upload is gone, the decode flows into sustained-100% compute (mid-stream idle bounce
+> eliminated); only the io-side .geno H2D head remains (out of scope). All genotype goldens held
+> (STEPPE_THOROUGH 61/61; CpuBackend==CudaBackend). **STILL OPEN:** Stage 2 = extract_f2 regime-B
+> (FP-sensitive pooled-MAF/maxmiss filter + N compaction); Stage 3 = dates (gather-2-rows + target
+> bit-repack). See `docs/research/host-compute-audit.md` C1/C2/M3/M4.
+
 ## State (as of this writing)
 - **`main`** @ `66280b7` (branch `phase2-fit-engine` may sit a few commits ahead — verify with `git rev-parse --short main phase2-fit-engine`). **Phase-1 PRECOMPUTE (S0–S2) COMPLETE THROUGH M5**; **Phase-2 qpAdm FIT ENGINE (S3–S8) BUILT + golden-gated**; big-refactor COMPLETE; **fit-engine BACKEND FINISHED**; **FULL AT2 END-TO-END PARITY achieved** (parity-chain block below); **all 5 goldens correct (convertf-PA)**; **CLI productized (extract-f2/qpadm/qpadm-rotate wired) + two studies reproduced + perf characterized on 1240K** (post-parity block below). **ctest 46/46.**
 - **🚀 POST-PARITY — PRODUCTIZATION + STUDIES + PERF (2026-06-22).** (a) **CLI surface COMPLETE:** `extract-f2` (streams big-P via the M5 tiered path — `--tier auto|resident|host|disk`; `--hash`/no-hash default; `--ploidy auto`), `qpadm`, **`qpadm-rotate`** (M(cli-3), `17c4606` — batched `run_qpadm_search`, golden-gated through the CLI), and **`qpwave`** (M(cli-2) — wired to GPU `run_qpwave`, NO `--target`/`--left[0]`=reference, golden-gated through the CLI vs `golden_qpwave`; the dead `run_not_yet_implemented` scaffold deleted + the identical per-subcommand flags deduped) are ALL WIRED. No scaffolds remain. (b) **Two studies reproduced** on real v66 1240K: Haak 2015 (`docs/studies/haak2015.md`) + Olalde 2018 single-model AND its competing-sources **rotation** (`docs/studies/olalde2018.md`, `olalde2018-rotation.md`) — both vs published, with cross-version pop-mapping documented. (c) **Perf (`docs/perf/1240k-sweep.md`):** `extract-f2` ~5.8 s at 60 pops / streams to 700+ (the ~37 s "wall" was a byte-at-a-time provenance SHA, now `--hash`-gated + overlapped); rotation **~60k models/sec jk0**, and **jk1 (SE) scales to pool_200 single-GPU** after the SE-pass VRAM-budget fix (`66280b7`). Whole-AADR rotation ≈ 36 min (point) / ~1.8 h (with SEs). Run sheet: `docs/RUN-SHEET.md`. **All single-GPU (`--device 0`; multi-gpu PARKED — memory `multi-gpu-parked`).**
