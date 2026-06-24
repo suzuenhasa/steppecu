@@ -5,6 +5,14 @@ data only. The WINNER becomes the qpGraph optimizer (ROADMAP §6;
 `qpgraph-gpu-design.md` flagged the optimizer as the highest-risk / most-reusable new
 asset).
 
+> **FAIR RE-MATCH SUPERSEDES THIS DOC.** The full, valid comparison —
+> IDEA2 re-implemented PROPERLY (block/warp-cooperative, lambda-across-lanes) + nadmix
+> 1/2/3 + the CROSSOVER (IDEA2-CMA wins N≤1k, IDEA1 wins N≥10k) — lives in
+> **`optimizer-comparison.md`**. The race below is the ORIGINAL, now-known-UNFAIR spike:
+> IDEA2 ran a SERIAL in-thread lambda loop (no N·lambda parallelism, could not saturate
+> the GPU at small N) at nadmix=1 only (a degenerate 1-D unimodal surface). It is kept
+> for the record. Cite `optimizer-comparison.md`, not this section.
+
 Bench TU: `tests/reference/bench_optimizers.cu` (manual, NOT a ctest gate — like
 `bench_rotation_1240k.cu`). Box: box5090 (2x RTX 5090 Blackwell sm_120, CUDA 13.0),
 Release build.
