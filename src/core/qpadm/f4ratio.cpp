@@ -44,9 +44,8 @@
 #include <span>
 #include <vector>
 
-#include "core/qpadm/f4_quartets.hpp"  // assemble_f4_quartets (REUSED verbatim — no new math)
 #include "core/qpadm/qpadm_fit.hpp"    // default_fit_precision(), honored_tag()
-#include "device/backend.hpp"          // ComputeBackend, F4Blocks
+#include "device/backend.hpp"          // ComputeBackend, RatioBlockJackknife (the shared seam)
 #include "device/device_f2_blocks.hpp" // device::DeviceF2Blocks (S3 device-resident input)
 #include "device/resources.hpp"        // device::Resources (the injected backend bundle)
 #include "steppe/config.hpp"           // Precision
@@ -69,90 +68,13 @@ inline constexpr double kSetmissThresh = 1e-6;
     return *resources.gpus.at(kPrimaryGpu).backend;
 }
 
-/// The per-ratio weighted block-jackknife for ONE tuple (the AT2 qpf4ratio / jack_mat_stats
-/// of the per-block ratio statistic R_b = num_loo_b / den_loo_b). Reads x_blocks (per-block
-/// f4, for tot = totnum/totden the variance-centering term) and x_loo (the AT2 est_to_loo
-/// replicate, for R_b) from the shared F4Blocks. `num_k` / `den_k` are the m-axis rows of
-/// the numerator / denominator quartet for this tuple. Writes alpha (= the jackknife $est),
-/// se, z. Near-zero-denom blocks (AT2 setmiss) are dropped from the survivor reduction.
-/// All accumulation in long double for the small-cancellation ratio (the §12 numerator rule).
-void ratio_jackknife(const F4Blocks& x, std::size_t num_k, std::size_t den_k,
-                     double& alpha, double& se, double& z) {
-    const std::size_t m = static_cast<std::size_t>(x.nl) * static_cast<std::size_t>(x.nr);
-    const int nb_all = x.n_block;
-
-    // Survivor pass over blocks: skip a block whose denominator (per-block f4_den) is
-    // near-zero (AT2 setmiss thresh=1e-6 makes that block's ratio missing). The survivor
-    // block_sizes total n and survivor count nb_surv drive the jackknife.
-    long double n_ld = 0.0L;        // Σ survivor block_sizes
-    int nb_surv = 0;                // survivor block count
-    long double totnum = 0.0L;      // Σ x_blocks[num]*bl  (over survivors)
-    long double totden = 0.0L;      // Σ x_blocks[den]*bl  (over survivors)
-    for (int b = 0; b < nb_all; ++b) {
-        const std::size_t bb = static_cast<std::size_t>(b);
-        const double den_blk = x.x_blocks[den_k + m * bb];
-        if (std::fabs(den_blk) < kSetmissThresh) continue;  // AT2 setmiss: missing block
-        const double bl = static_cast<double>(x.block_sizes[bb]);
-        n_ld += static_cast<long double>(bl);
-        ++nb_surv;
-        totnum += static_cast<long double>(x.x_blocks[num_k + m * bb]) * static_cast<long double>(bl);
-        totden += static_cast<long double>(den_blk) * static_cast<long double>(bl);
-    }
-
-    if (nb_surv <= 1 || n_ld <= 0.0L || totden == 0.0L) {
-        // Too few survivor blocks (no jackknife) / a degenerate total denominator: the honest
-        // NaN sentinel, never a fabricated value.
-        alpha = std::nan("");
-        se = std::nan("");
-        z = std::nan("");
-        return;
-    }
-
-    const double n = static_cast<double>(n_ld);
-    const double nb = static_cast<double>(nb_surv);
-    const double tot = static_cast<double>(totnum / totden);  // the variance-centering term.
-
-    // est = mean(tot - R_b)*nb + weighted_mean(R_b, bl)  (AT2 jack_mat_stats $est of the
-    // per-block ratio). The per-block ratio uses the LOO replicates R_b = num_loo / den_loo.
-    long double diffsum = 0.0L;       // Σ (tot - R_b)
-    long double wmean_num = 0.0L;     // Σ R_b * bl
-    for (int b = 0; b < nb_all; ++b) {
-        const std::size_t bb = static_cast<std::size_t>(b);
-        const double den_blk = x.x_blocks[den_k + m * bb];
-        if (std::fabs(den_blk) < kSetmissThresh) continue;  // same survivor mask
-        const double bl = static_cast<double>(x.block_sizes[bb]);
-        const double num_loo = x.x_loo[num_k + m * bb];
-        const double den_loo = x.x_loo[den_k + m * bb];
-        const double Rb = num_loo / den_loo;
-        diffsum += static_cast<long double>(tot) - static_cast<long double>(Rb);
-        wmean_num += static_cast<long double>(Rb) * static_cast<long double>(bl);
-    }
-    const double term1 = static_cast<double>(diffsum / static_cast<long double>(nb_surv)) * nb;
-    const double term2 = static_cast<double>(wmean_num / n_ld);
-    const double est = term1 + term2;
-
-    // xtau pseudo-values: h_b = n/bl_b; tau_b = h_b*tot - (h_b - 1)*R_b;
-    // xtau_b = (tau_b - est)/sqrt(h_b - 1); var = Σ xtau_b^2 / nb.
-    long double var_acc = 0.0L;
-    for (int b = 0; b < nb_all; ++b) {
-        const std::size_t bb = static_cast<std::size_t>(b);
-        const double den_blk = x.x_blocks[den_k + m * bb];
-        if (std::fabs(den_blk) < kSetmissThresh) continue;  // same survivor mask
-        const double bl = static_cast<double>(x.block_sizes[bb]);
-        const double num_loo = x.x_loo[num_k + m * bb];
-        const double den_loo = x.x_loo[den_k + m * bb];
-        const double Rb = num_loo / den_loo;
-        const double h = n / bl;
-        const double tau = h * tot - (h - 1.0) * Rb;
-        const double xtau = (tau - est) / std::sqrt(h - 1.0);
-        var_acc += static_cast<long double>(xtau) * static_cast<long double>(xtau);
-    }
-    const double var = static_cast<double>(var_acc / static_cast<long double>(nb_surv));
-
-    alpha = est;
-    se = (var > 0.0) ? std::sqrt(var) : std::nan("");
-    z = alpha / se;
-}
+/// The per-ratio weighted block-jackknife (the AT2 qpf4ratio / jack_mat_stats of the per-block
+/// ratio R_b = num_loo_b/den_loo_b) is NO LONGER a host loop here: it is the SHARED on-device
+/// ratio_block_jackknife backend virtual (backend.hpp), reached via f4ratio_blocks_jackknife —
+/// ONE engine with qpDstat. On the CUDA path the assemble keeps dX/dLoo RESIDENT and feeds the
+/// kernel directly (the [m·nb] x_blocks/x_loo D2H is DROPPED); on the CpuBackend the SAME entry
+/// assembles then delegates to the long-double oracle (tot_mode=0; the reference math UNCHANGED).
+/// Native FP64, AT2 setmiss thresh=1e-6 (kSetmissThresh).
 
 /// Shared run_f4ratio body: build the interleaved num/den quartet flat array (length 8N),
 /// ONE assemble_f4_quartets call (m=2N: num rows [0,N), den rows [N,2N)), then the per-ratio
@@ -209,37 +131,20 @@ F4RatioResult run_f4ratio_impl(ComputeBackend& be, const F2Src& f2,
         flat.push_back(t[3]);  // p4
     }
 
-    // S3 — assemble the batched per-quartet f4 X for BOTH num + den in ONE call (nl=2N, nr=1
-    // ⇒ m=2N). Native FP64 (OQ-5 cancellation carve-out).
-    F4Blocks X = core::qpadm::assemble_f4_quartets(be, f2, std::span<const int>(flat), prec);
-    const int m = X.nl * X.nr;  // == 2N
-
-    // A degenerate batch (all blocks missing ⇒ m or n_block 0) yields NaN rows but a populated
-    // index echo — surface as Ok with the per-row NaN sentinel (never a crash).
-    if (m <= 0 || X.n_block <= 0) {
-        res.alpha.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.se.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.z.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.status = Status::Ok;
-        return res;
-    }
-
-    // S4-equivalent — the per-ratio weighted block-jackknife per tuple (the ONLY new math).
-    // num row = k, den row = N + k (contiguous halves of the m=2N axis).
-    res.alpha.assign(static_cast<std::size_t>(N), 0.0);
-    res.se.assign(static_cast<std::size_t>(N), 0.0);
-    res.z.assign(static_cast<std::size_t>(N), 0.0);
-    for (int k = 0; k < N; ++k) {
-        const std::size_t num_k = static_cast<std::size_t>(k);
-        const std::size_t den_k = static_cast<std::size_t>(N + k);
-        double alpha = 0.0, se = 0.0, z = 0.0;
-        ratio_jackknife(X, num_k, den_k, alpha, se, z);
-        res.alpha[num_k] = alpha;
-        res.se[num_k] = se;
-        res.z[num_k] = z;
-    }
-
-    res.status = Status::Ok;
+    // S3 + S4 FUSED — the device-resident assemble + the SHARED on-device ratio-block-jackknife
+    // in ONE backend call (host-compute-audit M1 cure). On the CUDA path the interleaved per-
+    // quartet f4 X (num rows [0,N), den rows [N,2N)) stays RESIDENT (dX/dLoo) and feeds the
+    // ratio_block_jackknife kernel directly — DROPPING the former [m·nb] x_blocks/x_loo D2H +
+    // the host per-tuple ratio_jackknife loop. On the CpuBackend the SAME entry assembles then
+    // delegates to the long-double ratio_jackknife oracle (the reference math UNCHANGED). num
+    // row = k, den row = N + k (the contiguous halves of the m=2N axis); weight = block_sizes
+    // broadcast; tot_mode=0; setmiss_thresh=1e-6. Native FP64 (the §12 cancellation carve-out).
+    const RatioBlockJackknife jk =
+        be.f4ratio_blocks_jackknife(f2, std::span<const int>(flat), N, kSetmissThresh, prec);
+    res.alpha = jk.est;
+    res.se = jk.se;
+    res.z = jk.z;
+    res.status = jk.status;
     return res;
 }
 

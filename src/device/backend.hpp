@@ -200,6 +200,36 @@ struct JackknifeDiag {
     Status status = Status::Ok;  ///< Ok always (no Q invert ⇒ no NonSpdCovariance).
 };
 
+/// SHARED RATIO-block-jackknife output (the f4ratio + qpDstat common engine). The AT2
+/// jack_mat_stats / jack_dat_stats `$est` of a per-block RATIO statistic R_b = num_loo_b /
+/// den_loo_b, batched over the N items (each item reducing over the n_block axis). One slot
+/// per item: est = the jackknife point estimate ($est, NOT tot — the f4ratio.cpp header pins
+/// est==alpha to 2e-15 while tot errs by 3e-4); se = sqrt(var); z = est/se; p the two-sided
+/// tail (filled only when compute_p, i.e. the dstat path; f4ratio leaves p empty). A
+/// degenerate item (≤1 survivor block / degenerate total) is the per-row NaN sentinel.
+/// Native FP64 (the §12 cancellation carve-out — NEVER emulated).
+struct RatioBlockJackknife {
+    std::vector<double> est;  ///< [N] the jackknife point estimate ($est).
+    std::vector<double> se;   ///< [N] sqrt(var).
+    std::vector<double> z;    ///< [N] est/se.
+    std::vector<double> p;    ///< [N] two-sided tail (EMPTY unless compute_p).
+    int N = 0;
+    Status status = Status::Ok;
+};
+
+/// CUDA-FREE indexing descriptor for ONE per-(item,block) input array of the shared
+/// ratio-block-jackknife (so f4ratio's column-major-in-k x_loo/x_blocks and dstat's
+/// row-major numsum/densum/cnt feed the SAME kernel with ZERO repacking — the kernel reads
+/// element (item k, block b) at base + k*item_stride + b*block_stride). A null `data` means
+/// the array is absent (e.g. f4ratio omits nothing, dstat omits the x_blocks pair). A 0
+/// item_stride BROADCASTS the array across items (f4ratio's per-block block_sizes weight).
+struct RatioJackArray {
+    const double* data = nullptr;  ///< base pointer (host OR device per the overload).
+    long base = 0;                 ///< element offset of item 0, block 0.
+    long item_stride = 0;          ///< step between consecutive items (0 ⇒ broadcast).
+    long block_stride = 0;         ///< step between consecutive blocks.
+};
+
 /// qpGraph TOPOLOGY ARENAS carried INTO the fleet virtual (the CUDA-free device-facing
 /// twin of core::qpadm::QpGraphModel — backend.hpp need not include the model header).
 /// All flat int/double arenas, uploaded ONCE per topology (the qpAdm per-model index-
@@ -1141,6 +1171,116 @@ public:
         (void)x; (void)block_sizes; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::jackknife_diag: not implemented by this backend");
+    }
+
+    /// SHARED on-device RATIO-block-jackknife — the ONE engine for BOTH f4ratio (M1) and
+    /// qpDstat (M2), batched over the N items, each item a SHORT register reduction over the
+    /// n_block axis (the proven qpfstats_numer_jackknife_kernel idiom, RATIO-valued). The two
+    /// host jackknives (f4ratio.cpp ratio_jackknife, dstat.cpp dstat_jackknife) are the SAME
+    /// AT2 jack_mat_stats / jack_dat_stats ratio block-jackknife — R_b = num_loo_b/den_loo_b;
+    /// est = mean(tot−R_b)·nb + weighted_mean(R_b, w); tau_b = h_b·tot − (h_b−1)·R_b;
+    /// var = (1/nb)·Σ((tau_b−est)²/(h_b−1)) — differing on exactly THREE parameterized axes,
+    /// NOT two kernels:
+    ///   (a) WEIGHT — the caller-supplied per-(item,block) `weight` (f4ratio BROADCASTS the
+    ///       per-block block_sizes across items via weight.item_stride=0; dstat passes cnt[k,b]).
+    ///   (b) SURVIVOR MASK — `setmiss_thresh>0` ⇒ drop block b when |xblk_den(k,b)|<thresh
+    ///       (f4ratio AT2 setmiss=1e-6, needs the raw per-block f4 denominator); `thresh<=0` ⇒
+    ///       drop when weight(k,b)<=0 (dstat cnt>0).
+    ///   (c) TOT_MODE (the variance-centering term) — 0 (f4ratio): R_b = num(k,b)/den(k,b)
+    ///       directly (num/den ARE the est_to_loo replicates x_loo), tot = Σ(xblk_num·w)/
+    ///       Σ(xblk_den·w) [the block-sum ratio — reads xblk_num/xblk_den]; 1 (dstat): num/den
+    ///       ARE the per-block sums (numsum/densum) with weight=cnt, est_t_b = num/cnt, the LOO
+    ///       replicate loo_t_b = (Σ(est_t·cnt)/Σcnt − est_t·rel)/(1−rel) is built IN-KERNEL,
+    ///       R_b = loo_num/loo_den, tot = weighted_mean(R_b, 1−rel) [xblk_* unused / null].
+    /// The reported point estimate is the jackknife $est, NOT tot (f4ratio.cpp pins est==alpha
+    /// to 2e-15; tot errs by 3e-4). `compute_p` ⇒ fill p[k] = f4_two_sided_p(z[k]) on-device
+    /// (the dstat path); f4ratio leaves p empty. NATIVE FP64 with the EXACT ascending-b operand
+    /// order of the host long-double reference (the §12 cancellation carve-out — NEVER
+    /// EmulatedFp64). CpuBackend delegates to the existing long-double oracle (ratio_jackknife /
+    /// dstat_jackknife verbatim). NON-PURE: the base throws (the established backend.hpp pattern).
+    ///
+    /// @param num    per-(item,block) numerator descriptor (f4ratio x_loo_num; dstat numsum).
+    /// @param den    per-(item,block) denominator descriptor (f4ratio x_loo_den; dstat densum).
+    /// @param weight per-(item,block) jackknife weight (f4ratio block_sizes broadcast; dstat cnt).
+    /// @param xblk_num per-(item,block) RAW block numerator (f4ratio x_blocks_num; dstat null).
+    /// @param xblk_den per-(item,block) RAW block denominator (f4ratio x_blocks_den + the
+    ///                 setmiss mask source; dstat null).
+    /// @param N      the item count (rows of the output).
+    /// @param n_block the per-item block-reduction length.
+    /// @param tot_mode 0 = f4ratio (block-sum tot, replicates given); 1 = dstat (LOO-ratio tot,
+    ///                 replicates built in-kernel from num/den/weight).
+    /// @param setmiss_thresh >0 ⇒ |xblk_den|<thresh drops the block; <=0 ⇒ weight<=0 drops it.
+    /// @param compute_p ⇒ fill p (two-sided tail); else p is left empty.
+    /// @param precision honored only as the tag source; the jackknife is native FP64 (§12).
+    [[nodiscard]] virtual RatioBlockJackknife ratio_block_jackknife(
+        const RatioJackArray& num, const RatioJackArray& den, const RatioJackArray& weight,
+        const RatioJackArray& xblk_num, const RatioJackArray& xblk_den, int N, int n_block,
+        int tot_mode, double setmiss_thresh, bool compute_p, const Precision& precision) {
+        (void)num; (void)den; (void)weight; (void)xblk_num; (void)xblk_den;
+        (void)N; (void)n_block; (void)tot_mode; (void)setmiss_thresh; (void)compute_p;
+        (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::ratio_block_jackknife: not implemented by this backend");
+    }
+
+    /// FUSED f4ratio assemble→ratio-jackknife (M1; the device-resident producer entry). Builds
+    /// the interleaved num/den quartet f4 X (assemble_f4_quartets) and runs the SHARED
+    /// ratio_block_jackknife over it WITHOUT D2H'ing the [m·n_block] x_blocks/x_loo (the
+    /// host-compute-audit M1 cure: the f4ratio x_blocks/x_loo D2H is DROPPED — the resident
+    /// dX/dLoo feed launch_ratio_block_jackknife directly). `flat` is the interleaved 2N-quartet
+    /// flat array (length 8N; num quartets [0,N), den quartets [N,2N)); the result rows are the N
+    /// tuples (num row k, den row N+k). tot_mode=0, setmiss_thresh=1e-6, weight=block_sizes
+    /// broadcast, compute_p=false (f4ratio reports alpha/se/z only). The CudaBackend keeps dX/dLoo
+    /// resident + launches the kernel; the CpuBackend assembles then delegates to the long-double
+    /// ratio_jackknife oracle (the reference math UNCHANGED). NON-PURE: the base throws.
+    [[nodiscard]] virtual RatioBlockJackknife f4ratio_blocks_jackknife(
+        const steppe::device::DeviceF2Blocks& f2, std::span<const int> flat, int N,
+        double setmiss_thresh, const Precision& precision) {
+        (void)f2; (void)flat; (void)N; (void)setmiss_thresh; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::f4ratio_blocks_jackknife(DeviceF2Blocks): not implemented by this "
+            "backend (the device-resident assemble seam requires a CUDA backend)");
+    }
+
+    /// FUSED f4ratio host-oracle overload — the CpuBackend parity door (assemble over the host
+    /// F2BlockTensor, then delegate to the long-double ratio_jackknife oracle). The CudaBackend
+    /// reads DEVICE-RESIDENT f2 (the DeviceF2Blocks overload); this host-tensor overload is the
+    /// CpuBackend entry. NON-PURE: the base throws.
+    [[nodiscard]] virtual RatioBlockJackknife f4ratio_blocks_jackknife(
+        const F2BlockTensor& f2, std::span<const int> flat, int N, double setmiss_thresh,
+        const Precision& precision) {
+        (void)f2; (void)flat; (void)N; (void)setmiss_thresh; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::f4ratio_blocks_jackknife(host): not implemented by this backend");
+    }
+
+    /// FUSED dstat block-reduce→ratio-jackknife (M2; the device-resident producer entry). Runs
+    /// the per-(quadruple,block) D reduce (dstat_block_reduce) and the SHARED ratio_block_jackknife
+    /// over the RESIDENT numsum/densum/cnt WITHOUT D2H'ing them (the host-compute-audit M2 cure:
+    /// the numsum/densum/cnt D2H is DROPPED — the resident dNum/dDen/dCnt feed
+    /// launch_ratio_block_jackknife directly). tot_mode=1, setmiss_thresh=0 (cnt>0 mask),
+    /// weight=cnt, compute_p=true (p = f4_two_sided_p(z), on-device). The CudaBackend keeps
+    /// dNum/dDen/dCnt resident + launches the kernel; the CpuBackend composes
+    /// dstat_block_reduce → the long-double dstat_jackknife oracle (the reference math UNCHANGED).
+    /// NON-PURE: the base throws.
+    [[nodiscard]] virtual RatioBlockJackknife dstat_blocks_jackknife(
+        const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
+        std::span<const int> quadruples) {
+        (void)dec; (void)block_id; (void)n_block; (void)quadruples;
+        throw std::runtime_error(
+            "ComputeBackend::dstat_blocks_jackknife(DeviceDecodeResult): not implemented by this "
+            "backend (the device-resident decode seam requires a CUDA backend)");
+    }
+
+    /// FUSED dstat host-pointer overload — the CpuBackend parity door (the non-resident Q/V path:
+    /// reduce over host Q/V, then delegate to the long-double dstat_jackknife oracle). NON-PURE:
+    /// the base throws.
+    [[nodiscard]] virtual RatioBlockJackknife dstat_blocks_jackknife(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples) {
+        (void)Q; (void)V; (void)P; (void)M; (void)block_id; (void)n_block; (void)quadruples;
+        throw std::runtime_error(
+            "ComputeBackend::dstat_blocks_jackknife(host): not implemented by this backend");
     }
 
     /// GPU-ONLY f-stat SWEEP (the production-scale fix for the CPU-bound host-enumeration

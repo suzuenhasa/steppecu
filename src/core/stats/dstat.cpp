@@ -43,7 +43,6 @@
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, BlockPartition
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DecodeResult
 #include "device/resources.hpp"                   // device::Resources (the injected backend bundle)
-#include "steppe/f4.hpp"                          // f4_two_sided_p (REUSED — AT2 ztop == erfc(|z|/sqrt2))
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
@@ -63,98 +62,13 @@ inline constexpr int kPloidyDiploid = 2;
 /// The single-entry primary GPU index (mirrors f4.cpp/f4ratio.cpp's kPrimaryGpu).
 inline constexpr std::size_t kPrimaryGpu = 0;
 
-/// One quadruple's num/den block-jackknife (AT2 est_to_loo_dat + jack_dat_stats; the
-/// f4ratio.cpp ratio-jackknife FAMILY). `numsum`/`densum`/`cnt` are the row-major [N × nb]
-/// per-(quadruple, block) reductions; `k` is this quadruple's row. Writes D (=est), se, z.
-/// Survivor blocks are cnt[k,b] > 0 (NO setmiss). All accumulation in long double.
-void dstat_jackknife(const double* numsum, const double* densum, const double* cnt,
-                     int k, int n_block, double& D, double& se, double& z) {
-    // ---- survivor pass: per-block est_num/est_den + Σcnt + survivor count ----
-    long double sum_cnt = 0.0L;
-    int nb_surv = 0;
-    for (int b = 0; b < n_block; ++b) {
-        const std::size_t o = static_cast<std::size_t>(k) * static_cast<std::size_t>(n_block) +
-                              static_cast<std::size_t>(b);
-        if (cnt[o] > 0.0) { sum_cnt += static_cast<long double>(cnt[o]); ++nb_surv; }
-    }
-    if (nb_surv <= 1 || sum_cnt <= 0.0L) {
-        D = std::nan(""); se = std::nan(""); z = std::nan("");
-        return;
-    }
-    const double nb = static_cast<double>(nb_surv);
-
-    // ---- est_to_loo per type (AT2 est_to_loo_dat): tot_t = weighted.mean(est_t, cnt) ----
-    // tot_num/tot_den are the cnt-weighted means of the per-block est; the LOO replicate of
-    // block b is (tot_t - est_t_b*rel_bl)/(1-rel_bl), rel_bl = cnt_b/Σcnt.
-    long double tot_num_w = 0.0L, tot_den_w = 0.0L;  // Σ est_t_b * cnt_b
-    for (int b = 0; b < n_block; ++b) {
-        const std::size_t o = static_cast<std::size_t>(k) * static_cast<std::size_t>(n_block) +
-                              static_cast<std::size_t>(b);
-        if (cnt[o] <= 0.0) continue;
-        const long double est_num = static_cast<long double>(numsum[o]) /
-                                    static_cast<long double>(cnt[o]);
-        const long double est_den = static_cast<long double>(densum[o]) /
-                                    static_cast<long double>(cnt[o]);
-        tot_num_w += est_num * static_cast<long double>(cnt[o]);
-        tot_den_w += est_den * static_cast<long double>(cnt[o]);
-    }
-    const long double tot_num = tot_num_w / sum_cnt;  // weighted.mean(est_num, cnt)
-    const long double tot_den = tot_den_w / sum_cnt;  // weighted.mean(est_den, cnt)
-
-    // ---- per-block R_b = loo_num_b/loo_den_b + the jack_dat_stats accumulators ----
-    // tot   = weighted.mean(R_b, 1 - cnt_b/Σcnt)
-    // est   = mean(tot - R_b)*nb + weighted.mean(R_b, cnt)
-    long double tot_w_num = 0.0L, tot_w_den = 0.0L;  // Σ R_b*(1-rel), Σ(1-rel)  -> tot
-    long double diffsum = 0.0L;                       // Σ (placeholder) — needs tot first; two-pass
-    long double wmean_R_num = 0.0L;                   // Σ R_b * cnt_b  -> weighted.mean(R_b, cnt)
-    std::vector<double> Rb(static_cast<std::size_t>(n_block), std::nan(""));
-    for (int b = 0; b < n_block; ++b) {
-        const std::size_t o = static_cast<std::size_t>(k) * static_cast<std::size_t>(n_block) +
-                              static_cast<std::size_t>(b);
-        if (cnt[o] <= 0.0) continue;
-        const long double est_num = static_cast<long double>(numsum[o]) /
-                                    static_cast<long double>(cnt[o]);
-        const long double est_den = static_cast<long double>(densum[o]) /
-                                    static_cast<long double>(cnt[o]);
-        const long double rel = static_cast<long double>(cnt[o]) / sum_cnt;  // rel_bl
-        const long double loo_num = (tot_num - est_num * rel) / (1.0L - rel);
-        const long double loo_den = (tot_den - est_den * rel) / (1.0L - rel);
-        const long double R = loo_num / loo_den;
-        Rb[static_cast<std::size_t>(b)] = static_cast<double>(R);
-        const long double w = 1.0L - rel;                 // weight for tot
-        tot_w_num += R * w;
-        tot_w_den += w;
-        wmean_R_num += R * static_cast<long double>(cnt[o]);
-    }
-    const long double tot = tot_w_num / tot_w_den;        // weighted.mean(R_b, 1-cnt/Σcnt)
-    for (int b = 0; b < n_block; ++b) {
-        const std::size_t o = static_cast<std::size_t>(k) * static_cast<std::size_t>(n_block) +
-                              static_cast<std::size_t>(b);
-        if (cnt[o] <= 0.0) continue;
-        diffsum += tot - static_cast<long double>(Rb[static_cast<std::size_t>(b)]);
-    }
-    const long double est = (diffsum / static_cast<long double>(nb_surv)) *
-                                static_cast<long double>(nb) +
-                            wmean_R_num / sum_cnt;          // mean(tot-R)*nb + wmean(R,cnt)
-
-    // ---- xtau variance (AT2 jack_dat_stats): h_b = Σcnt/cnt_b;
-    //      xtau_b = (h_b*tot - (h_b-1)*R_b - est)^2 / (h_b-1); var = mean(xtau_b). ----
-    long double var_acc = 0.0L;
-    for (int b = 0; b < n_block; ++b) {
-        const std::size_t o = static_cast<std::size_t>(k) * static_cast<std::size_t>(n_block) +
-                              static_cast<std::size_t>(b);
-        if (cnt[o] <= 0.0) continue;
-        const long double h = sum_cnt / static_cast<long double>(cnt[o]);
-        const long double R = static_cast<long double>(Rb[static_cast<std::size_t>(b)]);
-        const long double tau = h * tot - (h - 1.0L) * R - est;
-        var_acc += (tau * tau) / (h - 1.0L);
-    }
-    const double var = static_cast<double>(var_acc / static_cast<long double>(nb_surv));
-
-    D = static_cast<double>(est);
-    se = (var > 0.0) ? std::sqrt(var) : std::nan("");
-    z = D / se;
-}
+/// The num/den block-jackknife (AT2 est_to_loo_dat + jack_dat_stats) is NO LONGER a host loop
+/// here: it is the SHARED on-device ratio_block_jackknife backend virtual (backend.hpp), reached
+/// via dstat_blocks_jackknife — ONE engine with f4-ratio. On the CUDA path the per-(quadruple,
+/// block) numsum/densum/cnt stay RESIDENT (dNum/dDen/dCnt) and feed the kernel directly (the
+/// [N·n_block] D2H is DROPPED); on the CpuBackend the SAME entry reduces then delegates to the
+/// long-double oracle (tot_mode=1, cnt>0 survivor mask, weight=cnt, p=f4_two_sided_p; the
+/// reference math UNCHANGED). Native FP64 (the §12 num/den cancellation carve-out).
 
 }  // namespace
 
@@ -292,35 +206,26 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
         return res;
     }
 
-    // ---- 3. The per-SNP D kernel (the S2 divergence) — per (quadruple, block) num/den/cnt
-    // ON THE GPU (device-resident, batched over N), the f2-cache NEVER touched. Outputs are
-    // tiny [N × n_block] row-major.
-    const std::size_t nb_out = static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
-    std::vector<double> numsum(nb_out, 0.0), densum(nb_out, 0.0), cnt(nb_out, 0.0);
-    if (resident)
-        be.dstat_block_reduce(ddr, partition.block_id.data(), n_block,
-                              std::span<const int>(flat), numsum.data(), densum.data(),
-                              cnt.data());
-    else
-        be.dstat_block_reduce(Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(),
-                              n_block, std::span<const int>(flat), numsum.data(),
-                              densum.data(), cnt.data());
-
-    // ---- 4. The num/den block-jackknife per quadruple (host-pure; the f4ratio FAMILY) --
-    res.est.assign(static_cast<std::size_t>(N), 0.0);
-    res.se.assign(static_cast<std::size_t>(N), 0.0);
-    res.z.assign(static_cast<std::size_t>(N), 0.0);
-    res.p.assign(static_cast<std::size_t>(N), 0.0);
-    for (int k = 0; k < N; ++k) {
-        double D = 0.0, se = 0.0, z = 0.0;
-        dstat_jackknife(numsum.data(), densum.data(), cnt.data(), k, n_block, D, se, z);
-        res.est[static_cast<std::size_t>(k)] = D;
-        res.se[static_cast<std::size_t>(k)] = se;
-        res.z[static_cast<std::size_t>(k)] = z;
-        res.p[static_cast<std::size_t>(k)] = f4_two_sided_p(z);  // == AT2 ztop.
-    }
-
-    res.status = Status::Ok;
+    // ---- 3 + 4 FUSED — the per-SNP D reduce + the SHARED on-device ratio-block-jackknife in
+    // ONE backend call (host-compute-audit M2 cure). On the CUDA path the per-(quadruple,block)
+    // numsum/densum/cnt stay RESIDENT (dNum/dDen/dCnt) and feed the ratio_block_jackknife kernel
+    // directly — DROPPING the former [N·n_block] numsum/densum/cnt D2H + the host per-quadruple
+    // dstat_jackknife loop. On the CpuBackend the SAME entry reduces then delegates to the
+    // long-double dstat_jackknife oracle (tot_mode=1, cnt>0 mask, weight=cnt, the reference math
+    // UNCHANGED). p = f4_two_sided_p(z) (== AT2 ztop) is computed in-kernel / in-oracle. The
+    // num/den block-jackknife is the SAME ratio block-jackknife as f4-ratio (one shared virtual).
+    const RatioBlockJackknife jk =
+        resident
+            ? be.dstat_blocks_jackknife(ddr, partition.block_id.data(), n_block,
+                                        std::span<const int>(flat))
+            : be.dstat_blocks_jackknife(Qk.data(), Vk.data(), P, M_kept,
+                                        partition.block_id.data(), n_block,
+                                        std::span<const int>(flat));
+    res.est = jk.est;
+    res.se = jk.se;
+    res.z = jk.z;
+    res.p = jk.p;
+    res.status = jk.status;
     return res;
 }
 

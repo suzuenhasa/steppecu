@@ -1179,6 +1179,246 @@ public:
         return out;
     }
 
+    /// SHARED RATIO-block-jackknife ORACLE (the f4ratio M1 + qpDstat M2 common engine;
+    /// backend.hpp ratio_block_jackknife). This IS the long-double reference the GPU
+    /// ratio_block_jackknife_kernel is diffed against — it reproduces the two former host
+    /// jackknives (f4ratio.cpp ratio_jackknife for tot_mode=0; dstat.cpp dstat_jackknife for
+    /// tot_mode=1) VERBATIM, in long double, over the generic per-(item,block) descriptors. The
+    /// reference math is UNCHANGED (the static ratio_jackknife/dstat_jackknife are folded HERE so
+    /// there is ONE oracle copy). Native FP64 result (§12 cancellation carve-out).
+    [[nodiscard]] RatioBlockJackknife ratio_block_jackknife(
+        const RatioJackArray& num, const RatioJackArray& den, const RatioJackArray& weight,
+        const RatioJackArray& xblk_num, const RatioJackArray& xblk_den, int N, int n_block,
+        int tot_mode, double setmiss_thresh, bool compute_p,
+        const Precision& precision) override {
+        (void)precision;  // native FP64 / long-double oracle.
+        RatioBlockJackknife out;
+        out.N = N;
+        if (N <= 0 || n_block <= 0) { out.status = Status::Ok; return out; }
+        out.est.assign(static_cast<std::size_t>(N), std::nan(""));
+        out.se.assign(static_cast<std::size_t>(N), std::nan(""));
+        out.z.assign(static_cast<std::size_t>(N), std::nan(""));
+        if (compute_p) out.p.assign(static_cast<std::size_t>(N), std::nan(""));
+
+        const auto at = [](const RatioJackArray& a, long k, int b) -> double {
+            return a.data[a.base + k * a.item_stride +
+                          static_cast<long>(b) * a.block_stride];
+        };
+
+        for (int k = 0; k < N; ++k) {
+            const long kk = static_cast<long>(k);
+            double est = std::nan(""), se = std::nan(""), z = std::nan("");
+
+            if (tot_mode == 0) {
+                // ===== f4ratio: ratio_jackknife (f4ratio.cpp:79-155) =====
+                long double n_ld = 0.0L; int nb_surv = 0;
+                long double totnum = 0.0L, totden = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double den_blk = at(xblk_den, kk, b);
+                    if (std::fabs(den_blk) < setmiss_thresh) continue;
+                    const double bl = at(weight, kk, b);
+                    n_ld += static_cast<long double>(bl);
+                    ++nb_surv;
+                    totnum += static_cast<long double>(at(xblk_num, kk, b)) *
+                              static_cast<long double>(bl);
+                    totden += static_cast<long double>(den_blk) * static_cast<long double>(bl);
+                }
+                if (nb_surv <= 1 || n_ld <= 0.0L || totden == 0.0L) {
+                    out.est[static_cast<std::size_t>(k)] = std::nan("");
+                    out.se[static_cast<std::size_t>(k)] = std::nan("");
+                    out.z[static_cast<std::size_t>(k)] = std::nan("");
+                    if (compute_p) out.p[static_cast<std::size_t>(k)] = std::nan("");
+                    continue;
+                }
+                const double n = static_cast<double>(n_ld);
+                const double nb = static_cast<double>(nb_surv);
+                const double tot = static_cast<double>(totnum / totden);
+                long double diffsum = 0.0L, wmean_num = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double den_blk = at(xblk_den, kk, b);
+                    if (std::fabs(den_blk) < setmiss_thresh) continue;
+                    const double bl = at(weight, kk, b);
+                    const double Rb = at(num, kk, b) / at(den, kk, b);
+                    diffsum += static_cast<long double>(tot) - static_cast<long double>(Rb);
+                    wmean_num += static_cast<long double>(Rb) * static_cast<long double>(bl);
+                }
+                const double term1 =
+                    static_cast<double>(diffsum / static_cast<long double>(nb_surv)) * nb;
+                const double term2 = static_cast<double>(wmean_num / n_ld);
+                est = term1 + term2;
+                long double var_acc = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double den_blk = at(xblk_den, kk, b);
+                    if (std::fabs(den_blk) < setmiss_thresh) continue;
+                    const double bl = at(weight, kk, b);
+                    const double Rb = at(num, kk, b) / at(den, kk, b);
+                    const double h = n / bl;
+                    const double tau = h * tot - (h - 1.0) * Rb;
+                    const double xtau = (tau - est) / std::sqrt(h - 1.0);
+                    var_acc += static_cast<long double>(xtau) * static_cast<long double>(xtau);
+                }
+                const double var = static_cast<double>(var_acc / static_cast<long double>(nb_surv));
+                se = (var > 0.0) ? std::sqrt(var) : std::nan("");
+                z = est / se;
+
+            } else {
+                // ===== dstat: dstat_jackknife (dstat.cpp:70-157) =====
+                long double sum_cnt = 0.0L; int nb_surv = 0;
+                for (int b = 0; b < n_block; ++b) {
+                    const double cn = at(weight, kk, b);
+                    if (cn > 0.0) { sum_cnt += static_cast<long double>(cn); ++nb_surv; }
+                }
+                if (nb_surv <= 1 || sum_cnt <= 0.0L) {
+                    out.est[static_cast<std::size_t>(k)] = std::nan("");
+                    out.se[static_cast<std::size_t>(k)] = std::nan("");
+                    out.z[static_cast<std::size_t>(k)] = std::nan("");
+                    if (compute_p) out.p[static_cast<std::size_t>(k)] = std::nan("");
+                    continue;
+                }
+                const double nb = static_cast<double>(nb_surv);
+                long double tot_num_w = 0.0L, tot_den_w = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double cn = at(weight, kk, b);
+                    if (cn <= 0.0) continue;
+                    const long double est_num =
+                        static_cast<long double>(at(num, kk, b)) / static_cast<long double>(cn);
+                    const long double est_den =
+                        static_cast<long double>(at(den, kk, b)) / static_cast<long double>(cn);
+                    tot_num_w += est_num * static_cast<long double>(cn);
+                    tot_den_w += est_den * static_cast<long double>(cn);
+                }
+                const long double tot_num = tot_num_w / sum_cnt;
+                const long double tot_den = tot_den_w / sum_cnt;
+                long double tot_w_num = 0.0L, tot_w_den = 0.0L, wmean_R_num = 0.0L;
+                std::vector<double> Rb(static_cast<std::size_t>(n_block), std::nan(""));
+                for (int b = 0; b < n_block; ++b) {
+                    const double cn = at(weight, kk, b);
+                    if (cn <= 0.0) continue;
+                    const long double est_num =
+                        static_cast<long double>(at(num, kk, b)) / static_cast<long double>(cn);
+                    const long double est_den =
+                        static_cast<long double>(at(den, kk, b)) / static_cast<long double>(cn);
+                    const long double rel = static_cast<long double>(cn) / sum_cnt;
+                    const long double loo_num = (tot_num - est_num * rel) / (1.0L - rel);
+                    const long double loo_den = (tot_den - est_den * rel) / (1.0L - rel);
+                    const long double R = loo_num / loo_den;
+                    Rb[static_cast<std::size_t>(b)] = static_cast<double>(R);
+                    const long double w = 1.0L - rel;
+                    tot_w_num += R * w;
+                    tot_w_den += w;
+                    wmean_R_num += R * static_cast<long double>(cn);
+                }
+                const long double tot = tot_w_num / tot_w_den;
+                long double diffsum = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double cn = at(weight, kk, b);
+                    if (cn <= 0.0) continue;
+                    diffsum += tot - static_cast<long double>(Rb[static_cast<std::size_t>(b)]);
+                }
+                const long double est_ld =
+                    (diffsum / static_cast<long double>(nb_surv)) * static_cast<long double>(nb) +
+                    wmean_R_num / sum_cnt;
+                long double var_acc = 0.0L;
+                for (int b = 0; b < n_block; ++b) {
+                    const double cn = at(weight, kk, b);
+                    if (cn <= 0.0) continue;
+                    const long double h = sum_cnt / static_cast<long double>(cn);
+                    const long double R =
+                        static_cast<long double>(Rb[static_cast<std::size_t>(b)]);
+                    const long double tau = h * tot - (h - 1.0L) * R - est_ld;
+                    var_acc += (tau * tau) / (h - 1.0L);
+                }
+                const double var = static_cast<double>(var_acc / static_cast<long double>(nb_surv));
+                est = static_cast<double>(est_ld);
+                se = (var > 0.0) ? std::sqrt(var) : std::nan("");
+                z = est / se;
+            }
+
+            out.est[static_cast<std::size_t>(k)] = est;
+            out.se[static_cast<std::size_t>(k)] = se;
+            out.z[static_cast<std::size_t>(k)] = z;
+            if (compute_p) {
+                static const double kInvSqrt2 = 1.0 / std::sqrt(2.0);
+                out.p[static_cast<std::size_t>(k)] = std::erfc(std::fabs(z) * kInvSqrt2);
+            }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
+    /// FUSED f4ratio assemble→ratio-jackknife — the CpuBackend host-oracle door (backend.hpp
+    /// f4ratio_blocks_jackknife). Assembles the interleaved num/den f4 X (assemble_f4_quartets,
+    /// the host oracle) then composes the ratio_block_jackknife oracle over the host F4Blocks
+    /// (tot_mode=0; the reference math UNCHANGED). num row k / den row N+k of the m=2N axis.
+    [[nodiscard]] RatioBlockJackknife f4ratio_blocks_jackknife(
+        const F2BlockTensor& f2, std::span<const int> flat, int N, double setmiss_thresh,
+        const Precision& precision) override {
+        RatioBlockJackknife out;
+        out.N = N;
+        if (N <= 0) { out.status = Status::Ok; return out; }
+        const F4Blocks X = assemble_f4_quartets(f2, flat, precision);
+        const long m = static_cast<long>(X.nl) * static_cast<long>(X.nr);  // == 2N
+        const int nb = X.n_block;
+        if (m <= 0 || nb <= 0) {
+            out.est.assign(static_cast<std::size_t>(N), std::nan(""));
+            out.se.assign(static_cast<std::size_t>(N), std::nan(""));
+            out.z.assign(static_cast<std::size_t>(N), std::nan(""));
+            out.status = Status::Ok;
+            return out;
+        }
+        // The per-block block_sizes weight as double (the f4ratio broadcast weight).
+        std::vector<double> w(static_cast<std::size_t>(nb));
+        for (int b = 0; b < nb; ++b)
+            w[static_cast<std::size_t>(b)] =
+                static_cast<double>(X.block_sizes[static_cast<std::size_t>(b)]);
+
+        // num = x_loo row k; den = x_loo row N+k; xblk = x_blocks (same rows). x_loo/x_blocks
+        // are [m*nb], element [k + m*b] ⇒ item_stride=1, block_stride=m; den base=N.
+        RatioJackArray num{X.x_loo.data(), 0, 1, m};
+        RatioJackArray den{X.x_loo.data(), static_cast<long>(N), 1, m};
+        RatioJackArray weight{w.data(), 0, 0, 1};  // broadcast across items.
+        RatioJackArray xbn{X.x_blocks.data(), 0, 1, m};
+        RatioJackArray xbd{X.x_blocks.data(), static_cast<long>(N), 1, m};
+        return ratio_block_jackknife(num, den, weight, xbn, xbd, N, nb,
+                                     /*tot_mode=*/0, setmiss_thresh, /*compute_p=*/false,
+                                     precision);
+    }
+
+    /// FUSED dstat block-reduce→ratio-jackknife — the CpuBackend host-pointer door (backend.hpp
+    /// dstat_blocks_jackknife). Reduces over host Q/V (dstat_block_reduce, the host oracle) then
+    /// composes the ratio_block_jackknife oracle over the host numsum/densum/cnt (tot_mode=1,
+    /// cnt>0 mask, weight=cnt, compute_p=true; the reference math UNCHANGED).
+    [[nodiscard]] RatioBlockJackknife dstat_blocks_jackknife(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples) override {
+        const int N = static_cast<int>(quadruples.size() / 4);
+        RatioBlockJackknife out;
+        out.N = N;
+        if (N <= 0 || n_block <= 0 || P <= 0 || M <= 0) {
+            out.est.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            out.se.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            out.z.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            out.p.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            out.status = Status::Ok;
+            return out;
+        }
+        const std::size_t nb_out =
+            static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
+        std::vector<double> numsum(nb_out, 0.0), densum(nb_out, 0.0), cnt(nb_out, 0.0);
+        dstat_block_reduce(Q, V, P, M, block_id, n_block, quadruples, numsum.data(),
+                           densum.data(), cnt.data());
+        // numsum/densum/cnt are [N*nb] row-major, element [k*nb+b] ⇒ item_stride=nb,
+        // block_stride=1.
+        const long nbl = static_cast<long>(n_block);
+        RatioJackArray num{numsum.data(), 0, nbl, 1};
+        RatioJackArray den{densum.data(), 0, nbl, 1};
+        RatioJackArray weight{cnt.data(), 0, nbl, 1};
+        RatioJackArray null{nullptr, 0, 0, 0};
+        return ratio_block_jackknife(num, den, weight, null, null, N, n_block,
+                                     /*tot_mode=*/1, /*setmiss_thresh=*/0.0, /*compute_p=*/true,
+                                     Precision{});
+    }
+
     /// S5 — rank test / SVD seed (design §4 S5). Seeds A,B from svd(x_total) at
     /// rank r and returns chisq = vec(E)'·Qinv·vec(E) for E = X - A·B with the
     /// seed factors. In M(fit-1) this is the ALS seed; the rank sweep is M(fit-2).

@@ -30,6 +30,7 @@ add_library(steppe_device STATIC
     cuda/dates_kernel.cu          # DATES: the cuFFT autocorrelation LD engine kernels (weight/residual/scatter + |F|²/cross-power + lag re-bin)
     cuda/qpfstats_kernel.cu       # qpfstats: zero-NaN-in-ymat + add-ridge-diag + NaN-row-downdate (the smoothing-solve prep kernels)
     cuda/qpfstats_jackknife_kernel.cu  # qpfstats PERF: on-device per-comb block-jackknife (y/ymat) + per-pair recenter (native FP64; §12 carve-out)
+    cuda/ratio_block_jackknife_kernel.cu  # SHARED on-device RATIO-block-jackknife (f4ratio M1 + qpDstat M2; native FP64; §12 carve-out)
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)

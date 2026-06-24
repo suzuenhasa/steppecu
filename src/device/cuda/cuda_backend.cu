@@ -104,6 +104,7 @@
 #include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
 #include "device/cuda/qpfstats_kernel.cuh"  // launch_qpfstats_zero_nan_ymat / _add_ridge_diag (the smoother prep)
 #include "device/cuda/qpfstats_jackknife_kernel.cuh"  // launch_qpfstats_numer_jackknife / _recenter_shift (the fused PERF path)
+#include "device/cuda/ratio_block_jackknife_kernel.cuh"  // launch_ratio_block_jackknife (the SHARED f4ratio M1 + qpDstat M2 engine)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
@@ -2926,6 +2927,245 @@ public:
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;
+    }
+
+    /// FUSED f4ratio assemble→ratio-jackknife (M1 host-compute-audit cure) — the device-resident
+    /// producer. SAME assemble as assemble_f4_quartets (the interleaved 2N-quartet f4 X: num
+    /// rows [0,N), den rows [N,2N)), BUT keeps dX (x_blocks) and dLoo (x_loo) RESIDENT and feeds
+    /// them straight to launch_ratio_block_jackknife — DROPPING the [m·nb_s] x_blocks + x_loo D2H
+    /// pair the assemble_f4_quartets path does (cuda_backend.cu:2915-2920). Only the small N-length
+    /// est/se/z cross back. tot_mode=0, weight=block_sizes broadcast, setmiss_thresh given,
+    /// compute_p=false. Native FP64 (the §12 carve-out; the kernel matches the host long-double
+    /// ratio_jackknife operand order). `flat` is the interleaved 2N-quartet flat array (length 8N).
+    [[nodiscard]] RatioBlockJackknife f4ratio_blocks_jackknife(
+        const steppe::device::DeviceF2Blocks& f2, std::span<const int> flat, int N,
+        double setmiss_thresh, const Precision& precision) override {
+        (void)precision;  // native FP64 (the cancellation-sensitive ratio diff)
+        guard_device();
+        RatioBlockJackknife jk;
+        jk.N = N;
+        const int nb = f2.n_block;
+        const int P = f2.P;
+        const std::size_t m = static_cast<std::size_t>(2) * static_cast<std::size_t>(N);  // 2N rows
+        if (N <= 0 || nb <= 0 || f2.f2_device() == nullptr) {
+            jk.est.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.se.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.z.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.status = Status::Ok;
+            return jk;
+        }
+
+        // F1 / OQ-12 SURVIVOR drop (the SAME on-device keep-mask the assemble path uses).
+        const std::vector<int> surv = device_survivor_blocks(f2, nb, P);
+        const int nb_s = static_cast<int>(surv.size());
+        if (nb_s <= 0) {
+            jk.est.assign(static_cast<std::size_t>(N), std::nan(""));
+            jk.se.assign(static_cast<std::size_t>(N), std::nan(""));
+            jk.z.assign(static_cast<std::size_t>(N), std::nan(""));
+            jk.status = Status::Ok;
+            return jk;
+        }
+        std::vector<int> block_sizes(static_cast<std::size_t>(nb_s));
+        std::vector<double> block_sizes_d(static_cast<std::size_t>(nb_s));
+        for (int bs = 0; bs < nb_s; ++bs) {
+            const int v = f2.block_sizes[static_cast<std::size_t>(surv[static_cast<std::size_t>(bs)])];
+            block_sizes[static_cast<std::size_t>(bs)] = v;
+            block_sizes_d[static_cast<std::size_t>(bs)] = static_cast<double>(v);
+        }
+        const bool dropped = (nb_s != nb);
+
+        // The interleaved num/den quartet flat array is the SAME `flat` (length 8N == 4*2N).
+        const int M2 = 2 * N;  // the m-axis quartet count (num then den halves).
+        DeviceBuffer<int> dQuartets(flat.size());
+        DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dBlockSizesD(static_cast<std::size_t>(nb_s));
+        DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuartets.data(), flat.data(),
+                                          flat.size() * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
+                                          static_cast<std::size_t>(nb_s) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizesD.data(), block_sizes_d.data(),
+                                          static_cast<std::size_t>(nb_s) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        if (dropped)
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
+                                              static_cast<std::size_t>(nb_s) * sizeof(int),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+
+        DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
+        DeviceBuffer<double> dTotal(m);
+        DeviceBuffer<double> dTotLine(m);
+
+        // S3 per-quartet gather (RESIDENT f2; native FP64 4-slab combine) + est_to_loo/total.
+        launch_assemble_f4_quartets_gather(f2.f2_device(), P, dQuartets.data(), M2, nb_s,
+                                           dropped ? dSurv.data() : nullptr,
+                                           dX.data(), stream_.get());
+        long long n_ll = 0;
+        for (int v : block_sizes) n_ll += v;
+        const double n = static_cast<double>(n_ll);
+        launch_f4_loo_total(dX.data(), dBlockSizes.data(),
+                            static_cast<int>(m), nb_s, n,
+                            dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
+
+        // The SHARED ratio-block-jackknife over the RESIDENT dX/dLoo — NO [m·nb_s] D2H.
+        // num/den ARE the est_to_loo replicates dLoo (rows k / N+k); xblk_num/xblk_den ARE the
+        // per-block f4 dX (rows k / N+k); weight = block_sizes broadcast. dX/dLoo are
+        // COLUMN-MAJOR in the m axis: element [row + m*b] ⇒ item_stride=1, block_stride=m.
+        const long ms = static_cast<long>(m);
+        DRatioJackArray dnum{dLoo.data(), 0, 1, ms};
+        DRatioJackArray dden{dLoo.data(), static_cast<long>(N), 1, ms};
+        DRatioJackArray dweight{dBlockSizesD.data(), 0, 0, 1};  // broadcast across items.
+        DRatioJackArray dxbn{dX.data(), 0, 1, ms};
+        DRatioJackArray dxbd{dX.data(), static_cast<long>(N), 1, ms};
+
+        DeviceBuffer<double> dEst(static_cast<std::size_t>(N));
+        DeviceBuffer<double> dSe(static_cast<std::size_t>(N));
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N));
+        launch_ratio_block_jackknife(dnum, dden, dweight, dxbn, dxbd, N, nb_s,
+                                     /*tot_mode=*/0, setmiss_thresh, /*compute_p=*/false,
+                                     dEst.data(), dSe.data(), dZ.data(), /*d_p=*/nullptr,
+                                     stream_.get());
+
+        jk.est.assign(static_cast<std::size_t>(N), 0.0);
+        jk.se.assign(static_cast<std::size_t>(N), 0.0);
+        jk.z.assign(static_cast<std::size_t>(N), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.est.data(), dEst.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.se.data(), dSe.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.z.data(), dZ.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        jk.status = Status::Ok;
+        return jk;
+    }
+
+    /// FUSED dstat block-reduce→ratio-jackknife (M2 host-compute-audit cure) — the device-resident
+    /// producer. Runs the per-(quadruple,block) D reduce keeping dNum/dDen/dCnt RESIDENT and feeds
+    /// them straight to launch_ratio_block_jackknife — DROPPING the numsum/densum/cnt D2H the
+    /// dstat_block_reduce path does (cuda_backend.cu:1445-1450). Only the small N-length
+    /// est/se/z/p cross back. tot_mode=1, weight=cnt, setmiss_thresh=0 (cnt>0 mask), compute_p=true
+    /// (p = f4_two_sided_p(z) on-device). Native FP64 (the §12 carve-out; matches the host
+    /// long-double dstat_jackknife operand order).
+    [[nodiscard]] RatioBlockJackknife dstat_blocks_jackknife(
+        const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
+        std::span<const int> quadruples) override {
+        guard_device();
+        const int N = static_cast<int>(quadruples.size() / 4);
+        RatioBlockJackknife jk;
+        jk.N = N;
+        if (dec.empty() || dec.q_device() == nullptr || N <= 0 || n_block <= 0) {
+            jk.est.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.se.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.z.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.p.assign(static_cast<std::size_t>(std::max(N, 0)), std::nan(""));
+            jk.status = Status::Ok;
+            return jk;
+        }
+        const double* dQ = dec.q_device();
+        const double* dV = dec.v_device();
+        const int P = dec.P;
+        const long M = dec.M_kept;
+
+        // Per-block contiguous SNP layout from block_id (the SAME inverse of assign_blocks the
+        // dstat_block_reduce_device path uses).
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+        std::vector<int> begin(static_cast<std::size_t>(n_block));
+        std::vector<int> size(static_cast<std::size_t>(n_block));
+        for (int b = 0; b < n_block; ++b) {
+            begin[static_cast<std::size_t>(b)] = static_cast<int>(ranges[static_cast<std::size_t>(b)].begin);
+            size[static_cast<std::size_t>(b)]  = static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+        }
+        const std::size_t nq = static_cast<std::size_t>(N) * 4u;
+        const std::size_t nb_out = static_cast<std::size_t>(N) * static_cast<std::size_t>(n_block);
+
+        DeviceBuffer<int> dQuad(nq);
+        DeviceBuffer<int> dBegin(static_cast<std::size_t>(n_block));
+        DeviceBuffer<int> dSize(static_cast<std::size_t>(n_block));
+        DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(),
+                                          static_cast<std::size_t>(n_block) * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
+                                  dBegin.data(), dSize.data(), n_block,
+                                  dNum.data(), dDen.data(), dCnt.data(), stream_.get());
+
+        // The SHARED ratio-block-jackknife over the RESIDENT dNum/dDen/dCnt — NO [N·nb] D2H.
+        // numsum/densum/cnt are ROW-MAJOR [N × n_block], element [k*nb+b] ⇒ item_stride=n_block,
+        // block_stride=1. xblk pair is null (dstat tot_mode=1 never reads it).
+        const long nbl = static_cast<long>(n_block);
+        DRatioJackArray dnum{dNum.data(), 0, nbl, 1};
+        DRatioJackArray dden{dDen.data(), 0, nbl, 1};
+        DRatioJackArray dweight{dCnt.data(), 0, nbl, 1};
+        DRatioJackArray dnull{nullptr, 0, 0, 0};
+
+        DeviceBuffer<double> dEst(static_cast<std::size_t>(N));
+        DeviceBuffer<double> dSe(static_cast<std::size_t>(N));
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N));
+        DeviceBuffer<double> dP(static_cast<std::size_t>(N));
+        launch_ratio_block_jackknife(dnum, dden, dweight, dnull, dnull, N, n_block,
+                                     /*tot_mode=*/1, /*setmiss_thresh=*/0.0, /*compute_p=*/true,
+                                     dEst.data(), dSe.data(), dZ.data(), dP.data(),
+                                     stream_.get());
+
+        jk.est.assign(static_cast<std::size_t>(N), 0.0);
+        jk.se.assign(static_cast<std::size_t>(N), 0.0);
+        jk.z.assign(static_cast<std::size_t>(N), 0.0);
+        jk.p.assign(static_cast<std::size_t>(N), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.est.data(), dEst.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.se.data(), dSe.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.z.data(), dZ.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.p.data(), dP.data(),
+                                          static_cast<std::size_t>(N) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        jk.status = Status::Ok;
+        return jk;
+    }
+
+    /// FUSED f4ratio host-oracle overload — NOT the GPU path. The CudaBackend reads
+    /// DEVICE-RESIDENT f2 (the DeviceF2Blocks form); the host-tensor overload is the CpuBackend
+    /// oracle door (sibling of assemble_f4_quartets(host) throwing).
+    [[nodiscard]] RatioBlockJackknife f4ratio_blocks_jackknife(
+        const F2BlockTensor& f2, std::span<const int> flat, int N, double setmiss_thresh,
+        const Precision& precision) override {
+        (void)f2; (void)flat; (void)N; (void)setmiss_thresh; (void)precision;
+        throw std::runtime_error(
+            "CudaBackend::f4ratio_blocks_jackknife(host): the GPU path reads DEVICE-RESIDENT f2 "
+            "(the DeviceF2Blocks overload); the host-tensor overload is the CpuBackend oracle door");
+    }
+
+    /// FUSED dstat host-pointer overload — NOT the GPU path. The CudaBackend reads the
+    /// DEVICE-RESIDENT decode (the DeviceDecodeResult form, dropping the numsum/densum/cnt D2H);
+    /// the host-pointer Q/V overload is the CpuBackend oracle door.
+    [[nodiscard]] RatioBlockJackknife dstat_blocks_jackknife(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples) override {
+        (void)Q; (void)V; (void)P; (void)M; (void)block_id; (void)n_block; (void)quadruples;
+        throw std::runtime_error(
+            "CudaBackend::dstat_blocks_jackknife(host): the GPU path reads the DEVICE-RESIDENT "
+            "decode (the DeviceDecodeResult overload); the host-pointer overload is the CpuBackend "
+            "oracle door");
     }
 
     /// STANDALONE f4 host-oracle overload — NOT the GPU path (sibling of assemble_f4(host));
