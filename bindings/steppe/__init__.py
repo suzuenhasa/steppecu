@@ -790,7 +790,8 @@ def qpdstat(
 
     ``quartets`` is a list where each entry is a ``(p1, p2, p3, p4)`` name tuple/list (or a
     ``{"pop1":..,"pop2":..,"pop3":..,"pop4":..}`` dict) = the QUADRUPLE input. The
-    normalized-D MAGNITUDE needs a genotype prefix (Part B, not yet implemented). Unknown pop
+    normalized-D MAGNITUDE needs a genotype prefix — use ``steppe.dstat`` (the genotype-path
+    normalized-D, Part B; or the CLI ``qpdstat --prefix PREFIX.{geno,snp,ind}``). Unknown pop
     names raise a clean KeyError."""
     quads: list[tuple[str, str, str, str]] = []
     for q in quartets:
