@@ -171,6 +171,12 @@ struct QpfstatsSmooth {
     /// [npairs] — the GLOBAL smoothed coefficients (AT2 `bglob`), the recentering target.
     std::vector<double> bglob;
 
+    /// [npairs] — the per-pair RECENTER SHIFT (AT2 f2blocks2 = f2blocks - f2(f2blocks)$est
+    /// + bglob): shift[pair] = bglob[pair] - f2blocks_pair_est(b[pair, :], block_sizes).
+    /// EMPTY unless the fused entry (qpfstats_blocks_smooth) computed the recenter on-device;
+    /// the plain qpfstats_smooth seam leaves it empty (the host applies the recenter).
+    std::vector<double> recenter_shift;
+
     int npairs = 0;    ///< n(n-1)/2 (the f-stat basis dim == ncol(x)).
     int n_block = 0;   ///< the jackknife block count (== ncol(ymat)).
 
@@ -988,6 +994,46 @@ public:
         (void)ridge; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::qpfstats_smooth: not implemented by this backend");
+    }
+
+    /// qpfstats FUSED reduce→jackknife→smooth→recenter (the PERF path; one device residency).
+    /// Folds the genotype-f4 NUMERATOR reduce (dstat_block_reduce), the per-comb block-
+    /// JACKKNIFE (matrix_jackknife_est_col, formerly the host long-double per-comb loop), the
+    /// smoothing SOLVE (qpfstats_smooth), AND the per-pair RECENTER jackknife (f2blocks_pair_est)
+    /// into ONE call that keeps numsum/cnt/ymat/y/b RESIDENT in VRAM — the ~1.7GB-each
+    /// numsum/cnt D2H and the host ~305k×711 long-double jackknife loop (the GPU-idle "0" half
+    /// of the 100/0 alternation) are ELIMINATED. Only the small b[npairs×n_block] / bglob[npairs]
+    /// / recenter_shift[npairs] cross back to the host (the host scatters them into the f2 tensor).
+    ///
+    /// The on-device jackknife is the SAME leave-one-out block jackknife already proven on this
+    /// codebase (qpadm_fit_kernels.cu f4_loo_total_row), in NATIVE FP64 with the EXACT ascending-b
+    /// operand order of the host long-double loop (the §12 cancellation carve-out — NEVER
+    /// EmulatedFp64 here). The CpuBackend implements this by composing its existing oracles
+    /// (dstat_block_reduce → matrix_jackknife_est_col → qpfstats_smooth → f2blocks_pair_est) so the
+    /// reference math is UNCHANGED. The matmul sub-steps of the solve obey `precision` (the f2
+    /// policy); the Cholesky/solve + the jackknives are native FP64.
+    ///
+    /// @param Q,V         decode_af outputs, COLUMN-MAJOR [P × M] (element (pop i, SNP s) at i+P·s).
+    /// @param P,M         the Q/V dims (P pops, M autosome-kept SNPs).
+    /// @param block_id    per-SNP dense block id (length M) from assign_blocks (non-decreasing).
+    /// @param n_block     the jackknife block count.
+    /// @param quadruples  flat 4*npopcomb popcomb table (quad k at [4k..4k+3] = {p1,p2,p3,p4}).
+    /// @param x           the design, COLUMN-MAJOR [npopcomb × npairs] (x[c + npopcomb*p]).
+    /// @param npopcomb    rows of x / quadruple count.
+    /// @param npairs      the f-stat basis dim n(n-1)/2 (cols of x).
+    /// @param block_sizes per-block SNP count (length n_block) — the recenter jackknife weights.
+    /// @param ridge       the L2 ridge added to diag(A_shared) (AT2 1e-5).
+    /// @param precision   governs ONLY the matmul sub-steps; the jackknives + solve are native FP64.
+    /// @return QpfstatsSmooth with b, bglob AND recenter_shift populated (the recenter ON-DEVICE).
+    /// NON-PURE: the base throws (the established backend.hpp pattern).
+    [[nodiscard]] virtual QpfstatsSmooth qpfstats_blocks_smooth(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) {
+        (void)Q; (void)V; (void)P; (void)M; (void)block_id; (void)n_block; (void)quadruples;
+        (void)x; (void)npopcomb; (void)npairs; (void)block_sizes; (void)ridge; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::qpfstats_blocks_smooth: not implemented by this backend");
     }
 
     /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and

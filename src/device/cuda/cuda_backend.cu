@@ -83,6 +83,7 @@
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/pchisq.hpp"         // core::internal::pchisq_upper (M(fit-2) rank-test p; the ONE shared special fn)
+#include "core/internal/qpfstats_jackknife.hpp"  // core::f2blocks_pair_est (the partial-NaN fallback recenter; cold path)
 #include "core/internal/small_linalg.hpp"   // core::jacobi_svd (M(fit-2) rank_Q diagnostic; bit-identical to the CPU oracle)
 #include "core/qpadm/qpadm_bounds.hpp"       // core::qpadm::model_fits_small_path — the SINGLE-SOURCE small-path envelope (kQpMax*)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
@@ -96,6 +97,7 @@
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
 #include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
 #include "device/cuda/qpfstats_kernel.cuh"  // launch_qpfstats_zero_nan_ymat / _add_ridge_diag (the smoother prep)
+#include "device/cuda/qpfstats_jackknife_kernel.cuh"  // launch_qpfstats_numer_jackknife / _recenter_shift (the fused PERF path)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
 #include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
@@ -1693,6 +1695,249 @@ public:
                               out.b.begin() + static_cast<std::ptrdiff_t>(np * static_cast<std::size_t>(col)));
                 else
                     out.bglob = bcol;
+            }
+        }
+
+        out.status = Status::Ok;
+        return out;
+    }
+
+    /// qpfstats FUSED reduce→jackknife→smooth→recenter ON THE GPU (the PERF path; backend.hpp
+    /// qpfstats_blocks_smooth). ONE device residency: the genotype-f4 numerator reduce
+    /// (launch_dstat_block_reduce → dNum/dCnt RESIDENT), the per-comb block-JACKKNIFE
+    /// (launch_qpfstats_numer_jackknife → dNumer/dYmat/dY, native FP64, the §12 carve-out —
+    /// formerly the host ~305k×711 long-double loop, the GPU-idle "0" half of the 100/0
+    /// alternation), the shared-factor batched smoothing SOLVE (the SAME syrk+potrf+gemm+Dtrsm
+    /// pair as qpfstats_smooth, reading dYmat/dY straight from VRAM — NO ymat/y H2D re-upload),
+    /// and the per-pair RECENTER jackknife (launch_qpfstats_recenter_shift over the resident
+    /// solved dRhs → dShift). The ~1.7GB-each numsum/cnt D2H is ELIMINATED; only the small
+    /// b[npairs×n_block] / bglob[npairs] / recenter_shift[npairs] cross back. matmul sub-steps
+    /// run `precision`; the jackknives + Cholesky/solve are native FP64.
+    [[nodiscard]] QpfstatsSmooth qpfstats_blocks_smooth(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) override {
+        guard_device();
+        QpfstatsSmooth out;
+        out.npairs = npairs;
+        out.n_block = n_block;
+        const int N = static_cast<int>(quadruples.size() / 4);
+        if (npopcomb <= 0 || npairs <= 0 || n_block <= 0 || N <= 0 || P <= 0 || M <= 0) {
+            out.status = Status::Ok;
+            return out;
+        }
+
+        const std::size_t nc = static_cast<std::size_t>(npopcomb);
+        const std::size_t np = static_cast<std::size_t>(npairs);
+        const std::size_t nbb = static_cast<std::size_t>(n_block);
+        const std::size_t nb_out = nc * nbb;
+
+        // ---- Per-block contiguous SNP layout (the SINGLE-SOURCE inverse of assign_blocks; the
+        // SAME primitive dstat_block_reduce uses). begin/size as int (M fits int by B22). ----
+        const std::vector<core::BlockRange> ranges =
+            core::block_ranges(std::span<const int>(block_id, static_cast<std::size_t>(M)),
+                               M, n_block);
+        std::vector<int> begin(nbb), size(nbb);
+        for (int b = 0; b < n_block; ++b) {
+            begin[static_cast<std::size_t>(b)] = static_cast<int>(ranges[static_cast<std::size_t>(b)].begin);
+            size[static_cast<std::size_t>(b)]  = static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+        }
+
+        const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t nq = static_cast<std::size_t>(N) * 4u;
+
+        // ---- Upload Q/V + the quad table + block layout + the design x (col-major). --------
+        DeviceBuffer<double> dQ(pm), dV(pm);
+        DeviceBuffer<int> dQuad(nq), dBegin(nbb), dSize(nbb);
+        DeviceBuffer<double> dX(nc * np);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(), nbb * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(), nbb * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dX.data(), x.data(), nc * np * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // ---- 1. The genotype-f4 numerator reduce → dNum/dCnt RESIDENT (densum ignored). ----
+        DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
+        launch_dstat_block_reduce(dQ.data(), dV.data(), P, M, dQuad.data(), N,
+                                  dBegin.data(), dSize.data(), n_block,
+                                  dNum.data(), dDen.data(), dCnt.data(), stream_.get());
+
+        // ---- 2. numer + ymat (col-major) + the GLOBAL per-comb jackknife y, ON-DEVICE. -----
+        // The RHS source for the solve is [npopcomb × (n_block+1)]: columns 0..n_block-1 = ymat,
+        // column n_block = y. We write ymat into the first nc*nb of dRhsSrc and y into the last.
+        const int ncols = n_block + 1;
+        const std::size_t ncols_sz = static_cast<std::size_t>(ncols);
+        DeviceBuffer<double> dNumer(nb_out);
+        DeviceBuffer<double> dRhsSrc(nc * ncols_sz);
+        launch_qpfstats_numer_jackknife(dNum.data(), dCnt.data(), npopcomb, n_block,
+                                        dNumer.data(), dRhsSrc.data(),
+                                        dRhsSrc.data() + nc * nbb, stream_.get());
+
+        // ---- The shared-factor batched smoothing solve, reading dRhsSrc straight from VRAM
+        // (IDENTICAL math to qpfstats_smooth; NO ymat/y H2D re-upload). Zero the NaN entries +
+        // count NaN comb-rows per column (the AT2 ymat_chunk[nan]=0).
+        DeviceBuffer<int> dNanPerCol(ncols_sz);
+        launch_qpfstats_zero_nan_ymat(dRhsSrc.data(), npopcomb, ncols, dNanPerCol.data(),
+                                      stream_.get());
+        std::vector<int> nan_per_col(ncols_sz, 0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(nan_per_col.data(), dNanPerCol.data(),
+                                          ncols_sz * sizeof(int), cudaMemcpyDeviceToHost,
+                                          stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // A_shared = x'x + ridge·I  (cublasDsyrk, EmulatedFp64 via the f2 policy).
+        DeviceBuffer<double> dA(np * np);
+        {
+            const double alpha = 1.0, beta = 0.0;
+            const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                     npairs, npopcomb, &alpha, dX.data(), npopcomb,
+                                     &beta, dA.data(), npairs));
+        }
+        launch_symmetrize_lower_to_full(dA.data(), npairs, stream_.get());
+        launch_qpfstats_add_ridge_diag(dA.data(), npairs, ridge, stream_.get());
+
+        // RHS = x' · RhsSrc  (cublasDgemm, [npairs × ncols], EmulatedFp64).
+        DeviceBuffer<double> dRhs(np * ncols_sz);
+        {
+            const double alpha = 1.0, beta = 0.0;
+            const MathModeScope gemm_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_T, CUBLAS_OP_N,
+                                     npairs, ncols, npopcomb, &alpha,
+                                     dX.data(), npopcomb, dRhsSrc.data(), npopcomb,
+                                     &beta, dRhs.data(), npairs));
+        }
+
+        // L = chol(A_shared) (cusolverDnDpotrf LOWER; native FP64 carve-out).
+        const CusolverMathModeScope solve_scope =
+            engage_solver_precision(solver_.get(), solve_precision_, &emulation_honorable);
+        DeviceBuffer<int> dInfo(1);
+        int lwork = 0;
+        CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
+                                                   npairs, dA.data(), npairs, &lwork));
+        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+        CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
+                                        dA.data(), npairs, dWork.data(), lwork, dInfo.data()));
+        int info = 0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        if (info != 0) { out.status = Status::NonSpdCovariance; return out; }
+
+        // The multi-column solve A·B = RHS via a cublasDtrsm PAIR over ALL ncols at once.
+        {
+            const double one = 1.0;
+            CUBLAS_CHECK(cublasDtrsm(blas_.get(), CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                                     CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, npairs, ncols, &one,
+                                     dA.data(), npairs, dRhs.data(), npairs));
+            CUBLAS_CHECK(cublasDtrsm(blas_.get(), CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER,
+                                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, npairs, ncols, &one,
+                                     dA.data(), npairs, dRhs.data(), npairs));
+        }
+        // dRhs now holds the solution B: columns 0..n_block-1 = b, column n_block = bglob.
+        // It STAYS RESIDENT so the recenter kernel reads b/bglob straight from VRAM.
+
+        // ---- The per-pair RECENTER jackknife ON-DEVICE → dShift (reads the resident b/bglob).
+        DeviceBuffer<int> dBlockSizes(nbb);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
+                                          nbb * sizeof(int), cudaMemcpyHostToDevice,
+                                          stream_.get()));
+        DeviceBuffer<double> dShift(np);
+        launch_qpfstats_recenter_shift(dRhs.data(), dRhs.data() + np * nbb, dBlockSizes.data(),
+                                       npairs, n_block, dShift.data(), stream_.get());
+
+        // ---- D2H ONLY the small outputs: b, bglob, recenter_shift. --------------------------
+        std::vector<double> sol(np * ncols_sz, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(sol.data(), dRhs.data(), np * ncols_sz * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        out.recenter_shift.assign(np, 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.recenter_shift.data(), dShift.data(),
+                                          np * sizeof(double), cudaMemcpyDeviceToHost,
+                                          stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.b.assign(np * nbb, 0.0);
+        std::copy(sol.begin(), sol.begin() + static_cast<std::ptrdiff_t>(np * nbb), out.b.begin());
+        out.bglob.assign(np, 0.0);
+        std::copy(sol.begin() + static_cast<std::ptrdiff_t>(np * nbb), sol.end(),
+                  out.bglob.begin());
+
+        // ---- PARTIAL-NaN downdate fallback (0 < k_col < npopcomb): the AT2 generic-solve
+        // branch. ABSENT on the real golden (block 536 is all-NaN ⇒ the zero-RHS shared solve
+        // is exact) ⇒ ZERO iterations in production. When present, re-solve ONLY those columns
+        // host-side with A_b = A_shared - x[nan]'x[nan]; the recenter is then recomputed on the
+        // corrected b. Bit-faithful to qpfstats_smooth's fallback. We D2H ymat/y ONLY here
+        // (the cold path) to feed the host recompute — the hot path never pays this.
+        bool any_partial = false;
+        for (int col = 0; col < ncols; ++col)
+            if (nan_per_col[static_cast<std::size_t>(col)] > 0 &&
+                nan_per_col[static_cast<std::size_t>(col)] < npopcomb) { any_partial = true; break; }
+        if (any_partial) {
+            std::vector<double> ymat(nb_out, 0.0), yv(nc, 0.0);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(ymat.data(), dRhsSrc.data(),
+                                              nb_out * sizeof(double), cudaMemcpyDeviceToHost,
+                                              stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(yv.data(), dRhsSrc.data() + nc * nbb,
+                                              nc * sizeof(double), cudaMemcpyDeviceToHost,
+                                              stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            const auto xat = [&](int c, int p) -> double {
+                return x[static_cast<std::size_t>(c) + nc * static_cast<std::size_t>(p)];
+            };
+            std::vector<double> Abase(np * np, 0.0);
+            for (int i = 0; i < npairs; ++i)
+                for (int j = 0; j < npairs; ++j) {
+                    long double s = 0.0L;
+                    for (int c = 0; c < npopcomb; ++c)
+                        s += static_cast<long double>(xat(c, i)) * static_cast<long double>(xat(c, j));
+                    double v = static_cast<double>(s);
+                    if (i == j) v += ridge;
+                    Abase[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] = v;
+                }
+            std::vector<double> rhs(np), bcol, Adown;
+            for (int col = 0; col < ncols; ++col) {
+                const int kc = nan_per_col[static_cast<std::size_t>(col)];
+                if (kc <= 0 || kc >= npopcomb) continue;
+                std::fill(rhs.begin(), rhs.end(), 0.0);
+                Adown = Abase;
+                for (int c = 0; c < npopcomb; ++c) {
+                    const double sv = (col < n_block)
+                        ? ymat[nc * static_cast<std::size_t>(col) + static_cast<std::size_t>(c)]
+                        : yv[static_cast<std::size_t>(c)];
+                    if (!std::isfinite(sv)) {
+                        for (int i = 0; i < npairs; ++i)
+                            for (int j = 0; j < npairs; ++j)
+                                Adown[static_cast<std::size_t>(i) + np * static_cast<std::size_t>(j)] -=
+                                    xat(c, i) * xat(c, j);
+                        continue;
+                    }
+                    for (int p = 0; p < npairs; ++p) rhs[static_cast<std::size_t>(p)] += xat(c, p) * sv;
+                }
+                const core::LinAlgStatus st = core::solve(Adown, npairs, rhs, bcol);
+                if (!st.ok) { out.status = Status::NonSpdCovariance; return out; }
+                if (col < n_block)
+                    std::copy(bcol.begin(), bcol.end(),
+                              out.b.begin() + static_cast<std::ptrdiff_t>(np * static_cast<std::size_t>(col)));
+                else
+                    out.bglob = bcol;
+            }
+            // Recompute the recenter on the corrected b (host; the same f2blocks_pair_est ref).
+            std::vector<int> bl(block_sizes.begin(), block_sizes.end());
+            std::vector<double> series(nbb, 0.0);
+            for (int p = 0; p < npairs; ++p) {
+                for (int b = 0; b < n_block; ++b)
+                    series[static_cast<std::size_t>(b)] =
+                        out.b[static_cast<std::size_t>(p) + np * static_cast<std::size_t>(b)];
+                out.recenter_shift[static_cast<std::size_t>(p)] =
+                    out.bglob[static_cast<std::size_t>(p)] - core::f2blocks_pair_est(series, bl);
             }
         }
 

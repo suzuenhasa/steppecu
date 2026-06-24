@@ -11,27 +11,32 @@
 //     over BOTH the comb axis AND the n_block axis ON THE GPU. f4mode=TRUE ⇒ numerator-only
 //     (the D denominator densum is computed by the kernel but IGNORED here).
 //
-// THE SMOOTHING REGRESSION (ComputeBackend::qpfstats_smooth, the on-device shared-factor
-// batched least-squares; AT2 qpfstats_regression REFORMULATED — NO host per-block loop):
+// THE FUSED reduce→jackknife→smooth→recenter (ComputeBackend::qpfstats_blocks_smooth, ONE
+// device residency; AT2 qpfstats_regression REFORMULATED — NO host per-block / per-comb loop):
 //   numer[comb,block] = numsum/cnt (the AT2 rowMeans, NaN where cnt==0).
 //   x[comb,pair] = construct_fstat_matrix (±1/2 f4-identity coefficients; *2 pure-f2 row).
 //   ymat = numer (col-major [npopcomb × nblock]); y = matrix_jackknife_est(numer,cnt).
 //   A_shared = x'x + ridge·I (ridge=1e-5); b[:,blk] = solve(A_blk, x'·ymat[:,blk]);
 //   bglob = solve(A_y, x'·y). The NaN-comb-row downdate + all-NaN→0 handled in the seam.
+//   recenter_shift[pair] = bglob[pair] - f2blocks_pair_est(b[pair,:], block_sizes).
+// The numer/ymat materialize, the per-comb jackknife (matrix_jackknife_est_col), AND the
+// per-pair recenter jackknife (f2blocks_pair_est) ALL run ON-DEVICE inside the seam — the
+// ~1.7GB-each numsum/cnt D2H and the ~305k×711 host long-double jackknife loop (the GPU-idle
+// "0" half of the 100/0 alternation) are ELIMINATED. Only b/bglob/recenter_shift cross back.
 //
 // THE OUTPUT (AT2 qpfstats scatter+recenter): scatter b → f2blocks[npop,npop,nblock]
-// (off-diagonal pairs, symmetric); recenter f2blocks2 = f2blocks - f2(f2blocks)$est + bglob
-// (the per-pair block-jackknife est of the smoothed tensor, block_lengths weights). The
-// diagonal stays 0. THIS is the smoothed F2BlockTensor the downstream tools consume.
+// (off-diagonal pairs, symmetric); recenter f2blocks2 = f2blocks + recenter_shift[pair] (the
+// per-pair block-jackknife est of the smoothed tensor, computed in the seam). Diagonal stays 0.
+// THIS is the smoothed F2BlockTensor the downstream tools consume.
 //
 // THE THREE PARITY PINS (inherited from qpDstat-B, proven on box5090): forced diploid (AT2
 // plain ref/an/2), assign_blocks == AT2 get_block_lengths, allsnps=TRUE per-(comb,block)
 // finiteness (no maxmiss/MAF/drop-mono; autosomes_only ON).
 //
-// CUDA-FREE: the per-SNP numerator reduction + the smoothing solve route through the
-// ComputeBackend seam (CpuBackend oracle / CudaBackend kernels). All host work is O(small):
-// the popcomb/design build (data-independent), the recenter jackknife (per-pair over blocks),
-// the scatter. NO host per-SNP / per-jackknife-block solve loop (the CPU-bound trap).
+// CUDA-FREE: the WHOLE numerator reduce + jackknife + smoothing solve + recenter route through
+// the ONE fused ComputeBackend seam (CpuBackend oracle / CudaBackend kernels). All host work is
+// O(small): the popcomb/design build (data-independent) and the tensor scatter. NO host
+// per-SNP / per-jackknife-block / per-comb-jackknife loop (the CPU-bound trap is GONE).
 
 #include "steppe/qpfstats.hpp"
 
@@ -188,102 +193,10 @@ void build_popcomb_and_design(int npop, std::vector<PopComb>& combs,
     for (double& v : x) v *= 0.5;
 }
 
-/// matrix_jackknife_est_full per popcomb column (AT2 R/io.R; the GLOBAL per-comb estimate
-/// `y` used for bglob). For column-c per-block means `numer[c,b]` (= numsum/cnt, NaN where
-/// invalid) + counts `cnt[c,b]`:
-///   valid = is.finite(numer); rel_bl = cnt/Σcnt;
-///   tot = Σ(numer·cnt over valid)/Σ(cnt over valid);
-///   loo = (tot - numer·rel_bl)/(1-rel_bl), masked to NA where !valid OR !finite;
-///   tot2 = Σ(loo·(1-rel_bl))/Σ(1-rel_bl) over finite loo;
-///   weighted_loo_mean = Σ(loo·cnt)/Σ(cnt) over finite loo;
-///   y = n_finite·tot2 - Σloo + weighted_loo_mean.
-/// `numer`/`cnt` are ROW-MAJOR [npopcomb × n_block] (numer[c*nb+b], the dstat output shape).
-[[nodiscard]] double matrix_jackknife_est_col(const double* numer, const double* cnt,
-                                              int c, int n_block) {
-    const std::size_t base = static_cast<std::size_t>(c) * static_cast<std::size_t>(n_block);
-    long double sum_n_all = 0.0L;  // Σ cnt (all blocks)
-    for (int b = 0; b < n_block; ++b) sum_n_all += static_cast<long double>(cnt[base + b]);
-    if (sum_n_all <= 0.0L) return std::nan("");
-
-    // tot = Σ(numer·cnt over valid) / Σ(cnt over valid).
-    long double tot_num = 0.0L, tot_w = 0.0L;
-    for (int b = 0; b < n_block; ++b) {
-        const double nu = numer[base + b];
-        const double cn = cnt[base + b];
-        if (!std::isfinite(nu) || cn <= 0.0) continue;
-        tot_num += static_cast<long double>(nu) * static_cast<long double>(cn);
-        tot_w += static_cast<long double>(cn);
-    }
-    if (tot_w <= 0.0L) return std::nan("");
-    const long double tot = tot_num / tot_w;
-
-    long double sum_loo = 0.0L, sum_omrb = 0.0L, sum_loo_omrb = 0.0L;
-    long double sum_loo_cnt = 0.0L, sum_cnt_finite = 0.0L;
-    int n_finite = 0;
-    for (int b = 0; b < n_block; ++b) {
-        const double nu = numer[base + b];
-        const double cn = cnt[base + b];
-        if (!std::isfinite(nu) || cn <= 0.0) continue;
-        const long double rel = static_cast<long double>(cn) / sum_n_all;  // rel_bl
-        if (rel >= 1.0L) continue;  // 1-rel==0 ⇒ loo not finite
-        const long double loo = (tot - static_cast<long double>(nu) * rel) / (1.0L - rel);
-        if (!std::isfinite(static_cast<double>(loo))) continue;
-        const long double omrb = 1.0L - rel;
-        sum_loo += loo;
-        sum_omrb += omrb;
-        sum_loo_omrb += loo * omrb;
-        sum_loo_cnt += loo * static_cast<long double>(cn);
-        sum_cnt_finite += static_cast<long double>(cn);
-        ++n_finite;
-    }
-    if (n_finite == 0 || sum_omrb <= 0.0L || sum_cnt_finite <= 0.0L) return std::nan("");
-    const long double tot2 = sum_loo_omrb / sum_omrb;
-    const long double weighted_loo_mean = sum_loo_cnt / sum_cnt_finite;
-    return static_cast<double>(static_cast<long double>(n_finite) * tot2 - sum_loo +
-                               weighted_loo_mean);
-}
-
-/// f2(f2blocks)$est for one pair series (the recentering target). AT2 f2(array): est_to_loo
-/// (block_lengths weights) then jack_vec_stats2 = weighted.mean(loo, 1-1/h), h=n/bl. For the
-/// per-block estimate vector `arr[b]` (length n_block) + block_lengths `bl[b]`:
-///   tot = weighted.mean(arr, bl); rel_bl = bl/Σbl; loo = (tot - arr·rel_bl)/(1-rel_bl);
-///   h = Σbl/bl; est = weighted.mean(loo, 1 - 1/h).
-/// NaN-safe (na.rm=TRUE: skip non-finite blocks throughout). All-zero/empty → 0.
-[[nodiscard]] double f2blocks_pair_est(const std::vector<double>& arr,
-                                       const std::vector<int>& bl) {
-    const int nb = static_cast<int>(arr.size());
-    long double sum_bl = 0.0L;
-    for (int b = 0; b < nb; ++b)
-        if (std::isfinite(arr[static_cast<std::size_t>(b)]))
-            sum_bl += static_cast<long double>(bl[static_cast<std::size_t>(b)]);
-    if (sum_bl <= 0.0L) return 0.0;
-
-    long double tot_num = 0.0L;
-    for (int b = 0; b < nb; ++b) {
-        const double a = arr[static_cast<std::size_t>(b)];
-        if (!std::isfinite(a)) continue;
-        tot_num += static_cast<long double>(a) *
-                   static_cast<long double>(bl[static_cast<std::size_t>(b)]);
-    }
-    const long double tot = tot_num / sum_bl;  // weighted.mean(arr, bl)
-
-    // est = weighted.mean(loo, 1 - 1/h), h = Σbl/bl, loo = (tot - arr·rel_bl)/(1-rel_bl).
-    long double num = 0.0L, den = 0.0L;
-    for (int b = 0; b < nb; ++b) {
-        const double a = arr[static_cast<std::size_t>(b)];
-        if (!std::isfinite(a)) continue;
-        const long double blb = static_cast<long double>(bl[static_cast<std::size_t>(b)]);
-        const long double rel = blb / sum_bl;       // rel_bl
-        if (rel >= 1.0L) continue;
-        const long double loo = (tot - static_cast<long double>(a) * rel) / (1.0L - rel);
-        const long double h = sum_bl / blb;          // h
-        const long double w = 1.0L - 1.0L / h;       // 1 - 1/h
-        num += loo * w;
-        den += w;
-    }
-    if (den <= 0.0L) return 0.0;
-    return static_cast<double>(num / den);
-}
+// The per-comb matrix_jackknife_est_col + the per-pair f2blocks_pair_est long-double REFERENCE
+// jackknives moved to core/internal/qpfstats_jackknife.hpp (SINGLE-SOURCE, shared by the
+// CpuBackend fused oracle). On the production path they run ON-DEVICE inside the fused seam
+// (ComputeBackend::qpfstats_blocks_smooth); the host no longer loops over combs/pairs.
 
 }  // namespace
 
@@ -397,49 +310,26 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
         flat.push_back(pc.p1); flat.push_back(pc.p2); flat.push_back(pc.p3); flat.push_back(pc.p4);
     }
 
-    // ---- 4. The genotype-f4 NUMERATOR ENGINE (REUSE dstat_block_reduce) ON THE GPU ----
-    // Per (comb, block): numsum = Σ(a-b)(c-d), cnt = #SNPs valid in all 4 pops (allsnps).
-    // densum (the D denominator) is emitted by the kernel but IGNORED (f4mode=TRUE). Output
-    // ROW-MAJOR [npopcomb × n_block].
-    const std::size_t nb_out =
-        static_cast<std::size_t>(npopcomb) * static_cast<std::size_t>(n_block);
-    std::vector<double> numsum(nb_out, 0.0), densum(nb_out, 0.0), cnt(nb_out, 0.0);
-    be.dstat_block_reduce(Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(), n_block,
-                          std::span<const int>(flat), numsum.data(), densum.data(), cnt.data());
-
-    // ---- 5. numer = numsum/cnt (the AT2 rowMeans; NaN where cnt==0); ymat = t(numer) ---
-    // ymat is COLUMN-MAJOR [npopcomb × n_block] (ymat[c + npopcomb*b]); numer/cnt are
-    // ROW-MAJOR [npopcomb × n_block]. y = matrix_jackknife_est over each comb column.
-    std::vector<double> ymat(nb_out, 0.0);
-    std::vector<double> y(static_cast<std::size_t>(npopcomb), 0.0);
-    std::vector<double> numer_rm(nb_out, 0.0);  // row-major numer for matrix_jackknife_est
-    for (int c = 0; c < npopcomb; ++c) {
-        const std::size_t base =
-            static_cast<std::size_t>(c) * static_cast<std::size_t>(n_block);
-        for (int b = 0; b < n_block; ++b) {
-            const double cn = cnt[base + b];
-            const double mean = (cn > 0.0) ? (numsum[base + b] / cn) : std::nan("");
-            numer_rm[base + b] = mean;
-            ymat[static_cast<std::size_t>(c) +
-                 static_cast<std::size_t>(npopcomb) * static_cast<std::size_t>(b)] = mean;
-        }
-        y[static_cast<std::size_t>(c)] =
-            matrix_jackknife_est_col(numer_rm.data(), cnt.data(), c, n_block);
-    }
-
-    // ---- 6. THE SMOOTHING SOLVE (ON THE GPU; shared-factor batched; NO host block loop) -
-    // A_shared = x'x + ridge·I; b[:,blk] = solve(A_blk, x'·ymat[:,blk]); bglob = solve(A_y,
-    // x'·y). The CUDA backend: ONE syrk + ONE potrf + ONE gemm + a Dtrsm pair (no-NaN
-    // blocks) + the CUB-grouped NaN downdate. The CpuBackend is the native small_linalg
-    // oracle. The matmul sub-steps run `precision` (EmulatedFp64{40} default); the
-    // Cholesky/solve native FP64 (the §12 carve-out).
-    const QpfstatsSmooth sm = be.qpfstats_smooth(
-        std::span<const double>(x), std::span<const double>(ymat), std::span<const double>(y),
-        npopcomb, npairs, n_block, kRidge, precision);
+    // ---- 4-8. FUSED reduce→jackknife→smooth→recenter ON THE GPU (ONE device residency) -
+    // The genotype-f4 NUMERATOR reduce (dstat_block_reduce), the per-comb block-JACKKNIFE
+    // (matrix_jackknife_est_col → y, and numer=numsum/cnt → ymat), the SMOOTHING SOLVE
+    // (A_shared = x'x + ridge·I; b[:,blk]=solve(A_blk, x'·ymat[:,blk]); bglob=solve(A_y, x'·y)),
+    // AND the per-pair RECENTER jackknife (f2blocks_pair_est → recenter_shift) — ALL on-device,
+    // numsum/cnt/ymat/y/b RESIDENT in VRAM. The host no longer materializes numer/ymat, runs
+    // the ~305k×711 long-double jackknife, or loops the recenter (the 100/0 GPU-idle half +
+    // the ~1.7GB-each D2H are GONE). The matmul sub-steps run `precision` (EmulatedFp64{40}
+    // default); the jackknives + the Cholesky/solve are native FP64 (the §12 carve-out). The
+    // recenter weights are block_lengths (the AT2 f2() block_sizes). Only b/bglob/recenter_shift
+    // cross back. The CpuBackend composes its existing oracles (unchanged reference math).
+    const QpfstatsSmooth sm = be.qpfstats_blocks_smooth(
+        Qk.data(), Vk.data(), P, M_kept, partition.block_id.data(), n_block,
+        std::span<const int>(flat), std::span<const double>(x), npopcomb, npairs,
+        std::span<const int>(block_lengths), kRidge, precision);
     if (sm.status != Status::Ok) { res.status = sm.status; return res; }
 
-    // ---- 7. Scatter b → f2blocks[npop,npop,n_block] (off-diagonal pairs, symmetric) ----
-    // f2blocks[i + P·j + P·P·b] = b[pair(i,j), b] for i!=j (lower+upper); diagonal stays 0.
+    // ---- 7-8. Scatter b → f2blocks[npop,npop,n_block] (off-diagonal, symmetric) + the
+    // per-pair RECENTER shift (computed on-device in the seam). f2blocks2[i + P·j + P·P·b] =
+    // b[pair(i,j), b] + recenter_shift[pair] for i!=j (lower+upper); the diagonal stays 0.
     F2BlockTensor& T = res.f2;
     T.P = npop;
     T.n_block = n_block;
@@ -456,34 +346,12 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
             for (int j = i + 1; j < npop; ++j) {
                 const int p = pair_index(i, j, npop);
                 const double v = sm.b[static_cast<std::size_t>(p) +
-                                      np * static_cast<std::size_t>(b)];
+                                      np * static_cast<std::size_t>(b)] +
+                                 sm.recenter_shift[static_cast<std::size_t>(p)];
                 T.f2[boff + static_cast<std::size_t>(i) +
                      static_cast<std::size_t>(npop) * static_cast<std::size_t>(j)] = v;
                 T.f2[boff + static_cast<std::size_t>(j) +
                      static_cast<std::size_t>(npop) * static_cast<std::size_t>(i)] = v;
-            }
-        }
-    }
-
-    // ---- 8. RECENTER: f2blocks2 = f2blocks - f2(f2blocks)$est + bglob (AT2 qpfstats) ---
-    // Per pair (i,j): the constant shift c(i,j) = bglob[pair] - f2blocks_pair_est[pair] is
-    // added to EVERY block's (i,j). The recenter target uses block_lengths weights (the AT2
-    // f2() jackknife est over the smoothed tensor). The diagonal stays 0.
-    std::vector<double> series(static_cast<std::size_t>(n_block), 0.0);
-    for (int i = 0; i < npop; ++i) {
-        for (int j = i + 1; j < npop; ++j) {
-            const int p = pair_index(i, j, npop);
-            for (int b = 0; b < n_block; ++b)
-                series[static_cast<std::size_t>(b)] =
-                    sm.b[static_cast<std::size_t>(p) + np * static_cast<std::size_t>(b)];
-            const double est = f2blocks_pair_est(series, T.block_sizes);
-            const double shift = sm.bglob[static_cast<std::size_t>(p)] - est;
-            for (int b = 0; b < n_block; ++b) {
-                const std::size_t boff = slab * static_cast<std::size_t>(b);
-                T.f2[boff + static_cast<std::size_t>(i) +
-                     static_cast<std::size_t>(npop) * static_cast<std::size_t>(j)] += shift;
-                T.f2[boff + static_cast<std::size_t>(j) +
-                     static_cast<std::size_t>(npop) * static_cast<std::size_t>(i)] += shift;
             }
         }
     }

@@ -59,6 +59,7 @@
 #include "core/internal/decode_af.hpp"     // genotype_code, accumulate_genotype, finalize_af (shared)
 #include "core/internal/f2_estimator.hpp"  // het_correction, f2_term, finalize_f2 (shared primitive)
 #include "core/internal/pchisq.hpp"        // core::internal::pchisq_upper (M(fit-2) rank-test p-value)
+#include "core/internal/qpfstats_jackknife.hpp"  // core::matrix_jackknife_est_col / f2blocks_pair_est (shared)
 #include "core/internal/small_linalg.hpp"  // core::solve/inverse/jacobi_svd (the qpAdm reference solvers)
 #include "core/internal/views.hpp"         // steppe::core::MatView (Q/V/N contract)
 #include "core/qpadm/qpadm_bounds.hpp"     // core::qpadm::qpadm_dof — the single-source (nl-r)*(nr-r) dof
@@ -766,6 +767,75 @@ public:
                 if (!st.ok) { out.status = Status::NonSpdCovariance; return out; }
                 out.bglob = bcol;
             }
+        }
+
+        out.status = Status::Ok;
+        return out;
+    }
+
+    /// qpfstats FUSED reduce→jackknife→smooth→recenter REFERENCE ORACLE (backend.hpp
+    /// qpfstats_blocks_smooth). COMPOSES the existing oracles so the reference math is
+    /// UNCHANGED vs the pre-fusion host path: dstat_block_reduce → numer=numsum/cnt + the
+    /// per-comb long-double matrix_jackknife_est_col (→ y, ymat) → qpfstats_smooth (→ b,
+    /// bglob) → the per-pair long-double f2blocks_pair_est (→ recenter_shift). The jackknives
+    /// use the SHARED core/internal/qpfstats_jackknife.hpp primitives (the SAME long-double
+    /// reference the host driver used before the move; SINGLE-SOURCE). Native FP64 + long
+    /// double (ignores `precision`; the §12 carve-out is intrinsic to the jackknife/solve).
+    [[nodiscard]] QpfstatsSmooth qpfstats_blocks_smooth(
+        const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
+        std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
+        std::span<const int> block_sizes, double ridge, const Precision& precision) override {
+        QpfstatsSmooth out;
+        out.npairs = npairs;
+        out.n_block = n_block;
+        if (npopcomb <= 0 || npairs <= 0 || n_block <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t nc = static_cast<std::size_t>(npopcomb);
+        const std::size_t np = static_cast<std::size_t>(npairs);
+        const std::size_t nbb = static_cast<std::size_t>(n_block);
+        const std::size_t nb_out = nc * nbb;
+
+        // 1. The genotype-f4 numerator reduce (numsum/cnt; densum ignored, f4mode=TRUE).
+        std::vector<double> numsum(nb_out, 0.0), densum(nb_out, 0.0), cnt(nb_out, 0.0);
+        dstat_block_reduce(Q, V, P, M, block_id, n_block, quadruples,
+                           numsum.data(), densum.data(), cnt.data());
+
+        // 2. numer = numsum/cnt (row-major; NaN where cnt==0) + ymat (col-major) + the
+        //    per-comb GLOBAL jackknife est y (the long-double reference, SINGLE-SOURCE).
+        std::vector<double> numer_rm(nb_out, 0.0), ymat(nb_out, 0.0);
+        std::vector<double> y(nc, 0.0);
+        for (int c = 0; c < npopcomb; ++c) {
+            const std::size_t base = static_cast<std::size_t>(c) * nbb;
+            for (int b = 0; b < n_block; ++b) {
+                const double cn = cnt[base + static_cast<std::size_t>(b)];
+                const double mean = (cn > 0.0)
+                    ? (numsum[base + static_cast<std::size_t>(b)] / cn) : std::nan("");
+                numer_rm[base + static_cast<std::size_t>(b)] = mean;
+                ymat[static_cast<std::size_t>(c) + nc * static_cast<std::size_t>(b)] = mean;
+            }
+            y[static_cast<std::size_t>(c)] =
+                core::matrix_jackknife_est_col(numer_rm.data(), cnt.data(), c, n_block);
+        }
+
+        // 3. The smoothing solve (reuse the qpfstats_smooth oracle).
+        QpfstatsSmooth sm = qpfstats_smooth(x, std::span<const double>(ymat),
+                                            std::span<const double>(y), npopcomb, npairs,
+                                            n_block, ridge, precision);
+        if (sm.status != Status::Ok) { out.status = sm.status; return out; }
+        out.b = std::move(sm.b);
+        out.bglob = std::move(sm.bglob);
+
+        // 4. The per-pair RECENTER jackknife: shift[p] = bglob[p] - f2blocks_pair_est(b[p,:]).
+        out.recenter_shift.assign(np, 0.0);
+        std::vector<int> bl(block_sizes.begin(), block_sizes.end());
+        std::vector<double> series(nbb, 0.0);
+        for (int p = 0; p < npairs; ++p) {
+            for (int b = 0; b < n_block; ++b)
+                series[static_cast<std::size_t>(b)] =
+                    out.b[static_cast<std::size_t>(p) + np * static_cast<std::size_t>(b)];
+            const double est = core::f2blocks_pair_est(series, bl);
+            out.recenter_shift[static_cast<std::size_t>(p)] =
+                out.bglob[static_cast<std::size_t>(p)] - est;
         }
 
         out.status = Status::Ok;

@@ -480,6 +480,17 @@ target_link_libraries(test_qpfstats_smooth_parity
 set_target_properties(test_qpfstats_smooth_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME qpfstats_smooth_parity COMMAND test_qpfstats_smooth_parity)
 
+# --- qpfstats FUSED reduce→jackknife→smooth→recenter parity (the PERF-path gate) ----
+# Directly diffs the ON-DEVICE block-jackknife kernels (qpfstats_jackknife_kernel.cu; the
+# per-comb y/ymat + the per-pair recenter, native FP64 §12 carve-out) against the long-double
+# CpuBackend oracle on a synthetic genotype field, at the golden tier (rtol 1e-6). SKIPs/fails
+# fast with no GPU. The real-AADR end-to-end statistic is gated by cli_qpfstats.
+add_executable(test_qpfstats_fused_parity reference/test_qpfstats_fused_parity.cu)
+target_link_libraries(test_qpfstats_fused_parity
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_qpfstats_fused_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME qpfstats_fused_parity COMMAND test_qpfstats_fused_parity)
+
 # --- DATES cuFFT LD-engine parity test (the within-codebase FFT-engine gate) -------
 # CUDA TU: drives BOTH production backends and asserts the CudaBackend cuFFT autocorrelation
 # path (ComputeBackend::dates_curve) matches the CpuBackend FFT-FREE direct-autocorrelation
