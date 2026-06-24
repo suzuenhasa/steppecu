@@ -28,8 +28,18 @@ Verify state: `cd /home/suzunik/steppe && git branch --show-current && git log -
 > GONE from the production path (only the CpuBackend oracle keeps them). **Keep-set BIT-EXACT to host
 > on REAL v66 AADR** (P=50, M=100k, 6 configs incl. the FP-fragile pooled-MAF boundary;
 > `test_extract_f2_regimeB_parity` test #49), `cli_extract_qpadm` n_snp_kept = 351539 EXACT, all
-> goldens held (STEPPE_THOROUGH 62/62; CpuBackend==CudaBackend). **STILL OPEN:** Stage 3 = dates
-> (gather-2-rows + target bit-repack). See `docs/research/host-compute-audit.md` C1/C2/M3/M4.
+> goldens held (STEPPE_THOROUGH 62/62; CpuBackend==CudaBackend). See `docs/research/host-compute-audit.md`
+> C1/C2/M3/M4.
+>
+> **HOST-COMPUTE AUDIT MEDIUM TAIL CLOSED (`f9cb042`, 2026-06-24).** M5 (DATES target repack →
+> on-device gather `launch_dates_repack_target`, bit-exact) + M6 (DATES exp-fit → batched on-device
+> `launch_dates_fit_curves`, native-FP64 carve-out) LANDED — the dates host repack/fit hot loops no
+> longer run in production. **M7 (single-model qpAdm SE) DEFERRED** — bit-identity-gated: the existing
+> FP64-double `qpadm_se_from_wmat_kernel` cannot reproduce the host long-double `sample_cov_diag`
+> bit-identically for the NRBIG `rtol=atol=0.0` anchor (cancellation regime), and no-new-kernel +
+> no-golden-shift + no-revert leave no on-device path. GOLDENS HELD: DATES date 9.733545 vs 9.742;
+> qpadm 9-pop se |d|=1.748e-05; NRBIG GPU se/z bit-identical |d|=0.000e+00; full ctest 62/62.
+> **Remaining host-audit work: only L1-L4 (bounded per-model/per-run tidy-ups).**
 >
 > Prior: **`9ad33d9` Stage 1 (regime-A: qpfstats + dstat)** — `decode_af_compact_autosome` resident
 > Q/V/N + the INTEGER-EXACT autosome keep-mask + the scan-gather lockstep compaction; nsys proof on
