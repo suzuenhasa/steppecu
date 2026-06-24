@@ -1378,13 +1378,16 @@ if(STEPPE_BUILD_CLI)
 
   # --- `steppe qpdstat --prefix` qpDstat Part-B golden gate (genotype-path NORMALIZED-D) --
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpdstat --prefix
-  # <STEPPE_AADR_ROOT>/converted_pa/v66_HO_pa` over ALL 60 quadruples of the genotype-path
-  # golden (csv/golden_fit0_dstat_geno.csv) and diffs the est/se/z table row-for-row at rtol
+  # <STEPPE_AADR_ROOT>/raw/v66.p1_HO.aadr.patch.PUB` (the RAW TGENO prefix steppe reads —
+  # --prefix is TGENO-only — the lossless transcode of the convertf-PA v66_HO_pa AT2 made the
+  # golden from) over ALL 60 quadruples of the genotype-path golden
+  # (csv/golden_fit0_dstat_geno.csv) and diffs the est/se/z table row-for-row at rtol
   # 1e-6 — RUNNING ON THE GPU through the per-SNP D kernel + num/den block-jackknife (the S2
   # divergence; NEVER the f2 cache). The est is the NORMALIZED D (~±0.06), distinct from the
   # f2-path f4 (~10x smaller). AT2 reads only the needed individuals via indvec (steppe reads
-  # only the 9-pop union), so no physical subset is needed. SKIPs cleanly (exit 0) when no
-  # CUDA device is visible OR the PA prefix / golden is absent. Also exercises the
+  # only the 9-pop union), so no physical subset is needed. The test takes only <steppe-binary>
+  # <aadr-root> <golden-dir> and derives the raw TGENO prefix internally. SKIPs cleanly (exit 0)
+  # when no CUDA device is visible OR the TGENO prefix / golden is absent. Also exercises the
   # single-quadruple --pops convenience. NO SYNTHETIC DATA (memory real-data-only).
   add_executable(test_cli_dstat_geno cli/test_cli_dstat_geno.cpp)
   target_link_libraries(test_cli_dstat_geno PRIVATE steppe::warnings)

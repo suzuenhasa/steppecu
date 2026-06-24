@@ -527,6 +527,31 @@ nb::dict run_qpgraph_search_py(F2Handle& h, const std::vector<std::string>& pops
     nb::list be;
     for (const auto& e : r.best.edges) be.append(nb::make_tuple(e.from, e.to));
     d["best_edges"] = be;
+
+    // The FULL per-candidate scored vector (additive marshalling of the already-computed
+    // QpGraphSearchResult::candidates — the same per-topology data the global-best argmin
+    // reduces over, in deterministic enumeration order; trees then admix1). Parallel arrays
+    // {nadmix, hash, score, restart_spread} so the facade can look a candidate up by its
+    // canonical graph_hash + the score the argmin chose. NO compute change (the score vector
+    // is already in the result; this only exposes it).
+    std::vector<int> cand_nadmix;
+    std::vector<std::uint64_t> cand_hash;
+    std::vector<double> cand_score;
+    std::vector<double> cand_spread;
+    cand_nadmix.reserve(r.candidates.size());
+    cand_hash.reserve(r.candidates.size());
+    cand_score.reserve(r.candidates.size());
+    cand_spread.reserve(r.candidates.size());
+    for (const auto& c : r.candidates) {
+        cand_nadmix.push_back(c.nadmix);
+        cand_hash.push_back(static_cast<std::uint64_t>(c.hash));
+        cand_score.push_back(c.score);
+        cand_spread.push_back(c.restart_spread);
+    }
+    d["cand_nadmix"] = cand_nadmix;
+    d["cand_hash"] = cand_hash;
+    d["cand_score"] = cand_score;
+    d["cand_restart_spread"] = cand_spread;
     return d;
 }
 

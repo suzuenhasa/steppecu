@@ -33,6 +33,8 @@ __all__ = [
     "qpwave",
     "qpgraph",
     "QpGraphResult",
+    "qpgraph_search",
+    "QpGraphSearchResult",
     "f4",
     "f3",
     "f4ratio",
@@ -600,6 +602,150 @@ def qpgraph(
             edge_pairs.append((str(e[0]), str(e[1])))
     d = _core.run_qpgraph(f2._h, edge_pairs, numstart, fudge, diag_f3, constrained)
     return QpGraphResult(d)
+
+
+class QpGraphSearchResult:
+    """The qpGraph TOPOLOGY-SEARCH result (oracle C: exhaustive bounded enumeration). The
+    search scores EVERY rooted topology on the bounded leaf set (nadmix in {0..max_nadmix})
+    in ONE heterogeneous-fleet GPU launch and returns the deterministic GLOBAL-BEST argmin.
+
+    ``.best_score`` is the global-best (min over all candidates) GLS fit score; ``.best_edges``
+    the argmin topology (an admixtools edge list); ``.best_hash`` its canonical graph_hash (the
+    isomorphism key). ``.n_candidates`` is the exhaustive count scored (== admixtools
+    generate_all_graphs). ``.candidates`` is the FULL per-candidate scored vector (one row per
+    enumerated topology, in deterministic enumeration order — the same data the argmin reduces
+    over), as a tidy DataFrame when pandas is available."""
+
+    def __init__(self, d: dict):
+        self._d = d
+
+    @property
+    def n_trees(self) -> int:
+        return int(self._d["n_trees"])
+
+    @property
+    def n_admix1(self) -> int:
+        return int(self._d["n_admix1"])
+
+    @property
+    def n_candidates(self) -> int:
+        return int(self._d["n_candidates"])
+
+    @property
+    def best_score(self) -> float:
+        return float(self._d["best_score"])
+
+    @property
+    def second_best_score(self) -> float:
+        return float(self._d["second_best_score"])
+
+    @property
+    def best_nadmix(self) -> int:
+        return int(self._d["best_nadmix"])
+
+    @property
+    def best_hash(self) -> int:
+        return int(self._d["best_hash"])
+
+    @property
+    def best_edges(self) -> list[tuple[str, str]]:
+        return [(str(p), str(c)) for p, c in self._d["best_edges"]]
+
+    @property
+    def heuristic_recovered(self) -> bool:
+        return bool(self._d["heuristic_recovered"])
+
+    @property
+    def fit_all_wall_ms(self) -> float:
+        return float(self._d["fit_all_wall_ms"])
+
+    @property
+    def topologies_per_s(self) -> float:
+        return float(self._d["topologies_per_s"])
+
+    @property
+    def argmin(self) -> int:
+        """The index of the global-best candidate within ``.candidates`` (the argmin row).
+        ``candidates[argmin]`` is the global-best score/hash the search returned; -1 if the
+        per-candidate vector was not populated (no candidate scored)."""
+        scores = self._d.get("cand_score") or []
+        if not scores:
+            return -1
+        best = scores[0]
+        idx = 0
+        for i, s in enumerate(scores):
+            if s < best:
+                best = s
+                idx = i
+        return idx
+
+    @property
+    def candidates(self):  # -> DataFrame [nadmix, hash, score, restart_spread]
+        """The FULL per-candidate scored vector (every successfully-fit topology, in the
+        deterministic enumeration order: trees then admix1), as a tidy DataFrame with columns
+        nadmix, hash, score, restart_spread. The argmin over ``score`` is the global-best."""
+        pd = _require_pandas()
+        return pd.DataFrame(
+            {
+                "nadmix": list(self._d.get("cand_nadmix") or []),
+                "hash": list(self._d.get("cand_hash") or []),
+                "score": list(self._d.get("cand_score") or []),
+                "restart_spread": list(self._d.get("cand_restart_spread") or []),
+            }
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"QpGraphSearchResult(n_candidates={self.n_candidates}, "
+            f"best_score={self.best_score:.6f}, best_nadmix={self.best_nadmix}, "
+            f"heuristic_recovered={self.heuristic_recovered}, "
+            f"status={Status.OK.name})"
+        )
+
+
+def qpgraph_search(
+    f2: F2Blocks,
+    *,
+    pops: list[str],
+    max_nadmix: int = 1,
+    numstart: int = 10,
+    fudge: float = 1e-4,
+    diag_f3: float = 1e-5,
+    constrained: bool = True,
+    run_heuristic: bool = True,
+) -> QpGraphSearchResult:
+    """qpGraph TOPOLOGY SEARCH on the GPU (oracle C: exhaustive bounded enumeration; the
+    heterogeneous-topology fleet fits ALL candidates in ONE launch).
+
+    Exhaustively enumerates every rooted topology on the bounded ``pops`` leaf set (nadmix in
+    ``{0..max_nadmix}``; this reproduces admixtools ``generate_all_graphs`` 1:1) and returns
+    the deterministic GLOBAL-BEST: the argmin over the per-candidate clean single-graph GLS
+    fit scores. The host does only the cheap enumeration + the argmin — NEVER a per-candidate
+    host fit. ``pops`` is the leaf pop-set (each must be an f2 population; >= 3 required).
+
+    Mirrors :func:`qpadm_search`: the per-candidate FIT options (``numstart`` / ``fudge`` /
+    ``diag_f3`` / ``constrained``) match the single-graph :func:`qpgraph` fit so a candidate's
+    score reproduces ``qpgraph(best_edges).score``. ``run_heuristic`` additionally runs the
+    hill-climb and verifies it recovers the exhaustive global-best (the falsifiable v1 gate).
+
+    NOTE: qpGraph uses the AT2 ``afprod=FALSE`` f2 (DIFFERENT from qpadm's ``afprod=TRUE``);
+    the ``f2`` handle must come from ``read_f2`` of an afprod=FALSE f2 dir.
+
+    Returns a :class:`QpGraphSearchResult` — ``.best_score`` / ``.best_edges`` / ``.best_hash``
+    are the global-best; ``.n_candidates`` the exhaustive count; ``.candidates`` the full
+    per-candidate scored vector; ``.argmin`` the global-best row in it. GPU-only: no CUDA
+    device raises a clear ValueError; an unknown pop name raises."""
+    d = _core.run_qpgraph_search(
+        f2._h,
+        list(pops),
+        max_nadmix,
+        numstart,
+        fudge,
+        diag_f3,
+        constrained,
+        run_heuristic,
+    )
+    return QpGraphSearchResult(d)
 
 
 def f4(

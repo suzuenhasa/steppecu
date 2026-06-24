@@ -488,17 +488,19 @@ int run_cli(int argc, char** argv) {
         });
     }
 
-    // ---- qpdstat (D-statistic / f4 over an f2_blocks dir; qpDstat A+B plan, Part A) ----
-    // THIN wrapper over the f4 path: --f2-dir reports f4 (the AT2 f2-path convention, proven
-    // byte-identical to qpdstat f4mode). The normalized-D MAGNITUDE needs per-SNP genotypes
-    // (--prefix = Part B, not yet implemented). REUSES add_f2_dir_flag + add_f4_quartet_flags
-    // (the QUADRUPLE input) + add_output_flags + add_common_flags verbatim; the ONLY new flag
-    // is --prefix (the Part-B sentinel run_qpdstat_command fails fast on).
+    // ---- qpdstat (D-statistic; qpDstat A+B plan: --f2-dir f4 (A) OR --prefix norm-D (B)) ----
+    // TWO paths: --f2-dir reports f4 (Part A; the AT2 f2-path convention, proven byte-identical
+    // to qpdstat f4mode). --prefix reads the genotype triple PREFIX.{geno,snp,ind} and reports
+    // the genotype-path NORMALIZED-D magnitude (Part B; D = mean num / mean den over per-SNP
+    // allele freqs, block-jackknifed — the AT2 qpdstat_geno allsnps=TRUE convention). REUSES
+    // add_f2_dir_flag + add_f4_quartet_flags (the QUADRUPLE input) + add_output_flags +
+    // add_common_flags verbatim; the ONLY new flag is --prefix (run_qpdstat_command branches on
+    // it to run_dstat).
     {
         CLI::App* sub = app.add_subcommand(
             "qpdstat",
-            "D-statistic / f4 over an f2_blocks dir (--f2-dir reports f4: the AT2 f2-path "
-            "convention; normalized-D needs --prefix = Part B, not yet implemented)");
+            "D-statistic: --f2-dir reports f4 (the AT2 f2-path convention) OR --prefix "
+            "PREFIX.{geno,snp,ind} reports the genotype-path normalized-D magnitude");
         qpdstat_args.command = Command::Qpdstat;
         add_f2_dir_flag(sub, qpdstat_args, "The f2_blocks directory");
         // qpdstat takes QUADRUPLES, not target/left/right: the row-aligned --pop1..--pop4
@@ -509,12 +511,13 @@ int run_cli(int argc, char** argv) {
         add_sweep_mode_flags(sub, qpdstat_args, "--all-quartets",
                              "Sweep ALL quadruples C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
         // --prefix: the Part-B genotype prefix for the normalized-D magnitude. Bound to the
-        // DEDICATED qpdstat_prefix field (NOT extract's --prefix) so the qpdstat command's
-        // fail-fast guard reads it WITHOUT ConfigBuilder expanding it into geno/snp/ind.
+        // DEDICATED qpdstat_prefix field (NOT extract's --prefix) so run_qpdstat_command reads
+        // it WITHOUT ConfigBuilder expanding it into geno/snp/ind, then branches to run_dstat.
         sub->add_option_function<std::string>(
             "--prefix", [&](const std::string& v) { qpdstat_args.qpdstat_prefix = v; },
-            "Genotype prefix for normalized-D magnitude (Part B; not yet implemented). "
-            "--f2-dir qpdstat reports f4 (the AT2 f2-path convention).");
+            "Genotype triple prefix PREFIX.{geno,snp,ind} for the normalized-D magnitude "
+            "(Part B; allsnps=TRUE block-jackknife). Without it, --f2-dir reports f4 "
+            "(the AT2 f2-path convention).");
         add_output_flags(sub, qpdstat_args);
         add_common_flags(sub, qpdstat_args);
         sub->callback([&]() {
@@ -522,7 +525,8 @@ int run_cli(int argc, char** argv) {
             if (!config) std::exit(cfg::kExitInvalidConfig);
             // Part A: the real GPU f4 over the quadruples (read dir -> resolve -> upload ->
             // run_f4 -> emit the pop1,pop2,pop3,pop4,est,se,z,p table — the D-output
-            // convention). --prefix (Part B) fails fast inside run_qpdstat_command.
+            // convention). Part B (--prefix) branches to the genotype-path normalized-D
+            // (run_dstat) inside run_qpdstat_command.
             std::exit(run_qpdstat_command(*config));
         });
     }
