@@ -24,6 +24,8 @@
 
 #include "core/internal/launch_config.hpp"   // cdiv, kMaxGridX
 #include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
+#include "io/filter/snp_summary_reduce.hpp"  // derive_pooled_summary_one + keep_decision_pooled (the shared HD body)
+#include "steppe/config.hpp"                 // FilterConfig
 
 namespace steppe::device {
 
@@ -40,6 +42,53 @@ __global__ void autosome_keep_mask_kernel(const int* __restrict__ chrom, long M,
     if (s >= M) return;
     const int chr = chrom[s];
     flags[s] = (chr >= chrom_min && chr <= chrom_max) ? std::uint8_t{1} : std::uint8_t{0};
+}
+
+/// REGIME-B per-SNP keep-mask: ONE thread per SNP s in [0, M) (so the across-pop Σ
+/// runs sequentially p = 0..P-1, BIT-IDENTICAL order to the host loop). Reproduces
+/// the host extract_f2 keep decision EXACTLY: (1) the pooled-MAF reduction Σ_pop Q·N
+/// (FFMA-immune via the SHARED derive_pooled_summary_one) + the SHARED
+/// keep_decision_pooled (the same filter_decision.hpp predicates + is_monomorphic
+/// ==0.0 exact); (2) the SEPARATE pop-coverage maxmiss folded in (drop if the
+/// fraction of pops with N<=0 STRICTLY EXCEEDS maxmiss), reproducing
+/// extract_f2_core.cpp:177-191 including the `<=0.0` on N and the strict `>`. For
+/// extract_f2 the membership is the no-op, so membership_ok is unconditionally true.
+/// Writes the uint8 CUB flag (the existing scan/Flagged/gather pipeline consumes it).
+__global__ void regimeb_keep_mask_kernel(const double* __restrict__ Q,
+                                         const double* __restrict__ N, int P, long M,
+                                         const char* __restrict__ ref,
+                                         const char* __restrict__ alt,
+                                         const int* __restrict__ chrom,
+                                         steppe::FilterConfig cfg, double ploidy_d,
+                                         double total_indiv_d, double maxmiss,
+                                         std::uint8_t* __restrict__ flags) {
+    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (s >= M) return;
+
+    // (1) The pooled-MAF reduction + the shared keep decision (membership no-op for
+    // extract_f2). geno_max_missing in cfg is FORCED to 1.0 by the host caller (the
+    // sample-axis predicate is the no-op; the pop-axis maxmiss is applied below).
+    const steppe::io::filter::PooledSnpSummary ps =
+        steppe::io::filter::derive_pooled_summary_one(Q, N, P, s, ploidy_d,
+                                                      total_indiv_d);
+    bool keep = steppe::io::filter::keep_decision_pooled(
+        ps, ref[s], alt[s], chrom[s], cfg, /*membership_ok=*/true);
+
+    // (2) The SEPARATE pop-coverage maxmiss (extract_f2_core.cpp:177-191): drop if
+    // the fraction of pops with N<=0 (no data) STRICTLY exceeds maxmiss. maxmiss>=1.0
+    // ⇒ no-op (kept above untouched). Counts on N (the haploid count) with `<=0.0`.
+    if (keep && maxmiss < 1.0) {
+        const long base = static_cast<long>(P) * s;
+        int n_missing_pops = 0;
+        for (int p = 0; p < P; ++p) {
+            if (N[base + static_cast<long>(p)] <= 0.0) ++n_missing_pops;
+        }
+        const double frac =
+            static_cast<double>(n_missing_pops) / static_cast<double>(P);
+        if (frac > maxmiss) keep = false;
+    }
+
+    flags[s] = keep ? std::uint8_t{1} : std::uint8_t{0};
 }
 
 /// One thread per (population i, source SNP s): if SNP s is kept, copy its whole
@@ -75,6 +124,23 @@ void launch_autosome_keep_mask(const int* d_chrom, long M, int chrom_min,
                   "(architecture.md §7) — tile the SNP axis");
     autosome_keep_mask_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
         d_chrom, M, chrom_min, chrom_max, d_flags);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_regimeb_keep_mask(const double* d_Q, const double* d_N, int P, long M,
+                              const char* d_ref, const char* d_alt,
+                              const int* d_chrom, const steppe::FilterConfig& cfg,
+                              double ploidy, double total_indiv, double maxmiss,
+                              std::uint8_t* d_flags, cudaStream_t stream) {
+    if (M <= 0) return;
+    const long grid_x = core::cdiv(M, static_cast<long>(kKeepBlock));
+    STEPPE_ASSERT(grid_x >= 0 &&
+                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
+                  "regime-B keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
+                  "(architecture.md §7) — tile the SNP axis");
+    regimeb_keep_mask_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
+        d_Q, d_N, P, M, d_ref, d_alt, d_chrom, cfg, ploidy, total_indiv, maxmiss,
+        d_flags);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

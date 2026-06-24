@@ -25,8 +25,9 @@
 #include <cstddef>
 #include <vector>
 
-#include "io/filter/filter_decision.hpp"  // the shared per-SNP predicates (single source)
-#include "io/filter/include_exclude.hpp"  // SnpMembership
+#include "io/filter/filter_decision.hpp"     // the shared per-SNP predicates (single source)
+#include "io/filter/snp_summary_reduce.hpp"  // PooledSnpSummary + keep_decision_pooled (the shared HD body)
+#include "io/filter/include_exclude.hpp"     // SnpMembership
 #include "io/snp_reader.hpp"              // SnpTable (id / chrom / ref / alt)
 #include "steppe/config.hpp"              // FilterConfig
 
@@ -122,18 +123,18 @@ struct PerSnpSummary {
                                             int chrom,
                                             const FilterConfig& cfg,
                                             bool membership_ok) noexcept {
-    // (1) Unconditional DROP-NOT-FLIP class drops (architecture.md §1).
-    if (is_multiallelic(ref, alt) || is_strand_ambiguous(ref, alt)) return false;
-    // (2)+(3) Threshold filters (thresholds FROM cfg, predicates SHARED).
-    if (!snp_passes_maf(sm.pooled_minor_af, cfg.maf_min)) return false;
-    if (!snp_passes_geno(sm.missing_frac, cfg.geno_max_missing)) return false;
-    // (4) Flag-gated additions (each off by default ⇒ no-op). is_monomorphic takes
-    // the UNFOLDED pooled ref-af (B20/F21: ends the double-fold).
-    if (cfg.drop_monomorphic && is_monomorphic(sm.pooled_ref_af)) return false;
-    if (cfg.transversions_only && !is_transversion(ref, alt)) return false;
-    if (cfg.autosomes_only && !is_autosome(chrom)) return false;
-    // (5) Include/exclude + prune.in membership (precomputed by the caller).
-    return membership_ok;
+    // Delegate to the SHARED __host__ __device__ body (snp_summary_reduce.hpp) so this
+    // host call site and the regime-B device keep-mask kernel run the IDENTICAL
+    // DROP-NOT-FLIP decision over the SAME filter_decision.hpp predicates — neither
+    // path can diverge on a boundary (§8 single source). PerSnpSummary carries the
+    // same three scalars the decision reads (pooled_minor_af / missing_frac /
+    // pooled_ref_af); copy them into the POD the shared body takes.
+    PooledSnpSummary ps;
+    ps.pooled_ref_af = sm.pooled_ref_af;
+    ps.pooled_minor_af = sm.pooled_minor_af;
+    ps.missing_frac = sm.missing_frac;
+    ps.pooled_allele_count = sm.pooled_allele_count;
+    return keep_decision_pooled(ps, ref, alt, chrom, cfg, membership_ok);
 }
 
 /// Build the per-SNP keep mask for the tile: a SNP is KEPT iff it passes EVERY

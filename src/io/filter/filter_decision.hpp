@@ -50,9 +50,8 @@
 #ifndef STEPPE_IO_FILTER_FILTER_DECISION_HPP
 #define STEPPE_IO_FILTER_FILTER_DECISION_HPP
 
-#include <cctype>
-
-#include "steppe/config.hpp"  // FilterConfig thresholds, kAutosomeChromMin/Max
+#include "core/internal/host_device.hpp"  // STEPPE_HD (header-only macro; no link edge)
+#include "steppe/config.hpp"              // FilterConfig thresholds, kAutosomeChromMin/Max
 
 namespace steppe::io::filter {
 
@@ -71,7 +70,7 @@ namespace steppe::io::filter {
 /// Folded minor allele frequency of a POOLED reference-allele frequency:
 /// min(ref_af, 1 - ref_af). Pure helper used by snp_passes_maf and the
 /// monomorphic check so the folding lives once.
-[[nodiscard]] inline constexpr double folded_maf(double pooled_ref_af) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr double folded_maf(double pooled_ref_af) noexcept {
     const double q = pooled_ref_af;
     return (q < 1.0 - q) ? q : (1.0 - q);
 }
@@ -80,7 +79,7 @@ namespace steppe::io::filter {
 /// is already folded (min(q,1-q)); pass folded_maf(pooled_ref_af) for it.
 /// Inclusive `>=`: maf_min == 0 keeps every SNP (the no-op default), and a SNP
 /// whose folded MAF exactly equals the threshold is KEPT.
-[[nodiscard]] inline constexpr bool snp_passes_maf(double pooled_minor_af, double maf_min) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr bool snp_passes_maf(double pooled_minor_af, double maf_min) noexcept {
     return pooled_minor_af >= maf_min;
 }
 
@@ -89,16 +88,16 @@ namespace steppe::io::filter {
 /// see file header). Inclusive `<=`: geno_max_missing == 1 keeps every SNP (the
 /// no-op default), and a SNP whose missing fraction exactly equals the threshold
 /// is KEPT.
-[[nodiscard]] inline constexpr bool snp_passes_geno(double per_snp_missing_frac,
-                                                    double geno_max_missing) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr bool snp_passes_geno(double per_snp_missing_frac,
+                                                             double geno_max_missing) noexcept {
     return per_snp_missing_frac <= geno_max_missing;
 }
 
 /// mind filter: keep a SAMPLE iff its per-sample missing fraction <=
 /// mind_max_missing. Inclusive `<=`: mind_max_missing == 1 keeps every sample
 /// (the no-op default). Decided in the conditional S-1 pre-pass (mind_prepass).
-[[nodiscard]] inline constexpr bool sample_passes_mind(double per_sample_missing_frac,
-                                                       double mind_max_missing) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr bool sample_passes_mind(double per_sample_missing_frac,
+                                                                double mind_max_missing) noexcept {
     return per_sample_missing_frac <= mind_max_missing;
 }
 
@@ -120,7 +119,7 @@ namespace steppe::io::filter {
 /// path: a truly monomorphic site has each per-pop Q exactly 0.0 or 1.0, so Q·N is
 /// exact and the pooled ref-af is exactly 0.0 or 1.0 — do NOT change the upstream
 /// pooling to a mean-of-frequencies, which rounds and would break the exactness.
-[[nodiscard]] inline constexpr bool is_monomorphic(double pooled_ref_af) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr bool is_monomorphic(double pooled_ref_af) noexcept {
     return folded_maf(pooled_ref_af) == 0.0;
 }
 
@@ -133,15 +132,21 @@ namespace steppe::io::filter {
 /// Normalize an allele char to uppercase A/C/G/T, or '\0' for anything else
 /// (incl. 'N', '0', '-', '.', X/indel codes). Internal helper so the class
 /// predicates treat lower/upper case identically and reject non-ACGT cleanly.
-[[nodiscard]] inline char normalize_allele(char a) noexcept {
-    const char u = static_cast<char>(std::toupper(static_cast<unsigned char>(a)));
+[[nodiscard]] STEPPE_HD inline char normalize_allele(char a) noexcept {
+    // ASCII uppercase, device-safe (no <cctype>/std::toupper on the GPU): a lowercase
+    // a-z differs from its uppercase form ONLY in bit 5 (0x20), so clear it. For the
+    // A/C/G/T allele chars this is bit-identical to the host std::toupper path (the C
+    // locale toupper is the same ASCII map), preserving the keep-set bit-exactness.
+    const unsigned char uc = static_cast<unsigned char>(a);
+    const char u = (uc >= 'a' && uc <= 'z') ? static_cast<char>(uc - 0x20)
+                                            : static_cast<char>(uc);
     return (u == 'A' || u == 'C' || u == 'G' || u == 'T') ? u : '\0';
 }
 
 /// The Watson-Crick complement of an A/C/G/T base (A↔T, C↔G), or '\0' if `a` is
 /// not a normalized base. Used by the strand-ambiguity test (the only place strand
 /// complementarity appears — we DROP ambiguous pairs, never flip by it).
-[[nodiscard]] inline char complement(char a) noexcept {
+[[nodiscard]] STEPPE_HD inline char complement(char a) noexcept {
     switch (normalize_allele(a)) {
         case 'A': return 'T';
         case 'T': return 'A';
@@ -171,7 +176,7 @@ namespace steppe::io::filter {
 /// "tens of thousands" the brief mentions are the TRANSVERSIONS (GT/TG/CA/AC ≈
 /// 18.5k of the first 100k), handled by the transversions_only flag. FLAGGED in
 /// the M2 report.
-[[nodiscard]] inline bool is_strand_ambiguous(char a, char b) noexcept {
+[[nodiscard]] STEPPE_HD inline bool is_strand_ambiguous(char a, char b) noexcept {
     const char na = normalize_allele(a);
     const char nb = normalize_allele(b);
     if (na == '\0' || nb == '\0') return false;  // not a clean biallelic ACGT pair
@@ -184,7 +189,7 @@ namespace steppe::io::filter {
 /// dropped, never resolved). (This reader sees only the declared ref/alt pair, so
 /// "multiallelic" here means "not a declarable clean SNP"; true >2-allele records
 /// arrive as a non-ACGT code or are pre-split upstream.)
-[[nodiscard]] inline bool is_multiallelic(char a, char b) noexcept {
+[[nodiscard]] STEPPE_HD inline bool is_multiallelic(char a, char b) noexcept {
     const char na = normalize_allele(a);
     const char nb = normalize_allele(b);
     return na == '\0' || nb == '\0' || na == nb;
@@ -193,7 +198,7 @@ namespace steppe::io::filter {
 /// Transition: a purine↔purine (A↔G) or pyrimidine↔pyrimidine (C↔T) substitution.
 /// The complementary classification to a transversion. Non-ACGT or equal alleles
 /// are neither (is_multiallelic catches them).
-[[nodiscard]] inline bool is_transition(char a, char b) noexcept {
+[[nodiscard]] STEPPE_HD inline bool is_transition(char a, char b) noexcept {
     // The "clean biallelic ACGT pair" rule lives once, in is_multiallelic: a pair that
     // fails it is multiallelic and is neither a transition nor a transversion (cleanup
     // 7.1, §8 single-source). is_multiallelic normalizes a/b, so na/nb are re-derived
@@ -209,7 +214,7 @@ namespace steppe::io::filter {
 /// Transversion: a purine↔pyrimidine substitution (A/G ↔ C/T). The complement of
 /// is_transition over clean biallelic ACGT pairs. Used by the transversions_only
 /// flag (keep iff transversion). Non-ACGT or equal alleles are NOT transversions.
-[[nodiscard]] inline bool is_transversion(char a, char b) noexcept {
+[[nodiscard]] STEPPE_HD inline bool is_transversion(char a, char b) noexcept {
     // Normalize once per logical check: guard the clean-pair rule via is_multiallelic,
     // then delegate the ring-class test to is_transition (its complement over clean
     // biallelic ACGT pairs). The prior body normalized a/b only to re-run the guard
@@ -227,7 +232,7 @@ namespace steppe::io::filter {
 /// this is the AT2-parity autosome set (X→23, Y→24, MT and other codes are NOT
 /// autosomes). Used by the autosomes_only flag. The range constants live in
 /// config.hpp (no bare 22 here).
-[[nodiscard]] inline constexpr bool is_autosome(int chrom) noexcept {
+[[nodiscard]] STEPPE_HD inline constexpr bool is_autosome(int chrom) noexcept {
     return chrom >= kAutosomeChromMin && chrom <= kAutosomeChromMax;
 }
 

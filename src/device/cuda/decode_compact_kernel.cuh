@@ -24,6 +24,8 @@
 
 #include <cuda_runtime.h>
 
+#include "steppe/config.hpp"  // FilterConfig (the regime-B keep-mask thresholds)
+
 namespace steppe::device {
 
 /// Per-SNP autosome keep-mask: one thread per SNP s in [0, M). Writes
@@ -34,6 +36,23 @@ namespace steppe::device {
 void launch_autosome_keep_mask(const int* d_chrom, long M, int chrom_min,
                                int chrom_max, std::uint8_t* d_flags,
                                cudaStream_t stream);
+
+/// REGIME-B per-SNP keep-mask (the extract_f2 FULL filter, on-device): one thread
+/// per SNP s in [0, M). Reproduces the host extract_f2 keep decision EXACTLY — the
+/// pooled-MAF reduction Σ_pop Q·N (FFMA-immune, the SHARED derive_pooled_summary_one,
+/// p = 0..P-1 sequential ⇒ bit-identical to the host loop) + the SHARED
+/// keep_decision_pooled (multiallelic / strand-ambiguous / MAF / geno / monomorphic
+/// ==0.0 exact / transversion / autosome) + the SEPARATE pop-coverage maxmiss (drop
+/// if the fraction of pops with N<=0 STRICTLY exceeds maxmiss; the `<=0.0` and strict
+/// `>` of extract_f2_core.cpp). Membership is the extract_f2 no-op (always true).
+/// `cfg` carries the thresholds (geno_max_missing FORCED to 1.0 by the caller; the
+/// pop-axis maxmiss is the separate `maxmiss` arg). Writes the uint8 CUB flag.
+/// d_ref/d_alt are the per-SNP .snp allele chars; d_chrom the per-SNP chromosome.
+void launch_regimeb_keep_mask(const double* d_Q, const double* d_N, int P, long M,
+                              const char* d_ref, const char* d_alt,
+                              const int* d_chrom, const steppe::FilterConfig& cfg,
+                              double ploidy, double total_indiv, double maxmiss,
+                              std::uint8_t* d_flags, cudaStream_t stream);
 
 /// Gather the kept COLUMNS of a column-major [P × M] tensor into a compacted
 /// [P × M_kept] tensor. d_keep_idx is the EXCLUSIVE prefix sum of the keep flags

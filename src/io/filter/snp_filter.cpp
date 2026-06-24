@@ -10,7 +10,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "io/filter/filter_decision.hpp"  // the shared predicates (single source)
+#include "io/filter/filter_decision.hpp"     // the shared predicates (single source)
+#include "io/filter/snp_summary_reduce.hpp"  // derive_pooled_summary_one (the shared __host__ __device__ reduction)
 
 namespace steppe::io::filter {
 
@@ -77,33 +78,17 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
     const double ploidy_d = static_cast<double>(in.ploidy);
 
     for (long s = 0; s < M; ++s) {
-        // Reduce ACROSS the kept populations into SNP-global scalars (the §1, §5
-        // S2 invariant): one pooled ref count, one pooled allele count, one
-        // non-missing-individual sum per SNP — never a per-(pop, SNP) value.
-        double pooled_ref_count = 0.0;     // Σ_pop Q·N  (== Σ ssum_pop)
-        double pooled_allele_count = 0.0;  // Σ_pop N    (== Σ 2·scnt_pop)
-        double nonmissing_indiv = 0.0;     // Σ_pop N/ploidy
-        // `(size_t)P * (size_t)s` is invariant w.r.t. `p` (only the pop index varies
-        // across this inner loop), so hoist it once per SNP instead of recomputing it
-        // P times (cleanup 7.2). Identical 64-bit-widened index, just CSE'd by hand.
-        const std::size_t base = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-        for (int p = 0; p < P; ++p) {
-            const std::size_t off = base + static_cast<std::size_t>(p);
-            const double npn = in.n[off];  // non-missing haploid count for (pop, snp)
-            // Q is zero-filled where invalid, and N is 0 there, so Q·N and N both
-            // contribute 0 from a missing (pop, snp) cell — no branch needed.
-            pooled_ref_count += in.q[off] * npn;
-            pooled_allele_count += npn;
-            nonmissing_indiv += npn / ploidy_d;
-        }
-
+        // Reduce ACROSS the kept populations into SNP-global scalars (the §1, §5 S2
+        // invariant) via the SHARED __host__ __device__ primitive (snp_summary_reduce
+        // .hpp), so this host loop and the regime-B device keep-mask kernel cannot
+        // diverge on a boundary — incl. the FFMA-immune Σ Q·N (the bit-exact pin).
+        const PooledSnpSummary ps =
+            derive_pooled_summary_one(in.q, in.n, P, s, ploidy_d, total_indiv_d);
         PerSnpSummary& sm = out[static_cast<std::size_t>(s)];
-        sm.pooled_allele_count = pooled_allele_count;
-        sm.pooled_ref_af =
-            (pooled_allele_count > 0.0) ? (pooled_ref_count / pooled_allele_count) : 0.0;
-        sm.pooled_minor_af = folded_maf(sm.pooled_ref_af);
-        sm.missing_frac =
-            (total_indiv_d > 0.0) ? (1.0 - nonmissing_indiv / total_indiv_d) : 1.0;
+        sm.pooled_allele_count = ps.pooled_allele_count;
+        sm.pooled_ref_af = ps.pooled_ref_af;
+        sm.pooled_minor_af = ps.pooled_minor_af;
+        sm.missing_frac = ps.missing_frac;
     }
     return out;
 }

@@ -1389,6 +1389,157 @@ public:
         return out;
     }
 
+    /// DEVICE-RESIDENT decode + REGIME-B (extract_f2 FULL filter) compaction (the
+    /// host-compute audit regime (B) cure). SIBLING of decode_af_compact_autosome:
+    /// it REUSES decode_af_resident verbatim for dQ/dV/dN, REPLACES the autosome-only
+    /// keep-mask with the regime-B keep-mask kernel (pooled-MAF Σ_pop Q·N [FFMA-immune]
+    /// + the shared keep_decision_pooled + the SEPARATE pop-coverage maxmiss), REUSES
+    /// the IDENTICAL CUB ExclusiveSum + Flagged + scan-gather idiom, and adds the THIRD
+    /// lockstep gather of N. The resident compacted Q/V/N escape (n_device() non-null);
+    /// only the small kept chrom/genpos cross to host (for assign_blocks).
+    [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_filter(
+        const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
+        std::span<const int> chrom, std::span<const double> genpos,
+        const FilterConfig& cfg, std::span<const std::size_t> pop_individuals,
+        int ploidy, double maxmiss) override {
+        guard_device();
+        steppe::device::DeviceDecodeResult out;
+        out.device_id = device_id_;
+        const int P = tile.n_pop;
+        const long M = static_cast<long>(tile.n_snp);
+        out.P = P;
+        if (P <= 0 || M <= 0) { out.M_kept = 0; return out; }
+
+        const std::size_t pm =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+        const std::size_t Mz = static_cast<std::size_t>(M);
+
+        // ---- 1. Decode → dQ/dV/dN RESIDENT (the SHARED front-end; NO host D2H). The
+        // regime-B keep-mask reads the UNCOMPACTED dQ/dN; the gather then compacts
+        // Q/V/N from the SAME resident dQ/dV/dN — no second decode. ----------------
+        DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
+        decode_af_resident(tile, P, M, dQ, dV, dN);
+
+        // ---- 2. The regime-B per-SNP keep-mask (the SHARED reduction + decision +
+        // the SEPARATE maxmiss) → d_flags. The sample-axis geno predicate is the
+        // no-op (geno_max_missing FORCED to 1.0); the pop-axis maxmiss is separate. -
+        FilterConfig kernel_cfg = cfg;
+        kernel_cfg.geno_max_missing = 1.0;  // pop-coverage maxmiss is the `maxmiss` arg.
+
+        // total_indiv = Σ_pop pop_individuals (the SNP-independent missing-frac
+        // denominator). pop_individuals length == P (the caller's contract); if it is
+        // short/empty, fall back to the segment sizes from the tile pop_offsets so the
+        // reduction never reads OOB. (Mirrors snp_filter.cpp's total_indiv loop.)
+        double total_indiv_d = 0.0;
+        if (pop_individuals.size() == static_cast<std::size_t>(P)) {
+            std::size_t total = 0;
+            for (int p = 0; p < P; ++p) total += pop_individuals[static_cast<std::size_t>(p)];
+            total_indiv_d = static_cast<double>(total);
+        } else {
+            std::size_t total = 0;
+            for (int p = 0; p < P; ++p)
+                total += tile.pop_offsets[static_cast<std::size_t>(p) + 1] -
+                         tile.pop_offsets[static_cast<std::size_t>(p)];
+            total_indiv_d = static_cast<double>(total);
+        }
+
+        // Upload the per-SNP ref/alt allele chars + chrom (genpos rides only the
+        // Flagged companion). dChrom is needed BOTH by the keep-mask (autosomes_only)
+        // and by the Flagged compaction, so it is uploaded once.
+        DeviceBuffer<char> dRef(Mz), dAlt(Mz);
+        DeviceBuffer<int> dChrom(Mz);
+        DeviceBuffer<double> dGenpos(Mz);
+        DeviceBuffer<std::uint8_t> dFlags(Mz);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRef.data(), ref.data(), Mz * sizeof(char),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dAlt.data(), alt.data(), Mz * sizeof(char),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dChrom.data(), chrom.data(), Mz * sizeof(int),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_regimeb_keep_mask(dQ.data(), dN.data(), P, M, dRef.data(), dAlt.data(),
+                                 dChrom.data(), kernel_cfg,
+                                 static_cast<double>(ploidy), total_indiv_d, maxmiss,
+                                 dFlags.data(), stream_.get());
+
+        // ---- 3. The compacted column index = EXCLUSIVE prefix sum of d_flags (the
+        // IDENTICAL CUB DeviceScan idiom as decode_af_compact_autosome). -----------
+        DeviceBuffer<long> dKeepIdx(Mz);
+        DeviceBuffer<int> dNumSel(1);
+        {
+            std::size_t scan_bytes = 0;
+            cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, dFlags.data(),
+                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
+                                          stream_.get());
+            DeviceBuffer<unsigned char> dScanTemp(scan_bytes == 0 ? 1 : scan_bytes);
+            std::size_t sb = scan_bytes;
+            cub::DeviceScan::ExclusiveSum(dScanTemp.data(), sb, dFlags.data(),
+                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
+                                          stream_.get());
+        }
+
+        // ---- 4. Compact the 1-D chrom/genpos with CUB DeviceSelect::Flagged (the
+        // IDENTICAL idiom + the int/double MAX-temp-size guard). -------------------
+        DeviceBuffer<int> dChromKept(Mz);
+        DeviceBuffer<double> dGenposKept(Mz);
+        {
+            std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
+            cub::DeviceSelect::Flagged(nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
+                                       dChromKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            cub::DeviceSelect::Flagged(nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
+                                       dGenposKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            const std::size_t sel_bytes = std::max(sel_bytes_i, sel_bytes_d);
+            DeviceBuffer<unsigned char> dSelTemp(sel_bytes == 0 ? 1 : sel_bytes);
+            std::size_t sb = sel_bytes;
+            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
+                                       dChromKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+            sb = sel_bytes;
+            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
+                                       dGenposKept.data(), dNumSel.data(),
+                                       static_cast<std::int64_t>(M), stream_.get());
+        }
+
+        int m_kept = 0;
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&m_kept, dNumSel.data(), sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        out.M_kept = static_cast<long>(m_kept);
+        if (m_kept <= 0) return out;
+
+        // ---- 5. The RESIDENT compacted Q/V/N [P × M_kept], the THREE lockstep
+        // scan-keyed gathers (Q, V, AND N — N is the regime-B addition; the SAME
+        // dFlags + dKeepIdx, so N is compacted in EXACT lockstep with Q/V, FILE ORDER
+        // preserved by the monotone exclusive scan). ------------------------------
+        const std::size_t pmk =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(m_kept);
+        out.impl = std::make_unique<steppe::device::DeviceDecodeResult::Impl>();
+        out.impl->q = DeviceBuffer<double>(pmk);
+        out.impl->v = DeviceBuffer<double>(pmk);
+        out.impl->n = DeviceBuffer<double>(pmk);
+        launch_compact_columns_gather(dQ.data(), P, M, dFlags.data(), dKeepIdx.data(),
+                                      out.impl->q.data(), stream_.get());
+        launch_compact_columns_gather(dV.data(), P, M, dFlags.data(), dKeepIdx.data(),
+                                      out.impl->v.data(), stream_.get());
+        launch_compact_columns_gather(dN.data(), P, M, dFlags.data(), dKeepIdx.data(),
+                                      out.impl->n.data(), stream_.get());
+
+        // ---- 6. The small kept chrom/genpos D2H (for the CUDA-free assign_blocks). --
+        out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
+        out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
     /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction on the GPU (the
     /// S2 divergence; backend.hpp dstat_block_reduce / include/steppe/dstat.hpp). Uploads
     /// the resident Q/V [P × M] + the [4 × N] quadruple index table + the per-block

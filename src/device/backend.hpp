@@ -769,6 +769,51 @@ public:
             "(the device-resident decode seam requires a CUDA backend)");
     }
 
+    /// DEVICE-RESIDENT decode + REGIME-B (extract_f2 FULL filter) compaction — the
+    /// host-compute audit regime (B) cure (the extract_f2 host per-SNP filter loop +
+    /// the full Q/V/N D2H GONE). SIBLING of decode_af_compact_autosome: it REUSES the
+    /// same decode_af_resident front-end and the IDENTICAL CUB ExclusiveSum + Flagged
+    /// + scan-gather idiom, but REPLACES the autosome-only keep-mask with the regime-B
+    /// keep-mask kernel (one thread per SNP: the pooled-MAF reduction Σ_pop Q·N
+    /// [FFMA-immune, the SHARED derive_pooled_summary_one] + the SHARED
+    /// keep_decision_pooled [class / MAF / geno / monomorphic ==0.0 exact / transversion
+    /// / autosome] + the SEPARATE pop-coverage maxmiss), and adds the THIRD lockstep
+    /// gather of N (the f2-GEMM needs the compacted N too). The resident compacted
+    /// Q/V/N escape in the DeviceDecodeResult (n_device() non-null); only the small
+    /// kept chrom/genpos cross to host (for assign_blocks).
+    ///
+    /// PARITY (GOLDEN-EXACT): one SNP per thread ⇒ the across-pop Σ order is
+    /// sequential p = 0..P-1, bit-identical to the host loop; the integer class /
+    /// chrom / maxmiss filters are FMA-immune; the FFMA-immune __dmul_rn/__dadd_rn
+    /// pin makes the pooled-MAF comparison bit-identical host==device. The kept SET,
+    /// ORDER, and assign_blocks reproduce the host extract_f2 path exactly.
+    ///
+    /// @param tile         the packed tile + population partition + per-sample ploidy.
+    /// @param ref / alt    per-SNP .snp allele chars (length tile.n_snp).
+    /// @param chrom        per-SNP chromosome (length tile.n_snp).
+    /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
+    /// @param cfg          the FilterConfig (maf_min / drop_monomorphic /
+    ///                     transversions_only / autosomes_only; geno_max_missing is
+    ///                     FORCED to 1.0 internally — the pop-axis maxmiss is separate).
+    /// @param pop_individuals  per-pop kept-individual count (the missing-frac
+    ///                     denominator; length tile.n_pop).
+    /// @param ploidy       the ploidy (2 diploid / 1 pseudo-haploid) for N/ploidy.
+    /// @param maxmiss      the AT2 pop-coverage maxmiss (drop if frac of pops with
+    ///                     N<=0 > maxmiss; >=1.0 ⇒ no-op).
+    /// NON-PURE: the base throws (the established pattern; the CpuBackend uses
+    /// decode_af + the host filter loop directly, never this resident entry).
+    [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_filter(
+        const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
+        std::span<const int> chrom, std::span<const double> genpos,
+        const FilterConfig& cfg, std::span<const std::size_t> pop_individuals,
+        int ploidy, double maxmiss) {
+        (void)tile; (void)ref; (void)alt; (void)chrom; (void)genpos; (void)cfg;
+        (void)pop_individuals; (void)ploidy; (void)maxmiss;
+        throw std::runtime_error(
+            "ComputeBackend::decode_af_compact_filter: not implemented by this backend "
+            "(the regime-B device-resident decode seam requires a CUDA backend)");
+    }
+
     // -----------------------------------------------------------------------
     // qpAdm fit-engine virtuals (design §1.7 + the M(fit-1) FROZEN CONTRACT §2).
     // BATCHED-CAPABLE by signature (a leading n_block / model axis) so the CUDA

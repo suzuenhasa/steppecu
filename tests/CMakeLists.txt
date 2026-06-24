@@ -1211,6 +1211,24 @@ target_link_libraries(test_filter_oracle
 set_target_properties(test_filter_oracle PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME filter_oracle COMMAND test_filter_oracle "${STEPPE_AADR_ROOT}")
 
+# --- REGIME-B on-device keep-set PARITY gate (extract_f2 FULL filter on the GPU) --
+# CUDA TU (mirrors test_decode_equivalence.cu / test_filter_oracle.cu): the central
+# gate for the extract_f2 regime-B filter moved on-device. Decodes the SAME real v66
+# AADR tile, runs CudaBackend::decode_af_compact_filter (the regime-B keep-mask kernel
+# + the N lockstep CUB compaction) and the verbatim HOST filter oracle, and asserts
+# the on-device keep-SET + the lockstep-compacted Q/V/N are BIT-IDENTICAL to the host
+# (M_kept exact, chrom/genpos bit-identical, Q/V/N memcmp). Spans the FMA-immune
+# integer filters (transversions / maxmiss / monomorphic / autosome) AND the FP-fragile
+# pooled-MAF boundary (the only piece the __dmul_rn/__dadd_rn FFMA-immune pin defends).
+# SKIPs cleanly (exit 0) with no CUDA device / no raw AADR. Links steppe::io (readers +
+# filters) + steppe::device (the CUDA + CPU backends). Self-checking main(); CTest gates
+# on the exit code. Takes the data ROOT as argv[1] (default the box layout).
+add_executable(test_extract_f2_regimeB_parity reference/test_extract_f2_regimeB_parity.cu)
+target_link_libraries(test_extract_f2_regimeB_parity
+    PRIVATE steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_extract_f2_regimeB_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME extract_f2_regimeB_parity COMMAND test_extract_f2_regimeB_parity "${STEPPE_AADR_ROOT}")
+
 # --- M(cli-1) `steppe qpadm` CLI acceptance gate (cli-bindings.md §7, §8) ---------
 # PLAIN C++ host TU (NO CUDA): writes the COMMITTED real-AADR golden f2 fixtures into a
 # temp f2-dir (f2.bin STPF2BK1 + pops.txt + meta.json) — exactly what a real <dir>
