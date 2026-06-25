@@ -1754,8 +1754,12 @@ __global__ void qpadm_gather_loo_qinv_kernel(const double* __restrict__ dLooSrc,
 // --- launch-geometry helper (group-7 7.4) ----------------------------------------
 /// 1-D grid-stride launch geometry: ceil-div `total` by `block` and clamp to
 /// kMaxGridDimX (== INT_MAX ⇒ the returned int is in range). The ONE ceil-div + clamp
-/// definition for the 8 grid-stride launch wrappers (each kernel is grid-stride, so the
-/// clamp is the safety net beyond INT_MAX). `total` MUST be > 0 (caller guards).
+/// definition for the 1-D grid-stride launch wrappers (each kernel is grid-stride, so the
+/// clamp is the safety net: on the f-stat sweep `total = (long)N * nb` can reach ~3e9,
+/// so `total / block` exceeds INT_MAX and an unclamped `int` grid would wrap negative —
+/// the clamp caps gridDim.x at INT_MAX and the grid-stride loop covers the full range
+/// regardless, so the result is bit-identical to a hypothetical non-overflowing launch).
+/// `total` MUST be > 0 (caller guards).
 inline int launch_grid_stride(long total, int block) {
     const long grid_l = (total + block - 1) / block;
     const long grid_cap = static_cast<long>(kMaxGridDimX);
@@ -1885,7 +1889,7 @@ void launch_assemble_f4_gather(const double* f2, int P,
     const long total = static_cast<long>(nl) * nr * nb;
     if (total <= 0) return;
     const int block = 256;
-    const int grid = static_cast<int>((total + block - 1) / block);
+    const int grid = launch_grid_stride(total, block);
     assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(f2, P, d_left, d_right,
                                                           nl, nr, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1898,7 +1902,7 @@ void launch_assemble_f4_quartets_gather(const double* f2, int P,
     const long total = static_cast<long>(N) * nb;
     if (total <= 0) return;
     const int block = 256;
-    const int grid = static_cast<int>((total + block - 1) / block);
+    const int grid = launch_grid_stride(total, block);
     assemble_f4_quartets_gather_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_quartets, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1911,7 +1915,7 @@ void launch_assemble_f3_triples_gather(const double* f2, int P,
     const long total = static_cast<long>(N) * nb;
     if (total <= 0) return;
     const int block = 256;
-    const int grid = static_cast<int>((total + block - 1) / block);
+    const int grid = launch_grid_stride(total, block);
     assemble_f3_triples_gather_kernel<<<grid, block, 0, stream>>>(
         f2, P, d_triples, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1944,7 +1948,7 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
     const long total = static_cast<long>(m) * nb;
     if (total <= 0) return;
     const int block = 256;
-    const int grid = static_cast<int>((total + block - 1) / block);
+    const int grid = launch_grid_stride(total, block);
     f4_xtau_kernel<<<grid, block, 0, stream>>>(dLoo, dEst, dTotLine, d_block_sizes,
                                                m, nb, n, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
