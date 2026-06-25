@@ -974,12 +974,27 @@ __global__ void f4_diag_var_kernel(const double* __restrict__ dXtau,
 }
 
 // --- symmetrize lower -> full (in place) -----------------------------------------
+// 2-D block-stride over BOTH axes: the y axis (gridDim.y) is hardware-capped at 65535
+// (core::kMaxGridY), and the qpfstats covariance is [npairs × npairs] with
+// npairs = P*(P-1)/2 — for P >= 1449 the natural ceil(npairs/kSymTile) y-extent
+// exceeds 65535, so the launch wrapper CLAMPS gridDim.y to kMaxGridY. A clamped grid
+// would under-cover the matrix with a one-thread-per-(i,j) kernel, so each thread
+// strides its row by gridDim.y*blockDim.y (and its col by gridDim.x*blockDim.x) to
+// cover all (i,j); identical to the unclamped per-thread mapping when no clamp fires
+// (DOC-VERIFIED gridDim.y cap 65535: CUDA C++ Programming Guide, "Technical
+// Specifications per Compute Capability"). Behavior-neutral at golden scale.
 __global__ void symmetrize_lower_to_full_kernel(double* __restrict__ dM, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;  // row
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;  // col
-    if (i < n && j < n && i > j) {
-        // copy lower (i,j) into upper (j,i): col-major idx = row + n*col.
-        dM[j + static_cast<long>(n) * i] = dM[i + static_cast<long>(n) * j];
+    const int i0 = blockIdx.x * blockDim.x + threadIdx.x;  // row base
+    const int j0 = blockIdx.y * blockDim.y + threadIdx.y;  // col base
+    const int istride = gridDim.x * blockDim.x;
+    const int jstride = gridDim.y * blockDim.y;
+    for (int j = j0; j < n; j += jstride) {
+        for (int i = i0; i < n; i += istride) {
+            if (i > j) {
+                // copy lower (i,j) into upper (j,i): col-major idx = row + n*col.
+                dM[j + static_cast<long>(n) * i] = dM[i + static_cast<long>(n) * j];
+            }
+        }
     }
 }
 
@@ -2057,7 +2072,15 @@ void launch_sweep_topk_raise_tau(const double* d_sorted_absz, int K, int mode,
 void launch_symmetrize_lower_to_full(double* dM, int n, cudaStream_t stream) {
     if (n <= 0) return;
     const dim3 block(kSymTile, kSymTile);
-    const unsigned grid_dim = (static_cast<unsigned>(n) + kSymTile - 1) / kSymTile;
+    // Natural square tiling: ceil(n / kSymTile) tiles per axis. The y axis is
+    // hardware-capped at 65535 (core::kMaxGridY), so CLAMP both axes to it — the
+    // qpfstats covariance is [npairs × npairs] (npairs = P*(P-1)/2), and for P >= 1449
+    // the y-extent would otherwise exceed 65535 -> cudaErrorInvalidConfiguration on the
+    // documented P<=2500 envelope. The kernel is 2-D block-stride over both axes, so a
+    // clamped grid still covers ALL (i,j) rows/cols (1-D launch_grid_stride clamp pattern
+    // lifted to 2-D; bit-identical to the unclamped mapping when no clamp fires).
+    const unsigned tiles = (static_cast<unsigned>(n) + kSymTile - 1) / kSymTile;
+    const unsigned grid_dim = tiles > core::kMaxGridY ? core::kMaxGridY : tiles;
     const dim3 grid(grid_dim, grid_dim);
     symmetrize_lower_to_full_kernel<<<grid, block, 0, stream>>>(dM, n);
     STEPPE_CUDA_CHECK_KERNEL();
