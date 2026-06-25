@@ -166,10 +166,52 @@ inline constexpr int kFirstOtherChromCode = -1;
 // Header parse.
 // ---------------------------------------------------------------------------
 
-/// Which packed layout a .geno file uses (its row axis). TGENO records are
-/// individual-major; GENO (PACKEDANCESTRYMAP) records are SNP-major. The M1
-/// decode targets TGENO; GENO is recognized so the reader does not mis-decode.
-enum class GenoFormat { Unknown, Tgeno, Geno };
+/// Which on-disk genotype layout a .geno file uses (its row axis + packing).
+/// TGENO records are PACKED individual-major; GENO (PACKEDANCESTRYMAP) records
+/// are PACKED SNP-major. EIGENSTRAT is the ASCII SNP-major form: one TEXT line per
+/// SNP, one character per individual (0/1/2 reference-allele copies, 9 missing) —
+/// no packed magic, so it is detected from its leading ASCII content (M-FR-EIG).
+/// All three share the sibling .snp/.ind; EIGENSTRAT, like GENO, is SNP-major and
+/// reaches the canonical individual-major tile through the on-device transpose.
+enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat };
+
+// ---------------------------------------------------------------------------
+// EIGENSTRAT ASCII .geno constants — the single home for the text-genotype
+// character convention (M-FR-EIG). The .geno is one line per SNP, one char per
+// individual; the char IS the reference-allele copy count (0/1/2) or '9' for a
+// missing call. The char→canonical-2-bit map is the IDENTITY on the value
+// (0→0,1→1,2→2) with '9'→kMissingCode(3), so once the ASCII line is packed
+// SNP-major the existing transpose runs with TileEncoding::Identity (no remap).
+// ---------------------------------------------------------------------------
+
+/// ASCII digit for a MISSING EIGENSTRAT genotype ('9'); maps to kMissingCode (3).
+inline constexpr char kEigenstratMissingChar = '9';
+/// The 2-bit canonical code a missing EIGENSTRAT char ('9') maps to (== kMissingCode).
+/// Single-homed beside kEigenstratMissingChar so the char→code map cannot drift.
+inline constexpr std::uint8_t kEigenstratMissingCode = kMissingCode;
+/// Largest reference-allele copy count an EIGENSTRAT char may carry ('0'..'2');
+/// the char→code map accepts '0'/'1'/'2' verbatim, '9' as missing, nothing else.
+inline constexpr char kEigenstratMaxCopiesChar = '2';
+
+/// Map one EIGENSTRAT .geno character to its canonical 2-bit genotype code.
+/// '0'/'1'/'2' → the reference-allele copy count 0/1/2 (the value IS the code, the
+/// same raw-value convention TGENO/GENO use); '9' → kMissingCode (3). Returns
+/// `true` and writes `out` on a recognized char; returns `false` on any other byte
+/// (a malformed .geno) so the caller can fail-fast with the line/column context —
+/// the SINGLE EIGENSTRAT char→code site shared by the host gather (no GPU twin is
+/// needed: the ASCII→2-bit pack happens host-side, then the canonical SNP-major
+/// bytes flow through the SAME transpose as GENO).
+[[nodiscard]] constexpr bool eigenstrat_char_to_code(char c, std::uint8_t& out) noexcept {
+    if (c >= '0' && c <= kEigenstratMaxCopiesChar) {
+        out = static_cast<std::uint8_t>(c - '0');  // 0/1/2 ref-allele copies
+        return true;
+    }
+    if (c == kEigenstratMissingChar) {
+        out = kEigenstratMissingCode;  // '9' → 3 (missing)
+        return true;
+    }
+    return false;  // any other byte is a malformed EIGENSTRAT genotype
+}
 
 /// Parsed packed-.geno header: the format, the two dataset counts, and the
 /// DERIVED record stride. For TGENO `n_records == n_ind` and `bytes_per_record

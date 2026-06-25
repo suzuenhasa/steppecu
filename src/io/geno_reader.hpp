@@ -111,6 +111,32 @@ public:
                                                    std::size_t snp_begin,
                                                    std::size_t snp_end);
 
+    /// EIGENSTRAT (ASCII SNP-major) gather (M-FR-EIG). The text twin of
+    /// `read_snp_major_tile`: parse the ASCII .geno (one line per SNP, one char per
+    /// individual — 0/1/2 ref-allele copies, 9 missing) for SNPs [snp_begin,
+    /// snp_end), map each char to its canonical 2-bit code (eigenstrat_char_to_code),
+    /// and PACK the line into the canonical SNP-major 2-bit layout (record s = SNP s,
+    /// `packed_bytes(n_ind)` bytes, source individual i at byte i/4, MSB-first) — the
+    /// SAME packing read_snp_major_tile produces from raw GENO bytes. It then builds
+    /// the identical selected, pop-contiguous individual gather list. The result is a
+    /// SnpMajorTile the app hands to the SAME ComputeBackend::transpose_to_canonical
+    /// (with TileEncoding::Identity, since the char→code map is the identity on the
+    /// value) — so NOTHING downstream of the transpose changes; only the gather
+    /// (ASCII parse + pack vs raw byte copy) and the geometry source differ.
+    ///
+    /// REQUIRES snp_begin == 0 (the byte-aligned SNP prefix; a nonzero begin is the
+    /// M5 tile loop). Keeps the SAME fail-fast guards as read_snp_major_tile (empty
+    /// partition, any selected row >= n_ind, the checked-multiply tile-size overflow)
+    /// PLUS a malformed-line guard: a .geno line whose length != n_ind, or carrying a
+    /// non-{0,1,2,9} byte, is REJECTED with the 1-based SNP line + column context
+    /// (the .geno line index IS the SNP index — a desync corrupts the SNP axis).
+    /// Throws std::runtime_error on a read error, an out-of-range SNP range, a
+    /// non-EIGENSTRAT file (TGENO/GENO use the packed readers), a malformed partition,
+    /// a malformed .geno line, or a failed allocation — the SAME documented contract.
+    [[nodiscard]] SnpMajorTile read_eigenstrat_snp_major_tile(const IndPartition& part,
+                                                             std::size_t snp_begin,
+                                                             std::size_t snp_end);
+
     GenoReader(const GenoReader&) = delete;
     GenoReader& operator=(const GenoReader&) = delete;
     GenoReader(GenoReader&&) noexcept = default;

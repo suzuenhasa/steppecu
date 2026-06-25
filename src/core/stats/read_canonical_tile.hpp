@@ -11,6 +11,9 @@
 //                                   + ComputeBackend::transpose_to_canonical (on the
 //                                   GPU; the CpuBackend host-loop oracle) -> the
 //                                   canonical individual-major tile.
+//   * EIGENSTRAT (ASCII SNP-major) -> reader.read_eigenstrat_snp_major_tile (the
+//                                   `io`-leaf ASCII parse + pack into the SAME canonical
+//                                   SNP-major source) + the SAME transpose (M-FR-EIG).
 //
 // After this call the tile is the SAME canonical packing every downstream consumer
 // (detect_ploidy / decode_af / the regime-B filter / f2 / D / DATES / qpfstats)

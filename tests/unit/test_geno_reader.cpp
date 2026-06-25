@@ -452,6 +452,103 @@ struct TempFile {
     return true;
 }
 
+// ---- EIGENSTRAT (ASCII SNP-major) reader (M-FR-EIG) --------------------------
+// Hand-built tiny ASCII .geno: one line per SNP, one char per individual
+// (0/1/2 ref-allele copies, 9 missing). NO packed magic — the ctor detects
+// EIGENSTRAT from its leading 0/1/2/9 content and derives n_ind (first line length)
+// / n_snp (line count). This is the §8.5 CI-portable fixture (a few inds × a few
+// SNPs, like the synthetic TGENO above) — it pins the char->2-bit map, the MSB-first
+// SNP-major pack, and the geometry WITHOUT real AADR or a GPU (the real-AADR
+// bit-exact gate is tests/reference/test_eigenstrat_decode_equivalence.cu).
+[[nodiscard]] bool write_eigenstrat(const std::filesystem::path& p,
+                                    const std::vector<std::string>& lines) {
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    for (const std::string& l : lines) out << l << '\n';
+    return static_cast<bool>(out);
+}
+
+[[nodiscard]] bool test_eigenstrat_reader() {
+    using steppe::io::GenoFormat;
+    using steppe::io::SnpMajorTile;
+    using steppe::io::packed_bytes;
+
+    // 5 individuals × 3 SNPs. Columns are individuals (0..4); rows are SNPs.
+    //   SNP0: 0 1 2 9 0   SNP1: 2 2 9 1 0   SNP2: 1 0 0 2 9
+    const std::vector<std::string> lines = {"01290", "22910", "10029"};
+    const std::size_t n_ind = 5, n_snp = 3;
+    const std::size_t bpr = packed_bytes(n_ind);  // ceil(5/4) == 2
+
+    TempFile f("eigenstrat");
+    if (!write_eigenstrat(f.path, lines)) return false;
+
+    GenoReader reader(f.path.string());
+    // (a) Geometry: detected as EIGENSTRAT, n_ind/n_snp from the ASCII shape, the
+    // canonical SNP-major stride packed_bytes(n_ind), header_bytes 0 (ASCII has no
+    // header), records_present == n_snp (the SNP-major convention).
+    if (reader.header().format != GenoFormat::Eigenstrat) return false;
+    if (reader.header().n_ind != n_ind || reader.header().n_snp != n_snp) return false;
+    if (reader.header().bytes_per_record != bpr) return false;
+    if (reader.header().header_bytes != 0) return false;
+    if (reader.records_present() != n_snp) return false;
+
+    // (b) The canonical SNP-major pack: select all 5 individuals (one pop) and assert
+    // the packed bytes match the HAND-COMPUTED MSB-first layout. The char->code map is
+    // the identity on the value (0/1/2) with '9'->3, and individual i sits at byte i/4,
+    // position i%4, shift (3 - i%4)*2 = 6/4/2/0. For SNP s, byte 0 holds inds 0..3 and
+    // byte 1 holds ind 4 (high 2 bits, the rest zero).
+    IndPartition part;
+    part.groups.push_back(group("pop", {0, 1, 2, 3, 4}));
+    part.n_individuals_total = n_ind;
+    const SnpMajorTile tile = reader.read_eigenstrat_snp_major_tile(part, 0, n_snp);
+    if (tile.n_snp != n_snp || tile.n_individuals != n_ind) return false;
+    if (tile.src_bytes_per_record != bpr) return false;
+    if (tile.snp_major.size() != n_snp * bpr) return false;
+
+    // Hand-pack each SNP line into the expected 2 bytes (MSB-first, codes 0/1/2/3).
+    auto code_of = [](char c) -> std::uint8_t {
+        return c == '9' ? std::uint8_t{3} : static_cast<std::uint8_t>(c - '0');
+    };
+    for (std::size_t s = 0; s < n_snp; ++s) {
+        std::uint8_t b0 = 0, b1 = 0;
+        for (std::size_t i = 0; i < n_ind; ++i) {
+            const std::uint8_t code = code_of(lines[s][i]);
+            const int shift = (3 - static_cast<int>(i % 4)) * 2;
+            if (i < 4) b0 = static_cast<std::uint8_t>(b0 | (code << shift));
+            else       b1 = static_cast<std::uint8_t>(b1 | (code << shift));
+        }
+        if (tile.snp_major[s * bpr + 0] != b0) return false;
+        if (tile.snp_major[s * bpr + 1] != b1) return false;
+    }
+
+    // (c) FAIL-FAST: an illegal genotype char ('3' is not 0/1/2/9) makes the ENTIRE
+    // file NOT EIGENSTRAT (the geometry scan rejects it), so the ctor throws — never a
+    // silent mis-decode.
+    {
+        TempFile bad("eigenstrat_badchar");
+        if (!write_eigenstrat(bad.path, {"01290", "22310", "10029"})) return false;  // '3' at SNP1
+        if (!threw_runtime_error([&] { GenoReader r(bad.path.string()); })) return false;
+    }
+    // (d) FAIL-FAST: a RAGGED line (different individual count) is rejected at ctor
+    // (a ragged char matrix is not a SNP-major EIGENSTRAT — would desync the SNP axis).
+    {
+        TempFile bad("eigenstrat_ragged");
+        if (!write_eigenstrat(bad.path, {"01290", "229", "10029"})) return false;  // short line 2
+        if (!threw_runtime_error([&] { GenoReader r(bad.path.string()); })) return false;
+    }
+    // (e) FAIL-FAST: calling the EIGENSTRAT gather with an out-of-range individual row
+    // (>= n_ind) throws (the phantom-individual guard).
+    {
+        IndPartition bad_part;
+        bad_part.groups.push_back(group("pop", {0, 5}));  // row 5 >= n_ind(5)
+        bad_part.n_individuals_total = n_ind;
+        if (!threw_runtime_error(
+                [&] { (void)reader.read_eigenstrat_snp_major_tile(bad_part, 0, n_snp); }))
+            return false;
+    }
+    return true;
+}
+
 struct Case { const char* name; bool (*fn)(); };
 
 constexpr Case kCases[] = {
@@ -467,6 +564,8 @@ constexpr Case kCases[] = {
      test_malformed_header_digits_handled},
     {"GENO header geometry (rlen floor + header==rlen record, M-FR-1 fix)",
      test_geno_header_geometry},
+    {"EIGENSTRAT reader (ASCII detect + char->2-bit MSB-first pack + fail-fast, M-FR-EIG)",
+     test_eigenstrat_reader},
 };
 
 }  // namespace

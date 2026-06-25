@@ -112,6 +112,25 @@ target_link_libraries(test_pa_decode_equivalence
 set_target_properties(test_pa_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME pa_decode_equivalence COMMAND test_pa_decode_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- M-FR-EIG Tier-1 EIGENSTRAT-reader == PA-reader BIT-EXACT gate -------------
+# CUDA TU (format-readers.md §5.3, the Tier-3-by-reduction-to-PA gate): drives the
+# PRODUCTION dispatch core::read_canonical_tile on an EIGENSTRAT (ASCII SNP-major)
+# .geno AND on the convertf-PA (GENO, SNP-major) .geno of the SAME 9-pop subset, then
+# asserts BYTE-FOR-BYTE: the canonical tile (NO tail mask — both are SNP-major), the
+# auto-detected sample_ploidy, and the decoded Q/V/N (memcmp==0) match on BOTH the GPU
+# backend and the CPU oracle. Both fixtures are convertf outputs from the SAME PA source
+# with the SAME poplist, so they share identical .ind/.snp and carry the SAME genotypes
+# two ways (ASCII vs packed) — a correct EIGENSTRAT reader MUST reproduce the PA decode
+# bit-for-bit. Since PA==TGENO==goldens (test_pa_decode_equivalence), this transitively
+# pins EIGENSTRAT to the goldens with NO new statistical golden + NO AT2 rerun. Integer/
+# bit-only (no float, no tolerance, no oracle file). SKIPs exit-0 if the fixture dir
+# (<root>/fixtures_eig) is absent. Self-checking main(); CTest gates on the exit code.
+add_executable(test_eigenstrat_decode_equivalence reference/test_eigenstrat_decode_equivalence.cu)
+target_link_libraries(test_eigenstrat_decode_equivalence
+    PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_eigenstrat_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME eigenstrat_decode_equivalence COMMAND test_eigenstrat_decode_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
 # the SHARED assign_blocks, computes the per-block f2 tensor via the production
@@ -1552,6 +1571,25 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_pa_prefix steppe_app)
   add_test(NAME cli_pa_prefix
            COMMAND test_cli_pa_prefix
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}")
+
+  # --- M-FR-EIG EIGENSTRAT-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ---------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the
+  # EIGENSTRAT (ASCII SNP-major) --prefix <fixtures_eig/v66_fit9_es> (the prefix that USED
+  # TO THROW at the GenoReader ctor) and once with the convertf-PA (GENO) --prefix of the
+  # SAME 9-pop subset — and asserts the EIGENSTRAT run WORKS (exit 0) AND matches the PA
+  # run: extract-f2's f2.bin BYTE-IDENTICAL, qpdstat est/se/z row-for-row (rtol 1e-6). Both
+  # fixtures are convertf outputs from the SAME PA source with the SAME poplist (identical
+  # .ind/.snp), so they are the SAME genotypes two ways; a correct EIGENSTRAT reader MUST
+  # reproduce the PA result. NO new golden (the comparison IS ES-vs-PA, and PA==TGENO==
+  # goldens via cli_pa_prefix). RUNNING ON THE GPU. SKIPs cleanly (exit 0) when no CUDA
+  # device is visible OR the fixtures_eig prefixes are absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_eigenstrat_prefix cli/test_cli_eigenstrat_prefix.cpp)
+  target_link_libraries(test_cli_eigenstrat_prefix PRIVATE steppe::warnings)
+  add_dependencies(test_cli_eigenstrat_prefix steppe_app)
+  add_test(NAME cli_eigenstrat_prefix
+           COMMAND test_cli_eigenstrat_prefix
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}")
 endif()
