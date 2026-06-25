@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"  // (reused elsewhere; chrom segmentation here)
+#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DatesMoments
 #include "device/resources.hpp"                   // device::Resources
 
@@ -125,7 +126,11 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const io::IndPartition part = io::read_ind(ind, sel, n_present);
     const io::SnpTable snptab = io::read_snp(snp, SIZE_MAX);
     const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    const io::GenotypeTile tile = reader.read_tile(part, 0, M0);
+    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
+    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is
+    // the canonical individual-major packing the decode front-end expects either way.
+    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    const io::GenotypeTile tile = core::read_canonical_tile(reader, part, be, 0, M0);
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);
@@ -133,7 +138,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
 
     // Source allele frequencies via decode_af (forced diploid — DATES plain ref/an).
     std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
-    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    // `be` was bound above (the tile read dispatch); reused here for the decode.
     DecodeTileView view;
     view.packed = tile.packed.data();
     view.bytes_per_record = tile.bytes_per_record;

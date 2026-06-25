@@ -175,7 +175,12 @@ enum class GenoFormat { Unknown, Tgeno, Geno };
 /// DERIVED record stride. For TGENO `n_records == n_ind` and `bytes_per_record
 /// == packed_bytes(n_snp)`; for GENO `n_records == n_snp` and `bytes_per_record
 /// == max(kGenoHeaderBytes, packed_bytes(n_ind))` (the PACKEDANCESTRYMAP rlen
-/// floor). All record offsets are `kGenoHeaderBytes + record * bytes_per_record`.
+/// floor). All record offsets are `header_bytes + record * bytes_per_record` —
+/// and `header_bytes` is NOT always kGenoHeaderBytes: TGENO's leading header is a
+/// fixed kGenoHeaderBytes (48) record, but GENO writes its header into one FULL
+/// rlen-width record, so for GENO `header_bytes == bytes_per_record` (e.g. 6899 for
+/// v66, not 48). Use `header_bytes`, never the kGenoHeaderBytes constant, to seek a
+/// data record (eigenstrat_format.cpp:113/126).
 struct GenoHeader {
     GenoFormat format = GenoFormat::Unknown;
     std::size_t n_ind = 0;             ///< number of individuals (samples)

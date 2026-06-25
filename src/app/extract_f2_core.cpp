@@ -24,6 +24,7 @@
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
 #include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_tiered (CUDA-FREE)
+#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
 #include "core/internal/views.hpp"                // steppe::core::MatView
 #include "device/backend.hpp"                     // DecodeTileView, DecodeResult (CUDA-FREE)
 #include "device/f2_blocks_out.hpp"               // F2BlocksOut (CUDA-FREE)
@@ -95,7 +96,12 @@ F2ExtractResult run_extract_f2(const std::string& geno,
 
     const io::SnpTable snptab = io::read_snp(snp, SIZE_MAX);
     const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    const io::GenotypeTile tile = reader.read_tile(part, 0, M0);
+    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
+    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. Either way
+    // `tile` is the canonical individual-major packing the rest of the chain expects.
+    steppe::ComputeBackend& backend = *resources.gpus.front().backend;
+    const io::GenotypeTile tile =
+        steppe::core::read_canonical_tile(reader, part, backend, 0, M0);
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);
@@ -117,7 +123,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
     // ---- 5. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
-    steppe::ComputeBackend& backend = *resources.gpus.front().backend;
+    // `backend` was bound above (the tile read dispatch); reused here for the decode.
 
     // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) -------
     // M-FR-0 (the L2 host-compute fix): for AUTO, the per-sample ploidy detection moves

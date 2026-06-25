@@ -128,6 +128,15 @@ add_library(steppe_core STATIC
     # exp+affine fit, and the leave-one-chrom weighted block jackknife. NEVER the f2 cache,
     # NEVER a host O(M^2) SNP-pair loop (the FFT reformulation designs the trap out).
     stats/dates.cpp
+    # M-FR-2 genotype front-end FORMAT DISPATCH (docs/design/format-readers.md §2.4):
+    # the single place the four genotype-path tools turn an open io::GenoReader + an
+    # IndPartition into the canonical individual-major io::GenotypeTile regardless of
+    # the on-disk axis — TGENO is read_tile (unchanged); GENO (SNP-major PA) is the
+    # io-leaf SNP-major gather + ComputeBackend::transpose_to_canonical. The app/
+    # orchestration wiring point where the CUDA-free io leaf meets the CUDA-free
+    # backend seam (NOT a CUDA TU); reused by steppe_core's tools AND steppe_extract's
+    # run_extract_f2 (which links steppe::core).
+    stats/read_canonical_tile.cpp
     # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
     # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
     # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps

@@ -25,6 +25,7 @@
 #include "io/eigenstrat_format.hpp"  // GenoHeader, GenoFormat
 #include "io/genotype_tile.hpp"      // GenotypeTile
 #include "io/ind_reader.hpp"         // IndPartition
+#include "io/snp_major_tile.hpp"     // SnpMajorTile (the SNP-major / GENO gather output)
 
 namespace steppe::io {
 
@@ -74,11 +75,41 @@ public:
     /// escapes to a caller written to catch(std::runtime_error&)).
     ///
     /// Throws std::runtime_error on a read error, an out-of-range SNP range, a
-    /// non-TGENO file (the M1 decode path targets TGENO), a malformed partition
-    /// (empty / row out of range / size overflow), or a failed tile allocation.
+    /// non-TGENO file (TGENO is the canonical individual-major path; a SNP-major
+    /// GENO file is read via `read_snp_major_tile` + the on-device transpose), a
+    /// malformed partition (empty / row out of range / size overflow), or a failed
+    /// tile allocation.
     [[nodiscard]] GenotypeTile read_tile(const IndPartition& part,
                                          std::size_t snp_begin,
                                          std::size_t snp_end);
+
+    /// SNP-MAJOR gather (PACKEDANCESTRYMAP / GENO; format-readers.md §2.4, M-FR-2).
+    /// Read SNPs [snp_begin, snp_end) of a SNP-major .geno into a raw SnpMajorTile:
+    /// the SNP-major source records for that range (one per SNP, full rlen-floored
+    /// width, ALL individuals interleaved) PLUS the selected, pop-contiguous
+    /// individual gather list (sel_rows / pop_offsets / pop_labels) built from the
+    /// partition. NO decode and NO transpose happens here — the `io` leaf is
+    /// CUDA-FREE; the app layer hands this tile to ComputeBackend::transpose_to_
+    /// canonical, which applies the selection + reorder + encoding on-device to
+    /// produce the canonical individual-major GenotypeTile decode_af consumes.
+    ///
+    /// This is the axis-swapped twin of `read_tile`: it seeks WHOLE per-SNP records
+    /// (header_bytes + snp*bytes_per_record) rather than per-individual records, and
+    /// the selection moves into the gather LIST (the transpose applies it) rather
+    /// than the seek loop (the SNP-major source interleaves all individuals within a
+    /// SNP byte, so a row cannot be skipped at read time). It keeps the SAME
+    /// fail-fast guards: empty partition, any selected row >= the source n_ind, and
+    /// the checked-multiply tile-size overflow are all rejected with a thrown
+    /// std::runtime_error (architecture.md §2 fail-fast).
+    ///
+    /// REQUIRES snp_begin == 0 for P0 (the byte-aligned SNP prefix; a nonzero begin
+    /// is the M5 tile loop). Throws std::runtime_error on a read error, an
+    /// out-of-range SNP range, a non-GENO file (TGENO uses `read_tile`), a malformed
+    /// partition, or a failed allocation — the SAME documented exception contract as
+    /// `read_tile`.
+    [[nodiscard]] SnpMajorTile read_snp_major_tile(const IndPartition& part,
+                                                   std::size_t snp_begin,
+                                                   std::size_t snp_end);
 
     GenoReader(const GenoReader&) = delete;
     GenoReader& operator=(const GenoReader&) = delete;

@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, BlockPartition
+#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, QpfstatsSmooth
 #include "device/resources.hpp"                   // device::Resources
 
@@ -231,7 +232,11 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     const io::IndPartition part = io::read_ind(ind, sel, n_present);
     const io::SnpTable snptab = io::read_snp(snp, SIZE_MAX);
     const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    const io::GenotypeTile tile = reader.read_tile(part, 0, M0);
+    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
+    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is
+    // the canonical individual-major packing the decode front-end expects either way.
+    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    const io::GenotypeTile tile = core::read_canonical_tile(reader, part, be, 0, M0);
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);
@@ -243,8 +248,7 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     }
     if (P <= 0 || M <= 0) { res.status = Status::Ok; return res; }
 
-    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
-
+    // `be` was bound above (the tile read dispatch); reused here for the decode.
     std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
     DecodeTileView view;
     view.packed = tile.packed.data();

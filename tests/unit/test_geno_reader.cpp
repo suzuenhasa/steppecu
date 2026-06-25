@@ -22,6 +22,7 @@
 // Dual harness (identical to tests/unit/test_filters.cpp): with
 // -DSTEPPE_TEST_WITH_GTEST it uses GoogleTest; otherwise a self-checking main()
 // returning non-zero on the first failure — all CTest needs to gate. No CUDA.
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -391,6 +392,66 @@ struct TempFile {
     return true;
 }
 
+// GENO (SNP-major PACKEDANCESTRYMAP) HEADER GEOMETRY (the M-FR-1 correctness pin;
+// format-readers.md §3.4 + the M-FR-1 GENO-header fix). The whole format-reader
+// transpose rides on the GENO header geometry being parsed RIGHT: GENO writes its
+// header into ONE FULL rlen-width record, so `header_bytes == bytes_per_record ==
+// max(kGenoHeaderBytes, ceil(n_ind/4))` — NOT a fixed 48. A 48-byte assumption
+// mis-seeks every GENO record by (rlen - 48). This pins both axes against TGENO:
+//   * SMALL n_ind  -> the rlen floor fires: header_bytes == bytes_per_record == 48.
+//   * LARGE n_ind  -> header_bytes == bytes_per_record == ceil(n_ind/4) (> 48),
+//     matching the empirically-verified v66 6899 (n_ind=27594 -> ceil/4 = 6899).
+//   * n_records == n_snp (the SNP-major axis), vs TGENO's n_records == n_ind.
+// TGENO's header stays the fixed 48-byte record (its geometry is unaffected).
+[[nodiscard]] bool test_geno_header_geometry() {
+    using steppe::io::GenoFormat;
+    using steppe::io::GenoHeader;
+    using steppe::io::parse_geno_header;
+
+    auto make_head = [](const std::string& text) {
+        std::array<char, kGenoHeaderBytes> head{};  // NUL-padded
+        for (std::size_t i = 0; i < text.size() && i < kGenoHeaderBytes; ++i) head[i] = text[i];
+        return head;
+    };
+
+    // (a) SMALL n_ind: the rlen floor fires (ceil(3/4)=1 < 48 -> 48). header_bytes
+    // == bytes_per_record == 48; n_records == n_snp.
+    {
+        const GenoHeader h = parse_geno_header(make_head("GENO 3 7 h1 h2"));
+        if (h.format != GenoFormat::Geno) return false;
+        if (h.n_ind != 3 || h.n_snp != 7) return false;
+        const std::size_t expect_bpr = std::max<std::size_t>(kGenoHeaderBytes, packed_bytes(3));
+        if (expect_bpr != kGenoHeaderBytes) return false;  // the floor must fire here
+        if (h.bytes_per_record != expect_bpr) return false;
+        if (h.header_bytes != expect_bpr) return false;     // header == one full rlen record
+        if (h.n_records != h.n_snp) return false;            // SNP-major axis
+    }
+
+    // (b) LARGE n_ind (the v66 geometry): ceil(27594/4) = 6899 > 48, so the rlen is
+    // 6899 and the header is ONE 6899-byte record — the empirically-verified value.
+    {
+        const GenoHeader h = parse_geno_header(make_head("GENO 27594 584131 h1 h2"));
+        if (h.format != GenoFormat::Geno) return false;
+        if (h.n_ind != 27594 || h.n_snp != 584131) return false;
+        if (packed_bytes(27594) != 6899) return false;       // pin the derived rlen
+        if (h.bytes_per_record != 6899) return false;
+        if (h.header_bytes != 6899) return false;            // NOT kGenoHeaderBytes(48)
+        if (h.header_bytes == kGenoHeaderBytes) return false;  // the exact bug guarded against
+        if (h.n_records != h.n_snp) return false;
+    }
+
+    // (c) TGENO is UNAFFECTED: the header stays the fixed 48-byte record; the data
+    // record stride is ceil(n_snp/4); n_records == n_ind (individual-major axis).
+    {
+        const GenoHeader h = parse_geno_header(make_head("TGENO 27594 584131 h1 h2"));
+        if (h.format != GenoFormat::Tgeno) return false;
+        if (h.header_bytes != kGenoHeaderBytes) return false;       // fixed 48
+        if (h.bytes_per_record != packed_bytes(584131)) return false;
+        if (h.n_records != h.n_ind) return false;                   // individual-major axis
+    }
+    return true;
+}
+
 struct Case { const char* name; bool (*fn)(); };
 
 constexpr Case kCases[] = {
@@ -404,6 +465,8 @@ constexpr Case kCases[] = {
      test_oversized_tile_alloc_throws_runtime_error},
     {"malformed header decimal digits handled (B18 overflow guard)",
      test_malformed_header_digits_handled},
+    {"GENO header geometry (rlen floor + header==rlen record, M-FR-1 fix)",
+     test_geno_header_geometry},
 };
 
 }  // namespace

@@ -155,8 +155,8 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     // ---- 1. Open the .geno + read .ind (selection) + .snp -------------------------
     io::IndPartition part;
     io::SnpTable snptab;
-    io::GenotypeTile tile;
     std::size_t n_present = 0;
+    long M = 0;
     try {
         io::GenoReader reader(config.geno());
         n_present = reader.records_present();
@@ -174,15 +174,20 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         }
 
         snptab = io::read_snp(config.snp(), SIZE_MAX);
-        const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-        tile = reader.read_tile(part, 0, M0);
+        // SIZING + VALIDATION ONLY (the dry-run + .snp/.geno-axis checks). The P/M the
+        // tile would report are derivable from the partition + header WITHOUT reading
+        // (and, for GENO, WITHOUT transposing) a tile: P == #selected pops, M == the
+        // common SNP prefix. The REAL canonical-tile read (TGENO direct or GENO gather
+        // + on-device transpose, M-FR-2) happens inside steppe::run_extract_f2 below.
+        // Deriving P/M here keeps this format-agnostic — a GENO prefix no longer throws
+        // at an up-front individual-major read_tile (which targets TGENO only).
+        M = static_cast<long>(std::min(reader.header().n_snp, snptab.count));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe extract-f2: input error: %s\n", e.what());
         return cfg::kExitIoError;
     }
 
-    const int P = static_cast<int>(tile.n_pop());
-    const long M = static_cast<long>(tile.n_snp);
+    const int P = static_cast<int>(part.groups.size());
     if (P <= 0 || M <= 0) {
         std::fprintf(stderr,
                      "steppe extract-f2: empty selection (P=%d) or no SNPs (M=%ld)\n", P, M);
@@ -204,7 +209,8 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     // PER-SAMPLE PLOIDY (AT2 adjust_pseudohaploid) is detected INSIDE the library entry
     // (steppe::run_extract_f2) now — the per-sample n_ph/n_dip observability counts come
     // back on the F2ExtractResult for the post-run echo. The CLI no longer re-detects here
-    // (the up-front tile read above stays only for the dry-run sizing + validation).
+    // (the up-front read is sizing/validation only, deriving P/M from the partition +
+    // header — no tile is read here, so a GENO prefix does not throw before the real run).
     std::size_t n_ph = 0, n_dip = 0;
 
     // The engaged precision (the requested DeviceConfig.precision; the resident path

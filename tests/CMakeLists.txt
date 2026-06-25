@@ -94,6 +94,24 @@ target_link_libraries(test_transpose_canonical
 set_target_properties(test_transpose_canonical PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME transpose_canonical COMMAND test_transpose_canonical "${STEPPE_AADR_ROOT}")
 
+# --- M-FR-2 Tier-1 PA-reader == TGENO-reader BIT-EXACT gate -------------------
+# CUDA TU (format-readers.md §5.1): drives the PRODUCTION dispatch
+# core::read_canonical_tile on a GENO (SNP-major PACKEDANCESTRYMAP) prefix
+# (converted_pa/v66_HO_pa) AND on the raw TGENO (individual-major) prefix of the
+# SAME data, then asserts BYTE-FOR-BYTE: the canonical tile (tail-masked), the
+# auto-detected sample_ploidy, and the decoded Q/V/N (memcmp==0) match on BOTH the
+# GPU backend and the CPU oracle. convertf is a lossless transcode, so PA and TGENO
+# are the SAME genotypes two ways — a correct full PA reader MUST reproduce the
+# TGENO decode bit-for-bit. Integer/bit-only (no float, no tolerance, no oracle
+# file). SKIPs exit-0 if the AADR root is absent. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::core (the dispatch) +
+# steppe::io (the readers) + steppe::device (the transpose + decode backends).
+add_executable(test_pa_decode_equivalence reference/test_pa_decode_equivalence.cu)
+target_link_libraries(test_pa_decode_equivalence
+    PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_pa_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME pa_decode_equivalence COMMAND test_pa_decode_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
 # the SHARED assign_blocks, computes the per-block f2 tensor via the production
@@ -1518,6 +1536,24 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- M-FR-2 PA-prefix CLI AUTO-COVER gate (format-readers.md §5.2) -------------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the GENO
+  # (SNP-major PACKEDANCESTRYMAP) --prefix <converted_pa/v66_HO_pa> (the prefix that USED TO
+  # THROW at geno_reader.cpp:81) and once with the raw TGENO --prefix — and asserts the PA
+  # run WORKS (exit 0) AND matches the TGENO run: extract-f2's f2.bin BYTE-IDENTICAL, qpdstat
+  # est/se/z row-for-row (rtol 1e-6), qpfstats smoothed f2.bin byte-identical. convertf is a
+  # lossless transcode so the two prefixes are the SAME data two ways; a correct PA reader
+  # MUST reproduce the TGENO result. NO new golden (the comparison IS PA-vs-TGENO). RUNNING
+  # ON THE GPU. SKIPs cleanly (exit 0) when no CUDA device is visible OR the converted_pa PA
+  # prefix / raw TGENO prefix is absent. NO SYNTHETIC DATA (memory real-data-only).
+  add_executable(test_cli_pa_prefix cli/test_cli_pa_prefix.cpp)
+  target_link_libraries(test_cli_pa_prefix PRIVATE steppe::warnings)
+  add_dependencies(test_cli_pa_prefix steppe_app)
+  add_test(NAME cli_pa_prefix
+           COMMAND test_cli_pa_prefix
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}")
 endif()
 
 # --- M(py-1) nanobind Python gate (cli-bindings.md §7, §8) ----------------------------
