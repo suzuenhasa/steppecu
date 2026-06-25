@@ -100,6 +100,7 @@
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
 #include "device/cuda/detect_ploidy_kernel.cuh" // launch_detect_ploidy (M-FR-0: on-device AT2 per-sample ploidy prepass)
+#include "device/cuda/transpose_canonical_kernel.cuh" // launch_transpose_to_canonical (M-FR-1: SNP-major -> canonical individual-major transpose+gather+encoding)
 #include "device/cuda/decode_compact_kernel.cuh" // launch_autosome_keep_mask / _compact_columns_gather (the device-resident decode seam)
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
 #include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
@@ -1302,6 +1303,65 @@ public:
                              tile.n_snp, dPloidy.data(), stream_.get());
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.data(), dPloidy.data(),
                                           tile.n_individuals * sizeof(int),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
+    /// M-FR-1: the SNP-major -> canonical individual-major TRANSPOSE+GATHER+ENCODING
+    /// ON THE GPU (the format-reader engine; the on-device override of the CUDA-free
+    /// base oracle). Upload the SNP-major source bytes + the selection (sel_rows /
+    /// pop_offsets), run launch_transpose_to_canonical (ONE thread per output byte:
+    /// gather source row sel_rows[g], encode, MSB-first re-pack into the canonical
+    /// individual-major byte), and D2H the canonical tile. Integer/bit-exact to the
+    /// base host-loop oracle BY CONSTRUCTION (same core::genotype_code extractor, same
+    /// encoding, same packer); the M-FR-1 unit gate diffs this device tile against the
+    /// CpuBackend oracle AND a hand-built expected tile (memcmp==0).
+    [[nodiscard]] CanonicalTile transpose_to_canonical(
+        const SnpMajorTileView& view) override {
+        guard_device();
+        CanonicalTile out;
+        out.n_snp = view.n_snp;
+        out.n_individuals = view.n_individuals;
+        // ceil(n_snp/4) — the canonical output record stride (the SAME radix the base
+        // oracle / io::packed_bytes use; via core::kCodesPerByte so they cannot drift).
+        const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
+        out.bytes_per_record = view.n_snp == 0 ? 0 : (view.n_snp + cpb - 1) / cpb;
+        if (view.pop_offsets != nullptr && view.n_pop >= 0) {
+            out.pop_offsets.assign(
+                view.pop_offsets,
+                view.pop_offsets + static_cast<std::size_t>(view.n_pop) + 1u);
+        }
+        const std::size_t out_total = view.n_individuals * out.bytes_per_record;
+        out.packed.assign(out_total, std::uint8_t{0});
+        if (out_total == 0) return out;  // empty tile (no individuals or no SNPs)
+
+        // Upload the SNP-major source + the per-output-column source-row selection.
+        const std::size_t src_total = view.n_snp * view.src_bytes_per_record;
+        DeviceBuffer<std::uint8_t> dSrc(src_total);
+        DeviceBuffer<std::size_t> dSel(view.n_individuals);
+        DeviceBuffer<std::uint8_t> dOut(out_total);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSrc.data(), view.snp_major,
+                                          src_total * sizeof(std::uint8_t),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSel.data(), view.sel_rows,
+                                          view.n_individuals * sizeof(std::size_t),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+
+        // Map the CUDA-FREE seam encoding onto the device-private kernel enum (1:1).
+        TransposeEncoding enc = TransposeEncoding::Identity;
+        switch (view.encoding) {
+            case TileEncoding::Identity:
+            default:
+                enc = TransposeEncoding::Identity;
+                break;
+        }
+        launch_transpose_to_canonical(dSrc.data(), view.src_bytes_per_record,
+                                      dSel.data(), view.n_individuals, view.n_snp,
+                                      out.bytes_per_record, enc, dOut.data(),
+                                      stream_.get());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.packed.data(), dOut.data(),
+                                          out_total * sizeof(std::uint8_t),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;

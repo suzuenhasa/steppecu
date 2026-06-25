@@ -436,6 +436,76 @@ struct DecodeResult {
     long M = 0;
 };
 
+/// The native-code -> canonical-code map a SNP-major source needs before its codes
+/// pack into the canonical individual-major tile (format-readers.md §3.2). P0
+/// PACKEDANCESTRYMAP/GENO already uses the canonical raw-value convention (0/1/2 ref
+/// copies, 3 missing) AND the MSB-first bit order, so its map is IDENTITY. Later
+/// formats (EIGENSTRAT ASCII, PLINK) add enumerators WITHOUT touching the transpose
+/// body. CUDA-FREE plain enum (the device twin TransposeEncoding mirrors it 1:1;
+/// transpose_canonical_kernel.cuh); the seam stays CUDA-free.
+enum class TileEncoding : int {
+    Identity = 0,  ///< P0 PACKEDANCESTRYMAP/GENO — the native code IS the canonical code.
+};
+
+/// A CUDA-FREE, NON-OWNING view of a SNP-MAJOR packed source + the SELECTED,
+/// REORDERED individual gather list — the input to `transpose_to_canonical`
+/// (format-readers.md §2.4, M-FR-1). The mirror of `DecodeTileView` for the
+/// transpose-on-read path: a new SNP-major reader (PACKEDANCESTRYMAP/GENO,
+/// EIGENSTRAT, PLINK) gathers its raw SNP-major bytes + builds the selection here,
+/// the app layer (the only `io`<->`device` wiring point) fills this view, and the
+/// backend transposes it into the canonical individual-major tile decode_af /
+/// detect_ploidy already consume. All pointers are borrowed (the caller owns the
+/// storage for the call's duration); no CUDA type appears.
+///
+/// SNP-MAJOR source packing: `snp_major` holds `n_snp` records of
+/// `src_bytes_per_record` bytes each (record s = SNP s); SOURCE individual `i` of
+/// SNP `s` is the 2-bit code at byte `s*src_bytes_per_record + i/4`, position `i%4`
+/// (MSB-first; the same code_in_byte order, with the individual axis interleaved
+/// within each SNP byte). `src_bytes_per_record` is the GENO rlen-floored stride
+/// max(48, ceil(n_ind/4)) — possibly LARGER than ceil(n_ind/4); only `i/4` for the
+/// SELECTED rows (each < n_ind) is read, so a small-n_ind record's PADDING bytes are
+/// never decoded as phantom individuals (format-readers.md §3.4).
+struct SnpMajorTileView {
+    const std::uint8_t* snp_major = nullptr;  ///< SNP-major source bytes (record s = SNP s)
+    std::size_t src_bytes_per_record = 0;     ///< source SNP-record stride (the rlen-floored max(48,ceil(n_ind/4)))
+    std::size_t n_snp = 0;                     ///< SNPs the tile covers (source records AND output columns)
+
+    /// SOURCE individual ROW per OUTPUT column g, in pop-contiguous Q/V/N order: the
+    /// IndPartition's selected, label-ASC-ordered set flattened pop-by-pop (output
+    /// column g -> source row sel_rows[g]). Length `n_individuals`. This is the
+    /// selection + reorder the transpose applies output-driven (the SNP-major source
+    /// interleaves ALL individuals, so the gather happens at transpose time — the
+    /// axis-swapped twin of the TGENO read_tile per-individual gather).
+    const std::size_t* sel_rows = nullptr;
+    std::size_t n_individuals = 0;             ///< gathered output individuals (output record count)
+
+    /// Population segment boundaries over the OUTPUT individual axis: pop `p` owns
+    /// gathered individuals [pop_offsets[p], pop_offsets[p+1]). Length P+1, copied
+    /// straight onto the output tile (the transpose does not touch the partition).
+    const std::size_t* pop_offsets = nullptr;
+    int n_pop = 0;                             ///< number of populations P (== pop_offsets length − 1)
+
+    /// The native-code -> canonical-code map (P0 = Identity). Applied per code by the
+    /// transpose before the MSB-first re-pack into the canonical output byte.
+    TileEncoding encoding = TileEncoding::Identity;
+};
+
+/// Output of `transpose_to_canonical`: the canonical INDIVIDUAL-MAJOR genotype tile
+/// as plain host data — the SAME packing io::GenotypeTile / DecodeTileView carry
+/// (gathered individual `g` at `packed[g*bytes_per_record + s/4]`, position `s%4`,
+/// MSB-first; pop-contiguous, segmented by `pop_offsets`). A backend-local POD
+/// (NOT io::GenotypeTile) so backend.hpp stays a CUDA-free seam that does NOT depend
+/// on the `io` leaf (the established DecodeTileView/DecodeResult pattern); the app
+/// layer copies these fields into an io::GenotypeTile (or fills a DecodeTileView
+/// directly) for the unchanged downstream decode/ploidy/f2 path.
+struct CanonicalTile {
+    std::vector<std::uint8_t> packed;        ///< canonical individual-major bytes, pop-contiguous
+    std::size_t bytes_per_record = 0;        ///< ceil(n_snp/4) — the output record stride
+    std::size_t n_snp = 0;                   ///< SNPs the tile covers
+    std::size_t n_individuals = 0;           ///< gathered individuals (== packed.size()/bytes_per_record)
+    std::vector<std::size_t> pop_offsets;    ///< P+1 segment boundaries (copied from the input view)
+};
+
 /// CUDA-FREE probe result describing the ONE device a backend instance is bound
 /// to, plus whether that device can peer-access the other visible devices — the
 /// capability-tier datum the M4.5 single-node multi-GPU machinery reads
@@ -813,6 +883,97 @@ public:
             }
         }
         return ploidy;
+    }
+
+    /// M-FR-1 — TRANSPOSE + GATHER + ENCODING: convert a SNP-MAJOR packed source
+    /// (PACKEDANCESTRYMAP/GENO, EIGENSTRAT, PLINK) into the canonical INDIVIDUAL-MAJOR
+    /// tile decode_af / detect_ploidy already consume (format-readers.md §2.4, the
+    /// transpose-on-read engine). The ONE on-device op a new SNP-major format needs;
+    /// after it the entire downstream genotype pipeline is UNCHANGED (it only ever
+    /// sees the canonical tile). Three steps fused in one pass:
+    ///   1. GATHER + REORDER — output column g reads SOURCE individual row
+    ///      view.sel_rows[g] (the IndPartition selection in pop-contiguous Q/V/N
+    ///      order); the SNP-major source interleaves ALL individuals per SNP byte, so
+    ///      the selection is output-driven here (the axis-swapped TGENO gather).
+    ///   2. ENCODING — each native 2-bit code is mapped to the canonical raw-value
+    ///      convention (view.encoding; P0 PACKEDANCESTRYMAP = IDENTITY).
+    ///   3. TRANSPOSE + RE-PACK — the codes pack MSB-first into the canonical
+    ///      individual-major byte (gathered individual g, SNP s at byte s/4 pos s%4).
+    /// rlen-floor (format-readers.md §3.4): individuals are bounded by the EXPLICIT
+    /// sel_rows (each < n_ind), so a small-n_ind GENO record's PADDING bytes beyond
+    /// ceil(n_ind/4) are never read as phantom individuals.
+    ///
+    /// INTEGER/BIT-EXACT (the M-FR-1 gate): the transpose is pure 2-bit unpack +
+    /// remap + MSB-first re-pack (no FP, no reduction, no precision lane — the
+    /// emulated-FP64 policy is matmul-only and does NOT apply; format-readers.md
+    /// §2.2). The CUDA backend's device transpose is bit-identical to this host-loop
+    /// ORACLE BY CONSTRUCTION (same core::genotype_code extractor, same encoding,
+    /// same packer); the M-FR-1 unit gate asserts GPU == CPU == expected (memcmp==0),
+    /// and the M-FR-2 Tier-1 gate asserts the PA path == the TGENO tile of the SAME
+    /// data (memcmp==0).
+    ///
+    /// NON-PURE with a CUDA-FREE base default (the host nested loop over the shared
+    /// `core` decode primitive — `core` is a base layer, always available). The CUDA
+    /// backend OVERRIDES this with launch_transpose_to_canonical (one thread per
+    /// output byte on the uploaded source); the CpuBackend inherits this base as its
+    /// reference oracle, and any GPU-free fake gets the correct result with no
+    /// override. The base body IS the oracle the GPU is diffed against.
+    [[nodiscard]] virtual CanonicalTile transpose_to_canonical(
+        const SnpMajorTileView& view) {
+        CanonicalTile out;
+        out.n_snp = view.n_snp;
+        out.n_individuals = view.n_individuals;
+        // ceil(n_snp/4) — the canonical output record stride (the SAME formula
+        // io::packed_bytes / read_tile derives; spelled via core::kCodesPerByte so the
+        // device twin and this oracle cannot drift on the radix).
+        const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
+        out.bytes_per_record =
+            view.n_snp == 0 ? 0 : (view.n_snp + cpb - 1) / cpb;
+        // Copy the partition straight onto the tile (the transpose does not touch it).
+        if (view.pop_offsets != nullptr && view.n_pop >= 0) {
+            out.pop_offsets.assign(
+                view.pop_offsets,
+                view.pop_offsets + static_cast<std::size_t>(view.n_pop) + 1u);
+        }
+        const std::size_t total = view.n_individuals * out.bytes_per_record;
+        out.packed.assign(total, std::uint8_t{0});
+        if (total == 0) return out;  // empty tile (no individuals or no SNPs)
+
+        // ONE pass per output byte (g, b): assemble the <=4 canonical codes of output
+        // SNPs {4b..4b+3} for gathered individual g by gathering+encoding from the
+        // SNP-major source, then MSB-first re-pack — the literal port of the device
+        // transpose_to_canonical_kernel (so they are bit-identical).
+        for (std::size_t g = 0; g < view.n_individuals; ++g) {
+            const std::size_t src_row = view.sel_rows[g];
+            const std::size_t src_byte_in_snp = src_row / cpb;  // source byte holding src_row
+            const int src_pos = static_cast<int>(src_row % cpb);  // its in-byte position
+            for (std::size_t b = 0; b < out.bytes_per_record; ++b) {
+                std::uint8_t packed = 0;
+                const std::size_t s0 = b * cpb;
+                for (int k = 0; k < core::kCodesPerByte; ++k) {
+                    const std::size_t s = s0 + static_cast<std::size_t>(k);
+                    if (s >= view.n_snp) break;  // partial last byte: remaining SNPs are 0
+                    const std::uint8_t src_byte =
+                        view.snp_major[s * view.src_bytes_per_record + src_byte_in_snp];
+                    const std::uint8_t code = core::genotype_code(src_byte, src_pos);
+                    // P0 encoding is IDENTITY; later formats remap here (the device twin
+                    // does the same switch). Kept explicit so the seam stays format-ready.
+                    std::uint8_t canon = code;
+                    switch (view.encoding) {
+                        case TileEncoding::Identity:
+                        default:
+                            canon = code;
+                            break;
+                    }
+                    const int shift =
+                        (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;  // 6,4,2,0
+                    packed = static_cast<std::uint8_t>(
+                        packed | static_cast<std::uint8_t>(canon << shift));
+                }
+                out.packed[g * out.bytes_per_record + b] = packed;
+            }
+        }
+        return out;
     }
 
     /// DEVICE-RESIDENT decode + AUTOSOME compaction (the host-compute audit C1/C2/

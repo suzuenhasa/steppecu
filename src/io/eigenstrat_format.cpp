@@ -105,17 +105,26 @@ GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noe
 
     h.n_ind = counts[0];
     h.n_snp = counts[1];
-    h.header_bytes = kGenoHeaderBytes;
 
     if (h.format == GenoFormat::Tgeno) {
-        // Individual-major: one record per individual, ceil(n_snp/4) bytes.
+        // Individual-major: one record per individual, ceil(n_snp/4) bytes. The
+        // TGENO header is a FIXED kGenoHeaderBytes (48) leading record (verified
+        // empirically: v66 file_size - n_ind*ceil(n_snp/4) == 48).
+        h.header_bytes = kGenoHeaderBytes;
         h.n_records = h.n_ind;
         h.bytes_per_record = packed_bytes(h.n_snp);
     } else {
-        // SNP-major PACKEDANCESTRYMAP: one record per SNP, with the rlen floor
-        // of kGenoHeaderBytes (EIGENSOFT: rlen = max(48, ceil(n_ind/4))).
-        h.n_records = h.n_snp;
+        // SNP-major PACKEDANCESTRYMAP/GENO: one record per SNP, with the EIGENSOFT
+        // rlen floor rlen = max(48, ceil(n_ind/4)). The HEADER occupies one FULL
+        // rlen-width record (NOT a fixed 48): EIGENSOFT writes the header into a
+        // record-stride-wide leading row, so header_bytes == bytes_per_record. For
+        // a small-n_ind dataset this is 48; for v66 (n_ind=27594) it is 6899 —
+        // verified empirically (file_size - n_snp*6899 == 6899). Hard-coding 48
+        // here mis-seeks every GENO record by (rlen-48) and breaks the GENO read
+        // (the TGENO path is unaffected: its header genuinely is 48).
         h.bytes_per_record = std::max(kGenoHeaderBytes, packed_bytes(h.n_ind));
+        h.header_bytes = h.bytes_per_record;
+        h.n_records = h.n_snp;
     }
     return h;
 }

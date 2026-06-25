@@ -76,6 +76,24 @@ set(STEPPE_AADR_ROOT "/workspace/data/aadr"
     CACHE PATH "AADR data root (contains raw/ TGENO triple + derived_acc/ oracle)")
 add_test(NAME decode_equivalence COMMAND test_decode_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- M-FR-1 transpose+gather+encoding primitive gate (DUAL) -------------------
+# CUDA TU: the SNP-major -> canonical individual-major transpose primitive
+# (format-readers.md M-FR-1). (A) a SYNTHETIC small SNP-major tile + a KNOWN
+# expected individual-major output asserts GPU==CPU==expected (memcmp==0), covering
+# the rlen-floor padding + selection/reorder + partial-last-byte edge cases real
+# AADR cannot exercise; (B) the convertf-PA (GENO, SNP-major) first-K-SNP x all-inds
+# slice transposes byte-identical (memcmp==0) to the raw TGENO (individual-major)
+# slice of the SAME data via the existing read_tile — same data two ways, the
+# strongest check. Integer/bit-only (no float, no tolerance, no oracle file). The
+# REAL part SKIPs exit-0 if the AADR root is absent. Self-checking main() (not a
+# GoogleTest TU); CTest gates on the exit code. Links steppe::io (the readers) +
+# steppe::device (both transpose backends).
+add_executable(test_transpose_canonical reference/test_transpose_canonical.cu)
+target_link_libraries(test_transpose_canonical
+    PRIVATE steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_transpose_canonical PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME transpose_canonical COMMAND test_transpose_canonical "${STEPPE_AADR_ROOT}")
+
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
 # the SHARED assign_blocks, computes the per-block f2 tensor via the production
