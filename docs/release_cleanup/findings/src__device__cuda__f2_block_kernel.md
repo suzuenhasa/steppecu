@@ -1,0 +1,13 @@
+# src__device__cuda__f2_block_kernel
+Files: /home/suzunik/steppe/src/device/cuda/f2_block_kernel.cu, /home/suzunik/steppe/src/device/cuda/f2_block_kernel.cuh
+Subsystem: device-cuda
+
+## Findings
+
+### G12 launch config & indexing
+- [G12.task][LOW] f2_block_kernel.cu:355 — `launch_f2_feeder` derives `grid.x` as `cdiv(M, 16)` and casts the `long` result to `unsigned`. At the documented SCALE (M~584131 → cdiv≈36509) this is safe, and x is the 2^31 axis by design (X-7/B6), but the cast to a 32-bit `unsigned` is the same width-narrowing class flagged elsewhere: there is no assert that `cdiv(M,16) <= UINT_MAX` here, unlike the `M <= INT_MAX` guard in `run_f2_gemms:384`. The feeder itself is fine for any realistic M (overflow needs M > ~6.8e10 SNPs), so this is informational only. Suggested: rely on the same upstream `M <= INT_MAX` guard documented at the feeder precondition (cuh:36) — already implied, no code change needed; note for completeness.
+
+### G18 correctness traps
+- [G18.task][LOW] f2_block_kernel.cu:129-131 — `f2_feeder_kernel` maps the grid transposed-in-block (s = blockIdx.x·blockDim.x + threadIdx.y; i = blockIdx.y·blockDim.y + threadIdx.x) and relies on the block being SQUARE (kCdivBlock×kCdivBlock = 16×16) for the bounds/coverage to be correct. This is correct today (verified: square block, `if (i >= P || s >= M) return` guards both axes, full coverage of M and P), but the correctness silently depends on `block.x == block.y`; a future non-square edit to either `launch_f2_feeder:354` or `kCdivBlock` would break SNP/pop coverage with no assert. The kernel comment (105-115) explains the intent but does not state the square-block dependency as a hard precondition. Suggested: add a one-line static/comment precondition that blockDim.x == blockDim.y is required by the transposed index map (identify-only; no edit).
+
+No other issues found (groups checked: G2-G10, G11-G22). Notable clean points: all kernel read-only pointers carry `const __restrict__` (G11); both kernels have idx<extent bounds guards and use no shared memory, so no `__syncthreads`/warp-sync hazard (G18); both launches are followed by `STEPPE_CUDA_CHECK_KERNEL()` and all cuBLAS calls are `CUBLAS_CHECK`-wrapped (G13); grid math routes through the single `cdiv`/`grid_for` home with the `long` overload on the SNP axis (G5/G12); `kF2StackedBlocks`/`kCdivBlock` are named constants from the shared headers, not magic literals (G5); the `M <= INT_MAX` narrowing at run_f2_gemms:384 is asserted (G4); `double`/native-FP64 throughout the feeder and assemble is the intentional §12 policy (not flagged); the one-shot capability-tag uses a thread-safe `std::atomic_flag` and the one warn sink (G19/G8 clean).

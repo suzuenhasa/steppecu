@@ -1,0 +1,16 @@
+# src__core__fstats__f2_blocks_multigpu_core
+Files: /home/suzunik/steppe/src/core/fstats/f2_blocks_multigpu_core.cpp, /home/suzunik/steppe/src/core/fstats/f2_blocks_multigpu_core.hpp
+Subsystem: core-stats
+
+## Findings
+
+### G7
+- [G7.task][LOW] f2_blocks_multigpu_core.cpp:193-199, 226-232, 259-266 — The three public entries (`compute_multigpu_partials`, `_resident`, `_into`) are now near-identical thin wrappers: each is a `const std::size_t G = shards.size();` (only the first two use G), a pre-sized result vector, and a single `fan_out_shards(Q, V, N, partition, shards, lambda)` call where the lambda differs only by the trailing seam call. The shared `fan_out_shards` already captures the bulk of the dedup (correctly); the residual three-way boilerplate is the seam-lambda wrapper. Marginal — extracting further would obscure the three distinct seam signatures/return shapes, so likely not worth it. Suggested: leave as-is, or note that the remaining structural similarity is intentional (three distinct result contracts). Honest LOW.
+
+### G3
+- [G3.task][LOW] f2_blocks_multigpu_core.cpp:209 and 163 — `const std::size_t G = shards.size();` is computed in `compute_multigpu_partials` (163) and `_resident` (209) only to size the `partials(G)` vector; it is otherwise unused (the loop lives inside `fan_out_shards`). This is fine/idiomatic, but worth noting `G` is a single-use local that could inline as `std::vector<...> partials(shards.size());`. Cosmetic. Suggested: optionally inline `shards.size()` at the vector construction.
+
+## Notes (verified clean, no finding)
+- G4 (numeric/overflow at scale): `col_off` (cpp:97-98) correctly widens both `P` (int) and `s0` (long) to `std::size_t` BEFORE multiplying, so the column byte-offset cannot overflow at P~2500 / M~584k. `block_id_local` length cast (cpp:108-109) and the `M_local`/`s0+k` index casts (cpp:110-112) operate on `long` SNP counts with `long` loop counter `k`; no 32-bit truncation. `n_block_local = sh.b1 - sh.b0` as `int` (cpp:89) is safe (n_block ~757). The `M < 0 ? 0` and `s0 < 0 ? 0` / `M_local < 0 ? 0` clamps are deliberate belt-and-suspenders against malformed negative ranges feeding unsigned widening — correct, not redundant.
+- G2/G5/G6/G8/G9/G10: clean. No deprecated APIs (host-pure, CUDA-free by design — confirmed: only ComputeBackend seam + CUDA-free plan/partial types referenced). No magic numbers (offsets are `P*s0` semantics, documented). Naming is explicit and consistent (`Qg/Vg/Ng`, `block_id_local`, `n_block_local`, `col_off`, `worker_errors`). Comments are extensive but accurate and rationale-bearing (the §12 parity-neutrality, jthread std::terminate hazard, reserve-to-avoid-realloc, exception_ptr first-error rethrow) — no stale/orphan TODO/FIXME. `worker_errors(G)` is value-initialized to nullptr (cpp:74, documented); `workers.reserve(G)` (cpp:81) prevents reallocation that would move not-yet-joined threads — correctly reasoned. `G` and locals declared at first use.
+- This is a host-pure (.cpp/.hpp, is_cuda=false) unit; G11-G22 not applicable. The std::jthread fan-out + exception_ptr capture + RAII join-barrier pattern is sound: each worker writes only its own pre-sized slot (no shared mutable state), and the join (jthread dtors at cpp:122) is the happens-before barrier before reading `worker_errors`.

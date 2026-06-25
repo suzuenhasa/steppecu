@@ -1,0 +1,13 @@
+# src__device__cuda__decode_compact_kernel
+Files: /home/suzunik/steppe/src/device/cuda/decode_compact_kernel.cu, /home/suzunik/steppe/src/device/cuda/decode_compact_kernel.cuh
+Subsystem: device-cuda
+
+## Findings
+
+### G5
+- [G5.src__device__cuda__decode_compact_kernel][LOW] decode_compact_kernel.cu:155 — Block dims `bx=32, by=8` are inline magic numbers re-derived here, while the design comment (lines 152-154) explicitly ties this kernel to "the same shape family as the decode kernel," which surfaces those edges as named constants `kDecodeBlockX`/`kDecodeBlockY` (launch_config.hpp:112). Duplicating the literals (32, 8) in a second file is a drift risk: if the decode kernel's tile shape is retuned, this gather silently diverges. Suggested: reuse the shared named decode-block constants (or define a local `constexpr` pair) instead of bare 32/8. (The `32` here is genuinely the warp/coalescing edge, not ambiguous.)
+
+### G18
+- [G18.src__device__cuda__decode_compact_kernel][LOW] decode_compact_kernel.cu:102-104 — `compact_columns_gather_kernel` maps the SNP axis onto `blockIdx.x * blockDim.y` and the pop axis onto `blockIdx.y * blockDim.x` (x↔y blockDim swap between the two axes). This is internally CONSISTENT with the launcher (`grid_x = cdiv(M, by)` at :156, `grid.y = grid_for(P, bx)` at :163, `block = dim3(bx, by)` at :161), so it is correct and coalesced — verified, NOT a bug. Flagged only as a readability/foot-gun trap: the crossed `blockDim.y`-for-x / `blockDim.x`-for-y indexing is easy to "fix" into a real OOB during future edits. Suggested: a one-line comment in the kernel noting the deliberate x/y swap (pop rides threadIdx.x for coalescing, SNP rides threadIdx.y).
+
+No other issues found (groups checked: G2-G10, G11-G22). Notes on the things that look suspect but are correct: int-index widening at P~2500/M~584k scale is handled — `src`/`dst` cast to `size_t` (:106-110) and the SNP linear index `s` is `long` (:41,:65,:102); the `keep_idx` exclusive-scan position is `long` (:100). Launch error handling is complete (`STEPPE_CUDA_CHECK_KERNEL()` after every launch: :127,:144,:166). All read-only kernel pointers carry `const __restrict__`. Grid-x SNP-axis over-limit is guarded by `STEPPE_ASSERT`/`kMaxGridX` in all three wrappers. No allocations/streams/handles are owned here (non-owning views; RAII N/A). The per-pop `Σ` loop in `regimeb_keep_mask_kernel` (:83) running sequentially per-thread is the DELIBERATE §12 fixed-order reduction, not a perf/divergence bug. The `flags[s]==0` early-return (:105) is warp-uniform (all 32 lanes share `s`), so no intra-warp divergence.
