@@ -37,6 +37,7 @@
 #include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the M4 deliverable)
 #include "steppe/qpadm.hpp"         // steppe::QpAdmOptions (CUDA-free; the fit seam config)
 #include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
+#include "core/internal/decode_af.hpp"  // genotype_code / kHeterozygousGenotypeCode / kPloidyDetectSnps (M-FR-0 base ploidy default)
 #include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
 #include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
 #include "device/device_decode_result.hpp"  // steppe::device::DeviceDecodeResult (CUDA-free opaque autosome-compacted Q/V resident handle)
@@ -397,6 +398,24 @@ struct DecodeTileView {
     /// The uniform fallback ploidy when `sample_ploidy == nullptr` (2 diploid / 1
     /// pseudo-haploid). Default 2 (diploid). With `sample_ploidy` set this is unused.
     int ploidy = 2;
+
+    /// ON-DEVICE PLOIDY PREPASS request (M-FR-0, the L2 host-compute fix). When TRUE
+    /// AND `sample_ploidy == nullptr`, the backend derives the per-sample ploidy
+    /// ITSELF, in lockstep with the decode, from the SAME packed bytes — the CUDA
+    /// backend runs a one-thread-per-individual GPU prepass on the uploaded d_packed
+    /// (launch_detect_ploidy), the CpuBackend runs the host io::detect_sample_ploidy
+    /// ORACLE — instead of the caller doing the host scan up front. Bit-identical to
+    /// the host detector by construction: it is a literal port of the host loop using
+    /// the SAME core::genotype_code / kHeterozygousGenotypeCode / kPloidyDetectSnps
+    /// primitives (scan the first min(kPloidyDetectSnps, n_snp) SNPs of each sample;
+    /// a het call ⇒ diploid, else pseudo-haploid). This is the GPU-FIRST path: the
+    /// ploidy detection moves on-device, off the host critical path.
+    ///
+    /// IGNORED when `sample_ploidy != nullptr` (an explicit per-sample vector always
+    /// wins) and FALSE by default (the legacy paths that set `sample_ploidy` or rely
+    /// on the uniform `ploidy` are bit-unchanged). This flag is CUDA-FREE (a plain
+    /// bool); the GPU prepass it triggers is PRIVATE to steppe_device.
+    bool detect_ploidy_on_device = false;
 };
 
 /// Output of a genotype-decode: the Q/V/N contract as plain column-major [P × M]
@@ -752,6 +771,49 @@ public:
     ///         (N, V integer-valued ⇒ zero diff; Q via integer-accumulate AC/AN +
     ///         single FP64 divide ⇒ exact is the goal/gate).
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
+
+    /// PER-SAMPLE PLOIDY PREPASS (M-FR-0, the L2 host-compute fix) — derive the
+    /// AT2 adjust_pseudohaploid per-sample ploidy vector for `tile` and RETURN it as
+    /// a host int vector of length tile.n_individuals (parallel to the gathered sample
+    /// axis; 2 diploid / 1 pseudo-haploid). The CUDA backend OVERRIDES this with the
+    /// GPU prepass (launch_detect_ploidy, one thread per individual, on the uploaded
+    /// d_packed) and copies the result to host; the CpuBackend runs the same host scan
+    /// ORACLE. Bit-identical across backends BY CONSTRUCTION (a literal port of the host
+    /// loop over the SAME core decode primitives — this BASE default IS that port, so a
+    /// non-overriding fake inherits the identical result). This is the standalone entry
+    /// the prepass is exposed through (decode_af / the resident paths run it INTERNALLY
+    /// when tile.detect_ploidy_on_device is set); the M-FR-0 bit-parity gate compares
+    /// the CUDA device vector against io::detect_sample_ploidy on a real-AADR Auto tile.
+    ///
+    /// NON-PURE with a CUDA-FREE base default (the host scan over the shared core
+    /// decode primitives — `core` is a base layer, always available): unlike the
+    /// resident GPU methods (which throw because they need a CUDA backend), the ploidy
+    /// scan is a pure integer/bit operation expressible host-side, so the base provides
+    /// the correct fallback and the test fakes need no override.
+    [[nodiscard]] virtual std::vector<int> detect_sample_ploidy_device(
+        const DecodeTileView& tile) {
+        std::vector<int> ploidy(tile.n_individuals, core::kPloidyPseudoHaploid);
+        const std::size_t window =
+            (static_cast<std::size_t>(core::kPloidyDetectSnps) < tile.n_snp)
+                ? static_cast<std::size_t>(core::kPloidyDetectSnps)
+                : tile.n_snp;
+        if (window == 0 || tile.n_individuals == 0) return ploidy;
+        for (std::size_t g = 0; g < tile.n_individuals; ++g) {
+            const std::uint8_t* rec = tile.packed + g * tile.bytes_per_record;
+            for (std::size_t s = 0; s < window; ++s) {
+                const std::size_t byte_in_rec =
+                    s / static_cast<std::size_t>(core::kCodesPerByte);
+                const int pos_in_byte =
+                    static_cast<int>(s % static_cast<std::size_t>(core::kCodesPerByte));
+                if (core::genotype_code(rec[byte_in_rec], pos_in_byte) ==
+                    core::kHeterozygousGenotypeCode) {
+                    ploidy[g] = core::kPloidyDiploid;
+                    break;
+                }
+            }
+        }
+        return ploidy;
+    }
 
     /// DEVICE-RESIDENT decode + AUTOSOME compaction (the host-compute audit C1/C2/
     /// M3/M4 cure for the regime-(A) consumers qpfstats / dstat). Decodes the tile

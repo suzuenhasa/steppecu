@@ -248,6 +248,57 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[gpu vs cpu]   max|Δ| Q=%.3e V=%.3e N=%.3e  %s\n",
                  dQ_gc, dV_gc, dN_gc, gc_exact ? "EXACT (PASS)" : "MISMATCH (FAIL)");
 
+    // ---- (2b) M-FR-0: ON-DEVICE PLOIDY PREPASS bit-parity (the L2 host-compute fix) -
+    // Placed HERE (before the numpy-oracle section, which std::exit()s if the derived_acc
+    // fixture is absent) so the on-device-ploidy gate exercises the real-AADR Auto tile
+    // sections (1)/(2) already loaded. (1) the on-device ploidy vector (launch_detect_ploidy
+    // via the GPU backend) MUST equal the host io::detect_sample_ploidy vector BIT-FOR-BIT
+    // (integer/bit ops — no precision lane, so equality is exact by construction); (2) the
+    // FLAG-DRIVEN decode (sample_ploidy=nullptr + detect_ploidy_on_device=true) must
+    // reproduce the explicit-vector decode bit-for-bit on BOTH backends — proving the inline
+    // prepass feeds the decode identically to the eager host scan it replaces.
+    {
+        // (2b-i) device-detected ploidy == host io::detect_sample_ploidy, BIT-EXACT.
+        // sample_ploidy IS io::detect_sample_ploidy(tile) (set at the view above), so this
+        // diffs the device/oracle prepass directly against the io-leaf host detector.
+        DecodeTileView pv = view;
+        pv.sample_ploidy = nullptr;
+        pv.detect_ploidy_on_device = true;
+        const std::vector<int> ploidy_gpu = gpu->detect_sample_ploidy_device(pv);
+        const std::vector<int> ploidy_cpu = cpu->detect_sample_ploidy_device(pv);
+        const bool ploidy_parity =
+            (ploidy_gpu.size() == sample_ploidy.size()) &&
+            (ploidy_cpu.size() == sample_ploidy.size()) &&
+            (std::memcmp(ploidy_gpu.data(), sample_ploidy.data(),
+                         sample_ploidy.size() * sizeof(int)) == 0) &&
+            (std::memcmp(ploidy_cpu.data(), sample_ploidy.data(),
+                         sample_ploidy.size() * sizeof(int)) == 0);
+        if (!ploidy_parity) ++failures;
+        std::fprintf(stderr,
+                     "[m-fr-0 ploidy] on-device == host detect_sample_ploidy (n=%zu): %s\n",
+                     sample_ploidy.size(), ploidy_parity ? "BIT-EXACT (PASS)" : "MISMATCH (FAIL)");
+
+        // (2b-ii) the FLAG-driven decode == the explicit-vector decode, BIT-EXACT, on the
+        // GPU (the prepass runs inside decode_af_resident; dec_gpu used the explicit host
+        // vector above) and on the CPU oracle (the host-scan flag path).
+        const DecodeResult dec_gpu_flag = gpu->decode_af(pv);
+        const DecodeResult dec_cpu_flag = cpu->decode_af(pv);
+        const bool gpu_flag_ok =
+            (max_abs_diff(dec_gpu_flag.q, dec_gpu.q) == 0.0) &&
+            (max_abs_diff(dec_gpu_flag.v, dec_gpu.v) == 0.0) &&
+            (max_abs_diff(dec_gpu_flag.n, dec_gpu.n) == 0.0);
+        const bool cpu_flag_ok =
+            (max_abs_diff(dec_cpu_flag.q, dec_cpu.q) == 0.0) &&
+            (max_abs_diff(dec_cpu_flag.v, dec_cpu.v) == 0.0) &&
+            (max_abs_diff(dec_cpu_flag.n, dec_cpu.n) == 0.0);
+        if (!gpu_flag_ok) ++failures;
+        if (!cpu_flag_ok) ++failures;
+        std::fprintf(stderr,
+                     "[m-fr-0 decode] flag-driven == explicit-vector decode: GPU %s, CPU %s\n",
+                     gpu_flag_ok ? "EXACT (PASS)" : "MISMATCH (FAIL)",
+                     cpu_flag_ok ? "EXACT (PASS)" : "MISMATCH (FAIL)");
+    }
+
     // ---- (3) Both vs the numpy oracle ---------------------------------------
     int Po = 0; long Mo = 0;
     std::vector<double> oQ, oV, oN;

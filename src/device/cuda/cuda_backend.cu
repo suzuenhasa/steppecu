@@ -99,6 +99,7 @@
 #include "device/cuda/device_decode_result_impl.cuh" // DeviceDecodeResult::Impl (the DeviceBuffer<double> q/v owners)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/decode_af_kernel.cuh" // launch_decode_af
+#include "device/cuda/detect_ploidy_kernel.cuh" // launch_detect_ploidy (M-FR-0: on-device AT2 per-sample ploidy prepass)
 #include "device/cuda/decode_compact_kernel.cuh" // launch_autosome_keep_mask / _compact_columns_gather (the device-resident decode seam)
 #include "device/cuda/dstat_kernel.cuh"     // launch_dstat_block_reduce (qpDstat Part B)
 #include "device/cuda/dates_kernel.cuh"     // DATES cuFFT autocorrelation LD engine kernels
@@ -1205,12 +1206,19 @@ public:
         DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
         DeviceBuffer<std::size_t> dOffsets(n_off);
 
-        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid): upload the per-sample vector
-        // when the caller supplied one (the auto-detect path); when NULL the kernel
-        // falls back to the uniform scalar tile.ploidy (the legacy all-diploid path),
-        // and we pass a null device pointer (no alloc/copy). A zero-length DeviceBuffer
-        // yields a null .data(), so the same handle serves both cases.
-        const bool have_sample_ploidy = (tile.sample_ploidy != nullptr);
+        // PER-SAMPLE ploidy (AT2 adjust_pseudohaploid). THREE cases (precedence in
+        // order): (1) an EXPLICIT per-sample vector — upload it; (2) tile.sample_ploidy
+        // NULL but detect_ploidy_on_device set (M-FR-0, the L2 on-device prepass) —
+        // DERIVE the per-sample ploidy on the GPU from the just-uploaded dPacked
+        // (launch_detect_ploidy, one thread/individual, the same packed bytes the decode
+        // reads), bit-identical to the host io::detect_sample_ploidy; (3) neither — the
+        // kernel falls back to the uniform scalar tile.ploidy (the legacy all-diploid
+        // path), a null device pointer (no alloc/copy). A zero-length DeviceBuffer yields
+        // a null .data(), so the same handle serves the no-ploidy case.
+        const bool explicit_sample_ploidy = (tile.sample_ploidy != nullptr);
+        const bool device_detect =
+            (!explicit_sample_ploidy && tile.detect_ploidy_on_device);
+        const bool have_sample_ploidy = explicit_sample_ploidy || device_detect;
         DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
 
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
@@ -1219,10 +1227,17 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
                                           n_off * sizeof(std::size_t),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        if (have_sample_ploidy) {
+        if (explicit_sample_ploidy) {
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSamplePloidy.data(), tile.sample_ploidy,
                                               tile.n_individuals * sizeof(int),
                                               cudaMemcpyHostToDevice, stream_.get()));
+        } else if (device_detect) {
+            // The L2 on-device prepass: scan dPacked (already in-flight on stream_; the
+            // kernel is enqueued AFTER the upload, so the ordering is correct) and write
+            // dSamplePloidy. Feeds launch_decode_af below in the SAME stream — no D2H.
+            launch_detect_ploidy(dPacked.data(), tile.bytes_per_record,
+                                 tile.n_individuals, tile.n_snp, dSamplePloidy.data(),
+                                 stream_.get());
         }
 
         // S0 unpack + S1 segmented reduction → Q/V/N (RESIDENT).
@@ -1260,6 +1275,33 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.v.data(), dV.data(), pm * sizeof(double),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.n.data(), dN.data(), pm * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        return out;
+    }
+
+    /// M-FR-0: the AT2 per-sample ploidy prepass ON THE GPU (the L2 host-compute fix).
+    /// Upload the packed tile, run launch_detect_ploidy (one thread/individual over the
+    /// SAME bytes decode_af reads), and D2H the [n_individuals] int ploidy vector. A
+    /// literal port of io::detect_sample_ploidy over the shared core decode primitives
+    /// — bit-identical to the host detector by construction (integer/bit ops). This is
+    /// the standalone entry; decode_af_resident runs the SAME prepass inline when the
+    /// tile sets detect_ploidy_on_device (no second upload there).
+    [[nodiscard]] std::vector<int> detect_sample_ploidy_device(
+        const DecodeTileView& tile) override {
+        guard_device();
+        std::vector<int> out(tile.n_individuals, core::kPloidyPseudoHaploid);
+        if (tile.n_individuals == 0) return out;
+        const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+        DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
+        DeviceBuffer<int> dPloidy(tile.n_individuals);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
+                                          packed_bytes * sizeof(std::uint8_t),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        launch_detect_ploidy(dPacked.data(), tile.bytes_per_record, tile.n_individuals,
+                             tile.n_snp, dPloidy.data(), stream_.get());
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.data(), dPloidy.data(),
+                                          tile.n_individuals * sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         return out;

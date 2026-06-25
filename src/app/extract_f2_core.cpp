@@ -33,7 +33,6 @@
 #include "io/geno_reader.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
-#include "io/ploidy_detect.hpp"   // detect_sample_ploidy (AT2 adjust_pseudohaploid)
 #include "io/snp_reader.hpp"
 #include "io/filter/snp_filter.hpp"
 
@@ -117,12 +116,20 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
+    // ---- 5. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
+    steppe::ComputeBackend& backend = *resources.gpus.front().backend;
+
     // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) -------
-    std::vector<int> sample_ploidy;
-    std::size_t n_ph = 0, n_dip = 0;
+    // M-FR-0 (the L2 host-compute fix): for AUTO, the per-sample ploidy detection moves
+    // ON-DEVICE — set DecodeTileView.detect_ploidy_on_device so the decode derives the
+    // ploidy ITSELF from the uploaded d_packed (the GPU prepass; the CpuBackend oracle
+    // runs the host scan), instead of the eager host io::detect_sample_ploidy here. The
+    // explicit PseudoHaploid/Diploid modes still fill a uniform vector (no detection).
+    std::vector<int> sample_ploidy;          // explicit modes only; EMPTY for Auto.
+    bool detect_on_device = false;
     switch (ploidy) {
         case ExtractPloidy::Auto:
-            sample_ploidy = io::detect_sample_ploidy(tile);
+            detect_on_device = true;         // the on-device prepass drives the decode.
             break;
         case ExtractPloidy::PseudoHaploid:
             sample_ploidy.assign(tile.n_individuals, kPloidyPseudoHaploid);
@@ -131,10 +138,6 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             sample_ploidy.assign(tile.n_individuals, kPloidyDiploid);
             break;
     }
-    for (int pl : sample_ploidy) (pl == kPloidyPseudoHaploid ? n_ph : n_dip)++;
-
-    // ---- 5. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
-    steppe::ComputeBackend& backend = *resources.gpus.front().backend;
 
     DecodeTileView view;
     view.packed = tile.packed.data();
@@ -143,8 +146,20 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     view.n_individuals = tile.n_individuals;
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = P;
-    view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = kPloidyDiploid;  // unused (sample_ploidy non-null); the safe default.
+    view.sample_ploidy = sample_ploidy.empty() ? nullptr : sample_ploidy.data();
+    view.detect_ploidy_on_device = detect_on_device;  // M-FR-0: Auto ⇒ on-device prepass.
+    view.ploidy = kPloidyDiploid;  // uniform fallback (unused when a vector/flag is set).
+
+    // The pseudo-haploid/diploid REPORT counts (observability). For the explicit modes
+    // the vector is in hand; for AUTO the prepass runs inside the decode, so derive the
+    // counts from the backend's on-device prepass (the SAME launch_detect_ploidy; one
+    // cheap [n_individuals] pass) — the GPU-first source, never the eager host scan.
+    // This is a SEPARATE local so it never disturbs view.sample_ploidy (which stays
+    // nullptr for Auto — the decode's detect_ploidy_on_device flag is what drives it).
+    std::size_t n_ph = 0, n_dip = 0;
+    const std::vector<int> ploidy_for_counts =
+        detect_on_device ? backend.detect_sample_ploidy_device(view) : sample_ploidy;
+    for (int pl : ploidy_for_counts) (pl == kPloidyPseudoHaploid ? n_ph : n_dip)++;
 
     // THE maxmiss SEMANTIC (cmd_extract_f2.cpp:358-416): the AT2 extract_f2 maxmiss is the
     // POPULATION-axis coverage test, applied SEPARATELY; the sample-axis geno_max_missing is

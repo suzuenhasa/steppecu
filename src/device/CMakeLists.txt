@@ -25,6 +25,7 @@ add_library(steppe_device STATIC
     cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
     cuda/qpgraph_fit_kernels.cu   # qpGraph: the on-device IDEA-1 fleet (one thread/restart; the path-table fill_pwts + GLS objective + NNLS edge solve)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
+    cuda/detect_ploidy_kernel.cu  # M-FR-0: on-device AT2 per-sample ploidy prepass (one thread/individual; the L2 host-compute fix)
     cuda/decode_compact_kernel.cu # device-resident decode seam: autosome keep-mask + [P×M] column gather (C2/M3/M4 cure)
     cuda/dstat_kernel.cu          # qpDstat Part B: per-block per-quadruple normalized-D reduction (the S2 divergence)
     cuda/dates_kernel.cu          # DATES: the cuFFT autocorrelation LD engine kernels (weight/residual/scatter + |F|²/cross-power + lag re-bin)

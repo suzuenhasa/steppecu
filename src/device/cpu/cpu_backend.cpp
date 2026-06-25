@@ -104,6 +104,41 @@ namespace {
     return pairwise_sum(a, h) + pairwise_sum(a + h, n - h);
 }
 
+/// M-FR-0 ORACLE: the AT2 per-sample ploidy prepass (the L2 host-compute fix), a
+/// LITERAL port of io::detect_sample_ploidy (src/io/ploidy_detect.cpp) over the SAME
+/// shared core decode primitives (core::genotype_code / kHeterozygousGenotypeCode /
+/// kPloidyDetectSnps — which the io constants mirror by construction). Scans the first
+/// min(kPloidyDetectSnps, n_snp) SNPs of each gathered individual's packed record for a
+/// het call; 2 (diploid) on the first het, else 1 (pseudo-haploid). Implemented HERE
+/// over `core::` (NOT a call to io::detect_sample_ploidy) so the CpuBackend keeps the
+/// §4 layering — `device` does not depend on the `io` leaf — while staying bit-identical
+/// to the io detector (same primitives, same window, same MSB-first byte layout). This
+/// is the CpuBackend ORACLE behind DecodeTileView.detect_ploidy_on_device; the test gate
+/// diffs the CUDA device vector against io::detect_sample_ploidy directly.
+[[nodiscard]] std::vector<int> detect_ploidy_host(const DecodeTileView& tile) {
+    std::vector<int> ploidy(tile.n_individuals, core::kPloidyPseudoHaploid);
+    const std::size_t window =
+        (static_cast<std::size_t>(core::kPloidyDetectSnps) < tile.n_snp)
+            ? static_cast<std::size_t>(core::kPloidyDetectSnps)
+            : tile.n_snp;
+    if (window == 0 || tile.n_individuals == 0) return ploidy;
+    for (std::size_t g = 0; g < tile.n_individuals; ++g) {
+        const std::uint8_t* rec = tile.packed + g * tile.bytes_per_record;
+        for (std::size_t s = 0; s < window; ++s) {
+            const std::size_t byte_in_rec =
+                s / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos_in_byte =
+                static_cast<int>(s % static_cast<std::size_t>(core::kCodesPerByte));
+            if (core::genotype_code(rec[byte_in_rec], pos_in_byte) ==
+                core::kHeterozygousGenotypeCode) {
+                ploidy[g] = core::kPloidyDiploid;
+                break;
+            }
+        }
+    }
+    return ploidy;
+}
+
 /// S7 SE ORACLE — sample-covariance DIAGONAL of an (nrows × ncols) row-major data
 /// matrix `w` (w[i*ncols + c]), matching R's cov(): divides by (nrows - 1), columns
 /// are the variables. Returns the ncols-length diagonal (the only part SE needs).
@@ -415,6 +450,20 @@ public:
 
         if (P <= 0 || M <= 0) return out;
 
+        // M-FR-0 PER-SAMPLE PLOIDY resolution (the L2 host-compute fix). Precedence:
+        // (1) an EXPLICIT tile.sample_ploidy wins; (2) else detect_ploidy_on_device set
+        // ⇒ run the host ORACLE prepass (detect_ploidy_host, bit-identical to
+        // io::detect_sample_ploidy over the shared core primitives) and use it; (3) else
+        // the uniform scalar tile.ploidy. `eff_ploidy` (when non-null) is the per-sample
+        // source the inner loop reads — so the on-device flag and an explicit vector both
+        // route through ONE accumulation, byte-identical to the GPU path's resolution.
+        std::vector<int> detected;
+        const int* eff_ploidy = tile.sample_ploidy;
+        if (eff_ploidy == nullptr && tile.detect_ploidy_on_device) {
+            detected = detect_ploidy_host(tile);
+            eff_ploidy = detected.data();
+        }
+
         // One (population, SNP) entry at a time; reduce over the population's
         // individual segment. Column-major [P × M]: element (i, s) at i + P·s.
         for (int i = 0; i < P; ++i) {
@@ -432,11 +481,12 @@ public:
                     const std::uint8_t byte =
                         tile.packed[g * tile.bytes_per_record + byte_in_rec];
                     const std::uint8_t code = core::genotype_code(byte, pos_in_byte);
-                    // PER-SAMPLE ploidy: the per-sample vector when present, else the
+                    // PER-SAMPLE ploidy: the resolved per-sample vector when present
+                    // (explicit OR the M-FR-0 on-device-flag oracle prepass), else the
                     // uniform scalar fallback (the legacy all-diploid path). AT2
                     // adjust_pseudohaploid accumulation, shared with the GPU kernel.
-                    const int pl = (tile.sample_ploidy != nullptr)
-                                       ? tile.sample_ploidy[g]
+                    const int pl = (eff_ploidy != nullptr)
+                                       ? eff_ploidy[g]
                                        : tile.ploidy;
                     core::accumulate_genotype_ploidy(code, pl, ac, n);
                 }
@@ -450,6 +500,17 @@ public:
             }
         }
         return out;
+    }
+
+    /// M-FR-0 ORACLE: the AT2 per-sample ploidy prepass (the L2 host-compute fix) — the
+    /// CpuBackend reference the CUDA detect_sample_ploidy_device is diffed against.
+    /// Delegates to detect_ploidy_host (the literal port of io::detect_sample_ploidy over
+    /// the shared core primitives — same window, same het rule, same MSB-first layout),
+    /// keeping §4 layering (`device` does not include the `io` leaf) while staying
+    /// bit-identical to the io detector.
+    [[nodiscard]] std::vector<int> detect_sample_ploidy_device(
+        const DecodeTileView& tile) override {
+        return detect_ploidy_host(tile);
     }
 
     /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction REFERENCE oracle
