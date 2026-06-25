@@ -20,7 +20,7 @@ against ADMIXTOOLS 2 goldens on real AADR data.
 | **GPU** | CUDA-capable NVIDIA GPU, **Blackwell `sm_120`** (e.g. RTX 5090 / RTX PRO 6000). The shipped wheel is built for `sm_120`; rebuild with `STEPPE_CUDA_ARCH=<arch>` for another GPU. |
 | **CUDA** | **CUDA 13** runtime + a matching driver (verified green on toolkit 13.0). The runtime is resolved at load from your CUDA 13 install — it is **not** bundled in the wheel. |
 | **GPUs used** | **single-GPU** (`--device 0`). Multi-GPU is deferred; run single-GPU. |
-| **Input format** | **TGENO only** today (the individual-major `.geno`/`.snp`/`.ind` triple). PLINK / EIGENSTRAT / PACKEDANCESTRYMAP are planned. Transcode with `convertf` first, or precompute an f2 dir once and reuse it. |
+| **Input format** | **TGENO, PACKEDANCESTRYMAP/GENO, EIGENSTRAT, PLINK (`.bed`/`.bim`/`.fam`), and ANCESTRYMAP** — the format is auto-detected from the magic/extension of the `--prefix` triple. All decode bit-identically (validated against the TGENO decode on real AADR). f2 dirs (STPF2BK1) are cacheable and reusable; they are **not** AT2 `.rds`-compatible. |
 | **Python** | 3.9+. `numpy` is the only hard dependency; `pandas` is an optional/lazy dependency used only by the DataFrame accessors. |
 
 ---
