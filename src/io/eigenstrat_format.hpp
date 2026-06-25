@@ -166,14 +166,59 @@ inline constexpr int kFirstOtherChromCode = -1;
 // Header parse.
 // ---------------------------------------------------------------------------
 
-/// Which on-disk genotype layout a .geno file uses (its row axis + packing).
+/// Which on-disk genotype layout a .geno/.bed file uses (its row axis + packing).
 /// TGENO records are PACKED individual-major; GENO (PACKEDANCESTRYMAP) records
 /// are PACKED SNP-major. EIGENSTRAT is the ASCII SNP-major form: one TEXT line per
 /// SNP, one character per individual (0/1/2 reference-allele copies, 9 missing) —
 /// no packed magic, so it is detected from its leading ASCII content (M-FR-EIG).
-/// All three share the sibling .snp/.ind; EIGENSTRAT, like GENO, is SNP-major and
-/// reaches the canonical individual-major tile through the on-device transpose.
-enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat };
+/// PLINK is the .bed/.bim/.fam triple: the .bed is SNP-major 2-bit LSB-first behind
+/// the 3-byte magic 0x6c 0x1b 0x01 (M-FR PLINK); its geometry comes from the .bim
+/// (n_snp) / .fam (n_ind) line counts, and its 2-bit codes are remapped + bit-order
+/// flipped to canonical in the io-leaf gather (geno_reader read_plink_snp_major_tile).
+/// EIGENSTRAT/GENO/TGENO share the sibling .snp/.ind; PLINK uses .bim/.fam (plink_reader).
+/// EIGENSTRAT, GENO, and PLINK are all SNP-major and reach the canonical individual-
+/// major tile through the on-device transpose.
+enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat, Plink };
+
+// ---------------------------------------------------------------------------
+// PLINK .bed constants — the single home for the PLINK binary-genotype literals
+// (M-FR PLINK; format-readers.md §3.2). The .bed begins with a 3-byte magic
+// (0x6c 0x1b 0x01: the two "magic" bytes + the SNP-major mode byte 1), then SNP-major
+// records: one record per SNP, ceil(n_ind/4) bytes, 4 individuals/byte, LSB-FIRST
+// (sample 0 in bits 1-0 — the OPPOSITE of the canonical MSB-first packing). The io-leaf
+// gather reads each LSB-first 2-bit code, maps it through kBedToCanon, and re-packs it
+// MSB-first into the canonical SNP-major source, so the transpose runs Identity.
+// ---------------------------------------------------------------------------
+
+/// The 3 leading bytes of a PLINK .bed: 0x6c 0x1b then the mode byte. Byte 2 == 0x01
+/// is SNP-major (the only mode steppe reads); 0x00 would be individual-major (legacy,
+/// rejected).
+inline constexpr unsigned char kBedMagic0 = 0x6c;
+inline constexpr unsigned char kBedMagic1 = 0x1b;
+inline constexpr unsigned char kBedModeSnpMajor = 0x01;
+/// Bytes of leading .bed magic (the SNP records start at this offset).
+inline constexpr std::size_t kBedMagicBytes = 3;
+
+/// PLINK .bed 2-bit code -> canonical raw-value code (A1-COPIES == canonical ref copies,
+/// since ref := A1; format-readers.md §3.2). The .bed value v (read LSB-first within its
+/// byte, then taken as the plain 2-bit integer 00=0,01=1,10=2,11=3) maps:
+///   00 (0) = homozygous A1  = 2 A1-copies          -> canonical 2
+///   01 (1) = MISSING                                -> canonical 3 (kMissingCode)
+///   10 (2) = heterozygous   = 1 A1-copy             -> canonical 1 (kHetCode)
+///   11 (3) = homozygous A2  = 0 A1-copies           -> canonical 0
+/// This is the distinct PLINK encoding (its missing sentinel is 01, NOT 11) — it does
+/// NOT match the GENO/TGENO identity map. Single-homed here so the io-leaf gather and
+/// any future device twin share the ONE LUT.
+inline constexpr std::array<std::uint8_t, 4> kBedToCanon = {2, kMissingCode, kHetCode, 0};
+
+/// Extract the 2-bit PLINK .bed code for sample position `k` (0-based) within a packed
+/// byte, LSB-FIRST: sample 0 in bits 1-0, sample 1 in 3-2, sample 2 in 5-4, sample 3 in
+/// 7-6. This is the `(byte >> (2*(k mod 4))) & 3` rule — the OPPOSITE shift direction
+/// from code_in_byte (the canonical MSB-first extractor). The single PLINK bit-order site.
+[[nodiscard]] constexpr std::uint8_t bed_code_in_byte(std::uint8_t byte, int k) noexcept {
+    const int shift = (k % kCodesPerByte) * kBitsPerCode;  // 0,2,4,6 (LSB-first)
+    return static_cast<std::uint8_t>((byte >> shift) & kCodeMask);
+}
 
 // ---------------------------------------------------------------------------
 // EIGENSTRAT ASCII .geno constants — the single home for the text-genotype

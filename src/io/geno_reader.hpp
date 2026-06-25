@@ -137,6 +137,31 @@ public:
                                                              std::size_t snp_begin,
                                                              std::size_t snp_end);
 
+    /// PLINK .bed (SNP-major, 2-bit LSB-first) gather (M-FR PLINK). The binary twin of
+    /// read_snp_major_tile: read the .bed SNP records for SNPs [snp_begin, snp_end) — one
+    /// record per SNP, ceil(n_ind/4) bytes, 4 individuals/byte LSB-first — then NORMALIZE
+    /// each record into the canonical SNP-major 2-bit layout (record s = SNP s,
+    /// `packed_bytes(n_ind)` bytes, source individual i at byte i/4 MSB-first) by (a)
+    /// flipping the bit order LSB-first -> MSB-first AND (b) remapping the .bed code
+    /// through kBedToCanon (00->2, 01->3 missing, 10->1, 11->0 in A1-copies == canonical
+    /// ref copies, since ref := A1; format-readers.md §3.2). The result is the SAME
+    /// canonical SNP-major source read_snp_major_tile produces from raw GENO bytes, so the
+    /// app hands it to the SAME ComputeBackend::transpose_to_canonical with
+    /// TileEncoding::Identity (the LUT + bit-flip happen HERE, in the io-leaf gather, so
+    /// the transpose body and the encoding enum are untouched — the EIGENSTRAT precedent).
+    ///
+    /// The .bed magic (0x6c 0x1b 0x01) is consumed at construction (header_bytes ==
+    /// kBedMagicBytes == 3); each SNP record is at `kBedMagicBytes + s*bytes_per_record`.
+    /// REQUIRES snp_begin == 0 (the byte-aligned SNP prefix; a nonzero begin is the M5
+    /// tile loop). Keeps the SAME fail-fast guards as read_snp_major_tile (empty partition,
+    /// any selected row >= n_ind, the checked-multiply tile-size overflow, the short-read
+    /// throw). Throws std::runtime_error on a read error, an out-of-range SNP range, a
+    /// non-PLINK file (TGENO/GENO/EIGENSTRAT use their own readers), a malformed partition,
+    /// or a failed allocation — the SAME documented contract.
+    [[nodiscard]] SnpMajorTile read_plink_snp_major_tile(const IndPartition& part,
+                                                        std::size_t snp_begin,
+                                                        std::size_t snp_end);
+
     GenoReader(const GenoReader&) = delete;
     GenoReader& operator=(const GenoReader&) = delete;
     GenoReader(GenoReader&&) noexcept = default;

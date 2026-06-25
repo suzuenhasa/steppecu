@@ -23,6 +23,7 @@
 #include "core/config/exit_code.hpp"
 #include "app/result_emit.hpp"           // OutputFormat, parse_output_format
 #include "device/resources.hpp"          // CUDA-FREE: Resources, build_resources
+#include "io/genotype_source.hpp"        // io::resolve_genotype_triple (EIGENSTRAT-family vs PLINK --prefix)
 #include "steppe/dates.hpp"              // steppe::run_dates + DatesResult/DatesOptions
 #include "steppe/error.hpp"             // steppe::Status
 
@@ -95,9 +96,12 @@ int run_dates_command(const cfg::RunConfig& config) {
     }
 
     const std::string& prefix = config.qpdstat_prefix();
-    const std::string geno = prefix + ".geno";
-    const std::string snp = prefix + ".snp";
-    const std::string ind = prefix + ".ind";
+    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
+    // PLINK -> P.{bed,bim,fam}. run_dates pins the parser via the GenoReader ctor.
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+    const std::string& geno = triple.geno;
+    const std::string& snp = triple.snp;
+    const std::string& ind = triple.ind;
 
     steppe::DatesOptions opts;  // defaults == the reference par.dates the goldens used.
 

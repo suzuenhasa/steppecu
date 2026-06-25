@@ -17,6 +17,7 @@
 #include "core/config/exit_code.hpp"
 #include "steppe/config.hpp"              // kCentimorgansPerMorgan, Precision
 #include "device/resources.hpp"          // CUDA-FREE: Resources, build_resources
+#include "io/genotype_source.hpp"        // io::resolve_genotype_triple (EIGENSTRAT-family vs PLINK --prefix)
 #include "steppe/qpfstats.hpp"           // run_qpfstats + QpfstatsResult
 
 namespace steppe::app {
@@ -56,9 +57,12 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    const std::string geno = prefix + ".geno";
-    const std::string snp = prefix + ".snp";
-    const std::string ind = prefix + ".ind";
+    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
+    // PLINK -> P.{bed,bim,fam}. run_qpfstats pins the parser via the GenoReader ctor.
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+    const std::string& geno = triple.geno;
+    const std::string& snp = triple.snp;
+    const std::string& ind = triple.ind;
 
     // ---- 2. build_resources -> run_qpfstats (genotype-path, GPU device-resident) ----
     const double blgsize_morgans = config.blgsize_cm() / kCentimorgansPerMorgan;

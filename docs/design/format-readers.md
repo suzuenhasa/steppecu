@@ -431,7 +431,7 @@ inds × a few hundred SNPs, like `test_geno_reader.cpp`'s synthetic TGENO) — s
 | **M-FR-2** | P0 PA reader: SNP-major gather + dispatch; wire `read_tile` to accept GENO via transpose | Tier-1 `test_pa_decode_equivalence.cu` (`memcmp==0`) |
 | **M-FR-3** | PA wiring proof: PA-prefix variants of `cli_dstat_geno` / `cli_qpfstats` / `cli_dates` | Tier-2 auto-cover, existing goldens, `rtol 1e-6` |
 | **M-FR-4** | P1 EIGENSTRAT ASCII reader (`'9'->3` map) | Tier-3 reduction-to-PA bit-exact compare |
-| **M-FR-5** | P2 PLINK `.bed`/`.bim`/`.fam` (LUT + bit-flip + allele polarity) | Tier-3 reduction-to-PA bit-exact compare (catches polarity flips) |
+| **M-FR-5** | P2 PLINK `.bed`/`.bim`/`.fam` (LUT + bit-flip + allele polarity) — **LANDED**: `read_bim`/`read_fam` (`plink_reader.cpp`) + `read_plink_snp_major_tile` (LSB→MSB flip + `kBedToCanon` LUT + ref:=A1) + the `GenoFormat::Plink` dispatch + the format-aware `resolve_genotype_triple`/`read_snp_table`/`read_ind_partition` front-door (`genotype_source.cpp`, the `.bed/.bim/.fam` vs `.geno/.snp/.ind` prefix fork). **The .fam population is column 6 (the phenotype), per AT2 `mcio.c:1180-1205` (NOT the FID — that is a convertf counter); convertf PACKEDPED writes it there with `outputgroup: YES`.** | Tier-1 `test_plink_decode_equivalence.cu` (`memcmp==0` PLINK==PA tile/ploidy/Q-V-N on GPU+CPU) + `cli_plink_prefix` (extract-f2 f2.bin BIT-IDENTICAL, qpdstat row-for-row) — both PASS on the real AADR convertf fixture |
 | **M-FR-6** | P3 ANCESTRYMAP | Tier-3 reduction-to-PA bit-exact compare |
 
 Commit between milestones; HIGH-impact reader changes are individually

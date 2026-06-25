@@ -56,6 +56,7 @@
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
+#include "io/genotype_source.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
@@ -225,12 +226,13 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     // read_ind(Explicit{sp}) decodes ONLY these pops (the AT2 indvec), sorted ASC by label
     // (== sp). FORCED diploid (the AT2 plain ref/an/2 pin). An io fault PROPAGATES.
     io::GenoReader reader(geno);
+    const io::GenoFormat fmt = reader.header().format;  // .snp|.bim, .ind|.fam parser (M-FR PLINK)
     const std::size_t n_present = reader.records_present();
     io::PopSelection sel;
     sel.mode = io::PopSelection::Mode::Explicit;
     sel.labels = sp;
-    const io::IndPartition part = io::read_ind(ind, sel, n_present);
-    const io::SnpTable snptab = io::read_snp(snp, SIZE_MAX);
+    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
+    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
     const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
     // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
     // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is

@@ -80,13 +80,24 @@ io::GenotypeTile read_canonical_tile(io::GenoReader& reader,
             return transpose_snp_major(
                 reader.read_eigenstrat_snp_major_tile(part, snp_begin, snp_end), backend);
 
+        case io::GenoFormat::Plink:
+            // PLINK (.bed SNP-major, 2-bit LSB-first, M-FR PLINK): the `io`-leaf gather
+            // reads the .bed records and NORMALIZES them into the SAME canonical SNP-major
+            // source — flipping the bit order LSB-first->MSB-first AND remapping the .bed
+            // code through kBedToCanon (00->2/01->3 missing/10->1/11->0 in A1-copies ==
+            // canonical ref copies, ref:=A1). After that normalization the source is
+            // byte-for-byte what the GENO path produces, so the encoding is IDENTITY and
+            // the SAME on-device transpose runs unchanged.
+            return transpose_snp_major(
+                reader.read_plink_snp_major_tile(part, snp_begin, snp_end), backend);
+
         case io::GenoFormat::Unknown:
         default:
             // The GenoReader ctor already rejects an unrecognized format, so this is
             // defensive (a future format reaching here without a dispatch arm).
             throw std::runtime_error(
                 "core::read_canonical_tile: unsupported .geno format (not TGENO, GENO, "
-                "nor EIGENSTRAT) — no canonical-tile dispatch");
+                "EIGENSTRAT, nor PLINK) — no canonical-tile dispatch");
     }
 }
 

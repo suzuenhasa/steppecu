@@ -46,6 +46,7 @@
 #include "steppe/f4.hpp"                // steppe::run_f4 + F4Result/options
 
 #include "io/geno_reader.hpp"           // io::GenoReader (records_present for the --prefix P-axis read)
+#include "io/genotype_source.hpp"       // io::resolve_genotype_triple / read_ind_partition (EIGENSTRAT-family vs PLINK)
 #include "io/ind_reader.hpp"            // io::read_ind / PopSelection (the --prefix P-axis order)
 
 namespace steppe::app {
@@ -114,9 +115,12 @@ namespace cfg = steppe::config;
 /// run_dstat (the AT2 qpdstat_geno parity). blgsize is config.blgsize_cm() -> Morgans.
 [[nodiscard]] int run_qpdstat_prefix(const cfg::RunConfig& config) {
     const std::string& prefix = config.qpdstat_prefix();
-    const std::string geno = prefix + ".geno";
-    const std::string snp = prefix + ".snp";
-    const std::string ind = prefix + ".ind";
+    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
+    // PLINK -> P.{bed,bim,fam}. The on-disk format is pinned by the GenoReader ctor below.
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+    const std::string& geno = triple.geno;
+    const std::string& snp = triple.snp;
+    const std::string& ind = triple.ind;
 
     // ---- 1. Build the quartet name table (REUSE the existing builder) ----------------
     std::vector<std::array<std::string, 4>> quartet_names;
@@ -143,11 +147,12 @@ namespace cfg = steppe::config;
     std::vector<std::string> pop_labels;  // the SORTED Explicit partition (the P axis order).
     try {
         io::GenoReader reader(geno);
+        const io::GenoFormat fmt = reader.header().format;  // .ind vs .fam parser (M-FR PLINK)
         const std::size_t n_present = reader.records_present();
         io::PopSelection sel;
         sel.mode = io::PopSelection::Mode::Explicit;
         sel.labels = pop_union;
-        const io::IndPartition part = io::read_ind(ind, sel, n_present);
+        const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
         pop_labels.reserve(part.groups.size());
         for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
     } catch (const std::exception& e) {

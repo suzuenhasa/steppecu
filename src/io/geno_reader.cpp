@@ -11,15 +11,62 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <ios>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "io/eigenstrat_format.hpp"
 
 namespace steppe::io {
+
+namespace {
+
+// Count newline-terminated records in a sibling text file (the .bim line count == n_snp,
+// the .fam line count == n_ind for a PLINK triple). A single trailing blank line at EOF
+// is NOT counted (the readers tolerate it). Returns 0 if the file cannot be opened (the
+// caller treats 0-geometry as "not a well-formed PLINK triple" and fails loudly). This
+// is the PLINK twin of parse_eigenstrat_geometry's line scan; it counts non-empty lines
+// so a final newline does not inflate the count, matching read_bim/read_fam which stop
+// at a trailing blank.
+std::size_t count_text_records(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 0;
+    std::size_t n = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF tolerance
+        if (line.empty()) {
+            // A blank line: count it as a record ONLY if more non-blank content follows
+            // (an interior blank is a malformed file the reader will reject; here we just
+            // do not let a trailing blank inflate n). Peek: at EOF -> trailing blank, stop.
+            if (in.peek() == std::char_traits<char>::eof()) break;
+            // Interior blank: the .bim/.fam reader fails loudly later; do not count it.
+            continue;
+        }
+        ++n;
+    }
+    return n;
+}
+
+// Derive a PLINK sibling path from the .bed path by replacing the trailing ".bed"
+// extension with `ext` (e.g. ".bim" / ".fam"). If the path does not end in ".bed" (a
+// caller passed a non-.bed path that nonetheless carried the .bed magic), append `ext`
+// to the whole path so the sibling is still deterministically derived.
+std::string plink_sibling(const std::string& bed_path, const char* ext) {
+    constexpr std::string_view kBed = ".bed";
+    if (bed_path.size() >= kBed.size() &&
+        bed_path.compare(bed_path.size() - kBed.size(), kBed.size(), kBed) == 0) {
+        return bed_path.substr(0, bed_path.size() - kBed.size()) + ext;
+    }
+    return bed_path + ext;
+}
+
+}  // namespace
 
 // The record OFFSET (header_bytes + row * bytes_per_record) is computed in
 // std::streamoff to keep the multiply 64-bit at AADR scale (~4e9; cleanup
@@ -135,9 +182,46 @@ GenoReader::GenoReader(const std::string& geno_path) : path_(geno_path) {
         header_ = parse_eigenstrat_geometry(path_);
     }
     if (header_.format == GenoFormat::Unknown) {
+        // PLINK .bed probe (M-FR PLINK): the leading 3 bytes are the .bed magic
+        // 0x6c 0x1b 0x01 (the two magic bytes + the SNP-major mode byte). 0x6c is 'l' —
+        // NOT a TGENO/GENO magic token and NOT a {0,1,2,9} EIGENSTRAT genotype char — so a
+        // .bed file always reaches this probe with format==Unknown. The .bed itself carries
+        // NO geometry; n_snp is the .bim line count and n_ind is the .fam line count
+        // (format-readers.md §3.1). We require BOTH siblings to be present + non-empty;
+        // otherwise this is not a well-formed PLINK triple and we fall through to the
+        // loud Unknown throw below.
+        const auto gc = static_cast<std::size_t>(in.gcount());
+        const auto* magic = reinterpret_cast<const unsigned char*>(head.data());
+        if (gc >= kBedMagicBytes && magic[0] == kBedMagic0 && magic[1] == kBedMagic1) {
+            if (magic[2] != kBedModeSnpMajor) {
+                throw std::runtime_error(
+                    "io::GenoReader: PLINK .bed is individual-major (mode byte 0x00); only "
+                    "SNP-major (0x01) is supported — re-export SNP-major: " + path_);
+            }
+            const std::string bim = plink_sibling(path_, ".bim");
+            const std::string fam = plink_sibling(path_, ".fam");
+            const std::size_t n_snp = count_text_records(bim);
+            const std::size_t n_ind = count_text_records(fam);
+            if (n_snp == 0 || n_ind == 0) {
+                throw std::runtime_error(
+                    "io::GenoReader: PLINK .bed found (magic 0x6c 0x1b 0x01) but its .bim/.fam "
+                    "siblings are missing or empty (.bim=" + bim + " n_snp=" +
+                    std::to_string(n_snp) + ", .fam=" + fam + " n_ind=" +
+                    std::to_string(n_ind) + ") for " + path_);
+            }
+            header_.format = GenoFormat::Plink;
+            header_.n_ind = n_ind;
+            header_.n_snp = n_snp;
+            header_.n_records = n_snp;                        // SNP-major: one record per SNP
+            header_.bytes_per_record = packed_bytes(n_ind);   // ceil(n_ind/4), 4 inds/byte
+            header_.header_bytes = kBedMagicBytes;            // the 3-byte .bed magic
+        }
+    }
+    if (header_.format == GenoFormat::Unknown) {
         throw std::runtime_error(
             "io::GenoReader: unrecognized .geno format (expected packed TGENO/GENO "
-            "magic, or an ASCII EIGENSTRAT .geno of 0/1/2/9 genotype lines): " + path_);
+            "magic, an ASCII EIGENSTRAT .geno of 0/1/2/9 genotype lines, or a PLINK "
+            ".bed of magic 0x6c 0x1b 0x01 with .bim/.fam siblings): " + path_);
     }
     // EIGENSTRAT is fully self-described by its ASCII content (geometry derived by the
     // scan above); it has NO packed data region, so the packed file-size validation
@@ -587,6 +671,153 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
                 (kCodesPerByte - 1 - static_cast<int>(i % cpb)) * kBitsPerCode;
             rec[byte_in_rec] = static_cast<std::uint8_t>(
                 rec[byte_in_rec] | static_cast<std::uint8_t>(code << shift));
+        }
+    }
+    return tile;
+}
+
+SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
+                                                   std::size_t snp_begin,
+                                                   std::size_t snp_end) {
+    if (header_.format != GenoFormat::Plink) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: this is the PLINK (.bed SNP-major) "
+            "path; this file is " +
+            std::string(header_.format == GenoFormat::Tgeno ? "TGENO (read via read_tile)"
+                        : header_.format == GenoFormat::Geno ? "GENO (read via read_snp_major_tile)"
+                        : header_.format == GenoFormat::Eigenstrat ? "EIGENSTRAT (read via read_eigenstrat_snp_major_tile)"
+                                                                   : "an unrecognized format") +
+            " — wrong reader for " + path_);
+    }
+    if (snp_begin != 0) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: P2 requires snp_begin == 0 "
+            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
+    }
+    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: SNP range [" +
+            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
+            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
+    }
+    // FAIL-FAST on a degenerate partition (architecture.md §2; mirrors read_snp_major_tile).
+    if (part.groups.empty()) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: empty partition (no selected "
+            "populations) for " + path_);
+    }
+
+    const std::size_t tile_snps = snp_end - snp_begin;       // == snp_end for snp_begin==0
+    // The .bed SNP-record stride (ceil(n_ind/4), 4 individuals/byte LSB-first) AND the
+    // canonical SNP-major source stride are BOTH packed_bytes(n_ind) — the LUT + bit-flip
+    // remap below changes the byte CONTENTS, not the byte COUNT. header_.bytes_per_record
+    // was set to packed_bytes(n_ind) at construction.
+    const std::size_t src_bpr = header_.bytes_per_record;    // canonical SNP-major stride == .bed stride
+    if (tile_snps > records_present_) {
+        // The .bed has fewer SNP records than the requested prefix (a partial/truncated
+        // file). records_present_ == n_snp here, the PLINK twin of read_snp_major_tile's
+        // SNP-records-on-disk guard.
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: requested SNP prefix [0, " +
+            std::to_string(tile_snps) + ") exceeds SNP records on disk (" +
+            std::to_string(records_present_) + ") in " + path_);
+    }
+
+    // Build the SELECTION + pop-contiguous reorder (the gather list the transpose applies
+    // output-driven) — byte-for-byte the same construction as read_snp_major_tile /
+    // read_eigenstrat_snp_major_tile. Validate every selected row is a real individual of
+    // THIS file (row < header_.n_ind == the .fam line count) so the transpose never reads
+    // a phantom individual.
+    SnpMajorTile tile;
+    tile.src_bytes_per_record = src_bpr;
+    tile.n_snp = tile_snps;
+    tile.pop_offsets.reserve(part.groups.size() + 1);
+    tile.pop_labels.reserve(part.groups.size());
+    tile.pop_offsets.push_back(0);
+    std::size_t out_ind = 0;
+    for (const auto& g : part.groups) {
+        tile.pop_labels.push_back(g.label);
+        for (std::size_t row : g.rows) {
+            if (row >= header_.n_ind) {
+                throw std::runtime_error(
+                    "io::GenoReader::read_plink_snp_major_tile: individual row " +
+                    std::to_string(row) + " out of range (n_ind=" +
+                    std::to_string(header_.n_ind) + ") in " + path_);
+            }
+            tile.sel_rows.push_back(row);
+            ++out_ind;
+        }
+        tile.pop_offsets.push_back(out_ind);
+    }
+    tile.n_individuals = out_ind;
+
+    // CHECKED MULTIPLY before resize (mirrors read_snp_major_tile's dominant guard):
+    // tile_snps * src_bpr is a std::size_t product (wraps modulo 2^N, SILENT). src_bpr is
+    // provably nonzero (the ctor sets bytes_per_record = packed_bytes(n_ind) with n_ind>=1).
+    const std::string size_operands =
+        std::to_string(tile_snps) + " snp-records * " +
+        std::to_string(src_bpr) + " bytes/record";
+    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: source size overflow (" +
+            size_operands + " exceeds size_t) for " + path_);
+    }
+    try {
+        // Zero-init: a partial last SNP byte (n_ind % 4 != 0) keeps its unused high-row
+        // slots at 0, AND every in-range code slot is written by the normalize loop below,
+        // so the canonical SNP-major source is fully defined.
+        tile.snp_major.assign(tile_snps * src_bpr, std::uint8_t{0});
+    } catch (const std::bad_alloc&) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: out of memory allocating SNP-major "
+            "source (" + size_operands + ") for " + path_);
+    } catch (const std::length_error&) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: SNP-major source too large for the "
+            "allocator (" + size_operands + " exceeds vector::max_size()) for " + path_);
+    }
+
+    // READ each .bed SNP record (LSB-first, the .bed's OWN bytes) into a staging buffer,
+    // then NORMALIZE it into the canonical SNP-major source: for each in-range individual
+    // i, read its LSB-first 2-bit code (bed_code_in_byte), remap it through kBedToCanon
+    // (00->2/01->3 missing/10->1/11->0 in A1-copies == canonical ref copies, ref:=A1), and
+    // re-pack it MSB-first (code_in_byte's order) into the canonical byte i/4 at position
+    // i%4 — producing the SAME canonical SNP-major source read_snp_major_tile reads raw
+    // from a GENO file. The .bed record index IS the SNP index, so a short read is a
+    // fail-fast format error. The selection/reorder is the transpose's job (sel_rows),
+    // NOT this read — this normalizes ALL n_ind individuals of each SNP record (matching
+    // read_snp_major_tile's full-record gather).
+    std::ifstream in(path_, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error(
+            "io::GenoReader::read_plink_snp_major_tile: cannot reopen .bed: " + path_);
+    }
+    const std::size_t cpb = static_cast<std::size_t>(kCodesPerByte);
+    const std::streamsize rec_bytes = static_cast<std::streamsize>(src_bpr);
+    std::vector<std::uint8_t> bed_rec(src_bpr);  // one LSB-first .bed SNP record
+    for (std::size_t s = 0; s < tile_snps; ++s) {
+        const std::streamoff off =
+            static_cast<std::streamoff>(header_.header_bytes) +
+            static_cast<std::streamoff>(s) * static_cast<std::streamoff>(src_bpr);
+        in.seekg(off, std::ios::beg);
+        char* dst = reinterpret_cast<char*>(bed_rec.data());
+        in.read(dst, rec_bytes);
+        if (in.gcount() != rec_bytes) {
+            throw std::runtime_error(
+                "io::GenoReader::read_plink_snp_major_tile: short read for SNP record " +
+                std::to_string(s) + " in " + path_);
+        }
+        std::uint8_t* canon_rec = tile.snp_major.data() + s * src_bpr;
+        for (std::size_t i = 0; i < header_.n_ind; ++i) {
+            // (a) read the LSB-first .bed code, (b) LUT-remap to canonical, (c) re-pack
+            // MSB-first into the canonical byte i/4, position i%4 (shift 6/4/2/0).
+            const std::uint8_t bed_code =
+                bed_code_in_byte(bed_rec[i / cpb], static_cast<int>(i % cpb));
+            const std::uint8_t canon = kBedToCanon[bed_code];  // 0..3 -> canonical 0..3
+            const int shift =
+                (kCodesPerByte - 1 - static_cast<int>(i % cpb)) * kBitsPerCode;  // 6,4,2,0
+            canon_rec[i / cpb] = static_cast<std::uint8_t>(
+                canon_rec[i / cpb] | static_cast<std::uint8_t>(canon << shift));
         }
     }
     return tile;

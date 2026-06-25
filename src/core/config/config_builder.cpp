@@ -6,6 +6,8 @@
 // the app prints it — architecture.md §10).
 #include "core/config/config_builder.hpp"
 
+#include "io/genotype_source.hpp"  // io::resolve_genotype_triple (--prefix EIGENSTRAT-family vs PLINK)
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -485,14 +487,19 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     // NOT expanded into geno/snp/ind — it is only the fail-fast sentinel the qpdstat command
     // reads (Part B not yet implemented). Distinct from extract-f2's --prefix below.
     if (merged_.qpdstat_prefix) cfg.qpdstat_prefix_ = *merged_.qpdstat_prefix;
-    // --prefix P expands to the genotype triple P.{geno,snp,ind} (cli-bindings.md §4.2;
-    // EIGENSTRAT/PACKEDANCESTRYMAP convention). An explicit --geno/--snp/--ind OVERRIDES
-    // the corresponding prefix-derived path (cli_parse documents --geno overrides --prefix).
+    // --prefix P expands to the genotype triple (cli-bindings.md §4.2). For the
+    // EIGENSTRAT family (TGENO/GENO/EIGENSTRAT) that is P.{geno,snp,ind}; for PLINK it is
+    // P.{bed,bim,fam} — resolve_genotype_triple chooses the extensions by a filesystem
+    // probe (.geno present wins; else a P.bed -> PLINK). The authoritative on-disk format
+    // is still pinned later by the GenoReader ctor; this only picks the sibling paths so a
+    // PLINK prefix opens .bed/.bim/.fam (M-FR PLINK). An explicit --geno/--snp/--ind
+    // OVERRIDES the corresponding prefix-derived path (cli_parse documents --geno overrides
+    // --prefix).
     if (merged_.prefix && !merged_.prefix->empty()) {
-        const std::string& p = *merged_.prefix;
-        if (!merged_.geno) cfg.geno_ = p + ".geno";
-        if (!merged_.snp)  cfg.snp_  = p + ".snp";
-        if (!merged_.ind)  cfg.ind_  = p + ".ind";
+        const io::GenotypeTriple triple = io::resolve_genotype_triple(*merged_.prefix);
+        if (!merged_.geno) cfg.geno_ = triple.geno;
+        if (!merged_.snp)  cfg.snp_  = triple.snp;
+        if (!merged_.ind)  cfg.ind_  = triple.ind;
     }
     if (merged_.geno)     cfg.geno_ = *merged_.geno;
     if (merged_.snp)      cfg.snp_ = *merged_.snp;

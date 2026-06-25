@@ -46,6 +46,7 @@
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
+#include "io/genotype_source.hpp"  // read_snp_table / read_ind_partition (format-aware .snp|.bim, .ind|.fam)
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
@@ -159,8 +160,9 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     long M = 0;
     try {
         io::GenoReader reader(config.geno());
+        const io::GenoFormat fmt = reader.header().format;  // pins .snp|.bim, .ind|.fam parser (M-FR PLINK)
         n_present = reader.records_present();
-        part = io::read_ind(config.ind(), sel, n_present);
+        part = io::read_ind_partition(fmt, config.ind(), sel, n_present);
 
         // Explicit-name validation (cli-bindings.md §4.2). read_ind silently drops an
         // unknown label, so verify the request against the resolved groups here.
@@ -173,7 +175,7 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
             return cfg::kExitInvalidConfig;
         }
 
-        snptab = io::read_snp(config.snp(), SIZE_MAX);
+        snptab = io::read_snp_table(fmt, config.snp(), SIZE_MAX);
         // SIZING + VALIDATION ONLY (the dry-run + .snp/.geno-axis checks). The P/M the
         // tile would report are derivable from the partition + header WITHOUT reading
         // (and, for GENO, WITHOUT transposing) a tile: P == #selected pops, M == the

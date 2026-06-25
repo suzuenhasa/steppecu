@@ -131,6 +131,23 @@ target_link_libraries(test_eigenstrat_decode_equivalence
 set_target_properties(test_eigenstrat_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME eigenstrat_decode_equivalence COMMAND test_eigenstrat_decode_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- M-FR PLINK TIER-1: the PLINK (.bed/.bim/.fam) reader == the PA reader, BIT-EXACT --
+# CUDA TU: drives the PRODUCTION dispatch (core::read_canonical_tile) on a PLINK .bed AND
+# on the convertf-PA .geno of the SAME 9-pop subset (fixtures_eig/v66_fit9_ped vs _pa) and
+# asserts BYTE-FOR-BYTE: the canonical tile (NO tail mask — both are SNP-major), the auto-
+# detected sample_ploidy, and the decoded Q/V/N (memcmp==0) match on BOTH the GPU backend
+# and the CPU oracle. The PLINK reader's LUT (00->2/01->3 missing/10->1/11->0 in A1-copies)
+# + the LSB->MSB bit-order flip + ref:=A1 polarity are pinned by this bit-exact compare —
+# a wrong LUT/bit-order/polarity diverges immediately (format-readers.md §8.4 highest-risk).
+# Since PA==TGENO==goldens (test_pa_decode_equivalence), this transitively pins PLINK to the
+# goldens with NO new statistical golden + NO AT2 rerun. SKIPs exit-0 if the fixture dir
+# (<root>/fixtures_eig) is absent. Self-checking main(); CTest gates on the exit code.
+add_executable(test_plink_decode_equivalence reference/test_plink_decode_equivalence.cu)
+target_link_libraries(test_plink_decode_equivalence
+    PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_plink_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME plink_decode_equivalence COMMAND test_plink_decode_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
 # the SHARED assign_blocks, computes the per-block f2 tensor via the production
@@ -1590,6 +1607,27 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_eigenstrat_prefix steppe_app)
   add_test(NAME cli_eigenstrat_prefix
            COMMAND test_cli_eigenstrat_prefix
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}")
+
+  # --- M-FR PLINK PLINK-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ------------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the PLINK
+  # (.bed/.bim/.fam, SNP-major 2-bit LSB-first) --prefix <fixtures_eig/v66_fit9_ped> (the
+  # prefix that USED TO THROW at the GenoReader ctor) and once with the convertf-PA (GENO)
+  # --prefix of the SAME 9-pop subset — and asserts the PLINK run WORKS (exit 0) AND matches
+  # the PA run: extract-f2's f2.bin BYTE-IDENTICAL, qpdstat est/se/z row-for-row (rtol 1e-6).
+  # Both fixtures are convertf outputs from the SAME PA source with the SAME poplist, so they
+  # are the SAME genotypes two ways; a correct PLINK reader (LUT + bit-flip + ref:=A1) MUST
+  # reproduce the PA result. This ALSO exercises the format-aware --prefix expansion (the
+  # PLINK prefix has no .geno -> resolve_genotype_triple picks .bed/.bim/.fam) + the
+  # read_bim/read_fam dispatch. NO new golden (the comparison IS PLINK-vs-PA, and PA==TGENO==
+  # goldens via cli_pa_prefix). RUNNING ON THE GPU. SKIPs cleanly (exit 0) when no CUDA device
+  # is visible OR the fixtures_eig prefixes are absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_plink_prefix cli/test_cli_plink_prefix.cpp)
+  target_link_libraries(test_cli_plink_prefix PRIVATE steppe::warnings)
+  add_dependencies(test_cli_plink_prefix steppe_app)
+  add_test(NAME cli_plink_prefix
+           COMMAND test_cli_plink_prefix
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}")
 endif()

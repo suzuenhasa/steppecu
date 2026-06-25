@@ -32,6 +32,7 @@
 #include "steppe/config.hpp"                      // Precision, FilterConfig
 
 #include "io/geno_reader.hpp"
+#include "io/genotype_source.hpp"  // read_snp_table / read_ind_partition (format-aware .snp|.bim, .ind|.fam)
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
@@ -88,13 +89,18 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             "required)");
     }
 
-    // ---- 1. Open the .geno + read .ind (selection) + .snp -----------------------------
+    // ---- 1. Open the .geno/.bed + read .ind/.fam (selection) + .snp/.bim ---------------
+    // The GenoReader ctor pins the on-disk format (TGENO/GENO/EIGENSTRAT/PLINK); the
+    // SnpTable + IndPartition reads dispatch the parser on that format (read_snp/read_ind
+    // for the EIGENSTRAT family; read_bim/read_fam for PLINK) — M-FR PLINK. The geno/snp/
+    // ind paths already carry the correct extensions (config resolve_genotype_triple).
     io::GenoReader reader(geno);
+    const io::GenoFormat fmt = reader.header().format;
     const std::size_t n_present = reader.records_present();
-    const io::IndPartition part = io::read_ind(ind, sel, n_present);
+    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
     validate_explicit_pops(sel, part);
 
-    const io::SnpTable snptab = io::read_snp(snp, SIZE_MAX);
+    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
     const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
     // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
     // the io-leaf SNP-major gather + the on-device transpose_to_canonical. Either way

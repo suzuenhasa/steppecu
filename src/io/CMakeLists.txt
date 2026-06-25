@@ -17,7 +17,9 @@ add_library(steppe_io STATIC
     eigenstrat_format.cpp        # packed-.geno header parse + DERIVED record stride
     ind_reader.cpp               # .ind → pop labels + selection (oracle-faithful)
     snp_reader.cpp               # .snp → id / chrom / genpos (Morgans) / ref / alt
-    geno_reader.cpp              # .geno tiled raw-byte gather (NO decode)
+    plink_reader.cpp             # PLINK .bim → SnpTable + .fam → IndPartition (M-FR PLINK)
+    genotype_source.cpp          # format-aware --prefix triple resolution + SnpTable/IndPartition front-door
+    geno_reader.cpp              # .geno/.bed tiled raw-byte gather (NO decode)
     ploidy_detect.cpp            # AT2 per-sample pseudo-haploid auto-detection (adjust_pseudohaploid)
     # M2 on-the-fly filters (host-pure; part of the SAME io leaf). filter_decision/
     # filter_plan are header-only predicates/structs (no .cpp). architecture.md §1,
