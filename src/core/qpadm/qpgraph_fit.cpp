@@ -132,6 +132,23 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
 
     // Worst f3-residual z over the basis pairs: z[k] = (f_obs[k]-f3_fit[k]) / se[k],
     // se[k] = sqrt(Q[k,k]) (the UNFUDGED diagonal). Report the max |z| with labels.
+    //
+    // L4 — DELIBERATELY HOST-SIDE (ACCEPT + DOCUMENT). This is a single-run, O(npair)
+    // bounded diagnostic in the CUDA-FREE driver, run ONCE per qpGraph fit (NOT in any
+    // batched/swept/per-restart inner loop — the throughput envelope the host-compute
+    // audit targets). Folding the numeric argmax on-device is a NET LOSS, not a win:
+    //   (1) its inputs are already host-resident — cov.Q's diagonal (the unfudged
+    //       covariance, a CUDA-FREE driver vector) and fl.f3_fit (the L3 device output,
+    //       already brought down) — so a device fold would re-ship Q to VRAM and bring
+    //       the argmax index back, ADDING round-trips for an O(npair) scan;
+    //   (2) the RESULT (worst_pop2/worst_pop3) is a pair of LABEL STRINGS that MUST be
+    //       resolved host-side from the model maps (m.leaves / centered_col_to_leaf)
+    //       regardless — the device cannot produce them.
+    // Unlike the per-block jackknife / decode / reduce / SE / ploidy items the campaign
+    // moved on-device (each in a hot per-block or per-model loop), this scan carries no
+    // throughput exposure, so it stays on the host as a conscious bounded-single-run
+    // diagnostic decision (the CpuBackend oracle path is the SAME host code). L1 (rank_Q)
+    // and L3 (the qpGraph edge/f3_fit re-eval) DID move on-device; L4 is accepted here.
     double worst = 0.0;
     int worst_k = -1;
     for (int k = 0; k < npair; ++k) {

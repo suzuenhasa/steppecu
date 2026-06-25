@@ -209,6 +209,20 @@ void launch_add_fudge_diag(double* dM, int n, double fudge, double tr,
 void launch_qpadm_seed_ab(const double* dXmat, int nl, int nr, int r,
                           double* dA, double* dB, cudaStream_t stream);
 
+/// L1: rank_Q ON-DEVICE — the numerical rank of the m×m COLUMN-MAJOR covariance Q
+/// (model_well_determined.rank_Q, observability-only, the last bounded per-model
+/// host-compute item). Runs the SAME one-sided-Jacobi sweep dev_jacobi_svd_V
+/// transliterates (core::jacobi_svd) over VRAM scratch, counting the singular values
+/// above tol = smax * m * eps (eps = std::numeric_limits<double>::epsilon(), passed so
+/// the constant is bit-identical to the host). BIT-IDENTICAL to the CpuBackend oracle
+/// rank_Q (the V-accumulation is dropped — sigma is independent of V — but W evolves
+/// identically, so the count is exact). `dScratch` holds W[m*m] | sigma[m] (m*m+m
+/// doubles); `dIntScratch` holds order[m] (m ints); `dRank` is the [1] int output.
+/// Single thread, native FP64 (the §4 SVD carve-out, same as the host path it replaces).
+void launch_qpadm_rank_via_jacobi(const double* dQ, int m, double eps,
+                                  double* dScratch, int* dIntScratch, int* dRank,
+                                  cudaStream_t stream);
+
 /// S6 ALS opt_A then opt_B for `als_iters` iterations (the FROZEN CONTRACT §2d;
 /// CpuBackend als_weights loop / opt_A / opt_B, src/device/cpu/cpu_backend.cpp).
 /// Transliterates the Kronecker coeffs/rhs build + the LU solve

@@ -87,7 +87,7 @@
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/pchisq.hpp"         // core::internal::pchisq_upper (M(fit-2) rank-test p; the ONE shared special fn)
 #include "core/internal/qpfstats_jackknife.hpp"  // core::f2blocks_pair_est (the partial-NaN fallback recenter; cold path)
-#include "core/internal/small_linalg.hpp"   // core::jacobi_svd (M(fit-2) rank_Q diagnostic; bit-identical to the CPU oracle)
+#include "core/internal/small_linalg.hpp"   // core::solve (the host downdated-A partial-NaN solve; rank_Q is now ON-DEVICE — L1)
 #include "core/qpadm/qpadm_bounds.hpp"       // core::qpadm::model_fits_small_path — the SINGLE-SOURCE small-path envelope (kQpMax*)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
@@ -115,8 +115,7 @@
 #include "device/f2_blocks_out.hpp"         // M5: DiskF2Blocks (the Disk descriptor DiskSink populates)
 #include "device/cuda/handles.hpp"          // CublasHandle, CusolverDnHandle (RAII)
 #include "device/cuda/qpadm_fit_kernels.cuh" // M(fit-4): f4 gather + loo/total + xtau + small-LA launch wrappers
-#include "device/cuda/qpgraph_fit_kernels.cuh" // qpGraph: the on-device IDEA-1 fleet launcher
-#include "core/qpadm/qpgraph_objective.hpp" // qpGraph host edge-recovery at the best theta (ONE eval, not per-iteration)
+#include "device/cuda/qpgraph_fit_kernels.cuh" // qpGraph: the on-device IDEA-1 fleet launcher + the L3 on-device edge/f3 recovery
 #include "device/cuda/pinned_buffer.cuh"    // PinnedRegistryCache (amortized in-place pin for async H2D overlap — P4/L2); PinnedBuffer (persistent D2H staging — P5/d2h-speed)
 #include "device/cuda/stream.hpp"           // Stream (RAII, owning non-blocking per-device stream — P2/F1)
 #include "device/vram_budget.hpp"           // max_blocks_per_chunk (host-pure VRAM budget; X-5/B5 + X-13/B26)
@@ -237,22 +236,6 @@ void fill_rankdrop(int rmax,
 }  // namespace
 
 /// GPU compute backend. The 3-GEMM f2 reformulation; one CublasHandle created
-/// Rebuild the minimal core::qpadm::QpGraphModel the host edge-recovery objective
-/// consumes from the CUDA-free arena (the final ONE-eval edge solve at the winning theta;
-/// NOT the per-iteration objective — that runs on-device in the fleet kernel).
-namespace {
-[[nodiscard]] core::qpadm::QpGraphModel topo_to_model(const QpGraphTopoArena& topo) {
-    core::qpadm::QpGraphModel m;
-    m.npop = topo.npop; m.nedge_norm = topo.nedge_norm; m.nadmix = topo.nadmix;
-    m.npair = topo.npair; m.npath = topo.npath; m.base_leaf = topo.base_leaf;
-    m.pwts0 = topo.pwts0;
-    m.pe_edge = topo.pe_edge; m.pe_leaf = topo.pe_leaf; m.pe_path = topo.pe_path;
-    m.pae_path = topo.pae_path; m.pae_admixedge = topo.pae_admixedge;
-    m.cmb1 = topo.cmb1; m.cmb2 = topo.cmb2;
-    return m;
-}
-}  // namespace
-
 /// once (architecture.md §7) and reused, with its workspace set for emulated-FP64
 /// determinism. Move-only via the ComputeBackend base (architecture.md §8).
 class CudaBackend final : public ComputeBackend {
@@ -3677,14 +3660,32 @@ public:
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready
 
         if (D == 0) {
-            // pure tree: no fleet — one host edge solve (the GPU fleet adds nothing at D=0).
-            core::qpadm::QpGraphModel m = topo_to_model(topo);
-            std::vector<double> bl, fit(static_cast<std::size_t>(npair), 0.0);
-            const double sc = core::qpadm::qpgraph_score(m, nullptr,
-                std::vector<double>(f_obs.begin(), f_obs.end()),
-                std::vector<double>(qinv.begin(), qinv.end()), topo.fudge, topo.constrained, &bl, &fit);
-            out.score = sc; out.edge_length = bl; out.f3_fit = fit;
-            out.status = std::isfinite(sc) ? Status::Ok : Status::NonSpdCovariance;
+            // pure tree: no fleet — ONE on-device edge solve (L3: the GPU fleet adds
+            // nothing at D=0, and d_fill_pwts_centered never derefs theta when n_pae==0,
+            // so the SAME d_qpgraph_score body evaluates the tree with a null theta). The
+            // host qpgraph_score (and topo_to_model) is dropped here too.
+            DeviceBuffer<double> dBl0(static_cast<std::size_t>(ne > 0 ? ne : 1));
+            DeviceBuffer<double> dF30(static_cast<std::size_t>(npair > 0 ? npair : 1));
+            DeviceBuffer<double> dSc0(1);
+            cuda::launch_qpgraph_eval_at_theta(dt, /*d_theta=*/nullptr, dFobs.data(),
+                                               dQinv.data(), dBl0.data(), dF30.data(),
+                                               dSc0.data(), stream_.get());
+            std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
+            std::vector<double> fit(static_cast<std::size_t>(npair), 0.0);
+            double sc = std::numeric_limits<double>::infinity();
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(bl.data(), dBl0.data(),
+                                              static_cast<std::size_t>(ne) * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(fit.data(), dF30.data(),
+                                              static_cast<std::size_t>(npair) * sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&sc, dSc0.data(), sizeof(double),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            const bool ok = std::isfinite(sc) && sc < 1e30;
+            out.score = sc; out.edge_length = ok ? bl : std::vector<double>(static_cast<std::size_t>(ne), 0.0);
+            out.f3_fit = ok ? fit : std::vector<double>(static_cast<std::size_t>(npair), 0.0);
+            out.status = ok ? Status::Ok : Status::NonSpdCovariance;
             return out;
         }
 
@@ -3722,14 +3723,34 @@ public:
             out.theta[static_cast<std::size_t>(d)] = h_theta[static_cast<std::size_t>(best_i) * static_cast<std::size_t>(D) + static_cast<std::size_t>(d)];
         out.theta_lo = thmin; out.theta_hi = thmax;
 
-        // recover the edge lengths + f3_fit at the best theta (ONE host eval; the same
-        // native FP64 objective the kernel runs — a localization the test diffs to 1e-6).
-        core::qpadm::QpGraphModel m = topo_to_model(topo);
-        std::vector<double> bl, fit(static_cast<std::size_t>(npair), 0.0);
-        const double sc_final = core::qpadm::qpgraph_score(m, out.theta.data(),
-            std::vector<double>(f_obs.begin(), f_obs.end()),
-            std::vector<double>(qinv.begin(), qinv.end()), topo.fudge, topo.constrained, &bl, &fit);
-        if (std::isfinite(sc_final)) { out.edge_length = bl; out.f3_fit = fit; out.status = Status::Ok; }
+        // recover the edge lengths + f3_fit at the best theta — L3: ON-DEVICE (was a
+        // host core::qpadm::qpgraph_score re-eval). launch_qpgraph_eval_at_theta runs the
+        // SAME d_qpgraph_score body the fleet runs, ONCE, at the winning restart's theta,
+        // exporting bl + f3_fit (= ppwts·bl) + the score — dropping the host objective.
+        // Reuses the resident dt/dFobs/dQinv (still in scope; the fleet basis). A
+        // 1e30 singular score ⇒ NonSpdCovariance (bl/f3_fit zeroed), as before.
+        DeviceBuffer<double> dThetaBest(static_cast<std::size_t>(D));
+        DeviceBuffer<double> dBl(static_cast<std::size_t>(ne > 0 ? ne : 1));
+        DeviceBuffer<double> dF3(static_cast<std::size_t>(npair > 0 ? npair : 1));
+        DeviceBuffer<double> dScFinal(1);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dThetaBest.data(), out.theta.data(),
+                                          static_cast<std::size_t>(D) * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+        cuda::launch_qpgraph_eval_at_theta(dt, dThetaBest.data(), dFobs.data(), dQinv.data(),
+                                           dBl.data(), dF3.data(), dScFinal.data(), stream_.get());
+        std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
+        std::vector<double> fit(static_cast<std::size_t>(npair), 0.0);
+        double sc_final = std::numeric_limits<double>::infinity();
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(bl.data(), dBl.data(),
+                                          static_cast<std::size_t>(ne) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(fit.data(), dF3.data(),
+                                          static_cast<std::size_t>(npair) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&sc_final, dScFinal.data(), sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        if (std::isfinite(sc_final) && sc_final < 1e30) { out.edge_length = bl; out.f3_fit = fit; out.status = Status::Ok; }
         else { out.edge_length.assign(static_cast<std::size_t>(ne), 0.0); out.f3_fit.assign(static_cast<std::size_t>(npair), 0.0); out.status = Status::NonSpdCovariance; }
         return out;
     }
@@ -4405,8 +4426,8 @@ public:
     /// The host then forms dof(r) = (nl-r)*(nr-r), p(r) = pchisq_upper, the AT2
     /// res$rankdrop nested table (rows f4rank DESCENDING; the nested diff to the
     /// next-lower rank; the last row NA), f4rank (the smallest non-rejected rank), and
-    /// rank_Q (numerical rank of Q via core::jacobi_svd — observability only, computed
-    /// host-side bit-identically to the oracle; NOT on the rank-test math path). The
+    /// rank_Q (numerical rank of Q via the ON-DEVICE one-sided Jacobi — observability
+    /// only, bit-identical to the oracle; NOT on the rank-test math path; L1). The
     /// per-rank SVD is recomputed each r. Native FP64 throughout (the §4 carve-out:
     /// SVD + the Qinv quadratic form are ill-conditioned/cuSOLVER ⇒ native; precision
     /// is ignored here, exactly like the oracle). DISPATCH (the FROZEN CONTRACT §3.2,
@@ -4530,17 +4551,32 @@ public:
 
         // ---- rank_Q: numerical rank of the (unfudged) covariance Q (m×m) ----
         // Observability only (the golden model_well_determined.rank_Q diagnostic, NOT
-        // gated; it is a derived property of Q, off the rank-test math path). Computed
-        // host-side via core::jacobi_svd — BIT-IDENTICAL to the CpuBackend oracle, so
-        // the GPU rank_Q == CPU rank_Q exactly (the localizer holds).
-        if (!cov.Q.empty() && cov.m == m) {
-            const core::SvdResult sq = core::jacobi_svd(cov.Q, m, m);
-            const double smax = sq.S.empty() ? 0.0 : sq.S.front();
-            const double tol = smax * static_cast<double>(m) *
-                               std::numeric_limits<double>::epsilon();
-            int rk = 0;
-            for (double s : sq.S) if (s > tol) ++rk;
-            rs.rank_Q = rk;
+        // gated; it is a derived property of Q, off the rank-test math path). L1: moved
+        // ON-DEVICE (was a host core::jacobi_svd). launch_qpadm_rank_via_jacobi runs the
+        // SAME one-sided-Jacobi sweep dev_jacobi_svd_V transliterates over VRAM scratch
+        // and counts the singular values above smax*m*eps — BIT-IDENTICAL to the
+        // CpuBackend oracle (eps passed from the host so the constant matches; the
+        // V-accumulation is dropped, irrelevant to sigma). GPU rank_Q == CPU rank_Q
+        // exactly (the localizer holds). Native FP64 (the §4 SVD carve-out).
+        if (!cov.Q.empty() && cov.m == m && m > 0) {
+            DeviceBuffer<double> dQfull(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
+            DeviceBuffer<double> dRankScratch(static_cast<std::size_t>(m) * static_cast<std::size_t>(m)
+                                              + static_cast<std::size_t>(m));  // W[m*m] | sigma[m]
+            DeviceBuffer<int> dRankOrder(static_cast<std::size_t>(m));          // order[m]
+            DeviceBuffer<int> dRank(1);
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQfull.data(), cov.Q.data(),
+                                              static_cast<std::size_t>(m) * static_cast<std::size_t>(m)
+                                                  * sizeof(double),
+                                              cudaMemcpyHostToDevice, stream_.get()));
+            launch_qpadm_rank_via_jacobi(dQfull.data(), m,
+                                         std::numeric_limits<double>::epsilon(),
+                                         dRankScratch.data(), dRankOrder.data(),
+                                         dRank.data(), stream_.get());
+            int rk_h = m;
+            STEPPE_CUDA_CHECK(cudaMemcpyAsync(&rk_h, dRank.data(), sizeof(int),
+                                              cudaMemcpyDeviceToHost, stream_.get()));
+            STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            rs.rank_Q = rk_h;
         } else {
             rs.rank_Q = m;
         }

@@ -374,6 +374,33 @@ __global__ void qpgraph_fleet_kernel(QpGraphDeviceTopo t, int numstart, int maxi
     out_score[inst] = s;
 }
 
+// ---- L3: evaluate the objective at a GIVEN theta and EXPORT bl + f3_fit ----------
+// The qpGraph fit's edge_length + f3_fit at the WINNING restart's theta, recovered
+// ON-DEVICE (was a host core::qpadm::qpgraph_score re-eval after the fleet — the
+// per-fit host-objective re-eval, L3). Runs the IDENTICAL d_qpgraph_score body the
+// fleet runs (the fleet's per-restart scratch is freed before the host can pick the
+// winner, and the scratch bl/res after d_fit_one_restart is STALE w.r.t. the returned
+// theta — the inner Newton loop's last objective eval is a probe, not the accepted
+// step — so a clean single re-eval at the converged theta is required; doing it on the
+// SAME device body is at least as faithful as the host re-eval it replaces, and drops
+// the host objective entirely). Single thread (one fit). bl = DB[L.bl]; f3_fit[r] =
+// ppwts·bl = f_obs[r] - res[r] (res = DB[L.res]). On a singular inner solve the score
+// is 1e30 — the host maps that to NonSpdCovariance (out.status), bl/f3_fit zeroed.
+// Native FP64 (the in-thread objective carve-out).
+__global__ void qpgraph_eval_at_theta_kernel(QpGraphDeviceTopo t, const double* theta,
+                                             const double* f_obs, const double* qinv,
+                                             ScratchLayout L, double* g_dbl, int* g_int,
+                                             double* out_bl, double* out_f3, double* out_score) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    const int ne = t.nedge_norm, np = t.npair;
+    const double s = d_qpgraph_score(t, theta, f_obs, qinv, L, g_dbl, g_int);
+    *out_score = s;
+    const double* bl  = g_dbl + L.bl;
+    const double* res = g_dbl + L.res;
+    for (int e = 0; e < ne; ++e) out_bl[e] = bl[e];
+    for (int r = 0; r < np; ++r) out_f3[r] = f_obs[r] - res[r];  // f3_fit = ppwts·bl
+}
+
 // ---- the HETEROGENEOUS-TOPOLOGY FLEET kernel (the topology-search killer app) ----
 // inst flattens (topo,restart): topo_id = inst/numstart, restart = inst%numstart. Each
 // thread reconstructs its topology's QpGraphDeviceTopo from the packed-arena base pointers
@@ -434,6 +461,20 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
     qpgraph_fleet_kernel<<<blocks, TPB, 0, stream>>>(topo, numstart, maxit, tol, d_fobs, d_qinv,
                                                      L, g_dbl.data(), g_int.data(),
                                                      d_out_theta, d_out_score);
+    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d_theta,
+                                  const double* d_fobs, const double* d_qinv,
+                                  double* d_out_bl, double* d_out_f3, double* d_out_score,
+                                  cudaStream_t stream) {
+    const ScratchLayout L = make_layout(topo.npop, topo.nedge_norm, topo.npair, topo.npath);
+    DeviceBuffer<double> g_dbl(static_cast<std::size_t>(L.dbl_total));
+    DeviceBuffer<int> g_int(static_cast<std::size_t>(L.int_total > 0 ? L.int_total : 1));
+    qpgraph_eval_at_theta_kernel<<<1, 1, 0, stream>>>(topo, d_theta, d_fobs, d_qinv, L,
+                                                      g_dbl.data(), g_int.data(),
+                                                      d_out_bl, d_out_f3, d_out_score);
     STEPPE_CUDA_CHECK(cudaGetLastError());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
 }

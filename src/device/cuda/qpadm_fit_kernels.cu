@@ -1007,6 +1007,81 @@ __global__ void seed_ab_kernel(const double* __restrict__ dXmat, int nl, int nr,
     dev_seed_ab<kQpMaxNl, kQpMaxNr, kQpMaxR>(dXmat, nl, nr, r, dA, dB);
 }
 
+// --- L1: rank_Q on-device (numerical rank of the m×m covariance Q) ----------------
+// The observability-only model_well_determined.rank_Q diagnostic, moved ON-DEVICE
+// (was a host core::jacobi_svd at the END of the GPU rank_sweep, the last bounded
+// per-model host-compute item). Reuses the EXACT one-sided-Jacobi sweep
+// dev_jacobi_svd_V transliterates (core::jacobi_svd, small_linalg.hpp:204-286) — same
+// kTol/kOffConvergence/kMaxSweeps, same rotation angle, same descending sort — so the
+// produced singular values (and thus the count) are BIT-IDENTICAL to the CpuBackend
+// oracle (the parity-localizer the test asserts: gpu rank_Q == cpu rank_Q exactly).
+// Only the SINGULAR VALUES are needed (not V), so the V-accumulation is dropped: sigma
+// = the column norms of the rotated W, a function of W + the rotation angles ONLY (V is
+// never read), so the count is unaffected. VRAM scratch (W[m*m], sigma[m], order[m])
+// instead of stacked local arrays so any production m fits (no kernel launch-OOM that a
+// large stacked Vfull[m*m]/W[m*m] frame would trip — the §1.4 large-path launch rule).
+// The tolerance is the EXACT host formula: tol = smax * m * DBL_EPSILON; rk = #{s>tol}.
+// Single thread (m small/bounded; one rank-count per model). Native FP64 (the §4 SVD
+// carve-out, same as the host jacobi_svd path it replaces).
+__global__ void rank_via_jacobi_kernel(const double* __restrict__ dQ, int m, double eps,
+                                       double* __restrict__ sW, double* __restrict__ sSigma,
+                                       int* __restrict__ sOrder, int* __restrict__ dRank) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (m <= 0) { *dRank = 0; return; }
+    // W = Q (m×m column-major). Q is symmetric (Q == Q'), so its singular values are
+    // |eigenvalues|; the one-sided Jacobi recovers them exactly as core::jacobi_svd does.
+    for (int i = 0; i < m * m; ++i) sW[i] = dQ[i];
+    const double kTol = 1e-15;
+    const int kMaxSweeps = 60;
+    for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+        double off = 0.0;
+        for (int p = 0; p < m - 1; ++p) {
+            for (int q = p + 1; q < m; ++q) {
+                double* wp = &sW[m * p];
+                double* wq = &sW[m * q];
+                double alpha = 0.0, beta = 0.0, gamma = 0.0;
+                for (int i = 0; i < m; ++i) {
+                    const double a = wp[i]; const double b = wq[i];
+                    alpha += a * a; beta += b * b; gamma += a * b;
+                }
+                off += gamma * gamma;
+                if (fabs(gamma) <= kTol * sqrt(alpha * beta) || gamma == 0.0) continue;
+                const double zeta = (beta - alpha) / (2.0 * gamma);
+                const double t = (zeta >= 0.0 ? 1.0 : -1.0) /
+                                 (fabs(zeta) + sqrt(1.0 + zeta * zeta));
+                const double c = 1.0 / sqrt(1.0 + t * t);
+                const double s = c * t;
+                for (int i = 0; i < m; ++i) {
+                    const double a = wp[i]; const double b = wq[i];
+                    wp[i] = c * a - s * b; wq[i] = s * a + c * b;
+                }
+                // V-accumulation intentionally omitted (sigma is independent of V).
+            }
+        }
+        if (off < kOffConvergence) break;
+    }
+    for (int j = 0; j < m; ++j) {
+        double nrm = 0.0;
+        const double* wj = &sW[m * j];
+        for (int i = 0; i < m; ++i) nrm += wj[i] * wj[i];
+        sSigma[j] = sqrt(nrm);
+    }
+    for (int j = 0; j < m; ++j) sOrder[j] = j;
+    for (int a = 0; a < m - 1; ++a)
+        for (int b = a + 1; b < m; ++b)
+            if (sSigma[sOrder[b]] > sSigma[sOrder[a]]) {
+                const int t = sOrder[a]; sOrder[a] = sOrder[b]; sOrder[b] = t;
+            }
+    // tol = smax * m * eps (the EXACT CpuBackend rank_Q tolerance; eps =
+    // std::numeric_limits<double>::epsilon() passed from the host so the constant is
+    // bit-identical). smax = the largest singular value.
+    const double smax = sSigma[sOrder[0]];
+    const double tol = smax * static_cast<double>(m) * eps;
+    int rk = 0;
+    for (int j = 0; j < m; ++j) if (sSigma[j] > tol) ++rk;
+    *dRank = rk;
+}
+
 // --- S6 ALS opt_A/opt_B loop (single thread; seeds already in dA/dB) -------------
 __global__ void als_kernel(const double* __restrict__ dXmat, const double* __restrict__ dQinv,
                            int nl, int nr, int r, double fudge, int als_iters,
@@ -1994,6 +2069,16 @@ void launch_qpadm_xmat_from_rowmajor(const double* dTotalSrc, int nl, int nr,
 void launch_qpadm_seed_ab(const double* dXmat, int nl, int nr, int r,
                           double* dA, double* dB, cudaStream_t stream) {
     seed_ab_kernel<<<1, 1, 0, stream>>>(dXmat, nl, nr, r, dA, dB);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_qpadm_rank_via_jacobi(const double* dQ, int m, double eps,
+                                  double* dScratch, int* dIntScratch, int* dRank,
+                                  cudaStream_t stream) {
+    // dScratch: W[m*m] | sigma[m]; dIntScratch: order[m]. dRank: the [1] int output.
+    double* sW = dScratch;
+    double* sSigma = dScratch + static_cast<long>(m) * m;
+    rank_via_jacobi_kernel<<<1, 1, 0, stream>>>(dQ, m, eps, sW, sSigma, dIntScratch, dRank);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

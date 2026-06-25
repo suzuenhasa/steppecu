@@ -82,6 +82,19 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
                           double tol, const double* d_fobs, const double* d_qinv,
                           double* d_out_theta, double* d_out_score, cudaStream_t stream);
 
+/// L3: evaluate the objective at a GIVEN theta and EXPORT the edge lengths + f3_fit
+/// ON-DEVICE (was a host core::qpadm::qpgraph_score re-eval at the winning restart's
+/// theta — the per-fit host objective, L3). Runs the IDENTICAL d_qpgraph_score body
+/// the fleet runs, ONCE, at `d_theta` (the host-selected best restart's converged
+/// theta), and writes out_bl[nedge_norm] (the fitted drift edge lengths) + out_f3[npair]
+/// (the fitted f3 = ppwts·bl = f_obs - res) + out_score[1] (the objective there; the
+/// host maps a 1e30 singular score to NonSpdCovariance). f_obs[npair] + qinv[npair²]
+/// col-major are device-resident. Single thread, native FP64 (the objective carve-out).
+void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d_theta,
+                                  const double* d_fobs, const double* d_qinv,
+                                  double* d_out_bl, double* d_out_f3, double* d_out_score,
+                                  cudaStream_t stream);
+
 /// The per-topology VIEW into the PACKED batch arenas (the topology-search heterogeneous
 /// fleet). Scalars by value; the array fields are BASE OFFSETS (element counts) into the
 /// single packed device buffers (d_pwts0 / d_pe_* / d_pae_* / d_cmb*). The kernel
