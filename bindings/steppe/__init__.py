@@ -18,7 +18,16 @@ from typing import Any, Optional
 
 from . import _core  # the compiled nanobind extension (steppe/_core*.so)
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("steppe")
+except Exception:  # not installed as a distribution (e.g. an in-tree dev import)
+    # Literal fallback; single-sourced against pyproject.toml [project].version.
+    __version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "Status",
     "F2Blocks",
     "QpAdmResult",

@@ -22,6 +22,9 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "steppe"
 version = "0.1.0"
+# RUNTIME FLOOR: CUDA 13 (a CUDA-13 runtime + matching NVIDIA driver, resolved at load — see
+# the header note above). steppe is a GPU product; `import steppe` works without a GPU, but any
+# GPU call requires a CUDA-13 device. The prebuilt wheel targets Blackwell sm_120.
 description = "GPU/CUDA-13 qpAdm / qpWave (f-statistics & model fitting)"
 readme = "README.md"
 requires-python = ">=3.9"

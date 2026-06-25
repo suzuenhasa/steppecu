@@ -6,15 +6,19 @@ invented variants. For *standing up / verifying a fresh box* see `docs/BOX-RUNBO
 for *what is built / what's next* see `docs/RESUME.md` + `docs/ROADMAP.md`; the fit
 internals live in `docs/design/fit-engine.md`.
 
-> **HONEST SCOPE (read this first).** There is **no CLI and no Python binding yet** — an
-> `app/` entry point is *planned*, not built (`docs/architecture.md` §4; the survey is in
-> `docs/research/desirable-features-survey.md`). Today, "running steppe" means one of two
-> things: (a) the **test-harness binaries** (`test_qpadm_parity` / `test_qpadm_rotation`)
-> which load the real AADR f2 fixtures and run the GPU fit/rotation, or (b) calling the
-> **C++ library API** (`steppe::run_qpadm` / `run_qpadm_search`, declared in
-> `include/steppe/qpadm.hpp`) from your own translation unit. There are also **no
-> standalone f4 / f3 / D-stat / f4-ratio / qpDstat / qpfstats / DATES / qpGraph entry
-> points** — the f4 math is internal to the fit. This guide covers what exists.
+> **SCOPE (read this first).** steppe ships a **14-subcommand CLI** (`steppe extract-f2 /
+> qpadm / qpadm-rotate / qpwave / f4 / f3 / f4-ratio / f4-sweep / f3-sweep / qpdstat /
+> qpfstats / qpgraph / qpgraph-search / dates`) **and** a **Python facade** (the
+> `steppe` package: `read_f2` / `extract_f2` / `qpadm` / `qpwave` / `qpgraph` /
+> `qpgraph_search` / `f4` / `f3` / `f4ratio` / `qpdstat` / `dstat` / `dates` /
+> `qpfstats` / `qpadm_search`). For the user-facing front door — install, the CLI command
+> table, the Python quickstart — see the top-level **`README.md`** and the canonical
+> **`docs/RUN-SHEET.md`**; the full feature/golden/wall-clock matrix is
+> `docs/feature-matrix.md`. **This guide is the lower-level / developer view**: the
+> build, the GPU-vs-AT2-golden ctest, the **test-harness binaries**
+> (`test_qpadm_parity` / `test_qpadm_rotation`), and the **C++ library API**
+> (`steppe::run_qpadm` / `run_qpadm_search`, `include/steppe/qpadm.hpp`) for embedding the
+> fit directly.
 
 Nothing builds locally — **author locally → rsync → build/test on the box.**
 
@@ -160,8 +164,8 @@ QpAdmResult r = run_qpadm(f2 /*DeviceF2Blocks*/, model, opts, resources);
 Key API facts (all from `include/steppe/qpadm.hpp`):
 
 - **A model references populations by INDEX** into the device-resident f2_blocks P axis —
-  no strings at the compute seam (name→index resolution is an app/binding concern, which
-  is part of what the planned `app/` would own).
+  no strings at the compute seam (name→index resolution is an app/binding concern, owned
+  by the built `app/` CLI layer and the Python facade).
 - **`run_qpadm`** has two overloads: the `DeviceF2Blocks` form (the GPU-first primary, zero
   D2H) and a host `F2BlockTensor&` form (the parity/oracle door used by the test).
 - **`run_qpwave`** — the qpWave rank-sweep form (no target prepend), same two overloads,
@@ -251,11 +255,15 @@ box and poll a log** (`docs/BOX-RUNBOOK.md` §7) rather than holding an ssh sess
 
 ---
 
-## Where the CLI / Python would land (planned, not built)
+## The CLI / Python surface (built — wraps this same API)
 
-When built, a thin **`app/`** layer (`docs/architecture.md` §4) would own name→index
-resolution (so users pass population *names*, not f2 indices), argument parsing, and the
-Python bindings — wrapping the same `run_qpadm` / `run_qpadm_search` library API this
-guide uses. Until then, the test harness + the C++ API **are** the way to run steppe. The
-candidate-feature survey (standalone f-stats, qpfstats, DATES, qpGraph, the precompute M6
-multi-dataset merge / M7 on-disk cache) is `docs/research/desirable-features-survey.md`.
+The `app/` layer **is built**: the `steppe` CLI (`src/app/`) owns name→index resolution
+(users pass population *names*, not f2 indices), argument parsing, and CSV/JSON emit; the
+Python facade (`bindings/steppe`, nanobind) exposes the same surface — both wrap the same
+`run_qpadm` / `run_qpadm_search` / `run_qpwave` library API this guide documents, plus the
+standalone f-stats (f4 / f3 / f4-ratio / qpDstat), qpfstats, qpGraph (fit + topology
+search), and DATES. For the user-facing install + command table + quickstart, see
+`README.md` and `docs/RUN-SHEET.md`; the per-feature golden/wall-clock matrix is
+`docs/feature-matrix.md`. Still pending (not yet built): older `.GENO`/EIGENSTRAT/PLINK
+readers (steppe is TGENO-only) and the precompute M6 multi-dataset merge / M7 on-disk
+cache (`docs/research/desirable-features-survey.md`).
