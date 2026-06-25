@@ -148,6 +148,23 @@ target_link_libraries(test_plink_decode_equivalence
 set_target_properties(test_plink_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME plink_decode_equivalence COMMAND test_plink_decode_equivalence "${STEPPE_AADR_ROOT}")
 
+# --- M-FR-AM TIER-1: the ANCESTRYMAP (text triple) reader == the PA reader, BIT-EXACT --
+# CUDA TU: drives the PRODUCTION dispatch (core::read_canonical_tile) on an ANCESTRYMAP .geno
+# AND on the convertf-PA .geno of the SAME 9-pop subset (fixtures_eig/v66_fit9_am vs _pa) and
+# asserts BYTE-FOR-BYTE: the canonical tile (NO tail mask — both are SNP-major), the auto-
+# detected sample_ploidy, and the decoded Q/V/N (memcmp==0) match on BOTH the GPU backend and
+# the CPU oracle. The ANCESTRYMAP reader's positional <snp_id> <sample_id> <genotype> parse +
+# the token->code map (0/1/2 copies, "-1"->missing — the ANCESTRYMAP sentinel, distinct from
+# EIGENSTRAT's '9') are pinned by this bit-exact compare — a wrong parse/sentinel diverges
+# immediately. Since PA==TGENO==goldens (test_pa_decode_equivalence), this transitively pins
+# ANCESTRYMAP to the goldens with NO new statistical golden + NO AT2 rerun. SKIPs exit-0 if the
+# fixture dir (<root>/fixtures_eig) is absent. Self-checking main(); CTest gates on the exit code.
+add_executable(test_ancestrymap_decode_equivalence reference/test_ancestrymap_decode_equivalence.cu)
+target_link_libraries(test_ancestrymap_decode_equivalence
+    PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_ancestrymap_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME ancestrymap_decode_equivalence COMMAND test_ancestrymap_decode_equivalence "${STEPPE_AADR_ROOT}")
+
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
 # the SHARED assign_blocks, computes the per-block f2 tensor via the production
@@ -1628,6 +1645,25 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_plink_prefix steppe_app)
   add_test(NAME cli_plink_prefix
            COMMAND test_cli_plink_prefix
+                   "$<TARGET_FILE:steppe_app>"
+                   "${STEPPE_AADR_ROOT}")
+
+  # --- M-FR-AM ANCESTRYMAP-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ---------
+  # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the
+  # ANCESTRYMAP (unpacked text triple) --prefix <fixtures_eig/v66_fit9_am> (the prefix that
+  # USED TO THROW at the GenoReader ctor) and once with the convertf-PA (GENO) --prefix of
+  # the SAME 9-pop subset — and asserts the ANCESTRYMAP run WORKS (exit 0) AND matches the PA
+  # run: extract-f2's f2.bin BYTE-IDENTICAL, qpdstat est/se/z row-for-row (rtol 1e-6). Both
+  # fixtures are convertf outputs from the SAME PA source with the SAME poplist (identical
+  # .ind/.snp), so they are the SAME genotypes two ways; a correct ANCESTRYMAP reader MUST
+  # reproduce the PA result. NO new golden (the comparison IS AM-vs-PA, and PA==TGENO==goldens
+  # via cli_pa_prefix). RUNNING ON THE GPU. SKIPs cleanly (exit 0) when no CUDA device is
+  # visible OR the fixtures_eig prefixes are absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_ancestrymap_prefix cli/test_cli_ancestrymap_prefix.cpp)
+  target_link_libraries(test_cli_ancestrymap_prefix PRIVATE steppe::warnings)
+  add_dependencies(test_cli_ancestrymap_prefix steppe_app)
+  add_test(NAME cli_ancestrymap_prefix
+           COMMAND test_cli_ancestrymap_prefix
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}")
 endif()

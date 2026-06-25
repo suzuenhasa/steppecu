@@ -162,6 +162,37 @@ public:
                                                         std::size_t snp_begin,
                                                         std::size_t snp_end);
 
+    /// ANCESTRYMAP (unpacked legacy EIGENSOFT, TEXT triple) gather (M-FR-AM). The
+    /// text-triple twin of read_eigenstrat_snp_major_tile: the .geno is one line per
+    /// (SNP, individual) pair `<snp_id> <sample_id> <genotype>`, laid out SNP-major
+    /// (each SNP's n_ind rows consecutive, in .ind order; SNPs in .snp order), so it is
+    /// POSITIONALLY addressed — line L is SNP L/n_ind, individual L%n_ind. For SNPs
+    /// [snp_begin, snp_end) this reads the leading tile_snps*n_ind lines SEQUENTIALLY
+    /// (the .geno carries no header), maps each line's 3rd token to its canonical 2-bit
+    /// code (ancestrymap_token_to_code: 0/1/2 copies, "-1"->kMissingCode), and PACKS it
+    /// MSB-first into the canonical SNP-major 2-bit layout (record s = SNP s,
+    /// `packed_bytes(n_ind)` bytes, source individual i at byte i/4) — the SAME packing
+    /// read_snp_major_tile / read_eigenstrat_snp_major_tile produce. It then builds the
+    /// identical selected, pop-contiguous individual gather list. The result is a
+    /// SnpMajorTile the app hands to the SAME ComputeBackend::transpose_to_canonical with
+    /// TileEncoding::Identity (the token->code map is the value identity, like EIGENSTRAT;
+    /// only the parse + the "-1" missing sentinel differ) — so NOTHING downstream of the
+    /// transpose changes.
+    ///
+    /// REQUIRES snp_begin == 0 (the byte-aligned SNP prefix; a nonzero begin is the M5
+    /// tile loop). Keeps the SAME fail-fast guards as read_eigenstrat_snp_major_tile
+    /// (empty partition, any selected row >= n_ind, the checked-multiply tile-size
+    /// overflow) PLUS a malformed-line guard: a .geno line that does not carry exactly
+    /// kAncestrymapFields whitespace tokens, or whose 3rd token is not 0/1/2/-1, is
+    /// REJECTED with the 1-based line + SNP/individual context (the line index IS the
+    /// SNP*n_ind+individual position — a desync corrupts the genotype matrix). Throws
+    /// std::runtime_error on a read error, an out-of-range SNP range, a non-ANCESTRYMAP
+    /// file (the other formats use their own readers), a malformed partition, a malformed
+    /// .geno line, or a failed allocation — the SAME documented contract.
+    [[nodiscard]] SnpMajorTile read_ancestrymap_snp_major_tile(const IndPartition& part,
+                                                              std::size_t snp_begin,
+                                                              std::size_t snp_end);
+
     GenoReader(const GenoReader&) = delete;
     GenoReader& operator=(const GenoReader&) = delete;
     GenoReader(GenoReader&&) noexcept = default;

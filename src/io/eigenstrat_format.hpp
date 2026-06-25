@@ -176,9 +176,20 @@ inline constexpr int kFirstOtherChromCode = -1;
 /// (n_snp) / .fam (n_ind) line counts, and its 2-bit codes are remapped + bit-order
 /// flipped to canonical in the io-leaf gather (geno_reader read_plink_snp_major_tile).
 /// EIGENSTRAT/GENO/TGENO share the sibling .snp/.ind; PLINK uses .bim/.fam (plink_reader).
-/// EIGENSTRAT, GENO, and PLINK are all SNP-major and reach the canonical individual-
-/// major tile through the on-device transpose.
-enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat, Plink };
+/// ANCESTRYMAP is the legacy EIGENSOFT UNPACKED format (convertf outputformat
+/// ANCESTRYMAP): the .geno is TEXT, one line per (SNP, individual) pair —
+/// `<snp_id> <sample_id> <genotype>` — laid out SNP-major (each SNP's n_ind rows
+/// consecutive, in .ind order; SNPs in .snp order). The genotype is the reference-
+/// allele copy count 0/1/2, or `-1` for MISSING (the ANCESTRYMAP missing sentinel —
+/// DISTINCT from EIGENSTRAT's `9`). It shares the sibling .snp/.ind; its geometry
+/// (n_snp / n_ind) is derived from those sibling line counts (the .geno carries no
+/// header), exactly as PLINK derives geometry from .bim/.fam. Its codes map to the
+/// SAME canonical raw-value 0/1/2/3 (0/1/2 copies, -1 -> kMissingCode) so the io-leaf
+/// gather packs it into the SAME canonical SNP-major source and the transpose runs
+/// Identity (the EIGENSTRAT precedent — only the parse + the missing sentinel differ).
+/// EIGENSTRAT, GENO, PLINK, and ANCESTRYMAP are all SNP-major and reach the canonical
+/// individual-major tile through the on-device transpose.
+enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat, Plink, Ancestrymap };
 
 // ---------------------------------------------------------------------------
 // PLINK .bed constants — the single home for the PLINK binary-genotype literals
@@ -256,6 +267,54 @@ inline constexpr char kEigenstratMaxCopiesChar = '2';
         return true;
     }
     return false;  // any other byte is a malformed EIGENSTRAT genotype
+}
+
+// ---------------------------------------------------------------------------
+// ANCESTRYMAP (unpacked legacy EIGENSOFT) .geno constants — the single home for
+// the text-triple-genotype convention (M-FR-AM). The .geno is one line per
+// (SNP, individual) pair: `<snp_id> <sample_id> <genotype>`, whitespace-separated
+// (convertf right-justifies the fields, so an arbitrary leading/intervening run of
+// spaces is normal). The genotype token is the reference-allele copy count "0"/"1"/
+// "2", or "-1" for a MISSING call — the ANCESTRYMAP missing sentinel, DISTINCT from
+// EIGENSTRAT's '9'. The token->canonical-2-bit map is the value identity on the
+// copy count (0->0,1->1,2->2) with "-1"->kMissingCode(3), so once the line is packed
+// SNP-major the existing transpose runs with TileEncoding::Identity (no remap).
+//
+// The .geno carries NO header / NO geometry; n_snp and n_ind come from the sibling
+// .snp / .ind line counts (the PLINK precedent — geometry from the metadata files,
+// not the genotype file). The .geno is positionally addressed: line index L (0-based)
+// is SNP L/n_ind, individual L%n_ind (verified on the convertf fixture: each SNP id
+// spans exactly n_ind consecutive lines in .ind order, SNPs in .snp order).
+// ---------------------------------------------------------------------------
+
+/// The exact whitespace-separated field count of an ANCESTRYMAP .geno line:
+/// <snp_id> <sample_id> <genotype>. A line with any other token count is NOT an
+/// ANCESTRYMAP record (the probe classifies the file Unknown / the gather fails loud).
+inline constexpr std::size_t kAncestrymapFields = 3;
+
+/// The ANCESTRYMAP missing-genotype token ("-1"); maps to kMissingCode (3). DISTINCT
+/// from EIGENSTRAT's single-char '9' (the formats use different missing sentinels).
+inline constexpr std::string_view kAncestrymapMissingToken = "-1";
+
+/// Map one ANCESTRYMAP genotype TOKEN (the 3rd whitespace field) to its canonical
+/// 2-bit code. "0"/"1"/"2" -> the reference-allele copy count 0/1/2 (the value IS the
+/// code, the same raw-value convention TGENO/GENO/EIGENSTRAT use); "-1" -> kMissingCode
+/// (3, missing). Returns `true` and writes `out` on a recognized token; returns `false`
+/// on anything else so the caller can fail-fast with the SNP/individual context — the
+/// SINGLE ANCESTRYMAP token->code site shared by the geometry probe and the host gather
+/// (no GPU twin: the text->2-bit pack happens host-side, then the canonical SNP-major
+/// bytes flow through the SAME transpose as GENO).
+[[nodiscard]] constexpr bool ancestrymap_token_to_code(std::string_view tok,
+                                                       std::uint8_t& out) noexcept {
+    if (tok.size() == 1 && tok[0] >= '0' && tok[0] <= kEigenstratMaxCopiesChar) {
+        out = static_cast<std::uint8_t>(tok[0] - '0');  // 0/1/2 ref-allele copies
+        return true;
+    }
+    if (tok == kAncestrymapMissingToken) {
+        out = kMissingCode;  // "-1" -> 3 (missing)
+        return true;
+    }
+    return false;  // any other token is a malformed ANCESTRYMAP genotype
 }
 
 /// Parsed packed-.geno header: the format, the two dataset counts, and the

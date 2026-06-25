@@ -91,13 +91,24 @@ io::GenotypeTile read_canonical_tile(io::GenoReader& reader,
             return transpose_snp_major(
                 reader.read_plink_snp_major_tile(part, snp_begin, snp_end), backend);
 
+        case io::GenoFormat::Ancestrymap:
+            // ANCESTRYMAP (unpacked legacy EIGENSOFT, TEXT triple, M-FR-AM): the `io`-leaf
+            // gather parses the positionally-addressed <snp_id> <sample_id> <genotype>
+            // lines and packs them into the SAME canonical SNP-major source — the
+            // token->code map is the value identity (0/1/2 copies, "-1"->missing), like
+            // EIGENSTRAT, so the encoding is IDENTITY and the SAME on-device transpose
+            // runs unchanged. Only the parse + the "-1" missing sentinel differ from the
+            // EIGENSTRAT path.
+            return transpose_snp_major(
+                reader.read_ancestrymap_snp_major_tile(part, snp_begin, snp_end), backend);
+
         case io::GenoFormat::Unknown:
         default:
             // The GenoReader ctor already rejects an unrecognized format, so this is
             // defensive (a future format reaching here without a dispatch arm).
             throw std::runtime_error(
                 "core::read_canonical_tile: unsupported .geno format (not TGENO, GENO, "
-                "EIGENSTRAT, nor PLINK) — no canonical-tile dispatch");
+                "EIGENSTRAT, ANCESTRYMAP, nor PLINK) — no canonical-tile dispatch");
     }
 }
 
