@@ -3612,6 +3612,13 @@ public:
         guard_device();
         QpGraphFleet out;
         const int D = topo.nadmix;
+        // The in-kernel fit holds theta in a fixed-size per-thread stack (kMaxThetaDev) —
+        // reject an over-cap topology before launch (a clear throw) instead of overrunning it.
+        if (D > cuda::kMaxThetaDev)
+            throw std::runtime_error(
+                "steppe::device::CudaBackend::qpgraph_fit_fleet: topology nadmix=" +
+                std::to_string(D) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
+                std::to_string(cuda::kMaxThetaDev) + ".");
         const int npair = topo.npair, ne = topo.nedge_norm;
 
         // ---- upload the resident basis + the topology arenas ----------------------
@@ -3789,6 +3796,16 @@ public:
         int max_npop = 0, max_ne = 0, max_npair = 0, max_npath = 0;
         for (int g = 0; g < G; ++g) {
             const QpGraphTopoArena& t = topos[static_cast<std::size_t>(g)];
+            // The per-thread theta stack is fixed-size (kMaxThetaDev): reject an over-cap
+            // topology HERE (a clear throw) so the heterogeneous fleet never hands the kernel
+            // an nadmix that would overrun th[]/thp[]/thm[]/thn[]. (The kernel also returns a
+            // 1e30 sentinel on the over-cap path; this host reject is the loud failure.)
+            if (t.nadmix > cuda::kMaxThetaDev)
+                throw std::runtime_error(
+                    "steppe::device::CudaBackend::qpgraph_fit_fleet_batch: candidate topology "
+                    + std::to_string(g) + " has nadmix=" + std::to_string(t.nadmix) +
+                    " exceeding the per-thread theta-stack cap kMaxThetaDev=" +
+                    std::to_string(cuda::kMaxThetaDev) + ".");
             cuda::QpGraphDeviceTopoView v{};
             v.npop = t.npop; v.nedge_norm = t.nedge_norm; v.nadmix = t.nadmix;
             v.npair = t.npair; v.npath = t.npath; v.base_leaf = t.base_leaf;

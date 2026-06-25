@@ -30,6 +30,9 @@
 #include "device/cuda/check.cuh"
 #include "device/cuda/device_buffer.cuh"
 
+#include <stdexcept>  // std::runtime_error — the nadmix > kMaxThetaDev reject-before-launch
+#include <string>     // std::to_string — the over-cap diagnostic message
+
 namespace steppe::device::cuda {
 
 namespace {
@@ -298,7 +301,9 @@ __device__ inline double d_init_theta(unsigned inst, int dim) {
 }
 __device__ inline double clamp01(double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); }
 
-constexpr int kMaxThetaDev = 16;  // device theta cap (production nadmix; comfortably large)
+// kMaxThetaDev (the per-thread theta-stack cap) is single-sourced in the .cuh — the host
+// launchers read it to reject an over-cap topology before launch; the device path guards on
+// it below (1e30 sentinel) so an oversized nadmix fails LOUDLY instead of overrunning th[].
 
 // ---- the SHARED per-restart fit (the whole multistart-instance loop in-kernel) ----
 // Runs ONE restart `inst` of topology `t`: deterministic splitmix theta init -> the
@@ -313,6 +318,10 @@ __device__ inline double d_fit_one_restart(const QpGraphDeviceTopo& t, unsigned 
                                            const ScratchLayout& L, double* DB, int* IB,
                                            double* th) {
     const int D = t.nadmix;
+    // Device guard (defense in depth; the host launchers reject this before launch). An
+    // over-cap nadmix would overrun the fixed th/thp/thm/thn[kMaxThetaDev] stack arrays and
+    // silently corrupt adjacent locals — fail LOUDLY with the singular sentinel instead.
+    if (D > kMaxThetaDev) return 1e30;
     for (int d = 0; d < D; ++d) th[d] = clamp01(d_init_theta(inst, d));
     double s = d_qpgraph_score(t, th, f_obs, qinv, L, DB, IB);
     if (D == 0) return s;  // pure tree: one eval, no theta axis (the in-kernel D==0 path).
@@ -370,7 +379,11 @@ __global__ void qpgraph_fleet_kernel(QpGraphDeviceTopo t, int numstart, int maxi
     double th[kMaxThetaDev];
     const double s = d_fit_one_restart(t, static_cast<unsigned>(inst), maxit, tol, f_obs, qinv,
                                        L, DB, IB, th);
-    for (int d = 0; d < D; ++d) out_theta[static_cast<long>(inst) * D + d] = th[d];
+    // th[] is only valid for d<min(D,kMaxThetaDev): on the over-cap path d_fit_one_restart
+    // returns 1e30 WITHOUT filling th, so clamp the readback to the stack length (the host
+    // rejects over-cap before launch, so the goldens never take this branch).
+    const int Dw = D < kMaxThetaDev ? D : kMaxThetaDev;
+    for (int d = 0; d < Dw; ++d) out_theta[static_cast<long>(inst) * D + d] = th[d];
     out_score[inst] = s;
 }
 
@@ -452,6 +465,12 @@ __global__ void qpgraph_fleet_batch_kernel(const QpGraphDeviceTopoView* views, i
 void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit,
                           double tol, const double* d_fobs, const double* d_qinv,
                           double* d_out_theta, double* d_out_score, cudaStream_t stream) {
+    if (topo.nadmix > kMaxThetaDev)
+        throw std::runtime_error(
+            "steppe::device::cuda::launch_qpgraph_fleet: topology nadmix=" +
+            std::to_string(topo.nadmix) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
+            std::to_string(kMaxThetaDev) + "; the in-kernel fit holds theta in fixed-size stack "
+            "arrays of that length. Reduce the admixture-node count or raise kMaxThetaDev.");
     const ScratchLayout L = make_layout(topo.npop, topo.nedge_norm, topo.npair, topo.npath);
     // per-thread global scratch (numstart slabs). Allocated here, freed at scope end.
     DeviceBuffer<double> g_dbl(static_cast<std::size_t>(numstart) * static_cast<std::size_t>(L.dbl_total));
@@ -469,6 +488,11 @@ void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d
                                   const double* d_fobs, const double* d_qinv,
                                   double* d_out_bl, double* d_out_f3, double* d_out_score,
                                   cudaStream_t stream) {
+    if (topo.nadmix > kMaxThetaDev)
+        throw std::runtime_error(
+            "steppe::device::cuda::launch_qpgraph_eval_at_theta: topology nadmix=" +
+            std::to_string(topo.nadmix) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
+            std::to_string(kMaxThetaDev) + " (the qpGraph fit's nadmix precondition).");
     const ScratchLayout L = make_layout(topo.npop, topo.nedge_norm, topo.npair, topo.npath);
     DeviceBuffer<double> g_dbl(static_cast<std::size_t>(L.dbl_total));
     DeviceBuffer<int> g_int(static_cast<std::size_t>(L.int_total > 0 ? L.int_total : 1));

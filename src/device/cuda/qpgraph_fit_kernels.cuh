@@ -11,8 +11,19 @@
 
 namespace steppe::device::cuda {
 
+/// The device theta-stack cap. The per-restart fit holds the admixture weights theta (and
+/// its forward-diff perturbations thp/thm/thn) in FIXED-SIZE per-thread stack arrays of this
+/// length — so `nadmix` MUST be `<= kMaxThetaDev`. The host launchers reject an over-cap
+/// topology before launch (a clear throw) and the kernel returns a 1e30 sentinel score on
+/// the over-cap path, so an oversized topology fails LOUDLY instead of silently overrunning
+/// the stack. 16 comfortably covers production nadmix (admixture-node counts are small).
+/// Single-source: both the header (host reject) and the kernel (device guard) read this.
+constexpr int kMaxThetaDev = 16;
+
 /// The flat device-arena pointers for the topology (uploaded ONCE per fit; the qpAdm
 /// per-model index-arena pattern). All device pointers; the scalars are by value.
+/// PRECONDITION: `nadmix <= kMaxThetaDev` (the per-thread theta stack cap) — enforced by the
+/// host launchers (throw) + the kernel (1e30 sentinel); see kMaxThetaDev.
 struct QpGraphDeviceTopo {
     int npop, nedge_norm, nadmix, npair, npath, base_leaf;
     int n_pe, n_pae;                 ///< path-edge / path-admixedge table lengths.
@@ -100,6 +111,9 @@ void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d
 /// single packed device buffers (d_pwts0 / d_pe_* / d_pae_* / d_cmb*). The kernel
 /// reconstructs a QpGraphDeviceTopo for topology g by adding the base device pointers to
 /// these offsets — so G heterogeneous topologies live in ONE buffer + one index table.
+/// PRECONDITION: `nadmix <= kMaxThetaDev` (same per-thread theta stack cap as
+/// QpGraphDeviceTopo) — enforced by the batch host launcher (throw) + the kernel (1e30
+/// sentinel); see kMaxThetaDev.
 struct QpGraphDeviceTopoView {
     int npop, nedge_norm, nadmix, npair, npath, base_leaf;
     int n_pe, n_pae;
