@@ -1625,9 +1625,14 @@ qpadm_fit_models_kernel(const double* __restrict__ dTotal,
     {
         int surv[kQpMaxNl];
         for (int i = 0; i < nl; ++i) surv[i] = i;
-        double wr[kQpMaxNl], cr;
+        // [10.2] cr seeded to a NaN sentinel: on a RankDeficient reduced fit
+        // dev_als_weights returns 6 WITHOUT writing *chisq_out (qpadm_fit_kernels:497),
+        // so the store below MUST be guarded on the status — matching the weights
+        // NaN-on-singular contract (and weights_chisq_kernel:1130's d_status guard).
+        double wr[kQpMaxNl], cr = (0.0 / 0.0);
         const int s0 = fit_reduced(surv, nl, wr, &cr);
-        d_pop_chisq[static_cast<long>(model) * (nl + 1) + 0] = cr;
+        d_pop_chisq[static_cast<long>(model) * (nl + 1) + 0] =
+            (s0 == 0) ? cr : (0.0 / 0.0);  // NaN on a singular reduced fit
         for (int i = 0; i < nl; ++i)
             d_pop_wfull[static_cast<long>(model) * nl + i] =
                 (s0 == 0) ? wr[i] : (0.0 / 0.0);  // NaN on a singular reduced fit
@@ -1639,10 +1644,13 @@ qpadm_fit_models_kernel(const double* __restrict__ dTotal,
             int surv[kQpMaxNl];
             int cnt = 0;
             for (int i = 0; i < nl; ++i) if (i != drop) surv[cnt++] = i;
-            double wr[kQpMaxNl], cr;
-            fit_reduced(surv, cnt, wr, &cr);
+            // [10.2] same guard as the full row above: capture the RankDeficient
+            // status and write NaN (not the unwritten/garbage cr) on a singular fit.
+            double wr[kQpMaxNl], cr = (0.0 / 0.0);
+            const int sd = fit_reduced(surv, cnt, wr, &cr);
             const int row = 1 + (nl - 1 - drop);
-            d_pop_chisq[static_cast<long>(model) * (nl + 1) + row] = cr;
+            d_pop_chisq[static_cast<long>(model) * (nl + 1) + row] =
+                (sd == 0) ? cr : (0.0 / 0.0);  // NaN on a singular reduced fit
         }
     }
 }
