@@ -216,17 +216,16 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     }
 
     // ---- 5b. GLOBAL-BEST argmin (deterministic reduction; NOT a fit) ------------
-    int best_arena = -1, second_arena = -1;
+    int best_arena = -1;
     double best_s = std::numeric_limits<double>::infinity();
     double second_s = std::numeric_limits<double>::infinity();
     for (int a = 0; a < static_cast<int>(arenas.size()); ++a) {
         const double s = fb.best_score[static_cast<std::size_t>(a)];
         if (!std::isfinite(s)) continue;
-        if (s < best_s) { second_s = best_s; second_arena = best_arena; best_s = s; best_arena = a; }
-        else if (s < second_s) { second_s = s; second_arena = a; }
+        if (s < best_s) { second_s = best_s; best_s = s; best_arena = a; }
+        else if (s < second_s) { second_s = s; }
     }
     if (best_arena < 0) { res.status = Status::NonSpdCovariance; return res; }
-    (void)second_arena;
     // map the best arena back to its candidate.
     int best_cand = -1;
     for (std::size_t i = 0; i < cands.size(); ++i) if (arena_of[i] == best_arena) { best_cand = static_cast<int>(i); break; }
@@ -329,7 +328,6 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
         const bool same_score =
             std::fabs(agg_s - best_s) <= kRecoveryAtol + kRecoveryRtol * std::fabs(best_s);
         res.heuristic_recovered = same_hash && same_score;
-        (void)score_cache;
     }
 
     res.status = Status::Ok;

@@ -66,10 +66,16 @@ inline constexpr std::size_t kPrimaryGpu = 0;
     const int P = f2.P;
     const int range = req.pop_subset.empty() ? P : static_cast<int>(req.pop_subset.size());
     const unsigned long long enumerated = choose_saturating(range, k);
-    res.enumerated = static_cast<std::size_t>(
+    // The clamped host estimate is the count REPORTED only on the two early-return paths
+    // (the empty `range < k` Ok and the maxcomb `capped` refusal below). On the dispatch
+    // path the backend echoes its EXACT survivor-range count, which overwrites res.enumerated
+    // after f4_sweep/f3_sweep — so we set it here only in the branches that return early,
+    // never as a dead store the compute path immediately replaces.
+    const std::size_t enumerated_estimate = static_cast<std::size_t>(
         enumerated > static_cast<unsigned long long>(SIZE_MAX) ? SIZE_MAX : enumerated);
 
     if (range < k) {  // too few pops to form even one item — a clean empty Ok result.
+        res.enumerated = enumerated_estimate;
         res.status = Status::Ok;
         return res;
     }
@@ -78,6 +84,7 @@ inline constexpr std::size_t kPrimaryGpu = 0;
     // written); every enumerated item is still computed on the GPU to TEST it, so a sweep over
     // more than kFstatMaxComb items is refused unless `sure` (it guards COMPUTE TIME).
     if (enumerated > kFstatMaxComb && !req.sure) {
+        res.enumerated = enumerated_estimate;
         res.capped = true;
         res.status = Status::InvalidConfig;
         return res;

@@ -48,14 +48,16 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
         // the per-sample loop instead of being re-evaluated once per individual
         // (cleanup 7.2). `n_snp > 0` is guaranteed by the enclosing branch.
         const double n_snp_d = static_cast<double>(n_snp);
+        // Byte index s/kCodesPerByte and in-byte position s%kCodesPerByte: the packing
+        // radix is single-homed in io::kCodesPerByte (the same 4 that packed_bytes /
+        // code_in_byte derive from), never re-spelled here. Loop-invariant across both
+        // the sample and SNP axes, so it is hoisted out of the loops alongside n_snp_d
+        // (the file's own loop-invariant-hoisting convention; cleanup 7.2).
+        constexpr auto kPerByte = static_cast<std::size_t>(io::kCodesPerByte);
         for (std::size_t ind = 0; ind < n_ind; ++ind) {
             const std::uint8_t* rec = in.packed + ind * in.bytes_per_record;
             std::size_t nonmissing_count = 0;
             for (std::size_t s = 0; s < n_snp; ++s) {
-                // Byte index s/kCodesPerByte and in-byte position s%kCodesPerByte:
-                // the packing radix is single-homed in io::kCodesPerByte (the same 4
-                // that packed_bytes / code_in_byte derive from), never re-spelled here.
-                constexpr auto kPerByte = static_cast<std::size_t>(io::kCodesPerByte);
                 const std::uint8_t byte = rec[s / kPerByte];
                 const std::uint8_t code =
                     code_in_byte(byte, static_cast<int>(s % kPerByte));

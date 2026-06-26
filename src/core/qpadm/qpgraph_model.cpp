@@ -10,10 +10,8 @@
 // weight then match AT2 exactly regardless of the in-edge order choice.
 #include "core/qpadm/qpgraph_model.hpp"
 
-#include <algorithm>
 #include <functional>
 #include <map>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>

@@ -1025,7 +1025,7 @@ nb::list run_qpadm_search_py(F2Handle& h, const std::string& target,
 nb::object f2_to_numpy(const F2Handle& h, const std::vector<double>& src) {
     const std::size_t P = static_cast<std::size_t>(h.tensor.P);
     const std::size_t nb_count = static_cast<std::size_t>(h.tensor.n_block);
-    const std::size_t n = P * P * nb_count;
+    const std::size_t n = h.tensor.size();
 
     // COPY into a heap buffer owned by the capsule (frees with the numpy array).
     auto* buf = new double[n];

@@ -36,7 +36,6 @@
 #include <cmath>
 #include <cstddef>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <vector>
 

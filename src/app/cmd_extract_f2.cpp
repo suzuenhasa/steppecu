@@ -47,7 +47,6 @@
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
 #include "io/genotype_source.hpp"  // read_snp_table / read_ind_partition (format-aware .snp|.bim, .ind|.fam)
-#include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
 

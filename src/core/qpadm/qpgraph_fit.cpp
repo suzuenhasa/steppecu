@@ -17,7 +17,6 @@
 //              worst f3-residual z. Domain outcomes are a status VALUE, never an exception.
 #include "steppe/qpgraph.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <span>

@@ -57,7 +57,6 @@ namespace steppe::device {
 
 using core::accumulate_genotype_ploidy;
 using core::AfResult;
-using core::finalize_af;
 using core::finalize_af_counts;
 using core::genotype_code;
 using core::kDecodeBlockX;  // SNP axis (32 = one warp, warp-aligned for coalescing)

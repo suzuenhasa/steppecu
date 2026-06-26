@@ -543,9 +543,7 @@ SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
     // this gathers the FULL per-SNP records for the [snp_begin, snp_end) prefix.
     const std::size_t tile_snps = snp_end - snp_begin;        // == snp_end for snp_begin==0
     const std::size_t src_bpr = header_.bytes_per_record;     // the rlen-floored SNP-record stride
-    const std::size_t n_records_to_read =
-        records_present_ < tile_snps ? records_present_ : tile_snps;
-    if (n_records_to_read < tile_snps) {
+    if (records_present_ < tile_snps) {
         // The on-disk SNP records are fewer than the requested prefix (a partial
         // file). read_tile bounds individual rows by records_present_; the SNP-major
         // analogue is the SNP-record count, so a requested SNP past records_present_

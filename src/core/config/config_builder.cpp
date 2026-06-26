@@ -133,7 +133,6 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     };
     take(merged_.device,      args.device);
     take(merged_.precision,   args.precision);
-    take(merged_.config_path, args.config_path);
     take(merged_.f2_dir,      args.f2_dir);
     take(merged_.target,      args.target);
     take(merged_.out_file,    args.out_file);

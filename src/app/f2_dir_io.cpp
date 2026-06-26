@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "device/f2_disk_format.hpp"  // F2DiskHeader, kF2DiskMagic/Version/DtypeFp64, kF2DiskHeaderSize (CUDA-FREE)
+#include "device/f2_disk_format.hpp"  // F2DiskHeader, kF2DiskMagic/Version/DtypeFp64 (CUDA-FREE)
 
 namespace steppe::app {
 

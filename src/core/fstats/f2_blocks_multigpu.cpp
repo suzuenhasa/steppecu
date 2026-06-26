@@ -203,6 +203,9 @@ void finish_streamed_tier(steppe::device::Resources& resources,
         Q, V, N, partition.block_id.data(), n_block, precision, target);
     out.P = handle.P;
     if (!handle.block_sizes.empty()) out.block_sizes = handle.block_sizes;
+    // NB: out.n_block is INTENTIONALLY not mirrored here — despite the "finisher"
+    // name — because each tier arm applies its own n_block rule (HostRam at :518,
+    // Disk at :541); this helper folds only the P / block_sizes pair they share.
 }
 
 }  // namespace

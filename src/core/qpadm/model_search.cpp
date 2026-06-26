@@ -17,7 +17,6 @@
 #include "device/device_f2_blocks.hpp"       // DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"              // device::Resources
 #include "steppe/config.hpp"                 // Precision
-#include "steppe/error.hpp"                  // Status
 #include "steppe/fstats.hpp"                 // F2BlockTensor
 
 namespace steppe::core::qpadm {

@@ -27,7 +27,6 @@
 
 #include <string>
 #include <cstddef>
-#include <string>
 #include <vector>
 
 #include "steppe/qpgraph.hpp"  // QpGraphEdge

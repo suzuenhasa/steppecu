@@ -84,11 +84,10 @@ void launch_detect_ploidy(const std::uint8_t* d_packed,
         (static_cast<std::size_t>(core::kPloidyDetectSnps) < n_snp)
             ? static_cast<std::size_t>(core::kPloidyDetectSnps)
             : n_snp;
-    if (window == 0) {
-        // No SNPs to scan ⇒ every sample stays the AT2 default pseudo-haploid (the
-        // host loop returns the all-1 init). Fill via the kernel with window=0 (the
-        // loop body never runs), so the output is still written.
-    }
+    // window == 0 ⇒ no SNPs to scan: the kernel still launches unconditionally and
+    // every sample stays the AT2 default pseudo-haploid (the het-scan loop body never
+    // runs for window=0), matching the host loop's all-1 init — so the output is still
+    // written without a special-case branch here.
     const long grid_x =
         core::cdiv(static_cast<long>(n_individuals), static_cast<long>(kPloidyBlock));
     STEPPE_ASSERT(grid_x >= 0 &&

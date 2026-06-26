@@ -584,7 +584,7 @@ public:
     [[nodiscard]] DatesMoments dates_curve(
         const double* src1_freq, const double* src2_freq, const double* src_valid,
         const std::uint8_t* packed, std::size_t bytes_per_record, int n_target,
-        const int* target_ploidy, const int* grid_cell, long M,
+        [[maybe_unused]] const int* target_ploidy, const int* grid_cell, long M,
         const int* chrom_first, const int* chrom_last, int n_chrom,
         int numqbins, int n_bin, int diffmax, double binsize, int qbin,
         const Precision& precision) override {
@@ -619,7 +619,6 @@ public:
         for (int i = 0; i < n_target; ++i) {
             // ---- per-sample: collect valid SNPs, weight, dosage (dates.c:585-606) ----------
             const std::uint8_t* rec = packed + static_cast<std::size_t>(i) * bytes_per_record;
-            const int pl = (target_ploidy != nullptr) ? target_ploidy[i] : 2;
             long numx = 0;
             // accumulators for the regression: ww1=w0-w2, ww2=w1-w2
             long double dot12 = 0.0L, dot22 = 0.0L;
@@ -632,7 +631,6 @@ public:
                 if (code == core::kMissingGenotypeCode) continue;  // getgtypes g<0 -> skip
                 // dosage g/2 (DATES w0 = g/2.0; g = ref-allele copies). A pseudo-haploid
                 // sample (ploidy 1) yields code 0/2; g/2 still applies (DATES uses /2.0 flat).
-                (void)pl;
                 const double g = static_cast<double>(code);
                 const double w1 = src1_freq[s];  // cauc_freq (source 1)
                 const double w2v = src2_freq[s]; // af_freq   (source 2)

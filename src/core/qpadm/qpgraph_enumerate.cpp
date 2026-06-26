@@ -269,7 +269,7 @@ namespace {
 // out-deg 2) — the inverse of insert_admix — then suppress the two degree-2 split nodes by
 // contracting them out, leaving the original bifurcating tree. Returns the int-labeled tree
 // re-built canonically. For a nadmix=0 graph returns the graph itself.
-IGraph base_tree_of(const IGraph& g, int nleaf) {
+IGraph base_tree_of(const IGraph& g, [[maybe_unused]] int nleaf) {
     // detect the admix node (the unique in-deg-2 node).
     std::unordered_map<int, int> indeg, outdeg;
     std::unordered_set<int> nodes;
@@ -319,7 +319,6 @@ IGraph base_tree_of(const IGraph& g, int nleaf) {
     }
     if (source_from >= 0 && source_to >= 0) t.push_back({source_from, source_to});
     if (dest_from >= 0 && a_child >= 0) t.push_back({dest_from, a_child});
-    (void)nleaf;
     return t;
 }
 
@@ -466,7 +465,7 @@ std::vector<EnumeratedTopology> topology_neighbors(const EnumeratedTopology& cur
         // itself is already in `out`).
         std::unordered_set<std::uint64_t> nni_seen;
         std::vector<EnumeratedTopology> nni_bases;
-        nni_seen.insert(base_tree_of(cur, nleaf).empty() ? 0 : hash_igraph(base, nleaf));
+        nni_seen.insert(hash_igraph(base, nleaf));
         nni_tree_neighbors(base, nleaf, leaves, nni_seen, nni_bases);
         for (const EnumeratedTopology& nb : nni_bases) {
             const IGraph nbt = relabel_to_int(nb.edges, leaves);

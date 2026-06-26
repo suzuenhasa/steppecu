@@ -25,6 +25,7 @@
 #define STEPPE_CORE_CONFIG_RUN_CONFIG_HPP
 
 #include <string>
+#include <vector>
 
 #include "steppe/config.hpp"     // DeviceConfig, FilterConfig, Precision (CUDA-free)
 #include "steppe/qpadm.hpp"      // QpAdmOptions, JackknifePolicy (CUDA-free)
