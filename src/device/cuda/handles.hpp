@@ -577,7 +577,7 @@ private:
 #if !STEPPE_HAVE_CUSOLVER_FP64_EMULATED
 namespace detail {
 inline void warn_cusolver_emulated_fp64_unavailable_once() {
-    static std::atomic_flag emitted = ATOMIC_FLAG_INIT;
+    static std::atomic_flag emitted;
     if (!emitted.test_and_set(std::memory_order_relaxed)) {
         STEPPE_LOG_WARN(
             "[capability] EmulatedFp64 SOLVE promotion requested but this CUDA "
