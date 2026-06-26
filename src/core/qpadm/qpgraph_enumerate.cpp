@@ -190,6 +190,13 @@ std::vector<QpGraphEdge> to_named(const IGraph& g, const std::vector<std::string
     return out;
 }
 
+// Forward decl: every admix-1 graph built on ONE base tree (defined below alongside the
+// other local-move helpers). Shared by enumerate_admix1 (whole-space) and topology_neighbors
+// (local moves) so the AT2 find_newedges/insert_admix wiring lives in exactly one place.
+void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::string>& leaves,
+                        std::unordered_set<std::uint64_t>& seen,
+                        std::vector<EnumeratedTopology>& out);
+
 }  // namespace
 
 std::uint64_t graph_hash(const std::vector<QpGraphEdge>& edges) {
@@ -234,51 +241,14 @@ std::vector<EnumeratedTopology> enumerate_admix1(const std::vector<std::string>&
     const int nleaf = static_cast<int>(leaves.size());
     std::vector<EnumeratedTopology> out;
     std::unordered_set<std::uint64_t> seen;
+    // For every base tree, emit its admix-1 children (shared with topology_neighbors). The
+    // per-base synthetic split/admix node ids inside admix1_children_of are quotiented out by
+    // hash_igraph's structural (1-WL) coloring, so the emitted hashes + the `seen` de-dup are
+    // independent of those ids; only the sequential `et.id` differs, which we assign below.
+    for (const IGraph& tree : enumerate_trees_int(nleaf))
+        admix1_children_of(tree, nleaf, leaves, seen, out);
     int idx = 0;
-    int next_id = 100000;  // fresh-node base for the split + admix nodes (well above leaves).
-    for (const IGraph& tree : enumerate_trees_int(nleaf)) {
-        const int r = root_of(tree);
-        const int op = outpop_of(tree, nleaf);
-        // AT2 fix_outgroup: drop root->outpop from the candidate edge set ENTIRELY.
-        IGraph base;
-        base.reserve(tree.size());
-        for (const IEdge& e : tree)
-            if (!(op >= 0 && e.p == r && e.c == op)) base.push_back(e);
-        for (std::size_t si = 0; si < base.size(); ++si) {
-            const IEdge& s = base[si];
-            for (std::size_t di = 0; di < base.size(); ++di) {
-                if (si == di) continue;
-                const IEdge& d = base[di];
-                // AT2 endpoint filters.
-                if (s.p == d.p || s.c == d.c || s.c == d.p || d.c == s.p) continue;
-                // AT2 acyclicity: no directed path dest_to ~> source_from.
-                if (reachable_from(tree, d.c, s.p)) continue;
-                const int x = next_id;       // source-edge split node.
-                const int a = next_id + 1;    // the admix node (in-deg 2, out-deg 1).
-                IGraph ng;
-                ng.reserve(tree.size() + 3);
-                for (const IEdge& e : tree)
-                    if (!((e.p == s.p && e.c == s.c) || (e.p == d.p && e.c == d.c)))
-                        ng.push_back(e);
-                ng.push_back({s.p, x});
-                ng.push_back({x, s.c});
-                ng.push_back({d.p, a});
-                ng.push_back({a, d.c});
-                ng.push_back({x, a});
-                const std::uint64_t h = hash_igraph(ng, nleaf);
-                if (seen.insert(h).second) {
-                    EnumeratedTopology et;
-                    et.edges = to_named(ng, leaves);
-                    et.nadmix = 1;
-                    et.id = idx++;
-                    et.hash = h;
-                    out.push_back(std::move(et));
-                }
-            }
-            next_id += 2;  // advance after each source so split-node ids stay unique-ish;
-        }
-        next_id += 2;
-    }
+    for (EnumeratedTopology& et : out) et.id = idx++;
     return out;
 }
 
@@ -373,7 +343,9 @@ IGraph relabel_to_int(const std::vector<QpGraphEdge>& edges, const std::vector<s
 }
 
 // Every admix-1 graph built on ONE base tree (the AT2 find_newedges/insert_admix children),
-// de-duplicated by hash. Mirrors enumerate_admix1's inner body for a single tree.
+// de-duplicated by hash. The single home for the admix-1 wiring: enumerate_admix1 maps this
+// over ALL base trees (whole-space enumeration); topology_neighbors calls it on the base tree
+// + the NNI-neighbor base trees (the local add-admix / relocate moves).
 void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::string>& leaves,
                         std::unordered_set<std::uint64_t>& seen,
                         std::vector<EnumeratedTopology>& out) {

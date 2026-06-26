@@ -27,6 +27,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>  // std::move (already used), std::declval (with_device_f2 trailing-return)
 #include <vector>
 
 #include <nanobind/nanobind.h>
@@ -87,6 +88,15 @@ struct F2Handle {
 // Raise a Python ValueError carrying a steppe fault reason.
 [[noreturn]] void raise_value(const std::string& msg) { throw nb::value_error(msg.c_str()); }
 
+// The single home for the GPU-only fail-fast: steppe is a GPU product, so an empty
+// Resources::gpus is a binding-layer FAULT (§1.3). Hand-duplicating this message across
+// the entry points lets the wording drift; raise it from one place.
+[[noreturn]] void raise_no_device() {
+    raise_value(
+        "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
+        "required)");
+}
+
 // Build (or reuse the cached) Resources on the handle's device, fail-fast on no-GPU.
 // Faults raise; this is a binding-layer FAULT, never a domain outcome (cli-bindings.md
 // §1.3 / §5.2). Mirrors cmd_qpadm.cpp:107-113.
@@ -101,11 +111,7 @@ sd::Resources& ensure_resources(F2Handle& h) {
         // build_resources fault (no device, cannot bind) — a FAULT, raise (§1.3).
         raise_value(std::string("device error: ") + e.what());
     }
-    if (r->gpus.empty()) {
-        raise_value(
-            "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
-            "required)");
-    }
+    if (r->gpus.empty()) raise_no_device();
     h.resources = std::move(r);
     return *h.resources;
 }
@@ -119,6 +125,81 @@ std::vector<int> resolve_names(const sa::PopResolver& resolver,
         throw nb::key_error((std::string(what) + ": " + r.error).c_str());
     }
     return r.indices;
+}
+
+// The index->NAME counterpart of resolve_names: map P-axis INDICES back to their labels
+// against the handle's name<->index map, bounds-checked (an out-of-range/-1 index -> the
+// empty string, the honest sentinel). The single home for the result-emitters' indices->
+// names step (f4/f3/dstat/f4ratio all share it; cli-bindings.md §5.1).
+std::vector<std::string> names_of(const std::vector<int>& idx,
+                                  const std::vector<std::string>& pops) {
+    std::vector<std::string> out;
+    out.reserve(idx.size());
+    for (int i : idx)
+        out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
+                          ? pops[static_cast<std::size_t>(i)]
+                          : std::string());
+    return out;
+}
+
+// Resolve a FIXED-ARITY tuple of pop NAMES to a std::array<int,N> against the resolver,
+// throwing a clean Python KeyError naming the offending label on a miss (binding-layer
+// §5.1). The single home for the per-tuple resolve loop the batched stats share — f4/
+// qpdstat (N=4), f3 (N=3), f4ratio (N=5), and run_dstat (N=4 via quadruples) all call it.
+template <std::size_t N>
+std::array<int, N> resolve_tuple(const sa::PopResolver& resolver,
+                                 const std::array<std::string, N>& q, const char* what) {
+    std::array<int, N> qi{};
+    for (std::size_t c = 0; c < N; ++c) {
+        const sa::ResolveResult rr = resolver.resolve(q[c]);
+        if (!rr.ok) throw nb::key_error((std::string(what) + ": " + rr.error).c_str());
+        qi[c] = rr.index;
+    }
+    return qi;
+}
+
+// The single home for the precision-string parse (the extract-f2 / qpfstats precision=
+// kwarg): nullopt -> the EmulatedFp64 40-bit default (the matmul-heavy f2-GEMM default);
+// "fp64"/"native" -> native FP64; "emulated_fp64"/"emu" -> EmulatedFp64; "tf32" -> Tf32;
+// anything else is a binding fault naming `tool` + the offending string.
+steppe::Precision parse_precision(const std::optional<std::string>& precision,
+                                  const char* tool) {
+    steppe::Precision prec;  // defaults to Kind::EmulatedFp64, kDefaultMantissaBits.
+    if (precision.has_value()) {
+        const std::string& p = *precision;
+        if (p == "fp64" || p == "native") {
+            prec.kind = steppe::Precision::Kind::Fp64;
+        } else if (p == "emulated_fp64" || p == "emu") {
+            prec.kind = steppe::Precision::Kind::EmulatedFp64;
+        } else if (p == "tf32") {
+            prec.kind = steppe::Precision::Kind::Tf32;
+        } else {
+            raise_value(std::string(tool) +
+                        ": precision must be one of 'fp64'/'native', 'emulated_fp64'/'emu', "
+                        "'tf32' (got '" + p + "')");
+        }
+    }
+    return prec;
+}
+
+// The single home for the resident-f2 fit prologue/epilogue the F2Handle fit entries share
+// (mirrors cmd_qpadm.cpp:107-117): build (cached) Resources on the handle's device, then —
+// inside the device-fault try/catch — pick the bound device_id, upload the host tensor (the
+// DeviceF2Blocks lives ONLY here and frees in its destructor — spike #1), and invoke `run`
+// with (dev_f2, resources). A CUDA/upload/seam fault re-raises as a "device error: ..."
+// Python error (§1.3 / §5.2). The differing run callable + any post-call status guard stay
+// in the caller. The return type is whatever `run` yields (the per-entry result struct).
+template <class Run>
+auto with_device_f2(F2Handle& h, Run&& run)
+    -> decltype(run(std::declval<sd::DeviceF2Blocks&>(), std::declval<sd::Resources&>())) {
+    sd::Resources& resources = ensure_resources(h);
+    try {
+        const int device_id = resources.gpus.front().device_id;
+        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
+        return run(dev_f2, resources);
+    } catch (const std::exception& e) {
+        raise_value(std::string("device error: ") + e.what());
+    }
 }
 
 // Map the kwargs onto QpAdmOptions with defaults matching the struct (qpadm.hpp:57-100)
@@ -234,19 +315,10 @@ nb::dict qpwave_to_dict(const steppe::QpWaveResult& r) {
 // (a degenerate quartet) ride through as numpy NaN — the honest sentinel, never a fake 0.
 nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& pops) {
     nb::dict d;
-    const auto names = [&pops](const std::vector<int>& idx) {
-        std::vector<std::string> out;
-        out.reserve(idx.size());
-        for (int i : idx)
-            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
-                              ? pops[static_cast<std::size_t>(i)]
-                              : std::string());
-        return out;
-    };
-    d["pop1"] = names(r.p1);
-    d["pop2"] = names(r.p2);
-    d["pop3"] = names(r.p3);
-    d["pop4"] = names(r.p4);
+    d["pop1"] = names_of(r.p1, pops);
+    d["pop2"] = names_of(r.p2, pops);
+    d["pop3"] = names_of(r.p3, pops);
+    d["pop4"] = names_of(r.p4, pops);
     d["est"] = r.est;
     d["se"] = r.se;
     d["z"] = r.z;
@@ -263,19 +335,10 @@ nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& p
 // ride through as numpy NaN — the honest sentinel, never a fake 0.
 nb::dict dstat_to_dict(const steppe::DstatResult& r, const std::vector<std::string>& pops) {
     nb::dict d;
-    const auto names = [&pops](const std::vector<int>& idx) {
-        std::vector<std::string> out;
-        out.reserve(idx.size());
-        for (int i : idx)
-            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
-                              ? pops[static_cast<std::size_t>(i)]
-                              : std::string());
-        return out;
-    };
-    d["pop1"] = names(r.p1);
-    d["pop2"] = names(r.p2);
-    d["pop3"] = names(r.p3);
-    d["pop4"] = names(r.p4);
+    d["pop1"] = names_of(r.p1, pops);
+    d["pop2"] = names_of(r.p2, pops);
+    d["pop3"] = names_of(r.p3, pops);
+    d["pop4"] = names_of(r.p4, pops);
     d["est"] = r.est;
     d["se"] = r.se;
     d["z"] = r.z;
@@ -291,18 +354,9 @@ nb::dict dstat_to_dict(const steppe::DstatResult& r, const std::vector<std::stri
 // reshapes to a DataFrame). NaN est/se/z/p (a degenerate triple) ride through as numpy NaN.
 nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::string>& pops) {
     nb::dict d;
-    const auto names = [&pops](const std::vector<int>& idx) {
-        std::vector<std::string> out;
-        out.reserve(idx.size());
-        for (int i : idx)
-            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
-                              ? pops[static_cast<std::size_t>(i)]
-                              : std::string());
-        return out;
-    };
-    d["pop1"] = names(r.p1);
-    d["pop2"] = names(r.p2);
-    d["pop3"] = names(r.p3);
+    d["pop1"] = names_of(r.p1, pops);
+    d["pop2"] = names_of(r.p2, pops);
+    d["pop3"] = names_of(r.p3, pops);
     d["est"] = r.est;
     d["se"] = r.se;
     d["z"] = r.z;
@@ -319,20 +373,11 @@ nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::string>& p
 // DataFrame). NaN alpha/se/z (a degenerate tuple) ride through as numpy NaN.
 nb::dict f4ratio_to_dict(const steppe::F4RatioResult& r, const std::vector<std::string>& pops) {
     nb::dict d;
-    const auto names = [&pops](const std::vector<int>& idx) {
-        std::vector<std::string> out;
-        out.reserve(idx.size());
-        for (int i : idx)
-            out.push_back((i >= 0 && static_cast<std::size_t>(i) < pops.size())
-                              ? pops[static_cast<std::size_t>(i)]
-                              : std::string());
-        return out;
-    };
-    d["pop1"] = names(r.p1);
-    d["pop2"] = names(r.p2);
-    d["pop3"] = names(r.p3);
-    d["pop4"] = names(r.p4);
-    d["pop5"] = names(r.p5);
+    d["pop1"] = names_of(r.p1, pops);
+    d["pop2"] = names_of(r.p2, pops);
+    d["pop3"] = names_of(r.p3, pops);
+    d["pop4"] = names_of(r.p4, pops);
+    d["pop5"] = names_of(r.p5, pops);
     d["alpha"] = r.alpha;
     d["se"] = r.se;
     d["z"] = r.z;
@@ -387,15 +432,10 @@ nb::dict run_qpadm_py(F2Handle& h, const std::string& target,
     const steppe::QpAdmOptions opts = make_options(
         fudge, als_iterations, rank, allow_negative_weights, rank_alpha, "all");
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::QpAdmResult result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_qpadm(dev_f2, model, opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::QpAdmResult result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_qpadm(dev_f2, model, opts, resources);
+        });
     return result_to_dict(result);
 }
 
@@ -416,16 +456,11 @@ nb::dict run_qpwave_py(F2Handle& h, const std::vector<std::string>& left,
     opts.fudge = fudge;
     opts.rank_alpha = rank_alpha;
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::QpWaveResult result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_qpwave(dev_f2, std::span<const int>(left_idx),
-                                    std::span<const int>(right_idx), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::QpWaveResult result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_qpwave(dev_f2, std::span<const int>(left_idx),
+                                      std::span<const int>(right_idx), opts, resources);
+        });
     return qpwave_to_dict(result);
 }
 
@@ -469,15 +504,10 @@ nb::dict run_qpgraph_py(F2Handle& h,
     opts.diag_f3 = diag_f3;
     opts.constrained = constrained;
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::QpGraphResult result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_qpgraph(dev_f2, e, h.pops, opts, resources);
-    } catch (const std::exception& ex) {
-        raise_value(std::string("device error: ") + ex.what());
-    }
+    const steppe::QpGraphResult result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_qpgraph(dev_f2, e, h.pops, opts, resources);
+        });
     if (result.status == steppe::Status::InvalidConfig)
         raise_value("qpgraph: the graph could not be fit (a leaf is not an f2 population, "
                     "or the topology is unrooted/cyclic/invalid)");
@@ -501,15 +531,10 @@ nb::dict run_qpgraph_search_py(F2Handle& h, const std::vector<std::string>& pops
     opts.fit.diag_f3 = diag_f3;
     opts.fit.constrained = constrained;
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::QpGraphSearchResult r;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        r = steppe::run_qpgraph_search(dev_f2, h.pops, opts, resources);
-    } catch (const std::exception& ex) {
-        raise_value(std::string("device error: ") + ex.what());
-    }
+    const steppe::QpGraphSearchResult r =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_qpgraph_search(dev_f2, h.pops, opts, resources);
+        });
     if (r.status == steppe::Status::InvalidConfig)
         raise_value("qpgraph-search: invalid pop-set (a pop is not an f2 population, or < 3 leaves)");
 
@@ -569,28 +594,16 @@ nb::dict run_f4_py(F2Handle& h,
 
     std::vector<std::array<int, 4>> idx_quartets;
     idx_quartets.reserve(quartets.size());
-    for (const std::array<std::string, 4>& q : quartets) {
-        std::array<int, 4> qi{};
-        for (int c = 0; c < 4; ++c) {
-            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
-            if (!rr.ok) throw nb::key_error(("quartet pop: " + rr.error).c_str());
-            qi[static_cast<std::size_t>(c)] = rr.index;
-        }
-        idx_quartets.push_back(qi);
-    }
+    for (const std::array<std::string, 4>& q : quartets)
+        idx_quartets.push_back(resolve_tuple<4>(resolver, q, "quartet pop"));
 
     steppe::QpAdmOptions opts;  // f4 uses fudge=0 internally (run_f4); opts is the default.
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::F4Result result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_f4(
-            dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::F4Result result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_f4(
+                dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
+        });
     return f4_to_dict(result, h.pops);
 }
 
@@ -610,28 +623,16 @@ nb::dict run_qpdstat_py(F2Handle& h,
 
     std::vector<std::array<int, 4>> idx_quartets;
     idx_quartets.reserve(quartets.size());
-    for (const std::array<std::string, 4>& q : quartets) {
-        std::array<int, 4> qi{};
-        for (int c = 0; c < 4; ++c) {
-            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
-            if (!rr.ok) throw nb::key_error(("quartet pop: " + rr.error).c_str());
-            qi[static_cast<std::size_t>(c)] = rr.index;
-        }
-        idx_quartets.push_back(qi);
-    }
+    for (const std::array<std::string, 4>& q : quartets)
+        idx_quartets.push_back(resolve_tuple<4>(resolver, q, "quartet pop"));
 
     steppe::QpAdmOptions opts;  // qpdstat==f4 uses fudge=0 internally (run_f4); opts default.
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::F4Result result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_f4(
-            dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::F4Result result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_f4(
+                dev_f2, std::span<const std::array<int, 4>>(idx_quartets), opts, resources);
+        });
     return f4_to_dict(result, h.pops);
 }
 
@@ -682,26 +683,15 @@ nb::dict run_dstat_py(const std::string& prefix,
 
     std::vector<std::array<int, 4>> idx_quads;
     idx_quads.reserve(quadruples.size());
-    for (const std::array<std::string, 4>& q : quadruples) {
-        std::array<int, 4> qi{};
-        for (int c = 0; c < 4; ++c) {
-            const sa::ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
-            if (!rr.ok) throw nb::key_error(("quadruple pop: " + rr.error).c_str());
-            qi[static_cast<std::size_t>(c)] = rr.index;
-        }
-        idx_quads.push_back(qi);
-    }
+    for (const std::array<std::string, 4>& q : quadruples)
+        idx_quads.push_back(resolve_tuple<4>(resolver, q, "quadruple pop"));
 
     steppe::DeviceConfig cfg;
     cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
     steppe::DstatResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
-        if (resources.gpus.empty()) {
-            raise_value(
-                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
-                "required)");
-        }
+        if (resources.gpus.empty()) raise_no_device();
         result = steppe::run_dstat(geno, snp, ind,
                                    std::span<const std::string>(pop_union),
                                    std::span<const std::array<int, 4>>(idx_quads),
@@ -731,11 +721,7 @@ nb::dict run_dates_py(const std::string& prefix, const std::string& target,
     steppe::DatesResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
-        if (resources.gpus.empty()) {
-            raise_value(
-                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
-                "required)");
-        }
+        if (resources.gpus.empty()) raise_no_device();
         result = steppe::run_dates(geno, snp, ind, target, source1, source2, opts, resources);
     } catch (const std::exception& e) {
         raise_value(std::string("input/device error: ") + e.what());
@@ -800,20 +786,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     filter.transversions_only = transversions_only;
 
     // The precision policy (default EmulatedFp64 40-bit, the f2-GEMM default = the CLI).
-    steppe::Precision prec;  // defaults to Kind::EmulatedFp64, kDefaultMantissaBits.
-    if (precision.has_value()) {
-        const std::string& p = *precision;
-        if (p == "fp64" || p == "native") {
-            prec.kind = steppe::Precision::Kind::Fp64;
-        } else if (p == "emulated_fp64" || p == "emu") {
-            prec.kind = steppe::Precision::Kind::EmulatedFp64;
-        } else if (p == "tf32") {
-            prec.kind = steppe::Precision::Kind::Tf32;
-        } else {
-            raise_value("extract_f2: precision must be one of 'fp64'/'native', "
-                        "'emulated_fp64'/'emu', 'tf32' (got '" + p + "')");
-        }
-    }
+    const steppe::Precision prec = parse_precision(precision, "extract_f2");
 
     steppe::ExtractPloidy ep = steppe::ExtractPloidy::Auto;
     if (ploidy == "auto") {
@@ -834,11 +807,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     steppe::F2ExtractResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
-        if (resources.gpus.empty()) {
-            raise_value(
-                "no CUDA device available (steppe is a GPU product; a CUDA-capable GPU is "
-                "required)");
-        }
+        if (resources.gpus.empty()) raise_no_device();
         result = steppe::run_extract_f2(geno, snp, ind, sel, filter, prec, blgsize, ep,
                                         resources);
     } catch (const std::exception& e) {
@@ -899,15 +868,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
     const std::string snp = prefix + ".snp";
     const std::string ind = prefix + ".ind";
 
-    steppe::Precision prec;  // defaults to Kind::EmulatedFp64, kDefaultMantissaBits.
-    if (precision.has_value()) {
-        const std::string& p = *precision;
-        if (p == "fp64" || p == "native") prec.kind = steppe::Precision::Kind::Fp64;
-        else if (p == "emulated_fp64" || p == "emu") prec.kind = steppe::Precision::Kind::EmulatedFp64;
-        else if (p == "tf32") prec.kind = steppe::Precision::Kind::Tf32;
-        else raise_value("qpfstats: precision must be 'fp64'/'native', 'emulated_fp64'/'emu', "
-                         "'tf32' (got '" + p + "')");
-    }
+    const steppe::Precision prec = parse_precision(precision, "qpfstats");
 
     steppe::DeviceConfig cfg;
     cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
@@ -916,10 +877,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
     steppe::QpfstatsResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
-        if (resources.gpus.empty()) {
-            raise_value("no CUDA device available (steppe is a GPU product; a CUDA-capable "
-                        "GPU is required)");
-        }
+        if (resources.gpus.empty()) raise_no_device();
         result = steppe::run_qpfstats(geno, snp, ind, std::span<const std::string>(pops),
                                       blgsize, prec, resources);
     } catch (const std::exception& e) {
@@ -970,28 +928,16 @@ nb::dict run_f3_py(F2Handle& h,
 
     std::vector<std::array<int, 3>> idx_triples;
     idx_triples.reserve(triples.size());
-    for (const std::array<std::string, 3>& t : triples) {
-        std::array<int, 3> ti{};
-        for (int c = 0; c < 3; ++c) {
-            const sa::ResolveResult rr = resolver.resolve(t[static_cast<std::size_t>(c)]);
-            if (!rr.ok) throw nb::key_error(("triple pop: " + rr.error).c_str());
-            ti[static_cast<std::size_t>(c)] = rr.index;
-        }
-        idx_triples.push_back(ti);
-    }
+    for (const std::array<std::string, 3>& t : triples)
+        idx_triples.push_back(resolve_tuple<3>(resolver, t, "triple pop"));
 
     steppe::QpAdmOptions opts;  // f3 uses fudge=0 internally (run_f3); opts is the default.
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::F3Result result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_f3(
-            dev_f2, std::span<const std::array<int, 3>>(idx_triples), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::F3Result result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_f3(
+                dev_f2, std::span<const std::array<int, 3>>(idx_triples), opts, resources);
+        });
     return f3_to_dict(result, h.pops);
 }
 
@@ -1009,28 +955,16 @@ nb::dict run_f4ratio_py(F2Handle& h,
 
     std::vector<std::array<int, 5>> idx_tuples;
     idx_tuples.reserve(tuples.size());
-    for (const std::array<std::string, 5>& t : tuples) {
-        std::array<int, 5> ti{};
-        for (int c = 0; c < 5; ++c) {
-            const sa::ResolveResult rr = resolver.resolve(t[static_cast<std::size_t>(c)]);
-            if (!rr.ok) throw nb::key_error(("f4-ratio pop: " + rr.error).c_str());
-            ti[static_cast<std::size_t>(c)] = rr.index;
-        }
-        idx_tuples.push_back(ti);
-    }
+    for (const std::array<std::string, 5>& t : tuples)
+        idx_tuples.push_back(resolve_tuple<5>(resolver, t, "f4-ratio pop"));
 
     steppe::QpAdmOptions opts;  // f4-ratio uses fudge=0 internally (run_f4ratio); opts default.
 
-    sd::Resources& resources = ensure_resources(h);
-    steppe::F4RatioResult result;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        result = steppe::run_f4ratio(
-            dev_f2, std::span<const std::array<int, 5>>(idx_tuples), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const steppe::F4RatioResult result =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_f4ratio(
+                dev_f2, std::span<const std::array<int, 5>>(idx_tuples), opts, resources);
+        });
     return f4ratio_to_dict(result, h.pops);
 }
 
@@ -1071,16 +1005,11 @@ nb::list run_qpadm_search_py(F2Handle& h, const std::string& target,
     const steppe::QpAdmOptions opts = make_options(
         fudge, als_iterations, rank, allow_negative_weights, rank_alpha, jackknife);
 
-    sd::Resources& resources = ensure_resources(h);
-    std::vector<steppe::QpAdmResult> results;
-    try {
-        const int device_id = resources.gpus.front().device_id;
-        sd::DeviceF2Blocks dev_f2 = sd::upload_f2_blocks_to_device(h.tensor, device_id);
-        results = steppe::run_qpadm_search(
-            dev_f2, std::span<const steppe::QpAdmModel>(models), opts, resources);
-    } catch (const std::exception& e) {
-        raise_value(std::string("device error: ") + e.what());
-    }
+    const std::vector<steppe::QpAdmResult> results =
+        with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
+            return steppe::run_qpadm_search(
+                dev_f2, std::span<const steppe::QpAdmModel>(models), opts, resources);
+        });
 
     nb::list out;
     for (const steppe::QpAdmResult& r : results) out.append(result_to_dict(r));

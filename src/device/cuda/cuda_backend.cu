@@ -2723,15 +2723,18 @@ public:
         // The bounded top-K reservoir target K (clamped to INT_MAX + the enumerated total). Sized
         // FIRST so its FIXED device footprint (CAP=2K reservoir + 2K gather scratch + sort
         // outputs ≈ 5·CAP·~52 B) is subtracted from free VRAM before the chunk is sized.
-        std::size_t K_budget = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
-        if (K_budget > static_cast<std::size_t>(enumerated)) K_budget = static_cast<std::size_t>(enumerated);
-        if (K_budget > static_cast<std::size_t>(0x40000000)) K_budget = 0x40000000;
-        if (K_budget < 1) K_budget = 1;
-        const std::size_t cap_budget = K_budget * 2;
+        // SINGLE-SOURCE: K_sz / CAP_sz are computed exactly ONCE here and reused below for both
+        // the reservoir sizing (reservoir_bytes) and the live reservoir state (K / CAP). A
+        // clamp-policy change therefore lands in one place — no sizing/state drift.
+        std::size_t K_sz = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
+        if (K_sz > static_cast<std::size_t>(enumerated)) K_sz = static_cast<std::size_t>(enumerated);
+        if (K_sz > static_cast<std::size_t>(0x40000000)) K_sz = 0x40000000;
+        if (K_sz < 1) K_sz = 1;
+        const std::size_t CAP_sz = K_sz * 2;  // slack = K (proven: chunk always fits pre-compact).
         // Reservoir + gather-scratch + sort-out per CAP slot: 4 doubles + 4 ints (reservoir) +
         // 4 doubles + 4 ints (gather scratch) + 1 double (sort keys) + 2 ints (perm in/out) ≈
         // 9·8 + 10·4 = 112 B/slot. Round up generously for the CUB sort temp.
-        const std::size_t reservoir_bytes = cap_budget * 160;
+        const std::size_t reservoir_bytes = CAP_sz * 160;
 
         // CHUNK size from free VRAM. Per item the device holds: the k-int key (k·4B) + x_blocks
         // (nb_s·8) + x_loo (nb_s·8) + xtau (nb_s·8) + est/loo-total/tot_line (3·8) + diag var
@@ -2794,12 +2797,9 @@ public:
         // K = the reservoir target; CAP = 2K slack so a chunk's survivors always fit before a
         // compact (each compact returns the fill to <=K, leaving >=K free headroom). K is also
         // clamped to INT_MAX (CUB num_items + our int kernels) and to the enumerated total.
-        std::size_t K_sz = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
-        if (K_sz > static_cast<std::size_t>(enumerated)) K_sz = static_cast<std::size_t>(enumerated);
-        if (K_sz > static_cast<std::size_t>(0x40000000)) K_sz = 0x40000000;
-        if (K_sz < 1) K_sz = 1;
+        // K_sz / CAP_sz were clamped+derived ONCE above (the single-source for reservoir sizing);
+        // here we only narrow them to the int kernel/CUB types.
         const int K = static_cast<int>(K_sz);
-        const std::size_t CAP_sz = K_sz * 2;  // slack = K (proven: chunk always fits pre-compact).
         const int CAP = (CAP_sz > static_cast<std::size_t>(INT_MAX)) ? INT_MAX
                                                                      : static_cast<int>(CAP_sz);
 

@@ -54,6 +54,19 @@ namespace {
     return "unknown";
 }
 
+// The precision-tag -> human string the `precision` column / field carries
+// (cli-bindings.md §4.4). A SWITCH (not a ternary) so a new Precision::Kind is a
+// compile-visible add here; the `return "fp64"` default keeps native FP64 the
+// fallback label. Precision::Kind is defined in include/steppe/config.hpp.
+[[nodiscard]] const char* precision_str(Precision::Kind k) {
+    switch (k) {
+        case Precision::Kind::EmulatedFp64: return "emu";
+        case Precision::Kind::Tf32:         return "tf32";
+        case Precision::Kind::Fp64:         return "fp64";
+    }
+    return "fp64";
+}
+
 // AT2 res$ "feasible" for the WHOLE model = both weights in [0,1] (the canonical qpAdm
 // feasibility screen; cli-bindings.md §4.4 summary `feasible`). Empty weights (a
 // domain-failed model) ⇒ not feasible.
@@ -100,6 +113,43 @@ namespace {
     return out;
 }
 
+// ---- JSON parallel-array primitives -------------------------------------------
+// The three rankdrop/popdrop/per_rank array emitters, shared by emit_json and
+// emit_qpwave_json (they were copy-pasted lambdas inside each). One definition,
+// reusing json_double (NaN->null) and the INT_MIN dofdiff->null sentinel.
+void emit_int_arr(std::ostream& os, const char* name, const std::vector<int>& v, bool last) {
+    os << "    " << json_quote(name) << ": [";
+    for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
+    os << "]" << (last ? "\n" : ",\n");
+}
+void emit_dbl_arr(std::ostream& os, const char* name, const std::vector<double>& v, bool last) {
+    os << "    " << json_quote(name) << ": [";
+    for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << json_double(v[k]);
+    os << "]" << (last ? "\n" : ",\n");
+}
+void emit_dofdiff_arr(std::ostream& os, const char* name, const std::vector<int>& v, bool last) {
+    os << "    " << json_quote(name) << ": [";
+    for (std::size_t k = 0; k < v.size(); ++k)
+        os << (k ? ", " : "") << (v[k] == INT_MIN ? std::string("null") : std::to_string(v[k]));
+    os << "]" << (last ? "\n" : ",\n");
+}
+
+// ---- rankdrop CSV body --------------------------------------------------------
+// The 7-column rankdrop table loop body (f4rank/dof/chisq/p/dofdiff/chisqdiff/
+// p_nested), shared by emit_csv and emit_qpwave_csv (it was byte-identical in
+// both). Reuses fmt_double (NaN->NA) and fmt_dofdiff (INT_MIN->NA). The header row
+// is emitted by the caller (the two callers share identical headers).
+template <class Rankdrop>
+void emit_rankdrop_csv(std::ostream& os, const Rankdrop& r, char sep) {
+    for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
+        os << r.rankdrop_f4rank[k] << sep << r.rankdrop_dof[k] << sep
+           << fmt_double(r.rankdrop_chisq[k]) << sep << fmt_double(r.rankdrop_p[k]) << sep
+           << fmt_dofdiff(r.rankdrop_dofdiff[k]) << sep
+           << fmt_double(r.rankdrop_chisqdiff[k]) << sep
+           << fmt_double(r.rankdrop_p_nested[k]) << "\n";
+    }
+}
+
 // ---- CSV / TSV ----------------------------------------------------------------
 void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
               const std::vector<std::string>& left, char sep) {
@@ -126,22 +176,14 @@ void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
        << r.f4rank << sep << r.est_rank << sep
        << (model_feasible(r) ? "TRUE" : "FALSE") << sep
        << csv_quote(status_str(r.status)) << sep
-       << csv_quote(r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-                    : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                                      : "fp64")
+       << csv_quote(precision_str(r.precision_tag))
        << "\n";
 
     // rankdrop section (AT2 res$rankdrop order) — golden_fit0_rankdrop.csv columns.
     os << "# section: rankdrop\n";
     os << "\"f4rank\"" << sep << "\"dof\"" << sep << "\"chisq\"" << sep << "\"p\""
        << sep << "\"dofdiff\"" << sep << "\"chisqdiff\"" << sep << "\"p_nested\"\n";
-    for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
-        os << r.rankdrop_f4rank[k] << sep << r.rankdrop_dof[k] << sep
-           << fmt_double(r.rankdrop_chisq[k]) << sep << fmt_double(r.rankdrop_p[k]) << sep
-           << fmt_dofdiff(r.rankdrop_dofdiff[k]) << sep
-           << fmt_double(r.rankdrop_chisqdiff[k]) << sep
-           << fmt_double(r.rankdrop_p_nested[k]) << "\n";
-    }
+    emit_rankdrop_csv(os, r, sep);
 
     // popdrop section (AT2 res$popdrop) — golden_fit0_popdrop.csv core columns.
     os << "# section: popdrop\n";
@@ -197,38 +239,19 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "    \"est_rank\": " << r.est_rank << ",\n";
     os << "    \"feasible\": " << (model_feasible(r) ? "true" : "false") << ",\n";
     os << "    \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "    \"precision\": " << json_quote(
-        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                          : "fp64") << "\n";
+    os << "    \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "  },\n";
 
-    // rankdrop block: parallel arrays (golden_fit0 res$rankdrop shape).
+    // rankdrop block: parallel arrays (golden_fit0 res$rankdrop shape). Uses the
+    // file-static emit_*_arr primitives, shared with emit_qpwave_json.
     os << "  \"rankdrop\": {\n";
-
-    auto emit_int_arr = [&](const char* name, const std::vector<int>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    auto emit_dbl_arr = [&](const char* name, const std::vector<double>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << json_double(v[k]);
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    auto emit_dofdiff_arr = [&](const char* name, const std::vector<int>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k)
-            os << (k ? ", " : "") << (v[k] == INT_MIN ? std::string("null") : std::to_string(v[k]));
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    emit_int_arr("f4rank", r.rankdrop_f4rank, false);
-    emit_int_arr("dof", r.rankdrop_dof, false);
-    emit_dbl_arr("chisq", r.rankdrop_chisq, false);
-    emit_dbl_arr("p", r.rankdrop_p, false);
-    emit_dofdiff_arr("dofdiff", r.rankdrop_dofdiff, false);
-    emit_dbl_arr("chisqdiff", r.rankdrop_chisqdiff, false);
-    emit_dbl_arr("p_nested", r.rankdrop_p_nested, true);
+    emit_int_arr(os, "f4rank", r.rankdrop_f4rank, false);
+    emit_int_arr(os, "dof", r.rankdrop_dof, false);
+    emit_dbl_arr(os, "chisq", r.rankdrop_chisq, false);
+    emit_dbl_arr(os, "p", r.rankdrop_p, false);
+    emit_dofdiff_arr(os, "dofdiff", r.rankdrop_dofdiff, false);
+    emit_dbl_arr(os, "chisqdiff", r.rankdrop_chisqdiff, false);
+    emit_dbl_arr(os, "p_nested", r.rankdrop_p_nested, true);
     os << "  },\n";
 
     // popdrop block: parallel arrays (golden_fit0 res$popdrop shape).
@@ -237,11 +260,11 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     for (std::size_t k = 0; k < r.popdrop_pat.size(); ++k)
         os << (k ? ", " : "") << json_quote(r.popdrop_pat[k]);
     os << "],\n";
-    emit_int_arr("wt", r.popdrop_wt, false);
-    emit_int_arr("dof", r.popdrop_dof, false);
-    emit_dbl_arr("chisq", r.popdrop_chisq, false);
-    emit_dbl_arr("p", r.popdrop_p, false);
-    emit_int_arr("f4rank", r.popdrop_f4rank, false);
+    emit_int_arr(os, "wt", r.popdrop_wt, false);
+    emit_int_arr(os, "dof", r.popdrop_dof, false);
+    emit_dbl_arr(os, "chisq", r.popdrop_chisq, false);
+    emit_dbl_arr(os, "p", r.popdrop_p, false);
+    emit_int_arr(os, "f4rank", r.popdrop_f4rank, false);
     os << "    \"feasible\": [";
     for (std::size_t k = 0; k < r.popdrop_feasible.size(); ++k)
         os << (k ? ", " : "") << (r.popdrop_feasible[k] != 0 ? "true" : "false");
@@ -360,8 +383,10 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
 // rank-sufficiency sweep (rank_chisq/rank_dof/rank_p, ASCENDING r) + the AT2-shaped
 // rankdrop table (f4rank-DESCENDING) + the f4rank/est_rank/status summary. Both emitters
 // REUSE the file-static format primitives verbatim (fmt_double/json_double/fmt_dofdiff/
-// csv_quote/json_quote/status_str + the rankdrop loop body / parallel-array lambdas), so
-// the rankdrop output is byte-shaped exactly like the qpadm rankdrop section / golden_qpwave.
+// csv_quote/json_quote/status_str/precision_str + the shared rankdrop helpers
+// emit_rankdrop_csv (CSV) and emit_int_arr/emit_dbl_arr/emit_dofdiff_arr (JSON), the same
+// definitions the qpadm emitters call), so the rankdrop output is byte-shaped exactly like
+// the qpadm rankdrop section / golden_qpwave.
 
 void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
                      const std::vector<std::string>& left, int right_n, char sep) {
@@ -370,13 +395,7 @@ void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
     os << "# section: rankdrop\n";
     os << "\"f4rank\"" << sep << "\"dof\"" << sep << "\"chisq\"" << sep << "\"p\""
        << sep << "\"dofdiff\"" << sep << "\"chisqdiff\"" << sep << "\"p_nested\"\n";
-    for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
-        os << r.rankdrop_f4rank[k] << sep << r.rankdrop_dof[k] << sep
-           << fmt_double(r.rankdrop_chisq[k]) << sep << fmt_double(r.rankdrop_p[k]) << sep
-           << fmt_dofdiff(r.rankdrop_dofdiff[k]) << sep
-           << fmt_double(r.rankdrop_chisqdiff[k]) << sep
-           << fmt_double(r.rankdrop_p_nested[k]) << "\n";
-    }
+    emit_rankdrop_csv(os, r, sep);
 
     // per_rank section (the ASCENDING-r sweep; `rank` column == the index r, 0-based).
     os << "# section: per_rank\n";
@@ -395,9 +414,7 @@ void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
        << "\"precision\"" << sep << "\"reference\"" << sep << "\"right_n\"\n";
     os << r.f4rank << sep << r.est_rank << sep
        << csv_quote(status_str(r.status)) << sep
-       << csv_quote(r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-                    : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                                      : "fp64")
+       << csv_quote(precision_str(r.precision_tag))
        << sep << csv_quote(left.empty() ? std::string() : left.front()) << sep
        << right_n << "\n";
 }
@@ -414,31 +431,16 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "  \"right_n\": " << right_n << ",\n";
 
     // rankdrop block: parallel arrays (golden_qpwave.json res$rankdrop shape) — the SAME
-    // lambdas as the qpadm rankdrop block (NaN->null via json_double; dofdiff INT_MIN->null).
+    // file-static emit_*_arr primitives as the qpadm rankdrop block (NaN->null via
+    // json_double; dofdiff INT_MIN->null).
     os << "  \"rankdrop\": {\n";
-    auto emit_int_arr = [&](const char* name, const std::vector<int>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    auto emit_dbl_arr = [&](const char* name, const std::vector<double>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << json_double(v[k]);
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    auto emit_dofdiff_arr = [&](const char* name, const std::vector<int>& v, bool last) {
-        os << "    " << json_quote(name) << ": [";
-        for (std::size_t k = 0; k < v.size(); ++k)
-            os << (k ? ", " : "") << (v[k] == INT_MIN ? std::string("null") : std::to_string(v[k]));
-        os << "]" << (last ? "\n" : ",\n");
-    };
-    emit_int_arr("f4rank", r.rankdrop_f4rank, false);
-    emit_int_arr("dof", r.rankdrop_dof, false);
-    emit_dbl_arr("chisq", r.rankdrop_chisq, false);
-    emit_dbl_arr("p", r.rankdrop_p, false);
-    emit_dofdiff_arr("dofdiff", r.rankdrop_dofdiff, false);
-    emit_dbl_arr("chisqdiff", r.rankdrop_chisqdiff, false);
-    emit_dbl_arr("p_nested", r.rankdrop_p_nested, true);
+    emit_int_arr(os, "f4rank", r.rankdrop_f4rank, false);
+    emit_int_arr(os, "dof", r.rankdrop_dof, false);
+    emit_dbl_arr(os, "chisq", r.rankdrop_chisq, false);
+    emit_dbl_arr(os, "p", r.rankdrop_p, false);
+    emit_dofdiff_arr(os, "dofdiff", r.rankdrop_dofdiff, false);
+    emit_dbl_arr(os, "chisqdiff", r.rankdrop_chisqdiff, false);
+    emit_dbl_arr(os, "p_nested", r.rankdrop_p_nested, true);
     os << "  },\n";
 
     // per_rank block: the ASCENDING-r sweep (rank == the 0-based index r).
@@ -446,9 +448,9 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "    \"rank\": [";
     for (std::size_t rr = 0; rr < r.rank_chisq.size(); ++rr) os << (rr ? ", " : "") << rr;
     os << "],\n";
-    emit_dbl_arr("chisq", r.rank_chisq, false);
-    emit_int_arr("dof", r.rank_dof, false);
-    emit_dbl_arr("p", r.rank_p, true);
+    emit_dbl_arr(os, "chisq", r.rank_chisq, false);
+    emit_int_arr(os, "dof", r.rank_dof, false);
+    emit_dbl_arr(os, "p", r.rank_p, true);
     os << "  },\n";
 
     // summary block: scalars.
@@ -456,13 +458,18 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "    \"f4rank\": " << r.f4rank << ",\n";
     os << "    \"est_rank\": " << r.est_rank << ",\n";
     os << "    \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "    \"precision\": " << json_quote(
-        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                          : "fp64") << "\n";
+    os << "    \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "  }\n";
 
     os << "}\n";
+}
+
+// Index-guarded label accessor for the standalone-stat parallel label arrays
+// (p1..p5): the k-th label, or "" when the array is shorter than the value array.
+// Shared by the f4/f3/f4ratio CSV+JSON emitters (each re-defined it as a local
+// `at` lambda); one definition keeps the out-of-range fallback uniform.
+[[nodiscard]] std::string label_at(const std::vector<std::string>& v, std::size_t k) {
+    return k < v.size() ? v[k] : std::string();
 }
 
 // ---- STANDALONE f4 (the `steppe f4` command) ----------------------------------
@@ -479,11 +486,8 @@ void emit_f4_csv(std::ostream& os, const F4Result& r,
     os << "\"pop1\"" << sep << "\"pop2\"" << sep << "\"pop3\"" << sep << "\"pop4\""
        << sep << "\"est\"" << sep << "\"se\"" << sep << "\"z\"" << sep << "\"p\"\n";
     for (std::size_t k = 0; k < r.est.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << csv_quote(at(p1)) << sep << csv_quote(at(p2)) << sep
-           << csv_quote(at(p3)) << sep << csv_quote(at(p4)) << sep
+        os << csv_quote(label_at(p1, k)) << sep << csv_quote(label_at(p2, k)) << sep
+           << csv_quote(label_at(p3, k)) << sep << csv_quote(label_at(p4, k)) << sep
            << fmt_double(r.est[k]) << sep << fmt_double(r.se[k]) << sep
            << fmt_double(r.z[k]) << sep << fmt_double(r.p[k]) << "\n";
     }
@@ -495,13 +499,10 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     os << "{\n";
     os << "  \"quartets\": [\n";
     for (std::size_t k = 0; k < r.est.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << "    { \"pop1\": " << json_quote(at(p1))
-           << ", \"pop2\": " << json_quote(at(p2))
-           << ", \"pop3\": " << json_quote(at(p3))
-           << ", \"pop4\": " << json_quote(at(p4))
+        os << "    { \"pop1\": " << json_quote(label_at(p1, k))
+           << ", \"pop2\": " << json_quote(label_at(p2, k))
+           << ", \"pop3\": " << json_quote(label_at(p3, k))
+           << ", \"pop4\": " << json_quote(label_at(p4, k))
            << ", \"est\": " << json_double(r.est[k])
            << ", \"se\": " << json_double(r.se[k])
            << ", \"z\": " << json_double(r.z[k])
@@ -510,10 +511,7 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(
-        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                          : "fp64") << "\n";
+    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "}\n";
 }
 
@@ -529,11 +527,8 @@ void emit_f3_csv(std::ostream& os, const F3Result& r,
     os << "\"pop1\"" << sep << "\"pop2\"" << sep << "\"pop3\""
        << sep << "\"est\"" << sep << "\"se\"" << sep << "\"z\"" << sep << "\"p\"\n";
     for (std::size_t k = 0; k < r.est.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << csv_quote(at(p1)) << sep << csv_quote(at(p2)) << sep
-           << csv_quote(at(p3)) << sep
+        os << csv_quote(label_at(p1, k)) << sep << csv_quote(label_at(p2, k)) << sep
+           << csv_quote(label_at(p3, k)) << sep
            << fmt_double(r.est[k]) << sep << fmt_double(r.se[k]) << sep
            << fmt_double(r.z[k]) << sep << fmt_double(r.p[k]) << "\n";
     }
@@ -545,12 +540,9 @@ void emit_f3_json(std::ostream& os, const F3Result& r,
     os << "{\n";
     os << "  \"triples\": [\n";
     for (std::size_t k = 0; k < r.est.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << "    { \"pop1\": " << json_quote(at(p1))
-           << ", \"pop2\": " << json_quote(at(p2))
-           << ", \"pop3\": " << json_quote(at(p3))
+        os << "    { \"pop1\": " << json_quote(label_at(p1, k))
+           << ", \"pop2\": " << json_quote(label_at(p2, k))
+           << ", \"pop3\": " << json_quote(label_at(p3, k))
            << ", \"est\": " << json_double(r.est[k])
            << ", \"se\": " << json_double(r.se[k])
            << ", \"z\": " << json_double(r.z[k])
@@ -559,10 +551,7 @@ void emit_f3_json(std::ostream& os, const F3Result& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(
-        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                          : "fp64") << "\n";
+    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "}\n";
 }
 
@@ -580,11 +569,9 @@ void emit_f4ratio_csv(std::ostream& os, const F4RatioResult& r,
     os << "\"pop1\"" << sep << "\"pop2\"" << sep << "\"pop3\"" << sep << "\"pop4\""
        << sep << "\"pop5\"" << sep << "\"alpha\"" << sep << "\"se\"" << sep << "\"z\"\n";
     for (std::size_t k = 0; k < r.alpha.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << csv_quote(at(p1)) << sep << csv_quote(at(p2)) << sep
-           << csv_quote(at(p3)) << sep << csv_quote(at(p4)) << sep << csv_quote(at(p5)) << sep
+        os << csv_quote(label_at(p1, k)) << sep << csv_quote(label_at(p2, k)) << sep
+           << csv_quote(label_at(p3, k)) << sep << csv_quote(label_at(p4, k)) << sep
+           << csv_quote(label_at(p5, k)) << sep
            << fmt_double(r.alpha[k]) << sep << fmt_double(r.se[k]) << sep
            << fmt_double(r.z[k]) << "\n";
     }
@@ -597,14 +584,11 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
     os << "{\n";
     os << "  \"tuples\": [\n";
     for (std::size_t k = 0; k < r.alpha.size(); ++k) {
-        const auto at = [k](const std::vector<std::string>& v) {
-            return k < v.size() ? v[k] : std::string();
-        };
-        os << "    { \"pop1\": " << json_quote(at(p1))
-           << ", \"pop2\": " << json_quote(at(p2))
-           << ", \"pop3\": " << json_quote(at(p3))
-           << ", \"pop4\": " << json_quote(at(p4))
-           << ", \"pop5\": " << json_quote(at(p5))
+        os << "    { \"pop1\": " << json_quote(label_at(p1, k))
+           << ", \"pop2\": " << json_quote(label_at(p2, k))
+           << ", \"pop3\": " << json_quote(label_at(p3, k))
+           << ", \"pop4\": " << json_quote(label_at(p4, k))
+           << ", \"pop5\": " << json_quote(label_at(p5, k))
            << ", \"alpha\": " << json_double(r.alpha[k])
            << ", \"se\": " << json_double(r.se[k])
            << ", \"z\": " << json_double(r.z[k]) << " }"
@@ -612,10 +596,7 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(
-        r.precision_tag == Precision::Kind::EmulatedFp64 ? "emu"
-        : r.precision_tag == Precision::Kind::Tf32        ? "tf32"
-                                                          : "fp64") << "\n";
+    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "}\n";
 }
 
