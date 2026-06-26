@@ -27,6 +27,7 @@
 // graphs have many edges). The arena ints (path tables) are read-only resident.
 #include "device/cuda/qpgraph_fit_kernels.cuh"
 
+#include "core/qpadm/qpgraph_opt_constants.hpp" // core::qpadm::qpgraph_opt — the splitmix + projected-Newton constant set (single-sourced with the CpuBackend oracle, §12/§13 parity). CUDA-FREE constexpr scalars: usable in __device__ code per CUDA C++ PG §5.3.
 #include "device/cuda/check.cuh"
 #include "device/cuda/device_buffer.cuh"
 
@@ -36,6 +37,11 @@
 namespace steppe::device::cuda {
 
 namespace {
+
+// The single-sourced splitmix + projected-Newton constant set, shared bit-for-bit with
+// the CpuBackend oracle (qpgraph_fit_fleet). CUDA-free constexpr scalars of built-in
+// integral / floating-point type — usable directly in __device__ code (CUDA C++ PG §5.3).
+namespace opt = ::steppe::core::qpadm::qpgraph_opt;
 
 // ---- per-thread native-FP64 linear algebra (mirrors the spike d_lu_factor/d_solve) ----
 // Column-major A(i,j) at i + n*j.
@@ -290,14 +296,17 @@ __device__ inline double d_qpgraph_score(const QpGraphDeviceTopo& t, const doubl
     return score;
 }
 
+// Deterministic-multistart splitmix theta init. The constants are single-sourced in
+// core/qpadm/qpgraph_opt_constants.hpp so this body stays bit-identical to the CpuBackend
+// oracle (init_theta in qpgraph_fit_fleet) for the §12/§13 parity diff.
 __device__ inline double d_init_theta(unsigned inst, int dim) {
-    unsigned long long z = (static_cast<unsigned long long>(inst) * 0x100000001B3ULL) +
-                           (static_cast<unsigned long long>(dim) * 0x9E3779B97F4A7C15ULL) +
-                           0xD1B54A32D192ED03ULL;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    unsigned long long z = (static_cast<unsigned long long>(inst) * opt::kSplitmixInstMul) +
+                           (static_cast<unsigned long long>(dim) * opt::kSplitmixDimMul) +
+                           opt::kSplitmixSeedInc;
+    z = (z ^ (z >> 30)) * opt::kSplitmixMix1;
+    z = (z ^ (z >> 27)) * opt::kSplitmixMix2;
     z = z ^ (z >> 31);
-    return static_cast<double>(z & 0xFFFFFFFFFFFFFULL) / static_cast<double>(0x10000000000000ULL);
+    return static_cast<double>(z & opt::kMantissaMask) / opt::kMantissaDiv;
 }
 __device__ inline double clamp01(double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); }
 
@@ -325,7 +334,7 @@ __device__ inline double d_fit_one_restart(const QpGraphDeviceTopo& t, unsigned 
     for (int d = 0; d < D; ++d) th[d] = clamp01(d_init_theta(inst, d));
     double s = d_qpgraph_score(t, th, f_obs, qinv, L, DB, IB);
     if (D == 0) return s;  // pure tree: one eval, no theta axis (the in-kernel D==0 path).
-    const double h = 1e-4;
+    const double h = opt::kFdStep;
     for (int it = 0; it < maxit; ++it) {
         double max_dx = 0.0, max_ds = 0.0;
         for (int d = 0; d < D; ++d) {
@@ -340,20 +349,20 @@ __device__ inline double d_fit_one_restart(const QpGraphDeviceTopo& t, unsigned 
             double g, curv;
             if (dwp > 0.0 && dwm > 0.0) {
                 g = (sp - sm) / (dwp + dwm);
-                curv = (sp - 2.0 * s + sm) / (0.5 * (dwp + dwm) * (dwp + dwm) + 1e-30);
+                curv = (sp - 2.0 * s + sm) / (opt::kCurvHalf * (dwp + dwm) * (dwp + dwm) + opt::kCurvGuard);
             } else if (dwp > 0.0) { g = (sp - s) / dwp; curv = 1.0; }
             else { g = (s - sm) / dwm; curv = 1.0; }
-            double step = (curv > 1e-8) ? (g / curv) : (g * 0.5);
-            if (step > 0.5) step = 0.5;
-            if (step < -0.5) step = -0.5;
+            double step = (curv > opt::kCurvThresh) ? (g / curv) : (g * opt::kGradStepScale);
+            if (step > opt::kTrustClamp) step = opt::kTrustClamp;
+            if (step < -opt::kTrustClamp) step = -opt::kTrustClamp;
             double wn = clamp01(w - step);
             double thn[kMaxThetaDev];
             for (int k = 0; k < D; ++k) thn[k] = th[k];
             thn[d] = wn;
             double sn = d_qpgraph_score(t, thn, f_obs, qinv, L, DB, IB);
             int bt = 0;
-            while (sn > s && bt < 8) {
-                wn = 0.5 * (wn + w); thn[d] = wn;
+            while (sn > s && bt < opt::kMaxBacktrack) {
+                wn = opt::kBacktrackHalf * (wn + w); thn[d] = wn;
                 sn = d_qpgraph_score(t, thn, f_obs, qinv, L, DB, IB); ++bt;
             }
             const double dx = fabs(wn - w), ds = fabs(sn - s);
@@ -361,7 +370,7 @@ __device__ inline double d_fit_one_restart(const QpGraphDeviceTopo& t, unsigned 
             if (dx > max_dx) max_dx = dx;
             if (ds > max_ds) max_ds = ds;
         }
-        if (max_dx < tol * 1e-2 && max_ds < tol * 1e-3) break;
+        if (max_dx < tol * opt::kTolDxScale && max_ds < tol * opt::kTolDsScale) break;
     }
     return s;
 }
