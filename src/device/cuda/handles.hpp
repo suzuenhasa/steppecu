@@ -46,6 +46,7 @@
 #define STEPPE_DEVICE_CUDA_HANDLES_HPP
 
 #include <cublas_v2.h>
+#include <cufft.h>         // cufftHandle / cufftDestroy (the DATES dates_curve FFT-plan RAII owner)
 #include <cusolverDn.h>    // cusolverDnHandle_t (the qpAdm fit small-LA: potrf/getrf/gesvdj)
 #include <cuda_runtime.h>  // cudaGetDevice (debug device-ordinal record-and-assert)
 
@@ -55,7 +56,7 @@
 
 #include "core/internal/host_device.hpp"  // STEPPE_DEBUG_ONLY, STEPPE_ASSERT (the one debug gate)
 #include "core/internal/log.hpp"          // STEPPE_LOG_WARN (the one teardown-warning sink)
-#include "device/cuda/check.cuh"          // STEPPE_CUDA_CHECK, CUBLAS_CHECK, CublasError
+#include "device/cuda/check.cuh"          // STEPPE_CUDA_CHECK, CUBLAS_CHECK, CUFFT_CHECK, CublasError, CufftError
 #include "steppe/config.hpp"              // steppe::Precision (the cuSOLVER promotion seam input)
 
 // ---------------------------------------------------------------------------
@@ -461,6 +462,104 @@ private:
     }
 
     gesvdjInfo_t info_ = nullptr;
+};
+
+/// Owning, move-only RAII wrapper for a cuFFT `cufftHandle` — the DATES
+/// `dates_curve` autocorrelation engine's batched D2Z/Z2D plans (architecture.md
+/// §2 RAII, §7, §8; cleanup device-cuda-cuda_backend [16.1]/[13.3]). A cuFFT plan
+/// is created by `cufftPlanMany` and released by `cufftDestroy`; the plan BACKS a
+/// cuFFT device WORKSPACE — "all the intermediate buffer allocations (on CPU/GPU
+/// memory) take place during planning ... released when the plan is destroyed"
+/// (CUDA 13.x cuFFT docs), so a leaked plan leaks VRAM, and the leak SCALES with
+/// retries.
+///
+/// dates_curve previously held the two plans as bare `cufftHandle plan_fwd=0,
+/// plan_inv=0` and freed them with a BARE `cufftDestroy` pair at the function tail
+/// — PAST a throw window: `CUFFT_CHECK` throws from `cufftSetStream` (between the
+/// two creates) and from `cufftExecD2Z`/`cufftExecZ2D` inside the per-sample loop,
+/// and any `STEPPE_CUDA_CHECK` between create and destroy can throw too; on ANY
+/// throw the function unwinds and the tail `cufftDestroy` is never reached,
+/// LEAKING BOTH plans. This was the ONE resource in cuda_backend.cu not behind an
+/// RAII owner. Making the plans `CufftPlan` scope members tears them down on
+/// EVERY exit path (normal return AND unwind), exactly like the wrappers above.
+///
+/// Created and destroyed per FFT SHAPE (cheap relative to the per-sample loop; a
+/// plan is set up ONCE per dates_curve call and reused across all n_target
+/// samples), so there is no reuse-across-calls contract here — each dates_curve
+/// makes a fresh pair. Stateless w.r.t. device ordinal: a cuFFT plan binds to the
+/// current device at `cufftPlanMany`, but `cufftDestroy` carries the plan's own
+/// device, so (like `GesvdjInfo`) this wrapper carries no device-ordinal
+/// record-and-assert — dates_curve is single-stream on the backend's device.
+/// Move-only, mirroring the other handle wrappers; the dtor NEVER throws — a
+/// nonzero `cufftDestroy` status routes to the §7 teardown-warning sink
+/// (`STEPPE_LOG_WARN`) via `CufftError::status_name` (the [13.3] previously-
+/// unchecked `cufftDestroy` is now checked). A moved-from wrapper owns nothing
+/// (`plan_ == 0`) and is safe to destroy.
+///
+/// NOTE: `cufftHandle` is a plain integer handle (a `0` sentinel is "no plan"):
+/// `cufftCreate`/`cufftPlanMany` write a valid handle and the cuFFT API never
+/// returns `0` as a live plan, so `plan_ == 0` is the unambiguous empty state.
+class CufftPlan {
+public:
+    /// An empty (non-owning) plan — `make()` populates it, or it stays a no-op
+    /// `0`-sentinel that destroys nothing. Mirrors a default-constructed
+    /// owning wrapper that has not yet acquired its resource.
+    CufftPlan() = default;
+
+    CufftPlan(CufftPlan&& o) noexcept : plan_(std::exchange(o.plan_, 0)) {}
+    CufftPlan& operator=(CufftPlan&& o) noexcept {
+        if (this != &o) {
+            destroy();
+            plan_ = std::exchange(o.plan_, 0);
+        }
+        return *this;
+    }
+    CufftPlan(const CufftPlan&) = delete;
+    CufftPlan& operator=(const CufftPlan&) = delete;
+    ~CufftPlan() { destroy(); }
+
+    /// Create a batched cuFFT plan into this owner via `cufftPlanMany`, replacing
+    /// (and first destroying) any plan already held. Throws `CufftError` via
+    /// `CUFFT_CHECK` on a nonzero `cufftResult` — a ctor-like acquire may throw;
+    /// the dtor may not. On a throw the owner is left holding no plan (the prior
+    /// one is destroyed first, the new one never assigned), so nothing leaks.
+    /// The argument order matches `cufftPlanMany` (rank, n, inembed, istride,
+    /// idist, onembed, ostride, odist, type, batch).
+    void make(int rank, int* n, int* inembed, int istride, int idist,
+              int* onembed, int ostride, int odist, cufftType type, int batch) {
+        destroy();
+        cufftHandle p = 0;
+        CUFFT_CHECK(cufftPlanMany(&p, rank, n, inembed, istride, idist,
+                                  onembed, ostride, odist, type, batch));
+        plan_ = p;
+    }
+
+    /// Bind a CUDA stream to this plan (`cufftSetStream`). Throws `CufftError` via
+    /// `CUFFT_CHECK` on failure (the plan is already owned, so a throw here unwinds
+    /// with the plan freed by the dtor — no leak).
+    void set_stream(cudaStream_t stream) {
+        CUFFT_CHECK(cufftSetStream(plan_, stream));
+    }
+
+    [[nodiscard]] cufftHandle get() const noexcept { return plan_; }
+
+private:
+    void destroy() noexcept {
+        // Destructor never throws (architecture.md §7); a nonzero destroy status is
+        // reported to the §7 teardown-warning sink (fail-fast must not become
+        // fail-silent — the [13.3] previously-unchecked cufftDestroy), never thrown.
+        // A moved-from / never-acquired wrapper (`plan_ == 0`) destroys nothing.
+        if (plan_ != 0) {
+            const cufftResult s = cufftDestroy(plan_);
+            if (s != CUFFT_SUCCESS) {
+                STEPPE_LOG_WARN("cufftDestroy at scope exit: %s",
+                                CufftError::status_name(s));
+            }
+        }
+        plan_ = 0;
+    }
+
+    cufftHandle plan_ = 0;  // 0 == no plan owned (cuFFT never returns 0 as a live plan)
 };
 
 // ---------------------------------------------------------------------------

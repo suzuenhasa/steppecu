@@ -1769,19 +1769,18 @@ public:
         const int n_cplx = n_fft / 2 + 1;
 
         // ---- cuFFT plans (created ONCE, reused across samples): batched D2Z + Z2D over n_chrom.
-        auto cufft_ok = [](cufftResult r, const char* what) {
-            if (r != CUFFT_SUCCESS)
-                throw std::runtime_error(std::string("cuFFT error in ") + what + ": code " +
-                                         std::to_string(static_cast<int>(r)));
-        };
-        cufftHandle plan_fwd = 0, plan_inv = 0;
+        // RAII-owned by CufftPlan (handles.hpp): the plans back cuFFT device WORKSPACES, and the
+        // function THROWS between create and the function tail (cufftSetStream below, the
+        // cufftExec* in the per-sample loop, and every STEPPE_CUDA_CHECK in between), so a bare
+        // cufftHandle + tail cufftDestroy would LEAK both plans (VRAM, scaling with retries) on any
+        // unwind ([16.1]). As scope members they tear down on EVERY exit path; the previously
+        // unchecked tail cufftDestroy is now routed through CufftError ([13.3]).
+        CufftPlan plan_fwd, plan_inv;
         int n_dim = n_fft;
-        cufft_ok(cufftPlanMany(&plan_fwd, 1, &n_dim, nullptr, 1, n_fft, nullptr, 1, n_cplx,
-                               CUFFT_D2Z, n_chrom), "cufftPlanMany(D2Z)");
-        cufft_ok(cufftPlanMany(&plan_inv, 1, &n_dim, nullptr, 1, n_cplx, nullptr, 1, n_fft,
-                               CUFFT_Z2D, n_chrom), "cufftPlanMany(Z2D)");
-        cufft_ok(cufftSetStream(plan_fwd, stream_.get()), "cufftSetStream(fwd)");
-        cufft_ok(cufftSetStream(plan_inv, stream_.get()), "cufftSetStream(inv)");
+        plan_fwd.make(1, &n_dim, nullptr, 1, n_fft, nullptr, 1, n_cplx, CUFFT_D2Z, n_chrom);
+        plan_inv.make(1, &n_dim, nullptr, 1, n_cplx, nullptr, 1, n_fft, CUFFT_Z2D, n_chrom);
+        plan_fwd.set_stream(stream_.get());
+        plan_inv.set_stream(stream_.get());
 
         // ---- device-resident inputs + scratch ----
         const std::size_t Mu = static_cast<std::size_t>(M);
@@ -1830,12 +1829,12 @@ public:
         STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd20.data(), 0, dm * sizeof(double), stream_.get()));
 
         auto fft_fwd = [&](double* in, double2* fr) {
-            cufft_ok(cufftExecD2Z(plan_fwd, in, reinterpret_cast<cufftDoubleComplex*>(fr)),
-                     "cufftExecD2Z");
+            CUFFT_CHECK(cufftExecD2Z(plan_fwd.get(), in,
+                                     reinterpret_cast<cufftDoubleComplex*>(fr)));
         };
         auto fft_inv = [&](double2* fr, double* outr) {
-            cufft_ok(cufftExecZ2D(plan_inv, reinterpret_cast<cufftDoubleComplex*>(fr), outr),
-                     "cufftExecZ2D");
+            CUFFT_CHECK(cufftExecZ2D(plan_inv.get(),
+                                     reinterpret_cast<cufftDoubleComplex*>(fr), outr));
         };
 
         // ---- per-sample loop (host-driven; the FFT/scatter are GPU-bound) -----------------
@@ -1918,8 +1917,8 @@ public:
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
-        cufftDestroy(plan_fwd);
-        cufftDestroy(plan_inv);
+        // plan_fwd / plan_inv (CufftPlan) tear down via RAII on scope exit — on the
+        // normal return here AND on any throw along the path above ([16.1]).
         out.status = Status::Ok;
         return out;
     }

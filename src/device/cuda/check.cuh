@@ -34,6 +34,7 @@
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cufft.h>
 #include <cusolverDn.h>
 
 #include <exception>
@@ -145,6 +146,61 @@ private:
     std::string msg_;
 };
 
+/// Typed exception thrown on a nonzero cuFFT status. Like cuBLAS/cuSOLVER, cuFFT
+/// has no `cudaGetErrorString` equivalent, so the `cufftResult` enum is mapped to
+/// its symbolic name here (architecture.md §8 table). Thrown — never `exit()` — so
+/// the DATES `dates_curve` cuFFT path can catch it and the API can translate it
+/// (architecture.md §7, §10). The cuFFT plan create/exec/destroy calls all return
+/// `cufftResult` (CUDA 13.x cuFFT: `CUFFT_SUCCESS = 0`); a nonzero status is an
+/// unrecoverable API fault, routed here.
+class CufftError : public std::exception {
+public:
+    CufftError(cufftResult status, const char* expr,
+               const std::source_location& loc)
+        : status_(status) {
+        msg_ = std::string(loc.file_name()) + ":" +
+               std::to_string(loc.line()) + " (" + loc.function_name() +
+               "): '" + expr + "' -> " + status_name(status);
+    }
+    [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
+    [[nodiscard]] cufftResult status() const noexcept { return status_; }
+
+    /// Symbolic name for a cuFFT status (cuFFT has no `cudaGetErrorString`). The
+    /// enumerators mirror `cufftResult` in CUDA 13.x `cufft.h` exactly (verified
+    /// against /usr/local/cuda/include/cufft.h on box5090): the legacy
+    /// CUFFT_INCOMPLETE_PARAMETER_LIST / CUFFT_PARSE_ERROR / CUFFT_LICENSE_ERROR
+    /// values were dropped, and CUFFT_MISSING_DEPENDENCY / CUFFT_NVRTC_FAILURE /
+    /// CUFFT_NVJITLINK_FAILURE / CUFFT_NVSHMEM_FAILURE were added — so naming only
+    /// the present enumerators keeps the switch warnings-as-errors clean.
+    [[nodiscard]] static const char* status_name(cufftResult s) noexcept {
+        switch (s) {
+            case CUFFT_SUCCESS:            return "CUFFT_SUCCESS";
+            case CUFFT_INVALID_PLAN:       return "CUFFT_INVALID_PLAN";
+            case CUFFT_ALLOC_FAILED:       return "CUFFT_ALLOC_FAILED";
+            case CUFFT_INVALID_TYPE:       return "CUFFT_INVALID_TYPE";
+            case CUFFT_INVALID_VALUE:      return "CUFFT_INVALID_VALUE";
+            case CUFFT_INTERNAL_ERROR:     return "CUFFT_INTERNAL_ERROR";
+            case CUFFT_EXEC_FAILED:        return "CUFFT_EXEC_FAILED";
+            case CUFFT_SETUP_FAILED:       return "CUFFT_SETUP_FAILED";
+            case CUFFT_INVALID_SIZE:       return "CUFFT_INVALID_SIZE";
+            case CUFFT_UNALIGNED_DATA:     return "CUFFT_UNALIGNED_DATA";
+            case CUFFT_INVALID_DEVICE:     return "CUFFT_INVALID_DEVICE";
+            case CUFFT_NO_WORKSPACE:       return "CUFFT_NO_WORKSPACE";
+            case CUFFT_NOT_IMPLEMENTED:    return "CUFFT_NOT_IMPLEMENTED";
+            case CUFFT_NOT_SUPPORTED:      return "CUFFT_NOT_SUPPORTED";
+            case CUFFT_MISSING_DEPENDENCY: return "CUFFT_MISSING_DEPENDENCY";
+            case CUFFT_NVRTC_FAILURE:      return "CUFFT_NVRTC_FAILURE";
+            case CUFFT_NVJITLINK_FAILURE:  return "CUFFT_NVJITLINK_FAILURE";
+            case CUFFT_NVSHMEM_FAILURE:    return "CUFFT_NVSHMEM_FAILURE";
+            default:                       return "CUFFT_STATUS_UNKNOWN";
+        }
+    }
+
+private:
+    cufftResult status_;
+    std::string msg_;
+};
+
 namespace detail {
 
 // The source_location defaults to the call site (std::source_location::current()
@@ -203,6 +259,12 @@ inline void cusolver_check(cusolverStatus_t status, const char* expr,
     if (status != CUSOLVER_STATUS_SUCCESS) throw CusolverError(status, expr, loc);
 }
 
+inline void cufft_check(cufftResult status, const char* expr,
+                        const std::source_location& loc =
+                            std::source_location::current()) {
+    if (status != CUFFT_SUCCESS) throw CufftError(status, expr, loc);
+}
+
 }  // namespace detail
 
 }  // namespace steppe::device
@@ -243,6 +305,15 @@ inline void cusolver_check(cusolverStatus_t status, const char* expr,
 /// CONTRACT §1c). Usage: `CUSOLVER_CHECK(cusolverDnDpotrf(...));`
 #define CUSOLVER_CHECK(expr) \
     ::steppe::device::detail::cusolver_check((expr), #expr)
+
+/// Check a cuFFT call; throw CufftError with file:line on a nonzero `cufftResult`.
+/// The ONE cuFFT error check in the codebase (architecture.md §8 table) — used by
+/// the DATES `dates_curve` cuFFT autocorrelation engine for plan create / exec /
+/// set-stream, and by the `CufftPlan` RAII owner's warn-not-throw teardown
+/// (handles.hpp), so the previously bare `cufftDestroy` is no longer unchecked.
+/// Usage: `CUFFT_CHECK(cufftPlanMany(...));`
+#define CUFFT_CHECK(expr) \
+    ::steppe::device::detail::cufft_check((expr), #expr)
 
 /// Post-launch kernel check (architecture.md §7). `cudaGetLastError()` surfaces a
 /// bad launch configuration synchronously; the debug-only `cudaDeviceSynchronize`
