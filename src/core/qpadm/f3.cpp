@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -66,6 +67,17 @@ F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
     F3Result res;
     res.precision_tag = core::qpadm::honored_tag(prec, be);
 
+    // Fail-fast BEFORE narrowing std::size_t -> int: at an all-triples sweep scale
+    // (P~2500 ⇒ C(2500,3) ~= 2.6e9 > INT_MAX) the static_cast below would silently wrap
+    // negative/truncate, defeating the `N <= 0` empty-batch guard and corrupting every
+    // downstream int-indexed size (res.p1/p2/p3 reserves, the 3*N flat reserve, the m=nl*nr
+    // seam compare). Surface an over-cap batch as a status VALUE, never an exception
+    // (architecture.md §10). The real-AADR goldens have tiny triple counts and never
+    // approach INT_MAX, so this is behavior-preserving (no parity impact).
+    if (triples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
     const int N = static_cast<int>(triples.size());
     if (N <= 0) {
         // An empty batch is a clean, empty Ok result (no rows) — never a fault.
