@@ -277,6 +277,12 @@ void emit_rotation_csv(std::ostream& os, std::span<const QpAdmResult> results,
                        char sep) {
     // One section, one row per model (cli-bindings.md §4.4 qpadm-rotate row schema).
     os << "# section: rotation\n";
+    // NOTE: the "f4rank" column is deliberately named to mirror AT2/golden_rot.json,
+    // but it carries the per-model FITTED rank (r.est_rank, written at the row below),
+    // NOT the rank-DECISION (r.f4rank). AT2's rotation res$f4rank is NULL and its
+    // per-model f4rank == the popdrop FULL-row fitted rank; the rank-decision r.f4rank
+    // is meaningless for the rotation path and is not emitted here. Keeping the column
+    // name "f4rank" preserves the byte-faithful diff against golden_rot.json.
     os << "\"model_index\"" << sep << "\"target\"" << sep << "\"left\"" << sep
        << "\"right_n\"" << sep << "\"p\"" << sep << "\"chisq\"" << sep << "\"dof\""
        << sep << "\"f4rank\"" << sep << "\"feasible\"" << sep << "\"status\"" << sep
@@ -336,6 +342,10 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
         os << "      \"p\": " << json_double(r.p) << ",\n";
         os << "      \"chisq\": " << json_double(r.chisq) << ",\n";
         os << "      \"dof\": " << r.dof << ",\n";
+        // Key deliberately named "f4rank" to mirror AT2/golden_rot.json, but it carries
+        // the per-model FITTED rank (r.est_rank), NOT the rank-DECISION (r.f4rank). AT2's
+        // rotation res$f4rank is NULL and its per-model f4rank == the fitted rank; the
+        // rank-decision r.f4rank is meaningless for rotation and is not emitted here.
         os << "      \"f4rank\": " << r.est_rank << ",\n";
         os << "      \"feasible\": " << (rotation_feasible(r) ? "true" : "false") << ",\n";
         os << "      \"status\": " << json_quote(status_str(r.status)) << "\n";
