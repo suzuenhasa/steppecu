@@ -168,18 +168,38 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
     std::vector<Path> paths;
     {
         std::vector<int> stack_edges;
+        // Recursion-stack guard: a cycle REACHABLE from a valid root (e.g. an admix
+        // node fed by its own descendant) passes the indeg/outdeg/root checks above
+        // but would make this DFS recurse forever. on_stack marks nodes on the current
+        // root..node path; revisiting one is a back-edge == cycle. We then short-circuit
+        // (cycle flag) and return the clean m.error instead of overflowing the stack.
+        std::vector<char> on_stack(static_cast<std::size_t>(V), 0);
+        bool cycle = false;
         std::function<void(int)> dfs = [&](int node) {
+            if (cycle) return;
             if (outdeg[static_cast<std::size_t>(node)] == 0) {
                 paths.push_back(Path{stack_edges, node_leaf[static_cast<std::size_t>(node)]});
                 return;
             }
+            on_stack[static_cast<std::size_t>(node)] = 1;
             for (int e : out_edges[static_cast<std::size_t>(node)]) {
+                const int child = e_child[static_cast<std::size_t>(e)];
+                if (on_stack[static_cast<std::size_t>(child)]) {  // back-edge -> cycle
+                    cycle = true;
+                    break;
+                }
                 stack_edges.push_back(e);
-                dfs(e_child[static_cast<std::size_t>(e)]);
+                dfs(child);
                 stack_edges.pop_back();
+                if (cycle) break;
             }
+            on_stack[static_cast<std::size_t>(node)] = 0;
         };
         dfs(root);
+        if (cycle) {
+            m.error = "qpgraph: cycle reachable from root (graph is not a DAG)";
+            return m;
+        }
     }
     m.npath = static_cast<int>(paths.size());
 
