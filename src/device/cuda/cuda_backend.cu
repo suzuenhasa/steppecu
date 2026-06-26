@@ -1401,14 +1401,14 @@ public:
             // compacted column position). Two-call temp-storage idiom (CUDA 13.x
             // CCCL CUB; d_temp_storage=nullptr query then the sized buffer).
             std::size_t scan_bytes = 0;
-            cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, dFlags.data(),
-                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
-                                          stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                nullptr, scan_bytes, dFlags.data(), dKeepIdx.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             DeviceBuffer<unsigned char> dScanTemp(scan_bytes == 0 ? 1 : scan_bytes);
             std::size_t sb = scan_bytes;
-            cub::DeviceScan::ExclusiveSum(dScanTemp.data(), sb, dFlags.data(),
-                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
-                                          stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                dScanTemp.data(), sb, dFlags.data(), dKeepIdx.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
         }
 
         // ---- 4. Compact the 1-D chrom/genpos with CUB DeviceSelect::Flagged
@@ -1423,22 +1423,26 @@ public:
             // double query is the larger; reusing an int-sized temp for the double
             // Flagged silently undersizes it (the observed all-zero genpos bug).
             std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
-            cub::DeviceSelect::Flagged(nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
-                                       dChromKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
-            cub::DeviceSelect::Flagged(nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
-                                       dGenposKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
+                dChromKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
+                dGenposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             const std::size_t sel_bytes = std::max(sel_bytes_i, sel_bytes_d);
             DeviceBuffer<unsigned char> dSelTemp(sel_bytes == 0 ? 1 : sel_bytes);
             std::size_t sb = sel_bytes;
-            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
-                                       dChromKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
+                dChromKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             sb = sel_bytes;
-            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
-                                       dGenposKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
+                dGenposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
         }
 
         // Read M_kept back (one int) — needed to size the resident Q/V buffers.
@@ -1554,14 +1558,14 @@ public:
         DeviceBuffer<int> dNumSel(1);
         {
             std::size_t scan_bytes = 0;
-            cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, dFlags.data(),
-                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
-                                          stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                nullptr, scan_bytes, dFlags.data(), dKeepIdx.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             DeviceBuffer<unsigned char> dScanTemp(scan_bytes == 0 ? 1 : scan_bytes);
             std::size_t sb = scan_bytes;
-            cub::DeviceScan::ExclusiveSum(dScanTemp.data(), sb, dFlags.data(),
-                                          dKeepIdx.data(), static_cast<std::int64_t>(M),
-                                          stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                dScanTemp.data(), sb, dFlags.data(), dKeepIdx.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
         }
 
         // ---- 4. Compact the 1-D chrom/genpos with CUB DeviceSelect::Flagged (the
@@ -1570,22 +1574,26 @@ public:
         DeviceBuffer<double> dGenposKept(Mz);
         {
             std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
-            cub::DeviceSelect::Flagged(nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
-                                       dChromKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
-            cub::DeviceSelect::Flagged(nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
-                                       dGenposKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
+                dChromKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                nullptr, sel_bytes_d, dGenpos.data(), dFlags.data(),
+                dGenposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             const std::size_t sel_bytes = std::max(sel_bytes_i, sel_bytes_d);
             DeviceBuffer<unsigned char> dSelTemp(sel_bytes == 0 ? 1 : sel_bytes);
             std::size_t sb = sel_bytes;
-            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
-                                       dChromKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dChrom.data(), dFlags.data(),
+                dChromKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
             sb = sel_bytes;
-            cub::DeviceSelect::Flagged(dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
-                                       dGenposKept.data(), dNumSel.data(),
-                                       static_cast<std::int64_t>(M), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
+                dGenposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
         }
 
         int m_kept = 0;
@@ -2821,13 +2829,14 @@ public:
         // per-chunk Flagged compaction; CAP for the reservoir SortPairsDescending) and reuse.
         // Two-call idiom: d_temp_storage=nullptr first to query temp_storage_bytes.
         std::size_t sel_bytes = 0;
-        cub::DeviceSelect::Flagged(nullptr, sel_bytes, dEst.data(), dFlags.data(),
-                                   dEstSel.data(), dNumSel.data(),
-                                   static_cast<std::int64_t>(C_max), stream_.get());
+        STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+            nullptr, sel_bytes, dEst.data(), dFlags.data(),
+            dEstSel.data(), dNumSel.data(),
+            static_cast<std::int64_t>(C_max), stream_.get()));
         std::size_t sort_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(
+        STEPPE_CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(
             nullptr, sort_bytes, dResAbsZ.data(), dSortAbsZ.data(), dPermIn.data(),
-            dPermOut.data(), static_cast<std::int64_t>(CAP), 0, sizeof(double) * 8, stream_.get());
+            dPermOut.data(), static_cast<std::int64_t>(CAP), 0, sizeof(double) * 8, stream_.get()));
         const std::size_t cub_bytes = std::max(sel_bytes, sort_bytes);
         DeviceBuffer<unsigned char> dCubTemp(cub_bytes == 0 ? 1 : cub_bytes);
 
@@ -2841,10 +2850,10 @@ public:
             const int m = res_n;
             launch_sweep_topk_iota(dPermIn.data(), m, stream_.get());
             std::size_t sb = cub_bytes;
-            cub::DeviceRadixSort::SortPairsDescending(
+            STEPPE_CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(
                 dCubTemp.data(), sb, dResAbsZ.data(), dSortAbsZ.data(), dPermIn.data(),
                 dPermOut.data(), static_cast<std::int64_t>(m), 0, sizeof(double) * 8,
-                stream_.get());
+                stream_.get()));
             const int newn = (m < keep) ? m : keep;  // truncate to <=K.
             // Gather the top `newn` rows (by the sorted permutation) into scratch, then swap back.
             launch_sweep_topk_gather(
@@ -2920,29 +2929,29 @@ public:
             // (4) COMPACT the chunk's above-tau survivors ON THE DEVICE (CUB Flagged; num_selected
             // written on device). The SAME 8 columns (est/se/z/absz + 4 keys) with the SAME flags.
             std::size_t sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dEst.data(), dFlags.data(),
-                                       dEstSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dEst.data(), dFlags.data(),
+                                       dEstSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dSe.data(), dFlags.data(),
-                                       dSeSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dSe.data(), dFlags.data(),
+                                       dSeSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dZ.data(), dFlags.data(),
-                                       dZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dZ.data(), dFlags.data(),
+                                       dZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dAbsZ.data(), dFlags.data(),
-                                       dAbsZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dAbsZ.data(), dFlags.data(),
+                                       dAbsZSel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC0.data(), dFlags.data(),
-                                       dC0Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC0.data(), dFlags.data(),
+                                       dC0Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC1.data(), dFlags.data(),
-                                       dC1Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC1.data(), dFlags.data(),
+                                       dC1Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC2.data(), dFlags.data(),
-                                       dC2Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC2.data(), dFlags.data(),
+                                       dC2Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
             sb = cub_bytes;
-            cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC3.data(), dFlags.data(),
-                                       dC3Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get());
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(dCubTemp.data(), sb, dC3.data(), dFlags.data(),
+                                       dC3Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
 
             int num_sel = 0;
             STEPPE_CUDA_CHECK(cudaMemcpyAsync(&num_sel, dNumSel.data(), sizeof(int),

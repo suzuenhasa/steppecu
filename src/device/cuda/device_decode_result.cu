@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <stdexcept>
 
 #include <cuda_runtime.h>
 
@@ -49,6 +50,21 @@ void DeviceDecodeResult::to_host_qvn(std::vector<double>& q_host,
     // its stream before returning the handle, so a default-stream copy here observes
     // the gathered values. Only the SMALL compacted arrays cross (the regime-B cure:
     // the host per-SNP filter loop + the full-tile D2H are gone).
+    // Fail-fast on the documented regime-B precondition (header
+    // device_decode_result.hpp:77: "Requires n_device() non-null"). A regime-A
+    // result has `impl` non-null but `impl->n` empty (n.data() == nullptr) while
+    // pmk > 0, so the N copy below would be cudaMemcpy(dst, nullptr, pmk*8, D2H) —
+    // STEPPE_CUDA_CHECK would then surface an opaque CUDA-runtime throw (a null device
+    // source) rather than the contract violated here. The empty() short-circuit at the top
+    // tests only P/M_kept, not N residency, so it cannot catch this misuse. This is
+    // a REAL runtime guard (not STEPPE_ASSERT, which compiles out under NDEBUG).
+    if (impl->n.data() == nullptr) {
+        throw std::invalid_argument(
+            "DeviceDecodeResult::to_host_qvn: N buffer is empty — this is a "
+            "regime-A (autosome-only) result, but to_host_qvn requires a "
+            "regime-B (filtered extract_f2) result with a resident compacted N "
+            "(see device_decode_result.hpp: 'Requires n_device() non-null')");
+    }
     STEPPE_CUDA_CHECK(cudaMemcpy(q_host.data(), impl->q.data(), pmk * sizeof(double),
                                  cudaMemcpyDeviceToHost));
     STEPPE_CUDA_CHECK(cudaMemcpy(v_host.data(), impl->v.data(), pmk * sizeof(double),

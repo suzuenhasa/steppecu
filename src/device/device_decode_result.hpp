@@ -74,8 +74,10 @@ public:
     /// ran ON-DEVICE); only the SMALL compacted Q/V/N cross to host to feed the
     /// existing compute_f2_blocks_multigpu_tiered (which takes host MatViews) —
     /// analogous to the regime-A chrom/genpos D2H, just the bigger compacted arrays.
-    /// Requires n_device() non-null (a regime-B result); a no-op on an empty result.
-    /// Defined in cuda/device_decode_result.cu.
+    /// Requires n_device() non-null (a regime-B result) — ENFORCED: a non-empty
+    /// regime-A result (impl set but N empty) throws std::invalid_argument rather
+    /// than dereferencing a null N source. A no-op (clears the outputs) on an empty
+    /// result. Defined in cuda/device_decode_result.cu.
     void to_host_qvn(std::vector<double>& q_host, std::vector<double>& v_host,
                      std::vector<double>& n_host) const;
 
