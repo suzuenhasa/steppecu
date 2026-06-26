@@ -35,9 +35,11 @@
 namespace steppe::core::qpadm {
 
 /// The parsed, fit-ready topology. All arrays are 0-based and flat (the device-arena
-/// shape). A non-empty `error` means the parse failed (an unrooted / cyclic / malformed
-/// graph, an internal node marked sampled, a leaf not in the f2 set) — the caller maps
-/// it to a Status domain outcome.
+/// shape). A non-empty `error` means the parse failed (an unrooted / no-root-cycle /
+/// malformed graph, an internal node marked sampled, a leaf not in the f2 set) — the
+/// caller maps it to a Status domain outcome. NOTE: "no-root-cycle" is the only cycle
+/// detected — every node having in-degree>0 (so no in-degree-0 root; see
+/// qpgraph_model.cpp). A cycle still reachable from a valid root is NOT caught here.
 struct QpGraphModel {
     int npop = 0;            ///< leaf count (== the f3 npop).
     int nedge_total = 0;     ///< all edges (rows of the input edge list).

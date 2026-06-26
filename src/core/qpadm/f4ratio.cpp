@@ -4,7 +4,8 @@
 // assemble seam — assemble_f4_quartets (the per-quartet four-slab AT2 identity) — with ZERO
 // new assemble math, and adds the ONE new math seam f4-ratio needs: the per-block-RATIO
 // weighted block-jackknife (the AT2 qpf4ratio / jack_mat_stats `$est` of the ratio statistic
-// + its xtau variance), HOST-PURE here (NOT a backend virtual; backend.hpp is unchanged).
+// + its xtau variance). That jackknife is the SHARED on-device RatioBlockJackknife backend
+// virtual (device/backend.hpp), reached via f4ratio_blocks_jackknife — NOT a host loop here.
 //
 // AT2 qpf4ratio (admixtools 4.3.3): pops is c(p1,p2,p3,p4,p5). alpha = f4(p1,p2;p3,p4) /
 // f4(p1,p2;p5,p4). The shared pops across num/den are p1,p2,p4; only the 3rd slot swaps (p3
@@ -19,18 +20,11 @@
 //     F4Blocks has m=2N: num rows k in [0,N), den rows k in [N,2N) (contiguous halves). It
 //     carries x_blocks[k+m*b] (per-block f4), x_loo[k+m*b] (AT2 est_to_loo LOO replicate),
 //     and block_sizes (survivor weights) — exactly the est_to_loo output AT2 needs.
-//  2. The NEW per-ratio jackknife (the ONLY new math, below): for each tuple k, with
-//     num_k=k, den_k=N+k, over the survivor blocks: Rb = x_loo[num_k]/x_loo[den_k];
-//     totnum=Σ(x_blocks[num_k]*bl)/Σbl, totden likewise, tot=totnum/totden;
-//     est = mean(tot - Rb)*nb + weighted_mean(Rb,bl); h_b=n/bl_b;
-//     tau_b = h_b*tot - (h_b-1)*Rb; xtau_b = (tau_b - est)/sqrt(h_b - 1);
-//     var = Σ(xtau_b^2)/nb; alpha = est; se = sqrt(var); z = alpha/se. This is the AT2
-//     jack_mat_stats(tot = the variance-centering term) — DO NOT route through jackknife_cov
-//     (it uses a DIFFERENT xtau decomposition: leading x_total*h minus tot_line_, whereas AT2
-//     jack_mat_stats uses tot*h leading and subtracts est; they are not the same — reuse the
-//     SEAM only for the est_to_loo replicates, write the ratio xtau explicitly).
-//  Near-zero denom (AT2 setmiss thresh=1e-6): per block, if abs(x_blocks[den_k+m*b])<1e-6
-//  treat that block's contribution as MISSING (skip from the survivor reduction).
+//  2. The per-ratio weighted block-jackknife (num row k, den row N+k) is delegated WHOLE to
+//     the shared RatioBlockJackknife seam — be.f4ratio_blocks_jackknife(f2, flat, N,
+//     kSetmissThresh, prec) — which also performs the AT2 setmiss near-zero-denom per-block
+//     skip (|x|<kSetmissThresh=1e-6 treated as MISSING). The detailed jack_mat_stats / xtau
+//     derivation lives near that kernel + the long-double oracle (NOT duplicated here).
 //
 // assemble_f4_quartets stays native FP64 by the cancellation carve-out (OQ-5), exactly like
 // f4/f3. fudge = 0 always (a bare ratio SE; the qpAdm 1e-4 ridge is a Q-INVERT concern only,
