@@ -613,8 +613,7 @@ public:
 
         // Per-sample scratch: the fine-grid moment arrays (z0q/z1q/z2q) + per-SNP regression.
         std::vector<double> z0q(nq), z1q(nq), z2q(nq);
-        std::vector<double> w0(static_cast<std::size_t>(M)), res(static_cast<std::size_t>(M)),
-                            wt(static_cast<std::size_t>(M));
+        std::vector<double> w0(static_cast<std::size_t>(M)), wt(static_cast<std::size_t>(M));
         std::vector<long> xindex(static_cast<std::size_t>(M));  // valid-SNP -> SNP index map
 
         for (int i = 0; i < n_target; ++i) {
@@ -644,7 +643,7 @@ public:
                 const double b = w1 - w2v;    // ww2
                 dot12 += static_cast<long double>(a) * static_cast<long double>(b);
                 dot22 += static_cast<long double>(b) * static_cast<long double>(b);
-                // stash w1,w2 in res temporarily? No — recompute below; store src idx.
+                // store src idx; w1,w2 are recomputed in the residual pass below.
                 xindex[static_cast<std::size_t>(numx)] = s;
                 ++numx;
             }
@@ -663,7 +662,7 @@ public:
                 const double w2v = src2_freq[s];
                 const double pred = yreg * w1 + (1.0 - yreg) * w2v;  // ww1 prediction
                 const double r = w0[static_cast<std::size_t>(k1)] - pred;  // residual
-                const double y = r * wt[static_cast<std::size_t>(k1)];     // signal = res·wt
+                const double y = r * wt[static_cast<std::size_t>(k1)];     // signal = residual·wt
                 const int cell = grid_cell[s];
                 const std::size_t cc = static_cast<std::size_t>(cell);
                 z0q[cc] += 1.0;
@@ -1836,22 +1835,6 @@ private:
             for (int j = 0; j < nr; ++j)
                 xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] =
                     x.x_total[static_cast<std::size_t>(j) + static_cast<std::size_t>(nr) * static_cast<std::size_t>(i)];
-        return xmat;
-    }
-
-    /// Build an nl×nr COLUMN-MAJOR xmat from a single LOO block's row-major slice
-    /// (the S7 per-block re-fit input; loo[k] for k = j + nr*i at block b).
-    [[nodiscard]] static std::vector<double> xmat_from_loo_block(const F4Blocks& x, int b) {
-        const int nl = x.nl, nr = x.nr;
-        const std::size_t M = static_cast<std::size_t>(nl) * static_cast<std::size_t>(nr);
-        std::vector<double> xmat(M, 0.0);
-        for (int i = 0; i < nl; ++i)
-            for (int j = 0; j < nr; ++j) {
-                const std::size_t k = static_cast<std::size_t>(j) +
-                                      static_cast<std::size_t>(nr) * static_cast<std::size_t>(i);
-                xmat[static_cast<std::size_t>(i) + static_cast<std::size_t>(nl) * static_cast<std::size_t>(j)] =
-                    x.x_loo[k + M * static_cast<std::size_t>(b)];
-            }
         return xmat;
     }
 

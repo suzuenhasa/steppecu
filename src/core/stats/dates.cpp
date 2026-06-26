@@ -21,12 +21,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <limits>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "core/domain/block_partition_rule.hpp"  // (reused elsewhere; chrom segmentation here)
 #include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DatesMoments
 #include "device/resources.hpp"                   // device::Resources

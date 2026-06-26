@@ -215,8 +215,10 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     // header — no tile is read here, so a GENO prefix does not throw before the real run).
     std::size_t n_ph = 0, n_dip = 0;
 
-    // The engaged precision (the requested DeviceConfig.precision; the resident path
-    // honors it or downgrades to native — recorded as the tag in meta.json).
+    // The REQUESTED precision (DeviceConfig.precision). This is what is PASSED to the
+    // library entry; the tag recorded in meta.json is taken back from the library result
+    // (extracted.precision_tag — the kind the resident path honored or downgraded to),
+    // see the `engaged` construction after run_extract_f2 below.
     const Precision precision = config.device().precision;
     const FilterConfig& filter = config.filter();
 
@@ -350,7 +352,14 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     pop_labels = extracted.pop_labels;       // the lib's P-axis labels (= the up-front read's).
     n_ph = extracted.n_pseudo_haploid;       // observability echo (the lib detected these).
     n_dip = extracted.n_diploid;
-    const Precision engaged = precision;     // recorded tag (the lib honors/downgrades internally).
+    // The ENGAGED precision: take the KIND from the library result (extracted.precision_tag
+    // is the F2ExtractResult's single source of truth for the precision the lib honored /
+    // downgraded to internally), and keep mantissa_bits from the requested config — the
+    // result carries only Precision::Kind, not the mantissa cap, which is meaningful only
+    // for EmulatedFp64 and unchanged by a downgrade. At HEAD the lib sets precision_tag from
+    // this same requested kind, so this is behavior-preserving (golden gate covers parity).
+    Precision engaged = precision;
+    engaged.kind = extracted.precision_tag;
 
     // ---- 9. Write the f2_blocks dir (f2.bin REAL vpair + pops.txt + meta.json) -----
     F2DirMeta meta;
