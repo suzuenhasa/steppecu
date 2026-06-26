@@ -74,6 +74,16 @@ constexpr int kMaxGridDimX = static_cast<int>(core::kMaxGridX);  // 2^31-1 == IN
 /// when the summed squared off-diagonal magnitude falls below this. FROZEN by §12
 /// parity (the value sets the oracle-matching iteration count) — name only (5.1).
 constexpr double kOffConvergence = 1e-30;
+/// Per-rotation relative tolerance and sweep cap for the on-device one-sided Jacobi
+/// SVD. Single-sourced here (alongside kOffConvergence) for the two device routines
+/// that run the BIT-IDENTICAL sweep — dev_jacobi_svd_V and rank_via_jacobi_kernel —
+/// so the parity-localizer (gpu rank_Q == cpu rank_Q) cannot drift between them.
+/// FROZEN by §12 parity (the values set the oracle-matching iteration count) — name
+/// only (5.5). __device__-referenced constexpr of built-in type at namespace scope is
+/// usable in device code (CUDA C++ Programming Guide §5.3), same rule kOffConvergence
+/// relies on.
+constexpr double kJacobiTol = 1e-15;
+constexpr int kJacobiMaxSweeps = 60;
 
 // NOTE (the small-bound envelope): these stacked-LOCAL templated kernels serve ONLY
 // the bit-parity SMALL path (nl<=5, nr<=10, r<=4 — the 9-pop golden is far inside).
@@ -143,7 +153,7 @@ __device__ inline bool dev_solve(const double* A, int n, const double* b,
 
 /// One-sided Jacobi SVD of m×n column-major A → V (n×k col-major, k=min(m,n),
 /// descending), and the W columns (normalized) are NOT needed by the seed (only V).
-/// Transliterates core::jacobi_svd (small_linalg.hpp:162-267). `W`/`Vfull`/`sigma`/
+/// Transliterates core::jacobi_svd (small_linalg.hpp:204-286). `W`/`Vfull`/`sigma`/
 /// `order` are caller scratch. Writes the leading min(r,k) columns of V into `Vout`
 /// (n×r col-major, k=min(m,n)); the FULL n×r buffer is zero-initialized first, so
 /// any columns [k,r) (only reachable if a caller violates r<=k) read as 0 in
@@ -157,9 +167,7 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
     for (int i = 0; i < m * n; ++i) W[i] = A[i];
     for (int i = 0; i < n * n; ++i) Vfull[i] = 0.0;
     for (int i = 0; i < n; ++i) Vfull[i + n * i] = 1.0;
-    const double kTol = 1e-15;
-    const int kMaxSweeps = 60;
-    for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+    for (int sweep = 0; sweep < kJacobiMaxSweeps; ++sweep) {
         double off = 0.0;
         for (int p = 0; p < n - 1; ++p) {
             for (int q = p + 1; q < n; ++q) {
@@ -171,7 +179,7 @@ __device__ inline void dev_jacobi_svd_V(const double* A, int m, int n, int r,
                     alpha += a * a; beta += b * b; gamma += a * b;
                 }
                 off += gamma * gamma;
-                if (fabs(gamma) <= kTol * sqrt(alpha * beta) || gamma == 0.0) continue;
+                if (fabs(gamma) <= kJacobiTol * sqrt(alpha * beta) || gamma == 0.0) continue;
                 const double zeta = (beta - alpha) / (2.0 * gamma);
                 const double t = (zeta >= 0.0 ? 1.0 : -1.0) /
                                  (fabs(zeta) + sqrt(1.0 + zeta * zeta));
@@ -1027,9 +1035,10 @@ __global__ void seed_ab_kernel(const double* __restrict__ dXmat, int nl, int nr,
 // (was a host core::jacobi_svd at the END of the GPU rank_sweep, the last bounded
 // per-model host-compute item). Reuses the EXACT one-sided-Jacobi sweep
 // dev_jacobi_svd_V transliterates (core::jacobi_svd, small_linalg.hpp:204-286) — same
-// kTol/kOffConvergence/kMaxSweeps, same rotation angle, same descending sort — so the
-// produced singular values (and thus the count) are BIT-IDENTICAL to the CpuBackend
-// oracle (the parity-localizer the test asserts: gpu rank_Q == cpu rank_Q exactly).
+// kJacobiTol/kOffConvergence/kJacobiMaxSweeps, same rotation angle, same descending
+// sort — so the produced singular values (and thus the count) are BIT-IDENTICAL to the
+// CpuBackend oracle (the parity-localizer the test asserts: gpu rank_Q == cpu rank_Q
+// exactly).
 // Only the SINGULAR VALUES are needed (not V), so the V-accumulation is dropped: sigma
 // = the column norms of the rotated W, a function of W + the rotation angles ONLY (V is
 // never read), so the count is unaffected. VRAM scratch (W[m*m], sigma[m], order[m])
@@ -1046,9 +1055,7 @@ __global__ void rank_via_jacobi_kernel(const double* __restrict__ dQ, int m, dou
     // W = Q (m×m column-major). Q is symmetric (Q == Q'), so its singular values are
     // |eigenvalues|; the one-sided Jacobi recovers them exactly as core::jacobi_svd does.
     for (int i = 0; i < m * m; ++i) sW[i] = dQ[i];
-    const double kTol = 1e-15;
-    const int kMaxSweeps = 60;
-    for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+    for (int sweep = 0; sweep < kJacobiMaxSweeps; ++sweep) {
         double off = 0.0;
         for (int p = 0; p < m - 1; ++p) {
             for (int q = p + 1; q < m; ++q) {
@@ -1060,7 +1067,7 @@ __global__ void rank_via_jacobi_kernel(const double* __restrict__ dQ, int m, dou
                     alpha += a * a; beta += b * b; gamma += a * b;
                 }
                 off += gamma * gamma;
-                if (fabs(gamma) <= kTol * sqrt(alpha * beta) || gamma == 0.0) continue;
+                if (fabs(gamma) <= kJacobiTol * sqrt(alpha * beta) || gamma == 0.0) continue;
                 const double zeta = (beta - alpha) / (2.0 * gamma);
                 const double t = (zeta >= 0.0 ? 1.0 : -1.0) /
                                  (fabs(zeta) + sqrt(1.0 + zeta * zeta));

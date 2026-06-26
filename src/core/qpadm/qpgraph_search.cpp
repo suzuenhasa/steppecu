@@ -47,6 +47,18 @@ inline constexpr std::size_t kPrimaryGpu = 0;
     return *resources.gpus.at(kPrimaryGpu).backend;
 }
 
+/// Safety bound on the topology-SEARCH hill-climb's best-improvement descent (NOT the qpGraph
+/// projected-Newton fit — those constants live in qpgraph_opt_constants.hpp). The bounded v1
+/// space's neighborhoods are finite, so a strictly-descending climb terminates at a local min
+/// in far fewer steps than this; the cap only guards against a pathological non-terminating walk.
+inline constexpr int kMaxHillClimbSteps = 1000;
+
+/// Recovery tolerances for the hill-climb-vs-exhaustive global-best score comparison (the v1
+/// recovery gate): |agg_s - best_s| <= kRecoveryAtol + kRecoveryRtol * |best_s|. The rtol
+/// mirrors the cc9ff69 AT2-fit golden tolerance (see qpgraph_search.hpp comment, "rtol ~1e-6").
+inline constexpr double kRecoveryRtol = 1e-6;
+inline constexpr double kRecoveryAtol = 1e-9;
+
 /// The canonical f3 basis over the search pop-set: base = pops[0]; the pairs are the
 /// choose(npop,2) (a<=b) over the npop-1 non-base leaves in pops order (incl the diagonal).
 /// `pair_a_pop`/`pair_b_pop` are the f2 P-axis indices of pair k's two leaves; the flattened
@@ -296,7 +308,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
                 cands.size() > 1 ? (static_cast<std::size_t>(sidx) * cands.size()) / static_cast<std::size_t>(K) : 0;
             cq::EnumeratedTopology cur = cands[start];
             double cur_s = score_of(cur);
-            for (int step = 0; step < 1000; ++step) {  // best-improvement descent.
+            for (int step = 0; step < kMaxHillClimbSteps; ++step) {  // best-improvement descent.
                 const std::vector<cq::EnumeratedTopology> nb =
                     cq::topology_neighbors(cur, opts.pops, max_nadmix);
                 double best_nb = cur_s;
@@ -313,9 +325,9 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
             if (std::isfinite(cur_s) && cur_s < agg_s) { agg_s = cur_s; agg_hash = cur.hash; }
         }
         // recovery: the multi-start aggregate == the exhaustive global-best (hash + score).
-        const double rtol = 1e-6, atol = 1e-9;
         const bool same_hash = (agg_hash == res.best.hash);
-        const bool same_score = std::fabs(agg_s - best_s) <= atol + rtol * std::fabs(best_s);
+        const bool same_score =
+            std::fabs(agg_s - best_s) <= kRecoveryAtol + kRecoveryRtol * std::fabs(best_s);
         res.heuristic_recovered = same_hash && same_score;
         (void)score_cache;
     }

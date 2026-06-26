@@ -47,6 +47,14 @@ inline constexpr int kPloidyDiploid = 2;
 /// DATES setqbins inter-chromosome gap: +5 Morgans between chromosomes so each chromosome's
 /// fine-grid cells are disjoint and the per-chrom FFT segments never overlap (dates.c:1140).
 inline constexpr double kInterChromGapMorgans = 5.0;
+/// weightjack zero-weight filter: blocks whose SNP-count weight is below this are dropped
+/// before the jackknife (statsubs.c weightjack jwt<1e-6 guard; jwt is a SNP count so any
+/// positive block clears it — this only excludes the empty/degenerate leave-one-chrom blocks).
+inline constexpr double kMinJackWeight = 1e-6;
+/// corr_from denominator floor: a divide-by-zero guard added to sqrt(v11·v22) so a bin with
+/// zero variance (v11·v22 == 0) returns corr 0 instead of NaN. Negligible vs any real variance
+/// (DATES corr_from; matches the dates.c ddcorr 0-variance handling).
+inline constexpr double kCorrDenomFloor = 1.0e-20;
 
 // M5/M6 host primitives (ExpFit, linfit_2x2, fit_exp_decay, dates_repack_host) moved to the
 // shared CUDA-FREE header core/internal/dates_fit.hpp so the CpuBackend reference oracle (in
@@ -61,10 +69,10 @@ inline constexpr double kInterChromGapMorgans = 5.0;
 void weight_jack(const std::vector<double>& jmean, const std::vector<double>& jwt, double mean,
                  double& est, double& sig) {
     est = std::nan(""); sig = std::nan("");
-    // drop zero-weight / non-finite blocks (weightjack's jwt<1e-6 filter).
+    // drop zero-weight / non-finite blocks (weightjack's jwt<kMinJackWeight filter).
     std::vector<double> m, w;
     for (std::size_t k = 0; k < jmean.size(); ++k) {
-        if (jwt[k] < 1e-6) continue;
+        if (jwt[k] < kMinJackWeight) continue;
         if (!std::isfinite(jmean[k])) continue;
         m.push_back(jmean[k]); w.push_back(jwt[k]);
     }
@@ -178,7 +186,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     kept_src.reserve(static_cast<std::size_t>(M));
     for (long s = 0; s < M; ++s) {
         const int chr = snptab.chrom[static_cast<std::size_t>(s)];
-        if (chr < 1 || chr > 22) continue;
+        if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;  // AT2 auto_only: autosomes 1..22.
         const std::size_t col = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
         const double v1 = dec.v[col + static_cast<std::size_t>(p_s1)];
         const double v2 = dec.v[col + static_cast<std::size_t>(p_s2)];
@@ -273,7 +281,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
         const double v11 = S11 / S0;
         const double v12 = S12 / S0;
         const double v22 = S22 / S0;
-        return v12 / std::sqrt(v11 * v22 + 1.0e-20);
+        return v12 / std::sqrt(v11 * v22 + kCorrDenomFloor);
     };
 
     // Build the total per-bin S-moments, and per-chrom LOO via subtraction.

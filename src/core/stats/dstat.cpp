@@ -179,7 +179,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
         genpos_kept.reserve(static_cast<std::size_t>(M));
         for (long s = 0; s < M; ++s) {
             const int chr = snptab.chrom[static_cast<std::size_t>(s)];
-            if (chr < 1 || chr > 22) continue;  // AT2 auto_only: autosomes 1..22.
+            if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;  // AT2 auto_only: autosomes 1..22.
             const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
             for (int p = 0; p < P; ++p) {
                 Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
