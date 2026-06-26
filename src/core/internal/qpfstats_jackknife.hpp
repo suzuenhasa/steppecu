@@ -24,6 +24,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "core/internal/host_device.hpp"  // STEPPE_ASSERT (debug-only precondition, NDEBUG-safe)
+
 namespace steppe::core {
 
 /// matrix_jackknife_est_full per popcomb column (AT2 R/io.R; the GLOBAL per-comb estimate
@@ -89,6 +91,10 @@ namespace steppe::core {
 /// NaN-safe (na.rm=TRUE: skip non-finite blocks throughout). All-zero/empty → 0.
 [[nodiscard]] inline double f2blocks_pair_est(const std::vector<double>& arr,
                                               const std::vector<int>& bl) {
+    // `arr` (per-block estimate) and `bl` (block_lengths) are both length n_block by contract;
+    // nb is derived from arr.size() yet bl[b] is indexed in lock-step. Guard the undefended
+    // precondition (debug-only; compiled out under NDEBUG, so the release hot path is unchanged).
+    STEPPE_ASSERT(bl.size() == arr.size(), "f2blocks_pair_est: arr/bl length mismatch");
     const int nb = static_cast<int>(arr.size());
     long double sum_bl = 0.0L;
     for (int b = 0; b < nb; ++b)

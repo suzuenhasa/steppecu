@@ -62,8 +62,13 @@ IndPartition read_ind(const std::string& path,
         std::string id, sex, pop;
         if (!(line_stream >> id >> sex >> pop)) continue;  // skip blank/short lines
         if (row >= n_records_present) {
-            ++row;
-            continue;  // beyond the present genotype records (partial-file cap)
+            // Beyond the present genotype records (partial-file cap): IGNORE the
+            // row entirely — do NOT ++row. Counting past-cap rows would inflate
+            // n_individuals_total past n_records_present, contradicting the
+            // hpp:71 "== TGENO records" contract / hpp:79-81 "rows ... are
+            // ignored" when the .ind is longer than the .geno (cleanup
+            // ind_reader 4.x). The grouping indices are already cap-bounded.
+            continue;
         }
         auto it = index_of.find(pop);
         if (it == index_of.end()) {
@@ -76,7 +81,8 @@ IndPartition read_ind(const std::string& path,
     }
 
     IndPartition part;
-    part.n_individuals_total = row;  // total .ind rows seen (the individual axis)
+    part.n_individuals_total = row;  // .ind rows within the cap == TGENO records
+                                     // (the individual axis); see the cap above
 
     if (groups.empty()) {
         throw_io_error("no individuals parsed from ");

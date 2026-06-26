@@ -508,10 +508,17 @@ BuildResult<RunConfig> ConfigBuilder::build() const {
     if (merged_.hash_source) cfg.hash_source_ = *merged_.hash_source;
     // qpgraph (single-graph fit) inputs/options.
     if (merged_.graph)       cfg.graph_file_ = *merged_.graph;
-    if (merged_.numstart)    cfg.qpgraph_numstart_ = *merged_.numstart;
+    if (merged_.numstart) {
+        if (*merged_.numstart < 1) return fail("--numstart must be >= 1");
+        cfg.qpgraph_numstart_ = *merged_.numstart;
+    }
     if (merged_.diag_f3)     cfg.qpgraph_diag_f3_ = *merged_.diag_f3;
     if (merged_.constrained) cfg.qpgraph_constrained_ = *merged_.constrained;
-    if (merged_.max_nadmix)  cfg.qpgraph_max_nadmix_ = *merged_.max_nadmix;
+    if (merged_.max_nadmix) {
+        // v1 supports the {0,1} admixture-node ceiling (run_config.hpp:178).
+        if (*merged_.max_nadmix < 0) return fail("--max-nadmix must be >= 0");
+        cfg.qpgraph_max_nadmix_ = *merged_.max_nadmix;
+    }
 
     return cfg;
 }

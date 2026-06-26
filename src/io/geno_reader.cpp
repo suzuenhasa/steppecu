@@ -1045,10 +1045,26 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
     }
     const std::size_t cpb = static_cast<std::size_t>(kCodesPerByte);
     const std::size_t n_ind = header_.n_ind;
-    const std::size_t n_lines = tile_snps * n_ind;  // checked-multiply OK: tile_snps*src_bpr
-                                                     // dominates and was bounded above; n_ind
-                                                     // <= 4*src_bpr, so this product is <=
-                                                     // 4*tile_snps*src_bpr (no wrap in practice).
+    // CHECKED MULTIPLY before forming the line count (mirrors this file's dominant
+    // tile-size guard at read_tile). `tile_snps * n_ind` is a std::size_t product and
+    // std::size_t arithmetic wraps modulo 2^N (well-defined-but-SILENT). The earlier
+    // `tile_snps * src_bpr` guard does NOT cover this product: src_bpr is the FLOORED
+    // SNP-record stride (max(kGenoHeaderBytes, ceil(n_ind/4))), so n_ind <= 4*src_bpr
+    // only yields tile_snps*n_ind <= 4*(tile_snps*src_bpr), which can itself wrap. A
+    // wrapped (small) n_lines would terminate the parse loop early and silently truncate
+    // the genotype matrix; this is the direct fail-fast guard (architecture.md §2). The
+    // idiom is the standard `a > MAX/b` overflow test (n_ind is provably nonzero: every
+    // header ctor path returns Unknown when n_ind == 0, and src_bpr = packed_bytes(n_ind)
+    // is nonzero only for n_ind >= 1).
+    const std::string line_count_operands =
+        std::to_string(tile_snps) + " snp-records * " +
+        std::to_string(n_ind) + " individuals";
+    if (n_ind && tile_snps > std::numeric_limits<std::size_t>::max() / n_ind) {
+        throw std::runtime_error(
+            "io::GenoReader::read_ancestrymap_snp_major_tile: line count overflow (" +
+            line_count_operands + " exceeds size_t) for " + path_);
+    }
+    const std::size_t n_lines = tile_snps * n_ind;
     std::string line;
     for (std::size_t L = 0; L < n_lines; ++L) {
         if (!std::getline(in, line)) {

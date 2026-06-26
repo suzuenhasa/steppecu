@@ -42,8 +42,10 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>    // INT_MAX (the npopcomb size_t->int narrow guard)
 #include <cstddef>
 #include <span>
+#include <stdexcept>  // std::runtime_error (fail-fast on the npopcomb int overflow)
 #include <string>
 #include <vector>
 
@@ -159,6 +161,14 @@ void build_popcomb_and_design(int npop, std::vector<PopComb>& combs,
                 combs.push_back({q[rot[r][0]], q[rot[r][1]], q[rot[r][2]], q[rot[r][3]]});
     }
 
+    // Fail-fast BEFORE the size_t->int narrow: combs grows ~C(npop,4)*3, so a large pop
+    // set would wrap `int npopcomb` and then feed the design-matrix sizing below
+    // (x.assign(npopcomb*npairs), x[c + npopcomb*p]) a NEGATIVE/wrapped extent — a silent
+    // out-of-bounds. A throw (the file's read_canonical_tile fail-fast idiom) guards it on
+    // RELEASE too; STEPPE_ASSERT would compile out under NDEBUG, exactly where it must hold.
+    // `int npopcomb` is the AT2-named design-axis seam (NAMING-STYLE-STANDARD §3.2) — kept.
+    if (combs.size() > static_cast<std::size_t>(INT_MAX))
+        throw std::runtime_error("qpfstats: npopcomb overflows int (pop set too large)");
     npopcomb = static_cast<int>(combs.size());
 
     // --- the design x [npopcomb × npairs], COLUMN-MAJOR (x[c + npopcomb*p]) ---

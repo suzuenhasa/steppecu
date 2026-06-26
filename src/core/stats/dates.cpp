@@ -21,9 +21,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>     // std::numeric_limits<int> (grid-dimension fits-int bound check)
 #include <string>
 #include <vector>
 
+#include "core/internal/host_device.hpp"           // STEPPE_ASSERT (debug-only fail-fast)
 #include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DatesMoments
 #include "device/resources.hpp"                   // device::Resources
@@ -254,9 +256,20 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const int n_chrom = static_cast<int>(chrom_present.size());
 
     // ---- 4. The curve dimensions (dates.c: numbins = round(maxdis/binsize)+5; diffmax) -
-    const int n_bin = static_cast<int>(std::lround(opts.maxdis_morgans / opts.binsize_morgans));
-    const int diffmax = static_cast<int>(std::lround(static_cast<double>(opts.qbin) *
-                                                     opts.maxdis_morgans / opts.binsize_morgans));
+    // Round in `long` (std::lround returns long int) and bound-check each grid dimension
+    // FITS int BEFORE the narrowing cast — a pathological maxdis/binsize/qbin could otherwise
+    // overflow the int these dims index. Behavior-neutral: opts are validated at the entry
+    // (the binsize/qbin/maxdis > 0 guard) and the assert compiles out under NDEBUG, so the
+    // narrowed values are identical to the prior single-cast form.
+    const long n_bin_l = std::lround(opts.maxdis_morgans / opts.binsize_morgans);
+    const long diffmax_l = std::lround(static_cast<double>(opts.qbin) *
+                                       opts.maxdis_morgans / opts.binsize_morgans);
+    STEPPE_ASSERT(n_bin_l <= static_cast<long>(std::numeric_limits<int>::max()),
+                  "DATES n_bin grid dimension overflows int");
+    STEPPE_ASSERT(diffmax_l <= static_cast<long>(std::numeric_limits<int>::max()),
+                  "DATES diffmax grid dimension overflows int");
+    const int n_bin = static_cast<int>(n_bin_l);
+    const int diffmax = static_cast<int>(diffmax_l);
     if (n_bin <= 0 || diffmax <= 0) { res.status = Status::InvalidConfig; return res; }
 
     // ---- 5. THE cuFFT AUTOCORRELATION LD ENGINE (the S2 divergence; dates_curve) -------

@@ -64,8 +64,8 @@ namespace cfg = steppe::config;
         // skip a header row.
         if (first_data) {
             std::string al = a, bl = b;
-            for (char& c : al) c = static_cast<char>(std::tolower(c));
-            for (char& c : bl) c = static_cast<char>(std::tolower(c));
+            for (char& c : al) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (char& c : bl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             first_data = false;
             if ((al == "from" && bl == "to") || (al == "parent" && bl == "child")) continue;
         }

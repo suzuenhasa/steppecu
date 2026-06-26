@@ -14,6 +14,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "core/internal/host_device.hpp"   // STEPPE_ASSERT (debug-only block-index bounds check)
 #include "core/internal/log.hpp"           // STEPPE_LOG_WARN (the one teardown-warning sink)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_WARN (device-restore guard)
 #include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers; pulls device_buffer.cuh)
@@ -75,6 +76,11 @@ F2DiskHeader disk_header(const DiskF2Blocks& d) {
 
 // ---- F2BlocksOut::read_block_to_host — the FIT's tile reader (tier-agnostic) ----
 void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_slab_out) const {
+    // Debug-only bounds contract: every tier computes off = slab·(size_t)b, so a negative
+    // b casts to a huge size_t (OOB D2H / host read / pread) and b >= n_block walks past
+    // the last slab. Compiles out under NDEBUG (b unevaluated) — the trust-based contract
+    // and the gate build are byte-identical.
+    STEPPE_ASSERT(b >= 0 && b < n_block, "read_block_to_host: block index out of range");
     const std::size_t slab = slab_elems(P);  // P² per-block slab (single-homed shape, 5.3)
     const std::size_t bytes = slab * sizeof(double);
     if (slab == 0) return;

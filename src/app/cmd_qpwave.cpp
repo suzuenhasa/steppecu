@@ -33,6 +33,7 @@
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
+#include "core/internal/host_device.hpp"  // STEPPE_ASSERT (debug-only fail-fast; CUDA-free)
 #include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
 #include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/error.hpp"             // steppe::Status
@@ -128,6 +129,11 @@ int run_qpwave_command(const cfg::RunConfig& config) {
     left_labels.reserve(left_idx.size());
     for (int idx : left_idx) left_labels.push_back(resolver.label_at(idx));
     // nr convention: right[0] == R0, so right_n == right.size()-1 (== metadata.nr).
+    // The subtraction underflows to negative iff right_idx is empty; the R0
+    // convention guarantees non-empty here (validated at the config.right() check
+    // ~50 lines above, :75). Make that invariant locally self-evident (debug-only).
+    STEPPE_ASSERT(!right_idx.empty(),
+                  "right_idx non-empty: R0 convention (validated at config.right() check)");
     const int right_n = static_cast<int>(right_idx.size()) - 1;
 
     if (config.out_file().empty()) {

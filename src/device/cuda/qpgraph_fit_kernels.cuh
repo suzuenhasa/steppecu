@@ -45,17 +45,17 @@ struct QpGraphDeviceTopo {
 struct ScratchLayout {
     int pwts_c, ppwts, Wm, cc, ccs, sc, q1, bl, res, path_w, qf;  // double sub-array offsets
     int nn_w, nn_Ap, nn_qp, nn_z, nn_lu, nn_y;                    // NNLS / solve scratch
-    int dbl_total;                                                // total doubles per thread
+    long dbl_total;                                               // total doubles per thread
     int nn_P, nn_piv, nn_pass;                                    // int sub-array offsets
-    int int_total;                                                // total ints per thread
+    long int_total;                                               // total ints per thread
 };
 
 /// Build the per-thread scratch layout for a topology of (npop,nedge,npair,npath). __host__
 /// __device__: the host sizes the slab + the kernel reconstructs per-topology offsets.
 __host__ __device__ inline ScratchLayout make_layout(int npop, int nedge, int npair, int npath) {
     ScratchLayout L{};
-    int o = 0;
-    auto take = [&](int sz) { int s = o; o += sz; return s; };
+    long o = 0;
+    auto take = [&](int sz) { long s = o; o += sz; return s; };
     L.pwts_c = take(nedge * (npop - 1));
     L.ppwts  = take(npair * nedge);
     L.Wm     = take(npair * nedge);
@@ -74,8 +74,8 @@ __host__ __device__ inline ScratchLayout make_layout(int npop, int nedge, int np
     L.nn_lu  = take(nedge * nedge);
     L.nn_y   = take(nedge);
     L.dbl_total = o;
-    int oi = 0;
-    auto takei = [&](int sz) { int s = oi; oi += sz; return s; };
+    long oi = 0;
+    auto takei = [&](int sz) { long s = oi; oi += sz; return s; };
     L.nn_P    = takei(nedge);
     L.nn_piv  = takei(nedge);
     L.nn_pass = takei(nedge);
