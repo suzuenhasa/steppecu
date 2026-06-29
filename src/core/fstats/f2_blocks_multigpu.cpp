@@ -428,17 +428,15 @@ steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
 }
 
 // =============================================================================
-// compute_f2_blocks_multigpu_tiered — the M5 ADAPTIVE TIERED entry (single-GPU first).
-// The result lives in the FASTEST tier it FITS in, selected by resolve_output_tier from
-// the RUNTIME free-VRAM probe (resources.gpus[0].caps.free_vram_bytes) + the RUNTIME
-// free-host-RAM probe (free_host_ram_bytes via sysinfo) — never hardcoded — or the
-// force-tier override. PARITY-NEUTRAL (§12): the tier moves no bits.
-//
-// TIER 0 (Resident) IS THE EXISTING PATH UNCHANGED: on OutputTier::Resident the
-// orchestrator calls compute_f2_blocks_device EXACTLY as the device entry does (no sink,
-// no staging, no triple-buffer) — P=512 keeps its 3.9x and never touches streaming.
-// HostRam + Disk drive the streamed seam (compute_f2_blocks_streamed) ONLY when the
-// result does not fit VRAM (opt-in-by-need).
+// compute_f2_blocks_multigpu_tiered — the M5 ADAPTIVE TIERED entry. The tier
+// CONTRACT (the Resident/HostRam/Disk tiers, single-GPU-first / always-drives-gpus[0]-
+// regardless-of-G, the 3.9x-win Resident fast-path, and tier parity-neutrality) is the
+// authoritative /// doc on the declaration in f2_blocks_multigpu.hpp — cross-referenced
+// here, NOT restated, so the two copies cannot drift (§2.11). This body only WIRES that
+// contract: resolve_output_tier picks the tier from the runtime free-VRAM probe
+// (resources.gpus[0].caps.free_vram_bytes) + the free-host-RAM probe (free_host_ram_bytes
+// via sysinfo) or the force-tier override, then drives compute_f2_blocks_device (Resident)
+// or the streamed seam (compute_f2_blocks_streamed; HostRam/Disk).
 // =============================================================================
 steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     steppe::device::Resources& resources,

@@ -31,11 +31,10 @@ namespace {
 // `out`. Returns true iff the parse succeeded (errc{}) AND the entire token was
 // consumed (ptr == end) — the "fully-consumed" contract both numeric parsers
 // below share. std::from_chars is locale-free, allocation-free, and throws
-// nothing (it reports failure through the returned errc), so the
-// runtime_error-only contract of read_snp is preserved (cleanup snp_reader 7.1;
-// it has overloads for both integer and floating-point T). The from_chars setup
-// triple (begin/end + the errc/consumed check) was copy-pasted in chrom_code and
-// parse_genpos differing only by the value type; this folds them to one site.
+// nothing (it reports failure through the returned errc), so read_snp's
+// runtime_error-only contract is preserved. One template (overloaded for integer
+// and floating-point T) is the single home for the begin/end + errc/consumed
+// setup that chrom_code and parse_genpos both need.
 template <class T>
 [[nodiscard]] bool parse_full(const std::string& tok, T& out) {
     const char* begin = tok.data();
@@ -48,9 +47,8 @@ template <class T>
 // adjacent-equality (all the block rule consumes) is well-defined. Numeric codes
 // pass through as their integer value; X/Y/MT take the EIGENSOFT codes named in
 // eigenstrat_format.hpp (kChromCodeX/Y/Mt — single-homed there because the M2
-// autosomes-only filter drops exactly these, cleanup F12/B16); any other
-// non-numeric label (or an all-digit label too large for int) gets a stable,
-// distinct negative sentinel.
+// autosomes-only filter drops exactly these); any other non-numeric label (or an
+// all-digit label too large for int) gets a stable, distinct negative sentinel.
 //
 // The numeric parse uses std::from_chars, NOT std::stoi: [charconv.from.chars] is
 // locale-free, allocation-free, and — load-bearing for read_snp's documented
@@ -59,8 +57,8 @@ template <class T>
 // runtime_error) on an all-digit token that exceeds INT_MAX, e.g. "99999999999",
 // which would escape read_snp uncaught and uncontextualized — violating the §10
 // fail-fast "io malformed-input carries context" contract and the header's
-// "Throws std::runtime_error on …" promise (cleanup snp_reader F2/B15;
-// https://en.cppreference.com/cpp/string/basic_string/stol). With from_chars an
+// "Throws std::runtime_error on …" promise
+// (https://en.cppreference.com/cpp/string/basic_string/stol). With from_chars an
 // overflowing all-digit token (errc::result_out_of_range) instead falls through to
 // the negative-sentinel path: only adjacent-equality between SNPs matters to the
 // block rule (block_partition_rule.hpp), so a stable distinct sentinel for a
@@ -76,7 +74,7 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
         // The all-digit check above guarantees a non-empty, sign-free, fully-
         // consumed run, so the only possible failure is errc::result_out_of_range
         // (token > INT_MAX). On success return the integer; on overflow fall
-        // through to the sentinel path below (never throw — B15).
+        // through to the sentinel path below (never throw).
         if (parse_full(tok, value)) {
             return value;
         }
@@ -96,9 +94,8 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
 // Split a .snp line into whitespace-separated tokens (the oracle uses line.split(),
 // any-whitespace; operator>> skips any whitespace run identically — see the
 // "Considered & rejected" note in docs/cleanup/io-snp_reader.md). The token COUNT
-// then drives the column decision deterministically (B14), replacing the old
-// extraction-failure fall-through that silently `continue`d on a short line and
-// could desync the SNP axis from the .geno.
+// then drives the column decision deterministically (see read_snp below), so a
+// short line is a deterministic fail-fast rather than a silent SNP-axis desync.
 [[nodiscard]] std::vector<std::string> split_ws(const std::string& line) {
     std::vector<std::string> tokens;
     std::istringstream ls(line);

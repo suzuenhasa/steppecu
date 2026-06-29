@@ -223,7 +223,8 @@ inline void cuda_check(cudaError_t status, const char* expr,
 // ONE STEPPE_LOG_WARN line (same file:line:function + error name/string as
 // CudaError, via the §10 warn sink) and RETURNS the status so the caller can
 // branch on it — it does NOT throw. This is the device-cuda-check CAP-1/CAP-2
-// home (architecture.md §11.4 capability tiers, §10 log taxonomy; TODO M4.5):
+// home (architecture.md §11.4 capability tiers, §10 log taxonomy; CI gate tracked
+// by the file-header TODO(M4.5)):
 // `cudaDeviceCanAccessPeer` returning "cannot" and `cudaDeviceEnablePeerAccess`
 // returning cudaErrorPeerAccessAlreadyEnabled are EXPECTED capability-degrade
 // outcomes on the budget tier (GeForce P2P-disabled), NOT errors — routing them
@@ -285,7 +286,8 @@ inline void cufft_check(cufftResult status, const char* expr,
     ::steppe::device::detail::cuda_check((expr), #expr)
 
 /// Non-throwing CUDA runtime check for RECOVERABLE statuses (capability tiers,
-/// architecture.md §11.4 / §10; TODO M4.5 CAP-1/CAP-2). On a non-cudaSuccess
+/// architecture.md §11.4 / §10; CAP-1/CAP-2, CI gate tracked by the file-header
+/// TODO(M4.5)). On a non-cudaSuccess
 /// status it logs ONE STEPPE_LOG_WARN line (file:line + error name/string) and
 /// CONTINUES; it does NOT throw and YIELDS the cudaError_t so the caller can
 /// branch and tag the degrade. Use for capability probes (e.g. P2P

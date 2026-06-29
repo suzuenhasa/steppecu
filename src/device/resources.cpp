@@ -60,6 +60,10 @@ namespace {
     // Auto-enumerate: the dense ordinal list 0..visible-1 from the single CUDA-free
     // count query build_resources already took (no context spin-up, no workspace
     // alloc, no device selection — unlike the old throwaway make_cuda_backend(0)).
+    // This visible<1 guard covers ONLY the auto-enumerate path; the explicit-list
+    // early-return above never reaches it. An EXPLICIT config.devices list on a
+    // zero-visible box is instead rejected downstream by validate_device_order (every
+    // configured ordinal is out of [0, visible) range when visible == 0), not here.
     if (visible < 1) {
         throw std::runtime_error(
             std::string(kBuildErrPrefix) +

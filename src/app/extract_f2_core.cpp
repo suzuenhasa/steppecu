@@ -128,7 +128,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
-    // ---- 5. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
+    // ---- 2. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
     // `backend` was bound above (the tile read dispatch); reused here for the decode.
 
     // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) -------
@@ -290,7 +290,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
         }
     }
 
-    // ---- 7. assign_blocks over the KEPT SNP axis --------------------------------------
+    // ---- 3. assign_blocks over the KEPT SNP axis --------------------------------------
     const steppe::core::BlockPartition partition = steppe::core::assign_blocks(
         std::span<const int>(chrom_kept), std::span<const double>(genpos_kept),
         blgsize_morgans);
@@ -300,14 +300,14 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             "genetic positions)");
     }
 
-    // ---- 8. compute_f2_blocks_multigpu_tiered (GPU; the UNIFIED adaptive entry) -------
+    // ---- 4. compute_f2_blocks_multigpu_tiered (GPU; the UNIFIED adaptive entry) -------
     const MatView Q{Qk.data(), P, M_kept};
     const MatView V{Vk.data(), P, M_kept};
     const MatView N{Nk.data(), P, M_kept};
     device::F2BlocksOut dev_f2 = steppe::core::compute_f2_blocks_multigpu_tiered(
         resources, Q, V, N, partition, precision);
 
-    // ---- 8b. Materialize -> host tensor with REAL f2 + vpair (tier-agnostic) ----------
+    // ---- 5. Materialize -> host tensor with REAL f2 + vpair (tier-agnostic) -----------
     F2ExtractResult out;
     out.f2 = dev_f2.to_host();
     out.pop_labels = std::move(pop_labels);

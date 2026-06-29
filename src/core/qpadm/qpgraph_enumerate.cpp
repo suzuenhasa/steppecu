@@ -404,6 +404,10 @@ void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::st
                 out.push_back(std::move(et));
             }
         }
+        // Bump by 2 (the x,a synthetic split/admix nodes) after each source edge. Every
+        // (si,di) candidate in this source's inner loop reuses the SAME x,a ids; that is
+        // fine because internal-node ids need only be locally distinct WITHIN one graph and
+        // hash_igraph quotients internal labels out — so this per-source bump is cosmetic.
         next_id += 2;
     }
 }

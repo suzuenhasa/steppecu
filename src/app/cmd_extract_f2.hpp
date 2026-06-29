@@ -3,10 +3,11 @@
 // The `steppe extract-f2` command (M(cli-4); cli-bindings.md §4.1 row `extract-f2`).
 // The genotype -> f2_blocks-dir precompute: the ONLY io->compute wiring in steppe (the
 // §4 layering rule — app is the only layer that may feed the io leaf into compute). It
-// wires read_ind / read_snp / GenoReader -> decode_af (GPU) -> filters -> assign_blocks
-// -> compute_f2_blocks_multigpu_device(/_tiered) -> the STPF2BK1 dir WRITER, producing
-// the <dir> the fit commands (steppe qpadm --f2-dir) consume (ADR-0005 precompute-once
-// / fit-many).
+// does the up-front sizing/validation reads, delegates the genotype -> f2_blocks chain
+// (decode -> filters -> assign_blocks -> compute_f2) to the library entry
+// steppe::run_extract_f2 (extract_f2_core.cpp), then writes the result via the STPF2BK1
+// dir WRITER, producing the <dir> the fit commands (steppe qpadm --f2-dir) consume
+// (ADR-0005 precompute-once / fit-many).
 //
 // PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
 // reached ONLY through the CUDA-FREE seams (resources.hpp build_resources, the

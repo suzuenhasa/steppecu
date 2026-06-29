@@ -189,7 +189,9 @@ inline bool opt_edge_lengths(const std::vector<double>& ppwts, const std::vector
 
 /// The full GLS objective score(theta) (AT2 optimweightsfun). Returns +inf on a singular
 /// inner solve (rejected by the optimizer). Optionally returns bl + f3_fit (the final
-/// extras for the result).
+/// extras for the result). PRECONDITION: if `out_fit` is non-null the CALLER must pre-size
+/// it to `m.npair` — it is written element-wise via `(*out_fit)[k]`, never resized (unlike
+/// `*out_bl`, which is assigned).
 inline double qpgraph_score(const QpGraphModel& m, const double* theta,
                             const std::vector<double>& f_obs, const std::vector<double>& ppinv,
                             double fudge, bool constrained,

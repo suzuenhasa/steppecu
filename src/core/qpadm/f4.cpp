@@ -106,16 +106,13 @@ F4Result run_f4_impl(ComputeBackend& be, const F2Src& f2,
         return res;
     }
 
-    // S4 — block-jackknife DIAGONAL variance over the whole m-batch (the OOM fix). A bare f4
-    // SE reads ONLY the diagonal Q[k + m*k] of the jackknife covariance and NEVER inverts Q
-    // (only qpAdm's GLS does), so we use jackknife_diag — var[k] = (1/nb)·Σ_b xtau[k,b]², the
-    // EXACT diagonal jackknife_cov used to compute — WITHOUT forming the dense m×m Q + its
-    // Cholesky inverse. At sweep scale (m = N quartets, ~36k+) the dense m×m Q is ~10GB+ and
-    // OOMs; the diagonal is O(m·nb) work / O(m) memory and is bit-equal to the deleted dense
-    // diagonal BY CONSTRUCTION (same xtau, same FP64 op-order ⇒ the f4 golden does not move).
-    // fudge is not consumed (a bare f4 SE is the UNFUDGED diagonal; the qpAdm 1e-4 ridge is a
-    // GLS Q-invert concern only). NO NonSpdCovariance is possible (no Q invert) — f4 is always
-    // Ok once assemble succeeds.
+    // S4 — block-jackknife DIAGONAL variance over the whole m-batch. A bare f4 SE reads ONLY
+    // the diagonal of the jackknife covariance and NEVER inverts Q (only qpAdm's GLS does), so
+    // it uses jackknife_diag: var[k] = (1/nb)·Σ_b xtau[k,b]² == diag(Q)[k] BY CONSTRUCTION,
+    // formed directly in O(m·nb) work / O(m) memory WITHOUT the dense m×m Q (which is ~10GB+ at
+    // sweep scale, m = N quartets ~36k+, and OOMs). fudge is not consumed (a bare f4 SE is the
+    // UNFUDGED diagonal; the qpAdm 1e-4 ridge is a GLS Q-invert concern only). NO
+    // NonSpdCovariance is possible (no Q invert) — f4 is always Ok once assemble succeeds.
     const JackknifeDiag diag =
         core::qpadm::jackknife_diag(be, X, std::span<const int>(X.block_sizes), prec);
 

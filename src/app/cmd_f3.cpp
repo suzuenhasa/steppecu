@@ -95,9 +95,9 @@ namespace cfg = steppe::config;
 
 int run_f3_command(const cfg::RunConfig& config) {
     // ---- SWEEP MODE (--all-triples): route to the GPU sweep over C(P,3) of the --pops
-    // SUBSET (empty ⇒ the whole f2 dir). on-device unrank+compute+|z|filter+CUB-compact,
-    // survivors only. SEPARATE from the explicit-list path below (the goldens gate it
-    // byte-identical). The sweep body lives in cmd_fstat_sweep.cpp (the SAME run_f3_sweep).
+    // SUBSET (empty ⇒ the whole f2 dir). SEPARATE from the explicit-list path below (the
+    // goldens gate it byte-identical). The sweep body lives in cmd_fstat_sweep.cpp
+    // (run_fstat_sweep / run_f3_sweep).
     if (config.sweep_all_combinations()) {
         return run_fstat_sweep(config, /*k=*/3, "f3");
     }

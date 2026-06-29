@@ -104,8 +104,8 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             const std::size_t off = slab * static_cast<std::size_t>(b);
             // PIN the caller's pageable D2H destinations for the copy window
             // (RegisteredHostRegion, graceful pageable degrade — never throws,
-            // pinned_buffer.cuh:159-176), EXACTLY like to_host's D2H at
-            // device_f2_blocks.cu:55-56. cudaHostRegister page-locks the range in
+            // pinned_buffer.cuh:159-176), EXACTLY like DeviceF2Blocks::to_host's
+            // D2H (device_f2_blocks.cu). cudaHostRegister page-locks the range in
             // place (CUDA 13.x Runtime API: "Page-locks the memory range ... and
             // maps it for the device(s) ... to automatically accelerate calls to
             // functions such as cudaMemcpy()"); it changes only the page state, not

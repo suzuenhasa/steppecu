@@ -12,8 +12,10 @@
 // against CUDA 13.x docs): per chunk of the lex index range — (1) an on-device UNRANK kernel
 // maps thread t -> its quartet (combinatorial number system), writing the device quartet list
 // the EXISTING batched assemble_f4_quartets gather reads (NO host enumeration); (2) the SAME
-// gather + loo/total + xtau + diagonal-jackknife device kernels run verbatim (emulated-FP64
-// policy inherited, native carve-out for the cancellation-sensitive combine); (3) an on-device
+// gather + loo/total + xtau + diagonal-jackknife device kernels run verbatim — the BACKEND
+// KERNELS own precision selection (the inherited EmulatedFp64 default + the native carve-out
+// for the cancellation-sensitive combine); the host driver only forwards
+// default_fit_precision(); (3) an on-device
 // |z| FILTER flags survivors; (4) cub::DeviceSelect::Flagged stream-compacts them on-device;
 // (5) ONLY the compacted survivors D2H. The HOST drives ONLY the chunk loop + receives
 // survivors — NO host enumeration, NO host filter, NO host per-item loop.

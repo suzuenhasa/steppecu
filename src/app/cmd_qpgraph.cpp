@@ -54,7 +54,8 @@ namespace cfg = steppe::config;
     bool first_data = true;
     while (std::getline(f, line)) {
         ++lineno;
-        // replace commas with spaces so split is uniform.
+        // admixtools' R write.csv emits comma-separated edge lists; normalize commas to
+        // whitespace so the istringstream split below handles CSV and space/tab edges alike.
         for (char& c : line) if (c == ',') c = ' ';
         std::istringstream ss(line);
         std::string a, b, extra;

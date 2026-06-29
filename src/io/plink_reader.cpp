@@ -226,12 +226,14 @@ IndPartition read_fam(const std::string& path,
 
     std::map<std::string, std::size_t> index_of;  // egroup label -> slot in `groups`
     std::vector<RawGroup> groups;
-    // The .bed individual-record index. EVERY .fam line is a .bed individual record (the
-    // universal PLINK invariant: .fam row i == .bed individual i, 1:1), so `row` increments
-    // for every well-formed line — INCLUDING an "ignored" (col6 in {9,-9,0}) individual,
+    // The .bed individual-record index. EVERY well-formed .fam line is a .bed individual
+    // record (the universal PLINK invariant: .fam row i == .bed individual i, 1:1), so `row`
+    // increments for every such line — INCLUDING an "ignored" (col6 in {9,-9,0}) individual,
     // which is simply omitted from every population GROUP (so it is never selected) while
     // still consuming its .bed row index, keeping the remaining individuals aligned with
-    // their .bed records.
+    // their .bed records. ONE tolerance: a short (<6-field) line is SKIPPED below WITHOUT
+    // incrementing `row` (unlike read_bim, which fail-fasts on a short record), so the 1:1
+    // mapping holds only under the assumption that there are no interior malformed lines.
     std::size_t row = 0;
     std::string line;
     while (std::getline(in, line)) {

@@ -58,7 +58,7 @@ namespace steppe::device {
 namespace {
 
 /// Row-major upper-triangle pair index for an off-diagonal pop pair (i,j), i<j, over the
-/// C(P,2) pairs — EXACTLY the host pair_index (qpfstats.cpp:80) and AT2 indmat order.
+/// C(P,2) pairs — EXACTLY the host pair_index (src/core/stats/qpfstats.cpp) and AT2 indmat order.
 /// Symmetric in (i,j); callers pass the SMALLER index first.
 __device__ __forceinline__ int pair_index_lo_hi(int lo, int hi, int P) {
     return lo * P - (lo * (lo + 1)) / 2 + (hi - lo - 1);

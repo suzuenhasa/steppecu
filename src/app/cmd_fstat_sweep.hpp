@@ -21,7 +21,9 @@ namespace steppe::app {
 /// `f4` / `f3` / `qpdstat` commands can route to the SAME GPU sweep when --all-quartets /
 /// --all-triples is set (mining the explicit `--pops` SUBSET + --min-z/--top-k/--sure/
 /// --shard-dir off the frozen config). `cmd` is the program-name string for stderr
-/// ("f4" / "f3" / "qpdstat") so the diagnostics read with the invoked command, not the sweep.
+/// ("f4" / "f3" / "qpdstat" from the standalone commands; "f4-sweep" / "f3-sweep" from the
+/// dedicated run_f4_sweep_command / run_f3_sweep_command wrappers) so the diagnostics read
+/// with the invoked command, not the sweep.
 [[nodiscard]] int run_fstat_sweep(const steppe::config::RunConfig& config, int k,
                                   const char* cmd);
 

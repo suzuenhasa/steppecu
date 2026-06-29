@@ -13,12 +13,15 @@
 // prototype itself, in two different namespaces, so a signature change silently
 // broke linkage/ODR with no single source (cleanup X-9/B8; device-backend §9.1).
 //
-// NAMESPACE: both factories live in `namespace steppe::device`. `make_cuda_backend`
-// always did (cuda_backend.cu); `make_cpu_backend` and the `CpuBackend` class were
-// MOVED here from `steppe::core` (they always compiled into steppe_device, so the
-// old `steppe::core` placement was a namespace/layer mismatch — TODO §A; the two
-// implementations of ONE interface now share ONE namespace). Both still return the
-// abstract `ComputeBackend` so callers never name the concrete type.
+// NAMESPACE: both factory DECLARATIONS live in `namespace steppe::device`.
+// `make_cuda_backend` always did (cuda_backend.cu); the `make_cpu_backend` FACTORY
+// was MOVED here from `steppe::core`. Only the factory function is declared here —
+// the concrete `CpuBackend` class itself is NOT named in this header; it remains a
+// private implementation detail of its own TU (cpu_backend.cpp). Both backends always
+// compiled into steppe_device, so the old `steppe::core` placement of the cpu factory
+// was a namespace/layer mismatch, now resolved: the two factories of ONE interface
+// share ONE namespace. Both still return the abstract `ComputeBackend` so callers
+// never name the concrete type.
 #ifndef STEPPE_DEVICE_BACKEND_FACTORY_HPP
 #define STEPPE_DEVICE_BACKEND_FACTORY_HPP
 

@@ -73,12 +73,15 @@
 //
 // In debug builds it is the standard `assert((cond) && msg)`, so a failure prints
 // the message and the call site and aborts under a debugger / compute-sanitizer.
-// Under NDEBUG it is removed (and `cond` is NOT evaluated — keep it side-effect
-// free). Use for documented-but-unenforced preconditions on the hot paths where a
-// throwing check is too costly but a silent wrong answer is unacceptable.
+// Under NDEBUG the check is removed: `cond`/`msg` appear ONLY inside an UNEVALUATED
+// `sizeof`, so they are still NOT evaluated (keep them side-effect free) yet are
+// marked "used" — a variable referenced solely inside an assert therefore does not
+// trip -Werror=unused-variable on the Release/NDEBUG gate build. Use for documented-
+// but-unenforced preconditions on the hot paths where a throwing check is too costly
+// but a silent wrong answer is unacceptable.
 // ---------------------------------------------------------------------------
 #if defined(NDEBUG)
-#  define STEPPE_ASSERT(cond, msg) ((void)0)
+#  define STEPPE_ASSERT(cond, msg) ((void)sizeof(cond), (void)sizeof(msg), (void)0)
 #else
 #  define STEPPE_ASSERT(cond, msg) assert((cond) && (msg))
 #endif

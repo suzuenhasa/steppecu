@@ -8,9 +8,9 @@
 //
 // PIPELINE (fit-engine §6, mirroring run_f4): assemble ONE batched X (an F4Blocks reused as
 // the generic per-block carrier) whose m axis is the N triples (nl=N, nr=1 ⇒ m=N), run ONE
-// jackknife_cov over the whole m-batch with fudge=0 (a bare f3 SE has no GLS matrix to
+// jackknife_diag over the whole m-batch with fudge=0 (a bare f3 SE has no GLS matrix to
 // ridge-regularize — the qpAdm 1e-4 fudge is a Q-INVERT concern only, and f3 never inverts
-// Q), then read est[k] = X.x_total[k] and se[k] = sqrt(Q[k+m*k]) (the UNFUDGED diagonal).
+// Q), then read est[k] = X.x_total[k] and se[k] = sqrt(diag.var[k]) (the UNFUDGED diagonal).
 // z = est/se; p = f4_two_sided_p(z) (REUSED — AT2 ztop == erfc(|z|/sqrt2) == f4_two_sided_p,
 // the SAME two-sided normal). assemble_f3_triples stays native FP64 by the cancellation
 // carve-out (OQ-5), exactly like assemble_f4_quartets. Domain outcomes (non-SPD covariance /

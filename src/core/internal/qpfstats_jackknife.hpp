@@ -67,6 +67,10 @@ namespace steppe::core {
         const long double rel = static_cast<long double>(cn) / sum_n_all;  // rel_bl
         if (rel >= 1.0L) continue;  // 1-rel==0 ⇒ loo not finite
         const long double loo = (tot - static_cast<long double>(nu) * rel) / (1.0L - rel);
+        // Narrow to double for the finiteness gate ON PURPOSE: AT2 holds loo as an R double, so
+        // testing finiteness in double (NOT the long-double std::isfinite overload) keeps WHICH
+        // loo values survive bit-identical to the oracle — switching could change the survivor set
+        // and risk parity (§12). The accumulation itself stays long double (the cancellation carve-out).
         if (!std::isfinite(static_cast<double>(loo))) continue;
         const long double omrb = 1.0L - rel;
         sum_loo += loo;

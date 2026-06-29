@@ -156,8 +156,9 @@ int run_f4_command(const cfg::RunConfig& config) {
 
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f4 (GPU path) ----------
     // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
-    // seams; a no-GPU box surfaces a clear fault from build_resources. fudge defaults to 0
-    // for a bare f4 SE inside run_f4 (NOT qpadm's 1e-4) — opts here is the struct default.
+    // seams; a no-GPU box surfaces a clear fault from build_resources. opts comes from the
+    // frozen config; fudge defaults to 0 for a bare f4 SE inside run_f4 (NOT qpadm's 1e-4)
+    // unless overridden.
     const QpAdmOptions opts = config.qpadm_options();
     F4Result result;
     try {

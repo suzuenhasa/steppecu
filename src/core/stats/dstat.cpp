@@ -3,9 +3,11 @@
 // run_dstat is the genotype-reading SIBLING of run_f4 / run_f4ratio: it does NOT read the f2
 // cache. It REUSES the extract-f2 decode FRONT-END (the io reader + decode_af [per-SNP Q/V/N]
 // + assign_blocks [from genpos]) and DIVERGES at S2 into the per-SNP D kernel
-// (ComputeBackend::dstat_block_reduce, the .cu) + the num/den block-jackknife (host-pure
-// here, the f4ratio.cpp ratio-jackknife FAMILY). Pinned to the AT2 qpdstat_geno golden
-// (allsnps=TRUE, f4mode=FALSE, blgsize=0.05) — docs/research/dates-genotype-stat-seam.md (i).
+// (ComputeBackend::dstat_block_reduce, the .cu) + the num/den block-jackknife — the SHARED
+// on-device ratio_block_jackknife backend virtual (NOT a host loop; ONE engine with f4-ratio,
+// reached via dstat_blocks_jackknife; see the per-virtual note below). Pinned to the AT2
+// qpdstat_geno golden (allsnps=TRUE, f4mode=FALSE, blgsize=0.05) —
+// docs/research/dates-genotype-stat-seam.md (i).
 //
 // THE THREE PARITY PINS (proven on box5090):
 //  (1) ALLELE FREQ — AT2 uses PLAIN ref/an/2 (NO pseudo-haploid adjustment). decode_af with

@@ -338,9 +338,9 @@ struct GenoHeader {
 
 /// Parse the leading `kGenoHeaderBytes` of a .geno header buffer. `head` must
 /// point to at least `kGenoHeaderBytes` bytes. Recognizes the "TGENO"/"GENO"
-/// magic and the two decimal counts that follow it (n_ind, n_snp for TGENO;
-/// n_ind, n_snp for GENO — both store the same two numbers, the difference is
-/// the record axis). Returns a header with `format == Unknown` on a bad magic or
+/// magic and the two decimal counts that follow it (n_ind, n_snp — both store
+/// the same two numbers regardless of format, the difference is the record
+/// axis). Returns a header with `format == Unknown` on a bad magic or
 /// unparsable counts (the caller decides how to fail; the `io` leaf never throws
 /// across the layer boundary on a format probe).
 [[nodiscard]] GenoHeader parse_geno_header(const std::array<char, kGenoHeaderBytes>& head) noexcept;

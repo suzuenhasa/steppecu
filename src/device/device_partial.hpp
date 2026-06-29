@@ -16,7 +16,7 @@ namespace steppe::device {
 /// device that computed it (NO D2H, NO free) — the M4.5 device-resident combine
 /// input. CUDA-FREE at this seam: the DeviceBuffer<double> f2/vpair owners + the
 /// resident device pointers live in `Impl`, defined in cuda/device_partial_impl.cuh
-/// (the same CUDA-free-decl / CUDA-def split combine_f2_partials_p2p uses). The
+/// (the same CUDA-free-decl / CUDA-def split combine_f2_partials_resident[_device] uses). The
 /// shape fields are plain host scalars so the CUDA-free orchestrator
 /// (compute_f2_blocks_multigpu, steppe::core) can hold and forward the handle
 /// without seeing <cuda_runtime.h>.

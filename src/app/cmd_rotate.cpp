@@ -156,14 +156,16 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 4. Multi-GPU warning (cli-bindings.md §4.5 / §379-382) -------------------
+    // ---- 4. Multi-GPU warning (cli-bindings.md §4.5) ------------------------------
     // The engine's G>=2 path is correct but host-bounce throughput-capped; single-GPU is
     // the supported/recommended default. A warning, NOT a fault.
     if (config.device().devices.size() >= 2) {
+        // TODO(multigpu-host-bounce): the rotation is host-bounce-capped on no-P2P consumer
+        // cards; single-GPU stays the supported path until the device-resident combine lands.
         std::fprintf(stderr,
                      "steppe qpadm-rotate: WARNING: %zu devices requested; the rotation "
-                     "runs single-GPU-preferred (TODO(multigpu-host-bounce): the rotation "
-                     "is host-bounce-capped on no-P2P consumer cards). Use --device 0.\n",
+                     "runs single-GPU-preferred (it is host-bounce-capped on no-P2P "
+                     "consumer cards). Use --device 0.\n",
                      config.device().devices.size());
     }
 

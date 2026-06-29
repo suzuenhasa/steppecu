@@ -12,9 +12,9 @@
 // status to, so "fail-fast" does not become "fail-silent at teardown" — and it
 // replaces the THREE duplicated, already-drifted `fprintf(stderr, ...)` macros
 // that were open-coded in device_buffer.cuh / stream.hpp / handles.hpp (the
-// `STEPPE_*_WARN_ON_TEARDOWN` placeholders, with one NDEBUG branch evaluating its
-// arg and two not — architecture.md §2 DRY; cleanup X-4). The fuller spdlog
-// `STEPPE_LOG_INFO/ERROR/...` levels land with the logging milestone (§10).
+// `STEPPE_*_WARN_ON_TEARDOWN` placeholders — architecture.md §2 DRY; cleanup X-4).
+// The fuller spdlog `STEPPE_LOG_INFO/ERROR/...` levels land with the logging
+// milestone (§10).
 //
 // Behavior (UNCHANGED from the placeholders it replaces): in debug builds a warn
 // emits one `[steppe][warn] ...` line to stderr; under NDEBUG it is removed

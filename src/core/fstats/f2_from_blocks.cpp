@@ -71,13 +71,16 @@ void validate_qvn([[maybe_unused]] const MatView& Q, [[maybe_unused]] const MatV
 
 // Debug-only O(M) scan: every block_id is in [0, n_block) and the sequence is
 // non-decreasing — the dense, contiguous-run invariant assign_blocks guarantees
-// and both backends' block_ranges relies on. Lives behind #ifndef NDEBUG so the
-// release build neither compiles nor calls it (it is referenced only from the
-// debug STEPPE_ASSERT below). block_ranges throws on these too, but only AFTER
+// and both backends' block_ranges relies on. Only ever *called* from the debug
+// STEPPE_ASSERT below; under NDEBUG that assert sizeof-references its operand (to
+// mark assert-only locals "used"), so the name must still resolve even in release
+// — hence the definition is unconditional and [[maybe_unused]]. It is never
+// odr-used in release (sizeof does not evaluate), so the optimizer drops the body
+// and the O(M) scan never runs. block_ranges throws on these too, but only AFTER
 // the data has crossed the CUDA-free seam; catching it here keeps the fault
 // attributable to the orchestration's own input (§2 fail-fast).
-#ifndef NDEBUG
-[[nodiscard]] bool block_ids_dense_nondecreasing(const BlockPartition& partition, long M) {
+[[maybe_unused]] [[nodiscard]]
+bool block_ids_dense_nondecreasing(const BlockPartition& partition, long M) {
     int prev = -1;  // last id seen; ids must be non-decreasing.
     for (long s = 0; s < M; ++s) {
         const int id = partition.block_id[static_cast<std::size_t>(s)];
@@ -86,7 +89,6 @@ void validate_qvn([[maybe_unused]] const MatView& Q, [[maybe_unused]] const MatV
     }
     return true;
 }
-#endif
 
 // Enforce the BlockPartition contract before it crosses the CUDA-free seam as a
 // bare `(const int*, int)` pair that erases the length and the dense/ordering

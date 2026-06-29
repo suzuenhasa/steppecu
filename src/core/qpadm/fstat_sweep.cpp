@@ -58,6 +58,10 @@ inline constexpr std::size_t kPrimaryGpu = 0;
                                          const SweepRequest& req, device::Resources& resources,
                                          int k) {
     SweepResult res;
+    // This driver only FORWARDS the shared fit-precision policy (default_fit_precision() ==
+    // EmulatedFp64{40}) to the backend sweep kernels; precision SELECTION (the emulated-FP64
+    // default + the native carve-out for the cancellation-sensitive combine) is owned by the
+    // device f4_sweep/f3_sweep kernels, not here.
     const Precision prec = core::qpadm::default_fit_precision();
     ComputeBackend& be = primary_backend(resources);
     res.precision_tag = core::qpadm::honored_tag(prec, be);

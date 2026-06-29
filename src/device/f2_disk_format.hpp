@@ -19,7 +19,7 @@
 namespace steppe::device {
 
 inline constexpr char     kF2DiskMagic[8]   = {'S','T','P','F','2','B','K','1'};  // "STPF2BK1"
-inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // on-disk format version (the writer stamps this; a future M7 reader checks it — single home so the two cannot drift, group-5 5.3)
+inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // on-disk format version (the writer stamps this; a future M7 reader checks it — single home so the two cannot drift)
 inline constexpr std::uint32_t kF2DiskDtypeFp64 = 1u;  // FP64 little-endian (storage is FP64 in every precision mode, include/steppe/fstats.hpp:17)
 
 /// 64-byte fixed header at file offset 0 (little-endian, packed). The remainder:
@@ -46,8 +46,7 @@ namespace detail {
 /// `base + P²·b·sizeof(double)`. The `P·P·b` widening is done in `std::uint64_t`
 /// (cast each factor BEFORE multiplying) so the stride cannot wrap at P²·b scale.
 /// SINGLE home for the f2/vpair slab arithmetic — both region accessors below differ
-/// ONLY by their `base` offset, so the identical stride lives here once (cleanup
-/// group-7 7.1 dup + 7.3 repeated widening cast chain).
+/// ONLY by their `base` offset, so the identical stride lives here once.
 [[nodiscard]] inline std::uint64_t slab_offset(std::uint64_t base, const F2DiskHeader& h,
                                                int b) noexcept {
     return base + static_cast<std::uint64_t>(h.P) * static_cast<std::uint64_t>(h.P) *

@@ -212,6 +212,10 @@ struct SvdResult {
     const auto Wcol = [&](int j) -> double* { return &W[cm_index(0, j, m)]; };
     const auto Vcol = [&](int j) -> double* { return &Vfull[cm_index(0, j, n)]; };
 
+    // PARITY-SENSITIVE (§3.2/§12): the relative off-diagonal rotation-skip threshold. A (p,q)
+    // rotation is skipped when |gamma| ≤ kTol·sqrt(alpha·beta) (line 233 below), so kTol governs
+    // which rotations fire and is oracle-diffable against the AT2/cuSOLVER SVD. Name only — the
+    // magnitude 1e-15 must not change.
     constexpr double kTol = 1e-15;
     // Convergence safety cap, NOT load-bearing: one-sided Jacobi converges in far
     // fewer sweeps for these small (≤ a few dozen) shapes; 60 only bounds a pathological

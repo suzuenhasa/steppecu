@@ -408,7 +408,7 @@ void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
     }
 
     // summary section (scalars). Echo the reference label + right_n for readability; the
-    // minimal schema-gated columns are f4rank/est_rank/status/precision (cli-bindings.md §357).
+    // minimal schema-gated columns are f4rank/est_rank/status/precision (cli-bindings.md §4.4).
     os << "# section: summary\n";
     os << "\"f4rank\"" << sep << "\"est_rank\"" << sep << "\"status\"" << sep
        << "\"precision\"" << sep << "\"reference\"" << sep << "\"right_n\"\n";

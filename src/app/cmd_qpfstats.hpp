@@ -24,10 +24,10 @@
 
 namespace steppe::app {
 
-/// Run qpfstats over the frozen config and return the process exit code
-/// (steppe::config::CliExitCode). Owns its stdout/stderr (the library never prints,
-/// architecture.md §10). A FAULT (bad prefix/pops/out-dir, no device, file/CUDA error)
-/// returns a nonzero code; a populated smoothed-f2 dir write exits 0.
+/// Run qpfstats over the frozen config and return the process exit code (the
+/// steppe::config::kExit* codes from core/config/exit_code.hpp). Owns its stdout/stderr
+/// (the library never prints, architecture.md §10). A FAULT (bad prefix/pops/out-dir, no
+/// device, file/CUDA error) returns a nonzero code; a populated smoothed-f2 dir write exits 0.
 [[nodiscard]] int run_qpfstats_command(const config::RunConfig& config);
 
 }  // namespace steppe::app

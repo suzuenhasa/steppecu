@@ -5,13 +5,17 @@
 // GPU is reached ONLY through the CUDA-FREE seams. main() owns stdout/stderr
 // (architecture.md §10 — the library never prints).
 //
-// THE CHAIN (mirrors tests/reference/test_decode_equivalence.cu + test_filter_oracle.cu
-// + test_f2_blocks_equivalence.cu, all CUDA-free seams):
+// THE CHAIN: this command does the up-front sizing/validation reads (1-3) and the dir
+// write (9); the GPU extract chain (4-8) lives in the library entry steppe::run_extract_f2
+// (extract_f2_core.cpp), which the command delegates to. The numbered list documents that
+// library chain (all CUDA-free seams; mirrors tests/reference/test_decode_equivalence.cu +
+// test_filter_oracle.cu + test_f2_blocks_equivalence.cu):
 //   1. GenoReader(geno)              -> records_present()
 //   2. read_ind(ind, PopSelection, n_present) -> IndPartition (groups sorted ASC by
 //      label = the P-axis order = pops.txt order). Explicit names validated here.
 //   3. read_snp(snp, SIZE_MAX)       -> SnpTable (chrom, genpos_morgans, ref, alt)
-//   4. reader.read_tile(part, 0, M)  -> GenotypeTile (packed bytes, pop-contiguous)
+//   4. read_canonical_tile(reader, part, 0, M) -> GenotypeTile (packed, pop-contiguous) —
+//      inside run_extract_f2 (the up-front read in THIS command is sizing/validation only)
 //   5. backend->decode_af(view)      -> DecodeResult Q/V/N [P x M] (the GPU decodes)
 //   6. filters (when non-default)    -> per-SNP keep mask, subset Q/V/N + snptab axis
 //   7. assign_blocks(chrom,genpos,blgsize) -> BlockPartition

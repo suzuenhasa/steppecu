@@ -479,6 +479,9 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         js << "  \"n_block\": " << f2.n_block << ",\n";
         js << "  \"precision_tag\": " << json_str(m.precision_tag) << ",\n";
         js << "  \"precision_mantissa_bits\": " << m.precision_mantissa_bits << ",\n";
+        // blgsize_cm serializes at the default ostringstream precision (~6 sig-figs);
+        // this provenance field is intentionally coarse (block size in cM is a coarse
+        // binning knob, not a parity-load-bearing value), so no setprecision is applied.
         js << "  \"blgsize_cm\": " << m.blgsize_cm << ",\n";
         js << "  \"n_snp_total\": " << m.n_snp_total << ",\n";
         js << "  \"n_snp_kept\": " << m.n_snp_kept << ",\n";

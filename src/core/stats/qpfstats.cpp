@@ -101,16 +101,11 @@ struct PopComb { int p1, p2, p3, p4; };
 ///   f4: fstat_get_popcombs(fnum=4) — the 3-rotation expansion of C(npop,4) quads
 ///       [(1,2,3,4),(1,3,2,4),(1,4,2,3)]. C(npop,4)*3 combos.
 /// The design row (construct_fstat_matrix): coeffs +1 on pair(p1,p4), +1 on pair(p2,p3),
-/// -1 on pair(p1,p3), -1 on pair(p2,p4); ×2 if it is a pure-f2 row (p1==p3 && p2==p4);
-/// then /2 ALL. Pure-f2 (A,B,A,B): pair(A,B) gets (1+1)*2/2 = 2 ... wait it collapses to
-/// (1+1-1·[pair(A,A) invalid]) — handled by accumulating coefficients into the pair index,
-/// since pair(p1,p3)=pair(A,A) and pair(p2,p4)=pair(B,B) are diagonal (skipped: AT2's indmat
-/// has NA on the diagonal, but for a pure-f2 row p1==p3 so those two -1 terms hit pairs
-/// (A,A)/(B,B) which DO NOT EXIST in the basis; the ×2/÷2 makes the surviving +1+1 = 2/2·... ).
-/// We replicate AT2 EXACTLY by accumulating ONLY the off-diagonal pairs (i!=j) — the
-/// diagonal coefficient writes AT2 does into indmat[x,x] are NA and never read (the design
-/// has no diagonal column), so skipping them is byte-identical (confirmed: f2 row a,b → the
-/// single nonzero coeff is +1 at pair(a,b)).
+/// -1 on pair(p1,p3), -1 on pair(p2,p4); ×2 if it is a pure-f2 row (p1==p3 && p2==p4),
+/// then /2 ALL. The pure-f2 coefficient collision and the dropped diagonal-pair (AT2 indmat
+/// NA) writes are resolved by the ASSIGNMENT-not-accumulation rule (the later write wins; a
+/// diagonal write is a no-op) — see the design-fill loop comment in the body for the exact
+/// mechanics (confirmed: an f2 row a,b → the single nonzero coeff is +1 at pair(a,b)).
 void build_popcomb_and_design(int npop, std::vector<PopComb>& combs,
                               std::vector<double>& x, int& npopcomb, int& npairs) {
     combs.clear();

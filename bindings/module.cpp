@@ -1043,7 +1043,9 @@ nb::object f2_to_numpy(const F2Handle& h, const std::vector<double>& src) {
 }  // namespace
 
 NB_MODULE(_core, m) {
-    m.doc() = "steppe._core — GPU qpAdm/qpWave bindings (M(py-1); marshalling only)";
+    m.doc() = "steppe._core — GPU bindings for the qpAdm/qpWave fit plus the f-stat / "
+              "graph / dating tools (f3/f4/f4ratio, qpdstat/dstat, qpfstats, qpgraph + "
+              "qpgraph-search, dates, extract-f2/read-f2); M(py-2)+, marshalling only.";
 
     nb::class_<F2Handle>(m, "F2Handle", "Opaque f2-dir handle: host f2 tensor + pops.")
         .def_prop_ro("pops", [](const F2Handle& h) { return h.pops; },

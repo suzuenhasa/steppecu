@@ -1,6 +1,6 @@
 // src/app/cli_parse.cpp
 //
-// The CLI11 wiring + subcommand dispatch (M(cli-0) scaffold). Plain CXX, app-only.
+// The CLI11 wiring + subcommand dispatch. Plain CXX, app-only.
 // CLI11 is named ONLY here (PRIVATE to the app subtree, §4 layering; cli-bindings.md
 // §6.1). NO CUDA header — this is a pure host TU; the arch-grep gate enforces it.
 //
@@ -381,8 +381,8 @@ int run_cli(int argc, char** argv) {
             auto config = build_config(qpadm_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
             // The real GPU qpAdm fit (read dir -> resolve -> upload -> run_qpadm ->
-            // emit CSV/JSON). qpadm-rotate + extract-f2 are likewise wired; only
-            // qpwave (M(cli-2)) remains a scaffold no-op.
+            // emit CSV/JSON). qpadm-rotate, qpwave, and extract-f2 are likewise wired to
+            // their real GPU compute.
             std::exit(run_qpadm_command(*config));
         });
     }
@@ -481,9 +481,9 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpwave_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // M(cli-2): the real GPU qpWave rank sweep (read dir -> resolve left/right,
-            // NO target, left[0]=reference -> upload -> run_qpwave -> emit the rank-sweep
-            // table). Mirrors how `qpadm` dispatches.
+            // The real GPU qpWave rank sweep (read dir -> resolve left/right, NO target,
+            // left[0]=reference -> upload -> run_qpwave -> emit the rank-sweep table).
+            // Mirrors how `qpadm` dispatches.
             std::exit(run_qpwave_command(*config));
         });
     }

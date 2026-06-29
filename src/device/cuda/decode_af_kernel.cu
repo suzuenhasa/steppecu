@@ -49,7 +49,7 @@
 
 #include <cuda_runtime.h>
 
-#include "core/internal/decode_af.hpp"       // genotype_code, accumulate_genotype, finalize_af
+#include "core/internal/decode_af.hpp"       // genotype_code, accumulate_genotype_ploidy, finalize_af_counts
 #include "core/internal/launch_config.hpp"   // cdiv, kDecodeBlockX/Y (the launch-math home)
 #include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
 
@@ -69,7 +69,7 @@ namespace {
 /// unpacking SNP s's 2-bit code from each record's byte (s/kCodesPerByte) at
 /// position (s%kCodesPerByte),
 /// folding it into AC (ref-allele copies) / AN (non-missing individuals) via the
-/// SHARED accumulate_genotype, then writing Q/V/N via the SHARED finalize.
+/// SHARED accumulate_genotype_ploidy, then writing Q/V/N via the SHARED finalize_af_counts.
 /// Column-major [P × M]: element (i,s) at i + P·s.
 ///
 /// COALESCING (cleanup 20.1/MED — uncoalesced output stores):

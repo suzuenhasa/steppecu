@@ -88,8 +88,8 @@ int run_qpwave_command(const cfg::RunConfig& config) {
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_qpwave (GPU path) -----
     // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
     // seams; a no-GPU box surfaces a clear fault from build_resources. The DeviceF2Blocks
-    // overload is the production GPU path the parity test's CudaBackend block exercises
-    // (test_qpwave_parity.cu:332).
+    // overload is the production GPU path the parity test's "CudaBackend DELIVERABLE" block
+    // exercises (tests/reference/test_qpwave_parity.cu).
     const QpAdmOptions opts = config.qpadm_options();  // fudge / rank_alpha drive qpWave
     QpWaveResult result;
     try {

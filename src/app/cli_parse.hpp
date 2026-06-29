@@ -6,10 +6,10 @@
 // (architecture.md §9). This is the ONLY place CLI11 is named — it is PRIVATE to the
 // app subtree (the §4 layering rule; cli-bindings.md §6.1). NO CUDA header here.
 //
-// M(cli-0) is the SCAFFOLD: every subcommand parses + validates its config, then the
-// fit subcommands (qpadm/qpwave/qpadm-rotate) and extract-f2 print a "not yet
-// implemented" notice and exit cleanly — EXCEPT the compute itself, which M(cli-1+)
-// fills in. No GPU work happens in this milestone.
+// Each subcommand parses + validates its config, then dispatches to the subcommand's
+// run_*_command (the real GPU compute) — qpadm / qpwave / qpadm-rotate / extract-f2 and
+// the f-stat / qpGraph / dates / qpfstats commands are ALL wired to their GPU compute;
+// no subcommand is a not-yet-implemented scaffold (see cli_parse.cpp's dispatch flow).
 #ifndef STEPPE_APP_CLI_PARSE_HPP
 #define STEPPE_APP_CLI_PARSE_HPP
 

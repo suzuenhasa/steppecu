@@ -71,6 +71,10 @@ void launch_dates_extract_lags(const double* d_inv, int n_fft, int n_chrom, int 
 /// sufficient statistics (DATES ddcorr + addcorr2, mode-1 corr). For each chrom kc, lag d in
 /// [1, diffmax] with dd00[d] >= 0.5: output bin s = floor(d/qbin); s0[kc*n_bin+s] += dd00[d],
 /// s12 += dd11[d], s11 += dd02[d], s22 += dd20[d] (s1/s2 left 0 — the mode-1 means).
+/// The dd→s subscripts are crossed ON PURPOSE: the dd-moment digits index (count,signal)
+/// MOMENT powers, while the s-stat digits index the two correlation SERIES — so the numerator
+/// cross-term s12 takes the signal autocorr dd11, while the per-series variances s11/s22 take
+/// the squared normalizers dd02/dd20 (corr = s12/sqrt(s11·s22)). dd11→s12, dd02→s11 is correct.
 void launch_dates_accumulate_bins(const double* d_dd00, const double* d_dd11,
                                   const double* d_dd02, const double* d_dd20,
                                   int n_chrom, int diffmax, int n_bin, int qbin,

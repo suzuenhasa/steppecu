@@ -33,9 +33,9 @@ namespace {
 
 // Read <dir>/pops.txt: one label per non-empty line, trailing CR stripped (so a
 // CRLF-authored sidecar reads cleanly), in file order (== P-axis index order). Blank
-// lines are skipped (a trailing newline is not a phantom pop); a leading/trailing
-// space is NOT trimmed inside a label (pop names can legitimately... they cannot, but
-// we keep the label verbatim minus the line terminator so the map is exact).
+// lines are skipped (a trailing newline is not a phantom pop); each label is kept
+// verbatim minus the line terminator (no whitespace trimming) so the name<->index
+// map is byte-exact.
 [[nodiscard]] bool read_pops_txt(const std::filesystem::path& path,
                                  std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path);

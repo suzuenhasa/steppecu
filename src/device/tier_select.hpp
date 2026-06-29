@@ -98,8 +98,8 @@ inline constexpr const char* kForceTierTokenDisk     = "disk";      ///< -> Outp
 [[nodiscard]] inline std::size_t streamed_working_set_bytes(
         int P, long /*M*/, int max_tile, int max_nb, int max_s_pad) noexcept {
     if (P <= 0) return 0;
-    const std::size_t p = nonneg(P);              // clamp-then-widen via the shared helper (7.4)
-    const std::size_t max_tile_z = nonneg(max_tile);  // (vram_budget.hpp)
+    const std::size_t p = nonneg(P);              // clamp-then-widen via the shared helper (vram_budget.hpp, 7.4)
+    const std::size_t max_tile_z = nonneg(max_tile);  // same clamp-then-widen
     const std::size_t nb = nonneg(max_nb);
     const std::size_t feeder =                                           // raw + tile feeder
         (kFeederRawBufsPerPop * p * max_tile_z + kFeederOutBufsPerPop * p * max_tile_z);  // (3+4)·P·tile, named in config.hpp

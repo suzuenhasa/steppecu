@@ -5,9 +5,9 @@
 // TRIPLE identity. A standalone f3 has NO ALS / NO rank test: it is just the AT2 weighted
 // block-jackknife POINT ESTIMATE per triple + the jackknife-diagonal SE, computed by
 // REUSING the SAME two seams the fit/f4 paths use — assemble_f3_triples (the three-slab AT2
-// identity, backend.hpp) and jackknife_cov (the block jackknife covariance, backend.hpp) —
-// with ONE new math seam (the 3-slab combine) and ZERO new infrastructure (fit-engine §6 /
-// the standalone-f3 design, mirroring f4).
+// identity, backend.hpp) and jackknife_diag (the diagonal-only block-jackknife variance,
+// backend.hpp) — with ONE new math seam (the 3-slab combine) and ZERO new infrastructure
+// (fit-engine §6 / the standalone-f3 design, mirroring f4).
 //
 // KEY MAPPING (AT2 f3(C;A,B); proven against the fixture-matched regen golden): each triple
 // (C=pop1, A=pop2, B=pop3) is one column of an f3 matrix with nl=1, nr=1, m=1, so per block
@@ -15,8 +15,9 @@
 // Outgroup-f3 = f3(Outgroup;A,B) (shared drift); admixture-f3 = f3(Target;Src1,Src2)
 // (negative ⇒ admixture). The SAME formula; only the apex/arg roles differ.
 // BATCHED (the GPU-first production envelope, design-for-scale): ONE F4Blocks (reused as the
-// generic per-block X carrier) whose m axis is the N triples, ONE jackknife_cov over the
-// whole m-batch — est[k] = X.x_total[k], se[k] = sqrt(Q[k + m*k]) (the UNFUDGED diagonal).
+// generic per-block X carrier) whose m axis is the N triples, ONE jackknife_diag over the
+// whole m-batch — est[k] = X.x_total[k], se[k] = sqrt(diag.var[k]) (the UNFUDGED diagonal-only
+// jackknife variance == diag(Q) BY CONSTRUCTION, never the dense m×m Q).
 // fudge = 0 for a bare f3 SE (qpAdm's 1e-4 ridge is a GLS-invert concern only; an f3 SE has
 // no matrix inverse to regularize). z = est/se; p = 2*pnorm_upper(|z|) (the two-sided normal
 // convention — REUSES f4_two_sided_p; AT2 ztop == erfc(|z|/sqrt2) == f4_two_sided_p).

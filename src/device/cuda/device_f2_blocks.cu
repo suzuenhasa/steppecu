@@ -40,10 +40,11 @@ const double* DeviceF2Blocks::vpair_device() const noexcept {
 // THE ONLY D2H + host alloc in the device-resident pipeline (opt-in). Bit-identical
 // to the result the old host-returning compute_f2_blocks produced (same doubles,
 // same [P×P×n_block] layout; §12). PINS the host destinations for the D2H window
-// (RegisteredHostRegion, graceful pageable degrade), EXACTLY like p2p_combine.cu
-// :185-186 — parity-neutral (pinned vs pageable moves the same bytes). Sets device_id
-// current for the copy and restores the caller's device (RAII guard), mirroring
-// p2p_combine.cu:79-85, because cudaMemcpy targets the buffers' device.
+// (RegisteredHostRegion, graceful pageable degrade), EXACTLY like the pin window in
+// combine_f2_partials_resident (p2p_combine.cu) — parity-neutral (pinned vs pageable
+// moves the same bytes). Sets device_id current for the copy and restores the caller's
+// device (RAII guard), mirroring that routine's set + DeviceGuard restore, because
+// cudaMemcpy targets the buffers' device.
 F2BlockTensor DeviceF2Blocks::to_host() const {
     F2BlockTensor out;
     out.P = P;
@@ -77,7 +78,7 @@ F2BlockTensor DeviceF2Blocks::to_host() const {
 // f2/vpair pair on device_id and cudaMemcpy the host tensor up. Raw byte copy =>
 // bit-faithful (preserves −0.0). PINS the host SOURCES for the H2D window
 // (RegisteredHostRegion, graceful pageable degrade), mirroring to_host's D2H dest
-// pinning at :55-56 — parity-neutral (pinned vs pageable moves the same bytes).
+// pinning — parity-neutral (pinned vs pageable moves the same bytes).
 // Re-selects device_id for the alloc+copy (DeviceBuffer cudaMalloc allocates on the
 // current device) and restores the caller's device.
 DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_id) {
@@ -104,7 +105,7 @@ DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_
     const std::size_t bytes = total * sizeof(double);
     // PIN the H2D source pages for the copy window (RegisteredHostRegion, graceful
     // pageable degrade — never throws, pinned_buffer.cuh:159-176), mirroring the D2H
-    // dest pinning in to_host at :55-56 and resolving the documented direction
+    // dest pinning in to_host and resolving the documented direction
     // asymmetry. cudaHostRegister takes void* and page-locks in place WITHOUT writing
     // the bytes, so a const H2D source registers soundly via the ctor's const_cast
     // (pinned_buffer.cuh:159-163); pinned vs pageable moves the identical bytes, so

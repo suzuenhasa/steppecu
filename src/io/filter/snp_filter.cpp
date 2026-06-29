@@ -60,8 +60,8 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
     // (pop, snp) cell; with P>0 && M>0 a null pointer (the struct's nullptr
     // defaults make this an easy caller mistake) would SIGSEGV three frames deep
     // rather than surface a diagnosable error (architecture.md §2). `v` is NOT
-    // required: N==0 ⇔ V==0 ⇔ missing by the decode contract (finalize_af), so the
-    // reduction uses N and never reads V.
+    // checked here — it is intentionally unused by the reduction (the
+    // derive_per_snp_summary doc in snp_filter.hpp has the authoritative why).
     if (in.q == nullptr || in.n == nullptr) {
         throw std::invalid_argument(
             "snp_filter: q and n must be non-null when P>0 && M>0");
@@ -81,7 +81,8 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
         // Reduce ACROSS the kept populations into SNP-global scalars (the §1, §5 S2
         // invariant) via the SHARED __host__ __device__ primitive (snp_summary_reduce
         // .hpp), so this host loop and the regime-B device keep-mask kernel cannot
-        // diverge on a boundary — incl. the FFMA-immune Σ Q·N (the bit-exact pin).
+        // diverge on a boundary; the shared primitive (pooled_ref_fma in
+        // snp_summary_reduce.hpp) is what enforces the bit-exact Σ Q·N.
         const PooledSnpSummary ps =
             derive_pooled_summary_one(in.q, in.n, P, s, ploidy_d, total_indiv_d);
         PerSnpSummary& sm = out[static_cast<std::size_t>(s)];

@@ -19,7 +19,7 @@
 //
 // WHAT IT ACCOUNTS FOR (the B26 correctness core). The M4 device path keeps TWO
 // equal-sized resident FP64 tensors co-resident for the whole bucket loop — `f2`
-// AND the retained `vpair` (the S4 jackknife weight), each `P²·n_block·8` bytes
+// AND the retained `Vpair` (the S4 jackknife weight), each `P²·n_block·8` bytes
 // (fstats.hpp; architecture.md §11.2). The pre-cleanup budget counted only ONE,
 // under-budgeting the resident set by ~2×. This helper subtracts BOTH tensors
 // (`resident_tensor_bytes`) AND the cuBLAS determinism workspace
@@ -70,7 +70,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 
 /// Bytes of the M4 resident f2+Vpair tensors held co-resident for the whole run.
 ///
-/// BOTH `f2` and `vpair` are `[P × P × n_block]` FP64 (`P²·n_block·8` bytes each;
+/// BOTH `f2` and `Vpair` are `[P × P × n_block]` FP64 (`P²·n_block·8` bytes each;
 /// fstats.hpp, architecture.md §11.2), so the resident footprint of the pair is
 /// `2·P²·n_block·8` — the term the §11.2 budget must reserve and the pre-cleanup
 /// path under-counted by 2× (cleanup X-13/B26). All arithmetic is done in
@@ -85,7 +85,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
     if (P <= 0 || n_block <= 0) return 0;
     const std::size_t p = nonneg(P);          // clamp-then-widen via the shared helper (7.4)
     const std::size_t nb = nonneg(n_block);
-    // f2 AND vpair: two equal [P×P×n_block] FP64 tensors (the B26 2× term).
+    // f2 AND Vpair: two equal [P×P×n_block] FP64 tensors (the B26 2× term).
     return kResidentTensorCount * p * p * nb * sizeof(double);
 }
 

@@ -197,7 +197,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     res.topologies_per_s =
         res.fit_all_wall_ms > 0.0 ? (static_cast<double>(arenas.size()) / (res.fit_all_wall_ms / 1000.0)) : 0.0;
 
-    // ---- 5. PER-CANDIDATE scored vector (additive exposure; NOT new compute) ----
+    // ---- 5. PER-CANDIDATE scored vector (exposure-only; reads batch scores) -----
     // Retain EVERY successfully-fit topology's {canonical hash, edges, best-of-restarts
     // score} in enumeration order — the same per-(topology) data the argmin below reduces
     // over. A candidate whose arena failed to build (a bad parse) is omitted (no score).
@@ -237,7 +237,9 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     res.second_best_score = second_s;
 
     // The full single-graph FIT of the global-best (the cc9ff69-tier result the per-
-    // candidate parity gate diffs against AT2 qpgraph(best_edges)). REUSES the fleet seam.
+    // candidate parity gate diffs against AT2 qpgraph(best_edges)). This is a SEPARATE
+    // (cheap, single-topology) re-fit through the fleet seam to obtain the full result
+    // struct — a NEW launch beyond the batch, not a pure reduction over fb.
     {
         const QpGraphTopoArena& a = arenas[static_cast<std::size_t>(best_arena)];
         const QpGraphFleet fl =
