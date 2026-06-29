@@ -302,7 +302,8 @@ __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int w
     // local ternary refine.
     double lo = fmax(1e-9, best_v - 1.0 / static_cast<double>(coarse));
     double hi = fmin(1.0 - 1e-9, best_v + 1.0 / static_cast<double>(coarse));
-    for (int it = 0; it < 200; ++it) {
+    const int ternary_iters = 200;
+    for (int it = 0; it < ternary_iters; ++it) {
         const double m1 = lo + (hi - lo) / 3.0;
         const double m2 = hi - (hi - lo) / 3.0;
         double a = 0.0, b = 0.0;

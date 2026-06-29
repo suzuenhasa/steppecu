@@ -95,7 +95,7 @@ inline constexpr std::size_t kPrimaryGpu = 0;
     // already sorted by |z| descending — NO unbounded host vector, NO host re-rank.
     SweepConfig cfg;
     cfg.k = k;
-    cfg.filter_mode = (req.filter == SweepFilter::MinZ) ? 0 : 1;  // 0 = fixed-tau MinZ; 1 = rising-tau TopK.
+    cfg.filter_mode = (req.filter == SweepFilter::MinZ) ? kSweepFilterMinZ : kSweepFilterTopK;
     cfg.min_z = req.min_z;
     // top_k is the device reservoir cap. For TopK it is the requested K (the user's intent). For
     // MinZ it is a hard SAFETY CEILING (so even a billions-item min-z sweep cannot OOM the host) —

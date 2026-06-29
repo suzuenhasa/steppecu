@@ -2669,6 +2669,11 @@ public:
         (void)precision;  // native FP64 by the f-stat cancellation carve-out (consistent policy)
         guard_device();
 
+        // TU-local sizing constants for the sweep reservoir (§3.3 occupancy/sizing tuning — kept
+        // next to the sweep, not in the public config header).
+        constexpr std::size_t kFstatIntClampMax = 0x40000000;  // 2^30 CUB num_items / int-kernel ceiling
+        constexpr std::size_t kFstatReservoirBytesPerSlot = 160;  // 112 B/slot rounded up for CUB sort temp
+
         SweepSurvivors out;
         const int P = f2.P;
         const int nb_full = f2.n_block;
@@ -2736,13 +2741,13 @@ public:
         // clamp-policy change therefore lands in one place — no sizing/state drift.
         std::size_t K_sz = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
         if (K_sz > static_cast<std::size_t>(enumerated)) K_sz = static_cast<std::size_t>(enumerated);
-        if (K_sz > static_cast<std::size_t>(0x40000000)) K_sz = 0x40000000;
+        if (K_sz > kFstatIntClampMax) K_sz = kFstatIntClampMax;
         if (K_sz < 1) K_sz = 1;
         const std::size_t CAP_sz = K_sz * 2;  // slack = K (proven: chunk always fits pre-compact).
         // Reservoir + gather-scratch + sort-out per CAP slot: 4 doubles + 4 ints (reservoir) +
         // 4 doubles + 4 ints (gather scratch) + 1 double (sort keys) + 2 ints (perm in/out) ≈
         // 9·8 + 10·4 = 112 B/slot. Round up generously for the CUB sort temp.
-        const std::size_t reservoir_bytes = CAP_sz * 160;
+        const std::size_t reservoir_bytes = CAP_sz * kFstatReservoirBytesPerSlot;
 
         // CHUNK size from free VRAM. Per item the device holds: the k-int key (k·4B) + x_blocks
         // (nb_s·8) + x_loo (nb_s·8) + xtau (nb_s·8) + est/loo-total/tot_line (3·8) + diag var
@@ -2771,7 +2776,7 @@ public:
         }
         if (chunk_sz < 1) chunk_sz = 1;
         // Clamp a chunk to INT_MAX (CUB num_items + our int kernels) and to the total.
-        if (chunk_sz > static_cast<std::size_t>(0x40000000)) chunk_sz = 0x40000000;
+        if (chunk_sz > kFstatIntClampMax) chunk_sz = kFstatIntClampMax;
         if (static_cast<unsigned long long>(chunk_sz) > enumerated)
             chunk_sz = static_cast<std::size_t>(enumerated);
         const int C_max = static_cast<int>(chunk_sz);
@@ -2799,9 +2804,10 @@ public:
         // the running top-K (largest |z|) with a MONOTONICALLY RISING threshold tau: the zfilter
         // pre-drops items at-or-below the current K-th |z|, so the per-chunk survivor count only
         // SHRINKS as the sweep proceeds. Host RAM is O(K) (~40 MB at K=1e6) regardless of the
-        // billions computed. mode 1 = TopK (tau rises); mode 0 = MinZ (tau pinned at min_z, but
-        // the reservoir still caps to K as a hard safety ceiling so a MinZ sweep cannot OOM).
-        const int zmode = cfg.filter_mode;  // 0 = fixed-tau MinZ; 1 = rising-tau TopK.
+        // billions computed. kSweepFilterTopK = TopK (tau rises); kSweepFilterMinZ = MinZ (tau
+        // pinned at min_z, but the reservoir still caps to K as a hard safety ceiling so a MinZ
+        // sweep cannot OOM).
+        const int zmode = cfg.filter_mode;  // kSweepFilterMinZ = fixed-tau MinZ; kSweepFilterTopK = rising-tau TopK.
         // K = the reservoir target; CAP = 2K slack so a chunk's survivors always fit before a
         // compact (each compact returns the fill to <=K, leaving >=K free headroom). K is also
         // clamped to INT_MAX (CUB num_items + our int kernels) and to the enumerated total.
@@ -2874,7 +2880,7 @@ public:
             // Raise tau to the new K-th |z| (only when the reservoir was actually FULL to K, and
             // only in TopK mode — MinZ keeps tau at the floor). dSortAbsZ is |z| descending, so
             // position K-1 is the K-th-largest. A no-op when newn < K (we have not yet seen K items).
-            if (zmode == 1 && newn >= K)
+            if (zmode == kSweepFilterTopK && newn >= K)
                 launch_sweep_topk_raise_tau(dSortAbsZ.data(), K, zmode, dTau.data(), stream_.get());
             res_n = newn;
         };

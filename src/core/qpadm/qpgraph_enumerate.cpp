@@ -31,6 +31,19 @@ namespace steppe::core::qpadm {
 
 namespace {
 
+/// Slack rounds added to the 2*|V| Weisfeiler-Lehman color-refinement bound. 1-WL stabilizes
+/// in at most |V|-1 iterations (each round either splits a color class or is the fixed point);
+/// the 2*|V| factor already over-covers that, and the +4 is conservative headroom so the loop
+/// is provably past the fixed point on every graph in the enumerated space. Tuning-only, not
+/// correctness-load-bearing (the hash is exact on the AT2 1485-set with this bound).
+inline constexpr int kWlExtraRounds = 4;
+
+/// Base id for the synthetic split/admix nodes that the admix-1 wiring introduces. Sits well
+/// above any leaf or tree-internal id; hash_igraph's structural (1-WL) coloring quotients these
+/// synthetic labels out, so the concrete base is cosmetic and a single shared value is safe
+/// (one base, not two, avoids the drift the prior 100000/500000 split risked).
+inline constexpr int kFreshNodeBase = 500000;
+
 // An int-labeled directed edge (parent,child). Leaves are 0..nleaf-1; internal/admix
 // nodes are >= nleaf (fresh ids). The synthetic pre-root pendant uses parent == -1.
 struct IEdge { int p, c; };
@@ -61,7 +74,7 @@ std::uint64_t hash_igraph(const IGraph& g, int nleaf) {
         else
             color[u] = "I" + std::to_string(indeg[u]) + "_" + std::to_string(outdeg[u]);
     }
-    const int rounds = 2 * static_cast<int>(nodes.size()) + 4;
+    const int rounds = 2 * static_cast<int>(nodes.size()) + kWlExtraRounds;
     for (int r = 0; r < rounds; ++r) {
         std::unordered_map<int, std::string> nc;
         for (int u : nodes) {
@@ -352,7 +365,7 @@ void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::st
     const int op = outpop_of(tree, nleaf);
     IGraph base;
     for (const IEdge& e : tree) if (!(op >= 0 && e.p == r && e.c == op)) base.push_back(e);
-    int next_id = 500000;
+    int next_id = kFreshNodeBase;
     for (std::size_t si = 0; si < base.size(); ++si) {
         for (std::size_t di = 0; di < base.size(); ++di) {
             if (si == di) continue;

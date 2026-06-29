@@ -822,7 +822,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
             (result.precision_tag == steppe::Precision::Kind::EmulatedFp64) ? "emu"
           : (result.precision_tag == steppe::Precision::Kind::Tf32)         ? "tf32"
                                                                             : "fp64";
-        meta.blgsize_cm = blgsize * 100.0;  // Morgans -> centimorgans (meta records cM).
+        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;  // Morgans -> centimorgans (meta records cM).
         meta.n_block = result.f2.n_block;
         meta.P = result.f2.P;
         meta.n_snp_total = result.n_snp_total;
@@ -894,7 +894,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
             (prec.kind == steppe::Precision::Kind::EmulatedFp64) ? "emu"
           : (prec.kind == steppe::Precision::Kind::Tf32)         ? "tf32"
                                                                  : "fp64";
-        meta.blgsize_cm = blgsize * 100.0;  // Morgans -> centimorgans (meta records cM).
+        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;  // Morgans -> centimorgans (meta records cM).
         meta.n_block = result.f2.n_block;
         meta.P = result.f2.P;
         meta.autosomes_only = true;

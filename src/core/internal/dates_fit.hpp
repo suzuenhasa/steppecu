@@ -104,7 +104,8 @@ inline ExpFitHost fit_exp_decay(const std::vector<double>& y, double step, bool 
     }
     double lo = std::max(1e-9, best_v - 1.0 / static_cast<double>(coarse));
     double hi = std::min(1.0 - 1e-9, best_v + 1.0 / static_cast<double>(coarse));
-    for (int it = 0; it < 200; ++it) {
+    const int ternary_iters = 200;
+    for (int it = 0; it < ternary_iters; ++it) {
         const double m1 = lo + (hi - lo) / 3.0;
         const double m2 = hi - (hi - lo) / 3.0;
         double c1a = 0.0, c1b = 0.0, c2a = 0.0, c2b = 0.0;

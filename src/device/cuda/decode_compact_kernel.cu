@@ -22,7 +22,7 @@
 
 #include <cuda_runtime.h>
 
-#include "core/internal/launch_config.hpp"   // cdiv, kMaxGridX
+#include "core/internal/launch_config.hpp"   // cdiv, grid_for, kMaxGridX, kDecodeBlockX/Y
 #include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
 #include "io/filter/snp_summary_reduce.hpp"  // derive_pooled_summary_one + keep_decision_pooled (the shared HD body)
 #include "steppe/config.hpp"                 // FilterConfig
@@ -151,8 +151,10 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
     if (P <= 0 || M <= 0) return;
     // Block: x rides the POPULATION axis (unit stride in the column-major [P×M]
     // arena, so adjacent lanes touch adjacent addresses — coalesced); y rides the
-    // SNP axis. 32×8 = 256 threads, the same shape family as the decode kernel.
-    const int bx = 32, by = 8;
+    // SNP axis. 32×8 = 256 threads — the shared, warp-justified decode block dims
+    // (core::kDecodeBlockX/Y, launch_config.hpp) rather than bare 32/8 re-picked
+    // here, so the cross-file decode tile shape is single-sourced (§3.3).
+    const int bx = core::kDecodeBlockX, by = core::kDecodeBlockY;
     const long grid_x = core::cdiv(M, static_cast<long>(by));
     STEPPE_ASSERT(grid_x >= 0 &&
                       static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,

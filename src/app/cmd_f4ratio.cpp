@@ -45,13 +45,20 @@ namespace {
 
 namespace cfg = steppe::config;
 
+/// The f4-ratio tuple arity: alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) is computed per
+/// 5-tuple (p1,p2,p3,p4,p5). Single-sources the `5` across the column count, the --pops
+/// group size / modulus, the 5*k index stride, the per-tuple loop bound, and the
+/// std::array arities below. Value 5, parity-frozen (the AT2 qpf4ratio tuple shape); TU-local
+/// because the arity is private domain knowledge of this command (§2.5 / §4 unnamed literal).
+constexpr std::size_t kTupleArity = 5;
+
 /// Build the 5-tuple NAME table (one row per tuple, five names each) from the frozen config.
 /// Prefers the row-aligned --pop1..--pop5 columns; falls back to the --pops 5-tuple
 /// convenience (names in groups of 5). Returns false (with a reason in `err`) on no input or a
 /// malformed shape (mismatched columns / non-multiple-of-5 --pops). On success `tuples[k]` =
 /// {pop1,pop2,pop3,pop4,pop5} of tuple k.
 [[nodiscard]] bool build_tuple_names(const cfg::RunConfig& config,
-                                     std::vector<std::array<std::string, 5>>& tuples,
+                                     std::vector<std::array<std::string, kTupleArity>>& tuples,
                                      std::string& err) {
     const auto& p1 = config.pop1();
     const auto& p2 = config.pop2();
@@ -84,16 +91,17 @@ namespace cfg = steppe::config;
               "or --pops p1,p2,p3,p4,p5[,...] (names in groups of 5)";
         return false;
     }
-    if (pops.size() % 5 != 0) {
+    if (pops.size() % kTupleArity != 0) {
         err = "--pops for f4-ratio must be a multiple of 5 names (each tuple is "
               "p1,p2,p3,p4,p5); got " + std::to_string(pops.size());
         return false;
     }
-    const std::size_t n = pops.size() / 5;
+    const std::size_t n = pops.size() / kTupleArity;
     tuples.reserve(n);
     for (std::size_t k = 0; k < n; ++k)
-        tuples.push_back({pops[5 * k + 0], pops[5 * k + 1], pops[5 * k + 2],
-                          pops[5 * k + 3], pops[5 * k + 4]});
+        tuples.push_back({pops[kTupleArity * k + 0], pops[kTupleArity * k + 1],
+                          pops[kTupleArity * k + 2], pops[kTupleArity * k + 3],
+                          pops[kTupleArity * k + 4]});
     return true;
 }
 
@@ -112,7 +120,7 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
     }
 
     // ---- 2. Build the 5-tuple name table + resolve names -> indices ----------------
-    std::vector<std::array<std::string, 5>> tuple_names;
+    std::vector<std::array<std::string, kTupleArity>> tuple_names;
     std::string terr;
     if (!build_tuple_names(config, tuple_names, terr)) {
         std::fprintf(stderr, "steppe f4-ratio: %s\n", terr.c_str());
@@ -127,21 +135,21 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
 
     // Resolve each (p1..p5) name 5-tuple to a P-axis index 5-tuple. Carry the resolved names
     // back for the emitter (label_at — canonical pops.txt spelling).
-    std::vector<std::array<int, 5>> tuples;
+    std::vector<std::array<int, kTupleArity>> tuples;
     tuples.reserve(tuple_names.size());
     std::vector<std::string> l1, l2, l3, l4, l5;
     l1.reserve(tuple_names.size()); l2.reserve(tuple_names.size());
     l3.reserve(tuple_names.size()); l4.reserve(tuple_names.size());
     l5.reserve(tuple_names.size());
-    for (const std::array<std::string, 5>& t : tuple_names) {
-        std::array<int, 5> idx{};
-        for (int c = 0; c < 5; ++c) {
-            const ResolveResult rr = resolver.resolve(t[static_cast<std::size_t>(c)]);
+    for (const std::array<std::string, kTupleArity>& t : tuple_names) {
+        std::array<int, kTupleArity> idx{};
+        for (std::size_t c = 0; c < kTupleArity; ++c) {
+            const ResolveResult rr = resolver.resolve(t[c]);
             if (!rr.ok) {
                 std::fprintf(stderr, "steppe f4-ratio: %s\n", rr.error.c_str());
                 return cfg::kExitInvalidConfig;
             }
-            idx[static_cast<std::size_t>(c)] = rr.index;
+            idx[c] = rr.index;
         }
         tuples.push_back(idx);
         l1.push_back(resolver.label_at(idx[0]));
@@ -168,7 +176,7 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         const int device_id = resources.gpus.front().device_id;
         device::DeviceF2Blocks dev_f2 =
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
-        result = run_f4ratio(dev_f2, std::span<const std::array<int, 5>>(tuples), opts,
+        result = run_f4ratio(dev_f2, std::span<const std::array<int, kTupleArity>>(tuples), opts,
                              resources);
     } catch (const std::exception& e) {
         // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,

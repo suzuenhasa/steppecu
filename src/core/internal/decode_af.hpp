@@ -89,6 +89,13 @@ inline constexpr std::uint8_t kMissingGenotypeCode = 3;
 inline constexpr int kCodesPerByte = 4;
 inline constexpr int kBitsPerCode = 2;
 
+/// The 2-bit code-extraction mask, DERIVED from the packing radix kBitsPerCode (the
+/// low kBitsPerCode bits set: (1 << 2) - 1 == 0x3 == 3). Single-homed alongside the
+/// radix so the mask and the shift in genotype_code below share ONE source — the
+/// kernel/oracle cannot re-pick a bare `0x3` while the shift derives from the named
+/// radix (value 0x3 unchanged; NAMING-STYLE-STANDARD §3.3 derive-from-named-radix).
+inline constexpr std::uint8_t kCodeMask = static_cast<std::uint8_t>((1u << kBitsPerCode) - 1u);
+
 /// The 2-bit code that denotes a HETEROZYGOUS genotype (RAW-VALUE mapping: 1
 /// reference-allele copy). Used by the AT2 pseudo-haploid auto-detection: a sample
 /// is diploid iff it has at least one het call in the detection prefix (a haploid
@@ -106,6 +113,13 @@ inline constexpr int kPloidyDetectSnps = 1000;
 inline constexpr int kPloidyPseudoHaploid = 1;  ///< pseudo-haploid (ancient DNA): N contributes 1
 inline constexpr int kPloidyDiploid = 2;        ///< diploid (modern / het-bearing): N contributes 2
 
+/// AT2's haploidization-divisor base in `val / (3.0 - ploidy(i))` (admixtools 2.0.10
+/// src/cpp_readgeno.cpp cpp_*_to_afs). PARITY-FROZEN literal: name-only, value MUST stay
+/// 3.0 (NAMING-STYLE-STANDARD §3.2 AT2 literals — name only, never change value). FLOAT
+/// is load-bearing: ploidy 1 ⇒ 3.0-1 == 2.0 ⇒ code/2.0 == 0.5 for an out-of-window het
+/// (an integer divide would drop it — see accumulate_genotype_ploidy). Single-homed here.
+inline constexpr double kPloidyDivisorBase = 3.0;
+
 /// Extract the 2-bit code for SNP position `k` (0-based) within a packed byte,
 /// MSB-first: position 0 → bits 7-6, 1 → 5-4, 2 → 3-2, 3 → 1-0. This is the
 /// `(byte >> (6 - 2*(k mod 4))) & 3` rule. SAME bit order as
@@ -114,7 +128,7 @@ inline constexpr int kPloidyDiploid = 2;        ///< diploid (modern / het-beari
 [[nodiscard]] STEPPE_HD inline std::uint8_t genotype_code(std::uint8_t packed_byte,
                                                           int k) noexcept {
     const int shift = (kCodesPerByte - 1 - (k % kCodesPerByte)) * kBitsPerCode;  // 6,4,2,0
-    return static_cast<std::uint8_t>((packed_byte >> shift) & 0x3u);
+    return static_cast<std::uint8_t>((packed_byte >> shift) & kCodeMask);
 }
 
 /// Whether a 2-bit code is a NON-MISSING genotype (code != 3). Missing genotypes
@@ -172,7 +186,7 @@ STEPPE_HD inline void accumulate_genotype_ploidy(std::uint8_t code, int ploidy,
                                                  double& ac,
                                                  std::int64_t& n) noexcept {
     if (genotype_valid(code) && (ploidy == kPloidyDiploid || ploidy == kPloidyPseudoHaploid)) {
-        ac += static_cast<double>(code) / (3.0 - static_cast<double>(ploidy));
+        ac += static_cast<double>(code) / (kPloidyDivisorBase - static_cast<double>(ploidy));
         n += ploidy;
     }
 }

@@ -45,9 +45,9 @@ inline constexpr int kQpMaxNr = 10;
 /// Max fit rank (r) the small-path kernels' per-thread arrays are sized for.
 inline constexpr int kQpMaxR = 4;
 /// Derived: max f4 matrix length m = nl*nr (the xmat / Qinv row count).
-inline constexpr int kQpMaxM = kQpMaxNl * kQpMaxNr;  // 50
+inline constexpr int kQpMaxM = kQpMaxNl * kQpMaxNr;  // = nl*nr
 /// Derived: max ALS coeff dimension t = max(nl,nr)*r.
-inline constexpr int kQpMaxT = (kQpMaxNl > kQpMaxNr ? kQpMaxNl : kQpMaxNr) * kQpMaxR;  // 40
+inline constexpr int kQpMaxT = (kQpMaxNl > kQpMaxNr ? kQpMaxNl : kQpMaxNr) * kQpMaxR;  // = max(nl,nr)*r
 
 /// The bit-parity small-path envelope predicate. A model with (nl, nr, r) inside the
 /// kQpMax* bounds is fit by the model-batched small-path kernels (the rotation common

@@ -55,10 +55,15 @@ inline bool nnls_active_set(const std::vector<double>& A, const std::vector<doub
                             int n, std::vector<double>& bl) {
     bl.assign(static_cast<std::size_t>(n), 0.0);
     std::vector<char> passive(static_cast<std::size_t>(n), 0);  // in the active (free) set?
-    const double eps = 1e-12;
+    // Shared NNLS tolerance: the KKT gradient-free threshold AND the variable-magnitude
+    // floor (passive-drop / ratio test). Parity-frozen value — name only, do NOT change
+    // its magnitude (AT2 qpsolve(cc,q1,bl>=0) golden parity; NAMING-STYLE-STANDARD §3.2/§5).
+    const double nnls_eps = 1e-12;
+    // Active-set iteration cap, shared by the outer KKT loop and the inner passive solve.
+    const int max_iter = 3 * n + 30;
     // gradient w = q - A bl; KKT: at the solution, for active(free) vars w==0; for the
     // bound(bl==0) vars w<=0.
-    for (int outer = 0; outer < 3 * n + 30; ++outer) {
+    for (int outer = 0; outer < max_iter; ++outer) {
         // w = q - A bl
         std::vector<double> w(static_cast<std::size_t>(n), 0.0);
         for (int i = 0; i < n; ++i) {
@@ -68,14 +73,14 @@ inline bool nnls_active_set(const std::vector<double>& A, const std::vector<doub
             w[static_cast<std::size_t>(i)] = s;
         }
         // pick the bound variable with the most-positive gradient to free.
-        int t = -1; double best = eps;
+        int t = -1; double best = nnls_eps;
         for (int i = 0; i < n; ++i)
             if (!passive[static_cast<std::size_t>(i)] && w[static_cast<std::size_t>(i)] > best) { best = w[static_cast<std::size_t>(i)]; t = i; }
         if (t < 0) return true;  // KKT satisfied
         passive[static_cast<std::size_t>(t)] = 1;
         // inner: solve the passive sub-system A_PP z_P = q_P; while any z_P <= 0, ratio-
         // test back toward feasibility and drop the binding var.
-        for (int inner = 0; inner < 3 * n + 30; ++inner) {
+        for (int inner = 0; inner < max_iter; ++inner) {
             std::vector<int> P;
             for (int i = 0; i < n; ++i) if (passive[static_cast<std::size_t>(i)]) P.push_back(i);
             const int p = static_cast<int>(P.size());
@@ -91,7 +96,7 @@ inline bool nnls_active_set(const std::vector<double>& A, const std::vector<doub
             if (!st.ok) return false;
             // all positive? accept.
             bool all_pos = true;
-            for (int a = 0; a < p; ++a) if (z[static_cast<std::size_t>(a)] <= eps) { all_pos = false; break; }
+            for (int a = 0; a < p; ++a) if (z[static_cast<std::size_t>(a)] <= nnls_eps) { all_pos = false; break; }
             if (all_pos) {
                 for (int i = 0; i < n; ++i) bl[static_cast<std::size_t>(i)] = 0.0;
                 for (int a = 0; a < p; ++a) bl[static_cast<std::size_t>(P[static_cast<std::size_t>(a)])] = z[static_cast<std::size_t>(a)];
@@ -100,10 +105,10 @@ inline bool nnls_active_set(const std::vector<double>& A, const std::vector<doub
             // ratio test: alpha = min over z<=0 of bl/(bl-z).
             double alpha = 1.0;
             for (int a = 0; a < p; ++a) {
-                if (z[static_cast<std::size_t>(a)] <= eps) {
+                if (z[static_cast<std::size_t>(a)] <= nnls_eps) {
                     const double blp = bl[static_cast<std::size_t>(P[static_cast<std::size_t>(a)])];
                     const double denom = blp - z[static_cast<std::size_t>(a)];
-                    if (denom > eps) { const double r = blp / denom; if (r < alpha) alpha = r; }
+                    if (denom > nnls_eps) { const double r = blp / denom; if (r < alpha) alpha = r; }
                 }
             }
             for (int a = 0; a < p; ++a) {
@@ -112,7 +117,7 @@ inline bool nnls_active_set(const std::vector<double>& A, const std::vector<doub
             }
             // drop the now-zero passive vars.
             for (int i = 0; i < n; ++i)
-                if (passive[static_cast<std::size_t>(i)] && bl[static_cast<std::size_t>(i)] <= eps) {
+                if (passive[static_cast<std::size_t>(i)] && bl[static_cast<std::size_t>(i)] <= nnls_eps) {
                     passive[static_cast<std::size_t>(i)] = 0; bl[static_cast<std::size_t>(i)] = 0.0;
                 }
         }

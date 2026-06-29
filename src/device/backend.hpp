@@ -288,20 +288,30 @@ struct SweepSurvivors {
     Status status = Status::Ok;
 };
 
+/// SweepConfig::filter_mode contract — the two on-device sweep filter modes, named at one
+/// source so the host setter (core/qpadm/fstat_sweep.cpp) and the device reader
+/// (device/cuda/cuda_backend.cu) cite the same constants instead of bare 0/1 literals.
+/// These are NOT a §3.2 parity-frozen oracle value: behavior-neutral mode tags, name-and-keep
+/// (§2.5, §4 "unnamed literal → name it; keep value"). The field stays `int` (the POD seam +
+/// device path read it as int) — these are not an enum-type change.
+inline constexpr int kSweepFilterMinZ = 0;  ///< fixed-threshold |z|>=min_z filter; tau pinned at the floor.
+inline constexpr int kSweepFilterTopK = 1;  ///< rising-tau device top-K reservoir; tau rises to the K-th |z|.
+
 /// CUDA-FREE request carried INTO the backend sweep virtual (the public SweepRequest's device-
 /// facing twin; the core driver fills it from the public type so backend.hpp need not include
-/// the public sweep header). k is the arity (4 quartet / 3 triple). filter_mode: 0 = MinZ
-/// (on-device |z|>=min_z); 1 = keep-all (TopK/All — the device keeps every item, the host ranks
-/// the compacted set). pop_subset empty ⇒ sweep [0,P).
+/// the public sweep header). k is the arity (4 quartet / 3 triple). filter_mode: kSweepFilterMinZ
+/// (on-device |z|>=min_z); kSweepFilterTopK = keep-all (TopK/All — the device keeps every item,
+/// the host ranks the compacted set). pop_subset empty ⇒ sweep [0,P).
 struct SweepConfig {
     int k = 4;                    ///< item arity (quartet/triple).
-    /// 0 = MinZ: a fixed-threshold |z|>=min_z filter; tau does NOT rise (but the device reservoir
-    /// still caps to top_k as a hard safety ceiling so even a billions-item MinZ sweep cannot OOM
-    /// the host). 1 = TopK: a DEVICE-BOUNDED rising-tau reservoir — keep the top_k most-significant
-    /// |z| in a fixed CAP=O(top_k) buffer; tau RISES to the running K-th |z| (min_z is its floor),
-    /// monotonically shrinking the per-chunk survivor count. Either way the host receives <=top_k
-    /// rows, sorted by |z| descending, INDEPENDENT of how many billions are computed.
-    int filter_mode = 0;
+    /// kSweepFilterMinZ: a fixed-threshold |z|>=min_z filter; tau does NOT rise (but the device
+    /// reservoir still caps to top_k as a hard safety ceiling so even a billions-item MinZ sweep
+    /// cannot OOM the host). kSweepFilterTopK: a DEVICE-BOUNDED rising-tau reservoir — keep the
+    /// top_k most-significant |z| in a fixed CAP=O(top_k) buffer; tau RISES to the running K-th |z|
+    /// (min_z is its floor), monotonically shrinking the per-chunk survivor count. Either way the
+    /// host receives <=top_k rows, sorted by |z| descending, INDEPENDENT of how many billions are
+    /// computed.
+    int filter_mode = kSweepFilterMinZ;
     double min_z = 3.0;          ///< |z| threshold / the rising-tau FLOOR.
     std::size_t top_k = 1000000; ///< device reservoir cap K (the bounded top-K target).
     std::vector<int> pop_subset; ///< optional subset of f2 indices; empty ⇒ all P.

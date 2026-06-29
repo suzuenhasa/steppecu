@@ -23,6 +23,7 @@
 #include "io/eigenstrat_format.hpp"  // kChromCodeX/Y/Mt, kFirstOtherChromCode
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -132,6 +133,11 @@ constexpr std::size_t kFamGroupCol = 5;  // the 6th column (phenotype) — the e
 // dropped from the partition exactly as AT2 drops it); any OTHER string is the population.
 constexpr const char* kFamControlPheno = "1";
 constexpr const char* kFamCasePheno = "2";
+// The "ignore" phenotype sentinels (mcio.c:1180-1205): a col6 of "9", "-9", or "0" marks
+// the individual ignored. Single-sourced here (beside the case/control sentinels) so the
+// drop set is one named list, matched via std::any_of at the use site rather than three
+// inline string literals.
+constexpr std::array<const char*, 3> kFamIgnorePhenos = {"9", "-9", "0"};
 
 // One .bim allele (col): the single-char allele, mapping the PLINK '0' no-call to 'N'.
 [[nodiscard]] char bim_allele(const std::vector<std::string>& fields, std::size_t col) {
@@ -242,7 +248,9 @@ IndPartition read_fam(const std::string& path,
         // selected) but still a .bed record; "1"/"2" -> the Control/Case label; any other
         // string -> the population. This matches AT2's PLINK grouping byte-for-byte.
         const std::string& pheno = fields[kFamGroupCol];
-        const bool ignored = (pheno == "9" || pheno == "-9" || pheno == "0");
+        const bool ignored = std::any_of(
+            kFamIgnorePhenos.begin(), kFamIgnorePhenos.end(),
+            [&](const char* sentinel) { return pheno == sentinel; });
         if (!ignored) {
             std::string pop = pheno;
             if (pheno == kFamControlPheno) pop = "Control";
