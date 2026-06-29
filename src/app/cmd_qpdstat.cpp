@@ -147,12 +147,12 @@ namespace cfg = steppe::config;
     std::vector<std::string> pop_labels;  // the SORTED Explicit partition (the P axis order).
     try {
         io::GenoReader reader(geno);
-        const io::GenoFormat fmt = reader.header().format;  // .ind vs .fam parser (M-FR PLINK)
+        const io::GenoFormat geno_fmt = reader.header().format;  // .ind vs .fam parser (M-FR PLINK)
         const std::size_t n_present = reader.records_present();
         io::PopSelection sel;
         sel.mode = io::PopSelection::Mode::Explicit;
         sel.labels = pop_union;
-        const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
+        const io::IndPartition part = io::read_ind_partition(geno_fmt, ind, sel, n_present);
         pop_labels.reserve(part.groups.size());
         for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
     } catch (const std::exception& e) {

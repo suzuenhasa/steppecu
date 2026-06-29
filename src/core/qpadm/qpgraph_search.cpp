@@ -85,16 +85,16 @@ struct CanonicalBasis {
     }
     const int base_f2 = pop_f2[0];
     // the non-base leaves in pops order (centered columns 0..npop-2).
-    std::vector<int> ncol_f2;
-    for (int i = 1; i < b.npop; ++i) ncol_f2.push_back(pop_f2[static_cast<std::size_t>(i)]);
-    const int ncc = static_cast<int>(ncol_f2.size());
-    for (int a = 0; a < ncc; ++a)
-        for (int bb = a; bb < ncc; ++bb) {
+    std::vector<int> nonbase_f2;
+    for (int i = 1; i < b.npop; ++i) nonbase_f2.push_back(pop_f2[static_cast<std::size_t>(i)]);
+    const int n_nonbase = static_cast<int>(nonbase_f2.size());
+    for (int a = 0; a < n_nonbase; ++a)
+        for (int bb = a; bb < n_nonbase; ++bb) {
             b.flat.push_back(base_f2);
-            b.flat.push_back(ncol_f2[static_cast<std::size_t>(a)]);
-            b.flat.push_back(ncol_f2[static_cast<std::size_t>(bb)]);
-            b.pair_a_pop.push_back(ncol_f2[static_cast<std::size_t>(a)]);
-            b.pair_b_pop.push_back(ncol_f2[static_cast<std::size_t>(bb)]);
+            b.flat.push_back(nonbase_f2[static_cast<std::size_t>(a)]);
+            b.flat.push_back(nonbase_f2[static_cast<std::size_t>(bb)]);
+            b.pair_a_pop.push_back(nonbase_f2[static_cast<std::size_t>(a)]);
+            b.pair_b_pop.push_back(nonbase_f2[static_cast<std::size_t>(bb)]);
         }
     b.npair = static_cast<int>(b.pair_a_pop.size());
     return b;

@@ -20,10 +20,10 @@ namespace steppe::app {
 /// The shared sweep body (arity `k`: 4 ⇒ f4 sweep, 3 ⇒ f3 sweep). EXPORTED so the standalone
 /// `f4` / `f3` / `qpdstat` commands can route to the SAME GPU sweep when --all-quartets /
 /// --all-triples is set (mining the explicit `--pops` SUBSET + --min-z/--top-k/--sure/
-/// --shard-dir off the frozen config). `prog` is the program-name string for stderr
+/// --shard-dir off the frozen config). `cmd` is the program-name string for stderr
 /// ("f4" / "f3" / "qpdstat") so the diagnostics read with the invoked command, not the sweep.
 [[nodiscard]] int run_fstat_sweep(const steppe::config::RunConfig& config, int k,
-                                  const char* prog);
+                                  const char* cmd);
 
 }  // namespace steppe::app
 

@@ -264,9 +264,9 @@ void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
     const cublasComputeType_t ct = f2_compute_type(precision);
     const double one = 1.0;
     const double zero = 0.0;
-    const int twoP = kF2StackedBlocks * P;
+    const int twoP_dim = kF2StackedBlocks * P;
     const long Psp = static_cast<long>(P) * s_pad;
-    const long twoPsp = static_cast<long>(twoP) * s_pad;
+    const long twoPsp = static_cast<long>(twoP_dim) * s_pad;
 
     // G[P×P×n] = Qg · Qgᵀ per slab. A=Qg (m=P,k=s_pad,lda=P,stride=P·s_pad),
     //   B=Qg (n=P,ldb=P,stride=P·s_pad), C=Gg (ldc=P,stride=P·P).
@@ -286,9 +286,9 @@ void run_f2_gemms_group(cublasHandle_t handle, const Precision& precision,
     // R[2P×P×n] = Sg · Vgᵀ per slab. A=Sg (m=2P,k=s_pad,lda=2P,stride=2P·s_pad),
     //   B=Vg (n=P,ldb=P,stride=P·s_pad), C=Rg (ldc=2P,stride=2P·P).
     CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-        handle, CUBLAS_OP_N, CUBLAS_OP_T, twoP, P, s_pad,
-        &one, dSg, CUDA_R_64F, twoP, twoPsp, dVg, CUDA_R_64F, P, Psp,
-        &zero, dRg, CUDA_R_64F, twoP, static_cast<long>(twoP) * P,
+        handle, CUBLAS_OP_N, CUBLAS_OP_T, twoP_dim, P, s_pad,
+        &one, dSg, CUDA_R_64F, twoP_dim, twoPsp, dVg, CUDA_R_64F, P, Psp,
+        &zero, dRg, CUDA_R_64F, twoP_dim, static_cast<long>(twoP_dim) * P,
         n_in_group, ct, CUBLAS_GEMM_DEFAULT));
 }
 

@@ -137,10 +137,10 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
     // back for the emitter (label_at — canonical pops.txt spelling).
     std::vector<std::array<int, kTupleArity>> tuples;
     tuples.reserve(tuple_names.size());
-    std::vector<std::string> l1, l2, l3, l4, l5;
-    l1.reserve(tuple_names.size()); l2.reserve(tuple_names.size());
-    l3.reserve(tuple_names.size()); l4.reserve(tuple_names.size());
-    l5.reserve(tuple_names.size());
+    std::vector<std::string> p1_labels, p2_labels, p3_labels, p4_labels, p5_labels;
+    p1_labels.reserve(tuple_names.size()); p2_labels.reserve(tuple_names.size());
+    p3_labels.reserve(tuple_names.size()); p4_labels.reserve(tuple_names.size());
+    p5_labels.reserve(tuple_names.size());
     for (const std::array<std::string, kTupleArity>& t : tuple_names) {
         std::array<int, kTupleArity> idx{};
         for (std::size_t c = 0; c < kTupleArity; ++c) {
@@ -152,11 +152,11 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
             idx[c] = rr.index;
         }
         tuples.push_back(idx);
-        l1.push_back(resolver.label_at(idx[0]));
-        l2.push_back(resolver.label_at(idx[1]));
-        l3.push_back(resolver.label_at(idx[2]));
-        l4.push_back(resolver.label_at(idx[3]));
-        l5.push_back(resolver.label_at(idx[4]));
+        p1_labels.push_back(resolver.label_at(idx[0]));
+        p2_labels.push_back(resolver.label_at(idx[1]));
+        p3_labels.push_back(resolver.label_at(idx[2]));
+        p4_labels.push_back(resolver.label_at(idx[3]));
+        p5_labels.push_back(resolver.label_at(idx[4]));
     }
 
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f4ratio (GPU path) -------
@@ -195,7 +195,8 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
     }
 
     if (config.out_file().empty()) {
-        emit_f4ratio_result(std::cout, fmt, result, l1, l2, l3, l4, l5);
+        emit_f4ratio_result(std::cout, fmt, result, p1_labels, p2_labels, p3_labels, p4_labels,
+                            p5_labels);
     } else {
         std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
         if (!out) {
@@ -203,7 +204,8 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
                          config.out_file().c_str());
             return cfg::kExitIoError;
         }
-        emit_f4ratio_result(out, fmt, result, l1, l2, l3, l4, l5);
+        emit_f4ratio_result(out, fmt, result, p1_labels, p2_labels, p3_labels, p4_labels,
+                            p5_labels);
     }
 
     // A DOMAIN outcome is a table + exit 0 (record-and-continue, cli-bindings.md §1.3);

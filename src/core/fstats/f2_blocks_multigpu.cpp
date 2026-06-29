@@ -188,7 +188,7 @@ void validate_multigpu_inputs([[maybe_unused]] const MatView& Q,
 // ONCE; each arm keeps only what genuinely differs (its tier tag, its dst wiring on
 // the target, the Disk path resolution, and its own n_block mirror rule — HostRam
 // trusts the sink count only when >= 0, Disk clamps, a pre-existing difference left
-// untouched here so the fold stays behavior-NEUTRAL, §12). `handle` is the tier's POD
+// untouched here so the fold stays behavior-NEUTRAL, §12). `tier_handle` is the tier's POD
 // result (F2BlockTensor host or DiskF2Blocks disk); both carry P / n_block /
 // block_sizes by the same field names, so one template binds both.
 template <typename TierHandle>
@@ -198,11 +198,11 @@ void finish_streamed_tier(steppe::device::Resources& resources,
                           const Precision& precision,
                           steppe::device::StreamTarget& target,
                           steppe::device::F2BlocksOut& out,
-                          const TierHandle& handle) {
+                          const TierHandle& tier_handle) {
     resources.gpus[0].backend->compute_f2_blocks_streamed(
         Q, V, N, partition.block_id.data(), n_block, precision, target);
-    out.P = handle.P;
-    if (!handle.block_sizes.empty()) out.block_sizes = handle.block_sizes;
+    out.P = tier_handle.P;
+    if (!tier_handle.block_sizes.empty()) out.block_sizes = tier_handle.block_sizes;
     // NB: out.n_block is INTENTIONALLY not mirrored here — despite the "finisher"
     // name — because each tier arm applies its own n_block rule (HostRam at :518,
     // Disk at :541); this helper folds only the P / block_sizes pair they share.

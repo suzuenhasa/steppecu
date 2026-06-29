@@ -193,13 +193,13 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     // maxmiss loop + the host lockstep subset (UNCHANGED). BOTH produce the IDENTICAL
     // kept SET, kept ORDER, chrom_kept/genpos_kept, and compacted Q/V/N (the keep-set
     // is bit-exact-gated: same SNPs, same order ⇒ identical assign_blocks/golden).
-    const bool resident = (backend.capabilities().device_count > 0);
+    const bool on_device = (backend.capabilities().device_count > 0);
     std::vector<double> Qk, Vk, Nk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
     long M_kept = 0;
 
-    if (resident) {
+    if (on_device) {
         const std::size_t Mu = static_cast<std::size_t>(M);
         steppe::device::DeviceDecodeResult ddr = backend.decode_af_compact_filter(
             view,

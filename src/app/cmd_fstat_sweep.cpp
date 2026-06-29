@@ -74,7 +74,7 @@ void emit_sweep(std::ostream& os, OutputFormat fmt, const SweepResult& r,
 
 /// Shared body for the sweep — reused by the dedicated `f4-sweep`/`f3-sweep` subcommands AND
 /// by the standalone `f4`/`f3`/`qpdstat` commands in --all-quartets/--all-triples mode. `k`
-/// selects the arity (4 ⇒ run_f4_sweep, 3 ⇒ run_f3_sweep); `prog` is the stderr program name.
+/// selects the arity (4 ⇒ run_f4_sweep, 3 ⇒ run_f3_sweep); `cmd` is the stderr program name.
 int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe %s: --f2-dir is required\n", cmd);

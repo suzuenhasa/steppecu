@@ -108,9 +108,9 @@ inline ExpFitHost fit_exp_decay(const std::vector<double>& y, double step, bool 
     for (int it = 0; it < ternary_iters; ++it) {
         const double m1 = lo + (hi - lo) / 3.0;
         const double m2 = hi - (hi - lo) / 3.0;
-        double c1a = 0.0, c1b = 0.0, c2a = 0.0, c2b = 0.0;
-        const double r1 = score(m1, c1a, c1b);
-        const double r2 = score(m2, c2a, c2b);
+        double co0_m1 = 0.0, c_m1 = 0.0, co0_m2 = 0.0, c_m2 = 0.0;
+        const double r1 = score(m1, co0_m1, c_m1);
+        const double r2 = score(m2, co0_m2, c_m2);
         const double rr1 = std::isnan(r1) ? std::numeric_limits<double>::infinity() : r1;
         const double rr2 = std::isnan(r2) ? std::numeric_limits<double>::infinity() : r2;
         if (rr1 < rr2) hi = m2; else lo = m1;

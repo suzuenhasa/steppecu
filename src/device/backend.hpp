@@ -958,7 +958,7 @@ public:
             const std::size_t src_byte_in_snp = src_row / cpb;  // source byte holding src_row
             const int src_pos = static_cast<int>(src_row % cpb);  // its in-byte position
             for (std::size_t b = 0; b < out.bytes_per_record; ++b) {
-                std::uint8_t packed = 0;
+                std::uint8_t out_byte = 0;
                 const std::size_t s0 = b * cpb;
                 for (int k = 0; k < core::kCodesPerByte; ++k) {
                     const std::size_t s = s0 + static_cast<std::size_t>(k);
@@ -977,10 +977,10 @@ public:
                     }
                     const int shift =
                         (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;  // 6,4,2,0
-                    packed = static_cast<std::uint8_t>(
-                        packed | static_cast<std::uint8_t>(canon << shift));
+                    out_byte = static_cast<std::uint8_t>(
+                        out_byte | static_cast<std::uint8_t>(canon << shift));
                 }
-                out.packed[g * out.bytes_per_record + b] = packed;
+                out.packed[g * out.bytes_per_record + b] = out_byte;
             }
         }
         return out;
