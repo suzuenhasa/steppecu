@@ -153,6 +153,14 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
     // throughput exposure, so it stays on the host as a conscious bounded-single-run
     // diagnostic decision (the CpuBackend oracle path is the SAME host code). L1 (rank_Q)
     // and L3 (the qpGraph edge/f3_fit re-eval) DID move on-device; L4 is accepted here.
+    // SENTINEL (dual role): 0.0 is BOTH the running max-|z| argmax accumulator AND the
+    // reported res.worst_residual_z default when no finite residual exists (worst_k stays
+    // -1, leaving this initial 0.0 as the result). The loop test below is strict
+    // |z| > |worst|, so an exactly-0 |z| is DELIBERATELY never recorded as the worst — a
+    // degenerate all-zero-residual basis reports worst_k=-1/no labels (benign for the
+    // real-data envelope). DO NOT relax the comparison to >=: that is a behavior change
+    // (it would populate worst_pop2/worst_pop3 for an exactly-0 residual that stays empty
+    // today).
     double worst = 0.0;
     int worst_k = -1;
     for (int k = 0; k < npair; ++k) {

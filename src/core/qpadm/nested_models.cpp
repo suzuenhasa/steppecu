@@ -34,8 +34,10 @@ SeResult se_from_loo(ComputeBackend& be, const F4Blocks& x, const JackknifeCov& 
                                ? se[static_cast<std::size_t>(i)]
                                : 0.0;
         out.se[static_cast<std::size_t>(i)] = sei;
-        out.z[static_cast<std::size_t>(i)] =
-            (sei > 0.0) ? weight[static_cast<std::size_t>(i)] / sei : 0.0;
+        const double wi = (static_cast<std::size_t>(i) < weight.size())
+                              ? weight[static_cast<std::size_t>(i)]
+                              : 0.0;
+        out.z[static_cast<std::size_t>(i)] = (sei > 0.0) ? wi / sei : 0.0;
     }
     return out;
 }

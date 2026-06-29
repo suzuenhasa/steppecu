@@ -447,18 +447,22 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
 
     // Dataset content shas (so the dir is reproducible + the shas match the golden
     // metadata's geno/snp/ind sha256). The writer is the single SHA home; it hashes a
-    // source file ONLY when source hashing is REQUESTED (m.hash_source_files, the
+    // source file ONLY when source hashing is REQUESTED (meta.hash_source_files, the
     // extract-f2 --hash opt-in) and the caller did not pre-fill the sha. The default
     // (hash_source_files = false) SKIPS the source-.geno SHA entirely — it is a ~tens-
     // of-seconds whole-file read+compress whose cost dominated extract-f2 yet only
     // produces a provenance value. When requested, the (large) geno sha is normally
     // PRE-filled by the caller from a background thread (overlapping the GPU pipeline),
     // so this only fills the small snp/ind shas here.
-    F2DirMeta m = meta;  // local copy so we can fill the dataset shas (meta is const).
-    if (m.hash_source_files) {
-        if (m.geno_sha256.empty() && !m.geno_path.empty()) m.geno_sha256 = sha256_file(m.geno_path);
-        if (m.snp_sha256.empty()  && !m.snp_path.empty())  m.snp_sha256  = sha256_file(m.snp_path);
-        if (m.ind_sha256.empty()  && !m.ind_path.empty())  m.ind_sha256  = sha256_file(m.ind_path);
+    // meta is const + read-only; keep just the three dataset shas as locals (seeded from
+    // any caller-pre-filled value), filling the missing ones only when hashing is requested.
+    std::string geno_sha = meta.geno_sha256;
+    std::string snp_sha  = meta.snp_sha256;
+    std::string ind_sha  = meta.ind_sha256;
+    if (meta.hash_source_files) {
+        if (geno_sha.empty() && !meta.geno_path.empty()) geno_sha = sha256_file(meta.geno_path);
+        if (snp_sha.empty()  && !meta.snp_path.empty())  snp_sha  = sha256_file(meta.snp_path);
+        if (ind_sha.empty()  && !meta.ind_path.empty())  ind_sha  = sha256_file(meta.ind_path);
     }
 
     // ---- pops.txt: the P labels, one per line, in P-axis index order --------------
@@ -474,38 +478,38 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         std::ostringstream js;
         js << "{\n";
         js << "  \"format\": \"STPF2BK1\",\n";
-        js << "  \"steppe_version\": " << json_str(m.steppe_version) << ",\n";
+        js << "  \"steppe_version\": " << json_str(meta.steppe_version) << ",\n";
         js << "  \"P\": " << f2.P << ",\n";
         js << "  \"n_block\": " << f2.n_block << ",\n";
-        js << "  \"precision_tag\": " << json_str(m.precision_tag) << ",\n";
-        js << "  \"precision_mantissa_bits\": " << m.precision_mantissa_bits << ",\n";
+        js << "  \"precision_tag\": " << json_str(meta.precision_tag) << ",\n";
+        js << "  \"precision_mantissa_bits\": " << meta.precision_mantissa_bits << ",\n";
         // blgsize_cm serializes at the default ostringstream precision (~6 sig-figs);
         // this provenance field is intentionally coarse (block size in cM is a coarse
         // binning knob, not a parity-load-bearing value), so no setprecision is applied.
-        js << "  \"blgsize_cm\": " << m.blgsize_cm << ",\n";
-        js << "  \"n_snp_total\": " << m.n_snp_total << ",\n";
-        js << "  \"n_snp_kept\": " << m.n_snp_kept << ",\n";
+        js << "  \"blgsize_cm\": " << meta.blgsize_cm << ",\n";
+        js << "  \"n_snp_total\": " << meta.n_snp_total << ",\n";
+        js << "  \"n_snp_kept\": " << meta.n_snp_kept << ",\n";
         js << "  \"filters\": {\n";
-        js << "    \"maf_min\": " << m.maf_min << ",\n";
-        js << "    \"maxmiss\": " << m.geno_max_missing << ",\n";
-        js << "    \"mind_max_missing\": " << m.mind_max_missing << ",\n";
-        js << "    \"autosomes_only\": " << bool_str(m.autosomes_only) << ",\n";
-        js << "    \"drop_monomorphic\": " << bool_str(m.drop_monomorphic) << ",\n";
-        js << "    \"transversions_only\": " << bool_str(m.transversions_only) << "\n";
+        js << "    \"maf_min\": " << meta.maf_min << ",\n";
+        js << "    \"maxmiss\": " << meta.geno_max_missing << ",\n";
+        js << "    \"mind_max_missing\": " << meta.mind_max_missing << ",\n";
+        js << "    \"autosomes_only\": " << bool_str(meta.autosomes_only) << ",\n";
+        js << "    \"drop_monomorphic\": " << bool_str(meta.drop_monomorphic) << ",\n";
+        js << "    \"transversions_only\": " << bool_str(meta.transversions_only) << "\n";
         js << "  },\n";
-        js << "  \"pop_selection\": " << json_str(m.pop_selection) << ",\n";
+        js << "  \"pop_selection\": " << json_str(meta.pop_selection) << ",\n";
         js << "  \"source\": {\n";
-        js << "    \"geno\": " << json_str(m.geno_path) << ",\n";
-        js << "    \"snp\": " << json_str(m.snp_path) << ",\n";
-        js << "    \"ind\": " << json_str(m.ind_path) << ",\n";
+        js << "    \"geno\": " << json_str(meta.geno_path) << ",\n";
+        js << "    \"snp\": " << json_str(meta.snp_path) << ",\n";
+        js << "    \"ind\": " << json_str(meta.ind_path) << ",\n";
         // source_hash_computed marks whether the source-dataset SHAs were computed (the
         // extract-f2 --hash opt-in) or DELIBERATELY skipped (the default). When false the
         // *_sha256 fields are "" by design — a consumer reads this marker to know the
         // absence is intentional, NOT a failed/missing hash (cli-bindings.md §4.3).
-        js << "    \"source_hash_computed\": " << bool_str(m.hash_source_files) << ",\n";
-        js << "    \"geno_sha256\": " << json_str(m.geno_sha256) << ",\n";
-        js << "    \"snp_sha256\": " << json_str(m.snp_sha256) << ",\n";
-        js << "    \"ind_sha256\": " << json_str(m.ind_sha256) << "\n";
+        js << "    \"source_hash_computed\": " << bool_str(meta.hash_source_files) << ",\n";
+        js << "    \"geno_sha256\": " << json_str(geno_sha) << ",\n";
+        js << "    \"snp_sha256\": " << json_str(snp_sha) << ",\n";
+        js << "    \"ind_sha256\": " << json_str(ind_sha) << "\n";
         js << "  },\n";
         js << "  \"f2_cache_id\": " << json_str(cache_id) << "\n";
         js << "}\n";
