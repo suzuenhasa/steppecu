@@ -133,6 +133,11 @@ constexpr std::size_t kFamGroupCol = 5;  // the 6th column (phenotype) — the e
 // dropped from the partition exactly as AT2 drops it); any OTHER string is the population.
 constexpr const char* kFamControlPheno = "1";
 constexpr const char* kFamCasePheno = "2";
+// The egroup labels AT2 emits for the "1"/"2" case/control sentinels (mcio.c:1180-1205):
+// col6 "1" -> "Control", "2" -> "Case". Single-homed here beside their paired tokens so the
+// token->label pairing lives in one place; values are byte-identical to AT2's output.
+constexpr const char* kControlLabel = "Control";
+constexpr const char* kCaseLabel = "Case";
 // The "ignore" phenotype sentinels (mcio.c:1180-1205): a col6 of "9", "-9", or "0" marks
 // the individual ignored. Single-sourced here (beside the case/control sentinels) so the
 // drop set is one named list, matched via std::any_of at the use site rather than three
@@ -255,8 +260,8 @@ IndPartition read_fam(const std::string& path,
             [&](const char* sentinel) { return pheno == sentinel; });
         if (!ignored) {
             std::string pop = pheno;
-            if (pheno == kFamControlPheno) pop = "Control";
-            else if (pheno == kFamCasePheno) pop = "Case";
+            if (pheno == kFamControlPheno) pop = kControlLabel;
+            else if (pheno == kFamCasePheno) pop = kCaseLabel;
             auto it = index_of.find(pop);
             if (it == index_of.end()) {
                 index_of.emplace(pop, groups.size());

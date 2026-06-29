@@ -73,6 +73,10 @@ struct EnumeratedTopology {
 /// add/drop the single admix node across the nadmix boundary). De-duplicated by graph_hash
 /// and filtered to the bounded space (nadmix<=max_nadmix). Each neighbor is re-scored by
 /// the SAME fleet (host-proposes / fleet-fits).
+/// NOTE: returned neighbors carry `id == 0` — NOT a meaningful enumeration index (unlike
+/// the whole-space enumerators, where `id` is the stable enumeration order per the
+/// `EnumeratedTopology::id` field doc above). Neighbor results are identified/de-duplicated
+/// and scored by `hash` (the canonical graph hash), not by `id`.
 [[nodiscard]] std::vector<EnumeratedTopology> topology_neighbors(
     const EnumeratedTopology& current, const std::vector<std::string>& leaves,
     int max_nadmix);

@@ -64,7 +64,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// (cleanup group-7 7.1). `fraction` is a tunable policy share in (0, 1]; `free` is a
 /// RUNTIME free-VRAM / free-host-RAM probe (never hardcoded). Parity-neutral (§12): a
 /// budget threshold moves no bits.
-[[nodiscard]] inline std::size_t budget_bytes(double fraction, std::size_t free) noexcept {
+[[nodiscard]] inline constexpr std::size_t budget_bytes(double fraction, std::size_t free) noexcept {
     return static_cast<std::size_t>(fraction * static_cast<double>(free));
 }
 
@@ -129,8 +129,8 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// @param P          number of populations.
 /// @param n_block    number of jackknife blocks.
 /// @return           bytes available for one chunk's transient slabs.
-[[nodiscard]] inline std::size_t chunk_budget_bytes(std::size_t free_vram, int P,
-                                                    int n_block) noexcept {
+[[nodiscard]] inline constexpr std::size_t chunk_budget_bytes(std::size_t free_vram, int P,
+                                                              int n_block) noexcept {
     const std::size_t reserved = resident_tensor_bytes(P, n_block) + kCublasWorkspaceBytes;
     const std::size_t net = (free_vram > reserved) ? (free_vram - reserved) : 0u;
     return budget_bytes(kMaxVramUtilizationFraction, net);  // floor(fraction·net), shared helper (7.1)
@@ -166,8 +166,8 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// @param s_pad      the bucket's padded block width.
 /// @param nb_total   number of blocks in this bucket (the upper clamp).
 /// @return           blocks per chunk, clamped to `[1, min(nb_total, kMaxGridZ)]`.
-[[nodiscard]] inline int max_blocks_per_chunk(std::size_t free_vram, int P, int n_block,
-                                              int s_pad, int nb_total) noexcept {
+[[nodiscard]] inline constexpr int max_blocks_per_chunk(std::size_t free_vram, int P, int n_block,
+                                                        int s_pad, int nb_total) noexcept {
     if (nb_total <= 0) return 0;  // empty bucket — nothing to chunk.
     const std::size_t budget = chunk_budget_bytes(free_vram, P, n_block);
     const std::size_t per_block = per_block_chunk_bytes(P, s_pad);
