@@ -49,6 +49,7 @@
 
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK (fault), STEPPE_CUDA_WARN (recoverable peer-enable)
 #include "device/cuda/device_buffer.cuh"    // steppe::device::DeviceBuffer<double> (the allowlisted RAII owner)
+#include "device/cuda/device_guard.cuh"     // steppe::device::DeviceGuard (shared scoped device-restore RAII, §3.3)
 #include "device/cuda/device_partial_impl.cuh"  // DevicePartial::Impl (resident DeviceBuffer<double> f2/vpair owners)
 #include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (the device-resident FULL result buffers)
 #include "device/cuda/pinned_buffer.cuh"    // steppe::device::RegisteredHostRegion (pin the final D2H — M4.5 d2h-speed)
@@ -160,22 +161,10 @@ F2BlockTensor combine_f2_partials_resident(
     // restored device does not matter for their teardown (§7).
     int prev_device = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev_device));
-    struct DeviceGuard {
-        int dev;
-        explicit DeviceGuard(int d) noexcept : dev(d) {}
-        ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); }
-        // Side-effecting dtor (cudaSetDevice restore) ⇒ non-copyable AND non-movable
-        // (standard §2.12): a copy/move would re-fire the restore (a redundant rebind).
-        // Scope-restore guard, never relocated, so all four are deleted — not move-only.
-        // The explicit int ctor is REQUIRED: a user-declared (deleted) copy/move ctor
-        // makes the class a non-aggregate under C++20 (P1008R1 — "no user-declared ...
-        // constructors"), so the `restore{prev_device}` init can no longer rely on
-        // aggregate init and must reach a real ctor. Behavior-neutral. [16.3]
-        DeviceGuard(const DeviceGuard&) = delete;
-        DeviceGuard& operator=(const DeviceGuard&) = delete;
-        DeviceGuard(DeviceGuard&&) = delete;
-        DeviceGuard& operator=(DeviceGuard&&) = delete;
-    } restore{prev_device};  // restore on scope exit (teardown WARN, never throw)
+    // Restore on scope exit via the shared DeviceGuard (device_guard.cuh; standard §3.3
+    // single device-restore helper): its dtor routes the restore through the
+    // non-throwing STEPPE_CUDA_WARN, so teardown never throws.
+    DeviceGuard restore{prev_device};
     STEPPE_CUDA_CHECK(cudaSetDevice(root_device_id));
 
     // The combine's OWN non-blocking stream on the root (the backends' per-device
@@ -259,22 +248,10 @@ DeviceF2Blocks combine_f2_partials_resident_device(
     // host-returning sibling.
     int prev_device = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev_device));
-    struct DeviceGuard {
-        int dev;
-        explicit DeviceGuard(int d) noexcept : dev(d) {}
-        ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); }
-        // Side-effecting dtor (cudaSetDevice restore) ⇒ non-copyable AND non-movable
-        // (standard §2.12): a copy/move would re-fire the restore (a redundant rebind).
-        // Scope-restore guard, never relocated, so all four are deleted — not move-only.
-        // The explicit int ctor is REQUIRED: a user-declared (deleted) copy/move ctor
-        // makes the class a non-aggregate under C++20 (P1008R1 — "no user-declared ...
-        // constructors"), so the `restore{prev_device}` init can no longer rely on
-        // aggregate init and must reach a real ctor. Behavior-neutral. [16.3]
-        DeviceGuard(const DeviceGuard&) = delete;
-        DeviceGuard& operator=(const DeviceGuard&) = delete;
-        DeviceGuard(DeviceGuard&&) = delete;
-        DeviceGuard& operator=(DeviceGuard&&) = delete;
-    } restore{prev_device};
+    // Restore on scope exit via the shared DeviceGuard (device_guard.cuh; standard §3.3),
+    // exactly as the host-returning sibling: teardown routes through the non-throwing
+    // STEPPE_CUDA_WARN and never throws.
+    DeviceGuard restore{prev_device};
     STEPPE_CUDA_CHECK(cudaSetDevice(root_device_id));
 
     // The combine's OWN non-blocking stream on the root (off the legacy default stream).

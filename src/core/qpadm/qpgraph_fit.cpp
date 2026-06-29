@@ -97,6 +97,11 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
     }
     // S3 — the per-triple f3 X (one assemble; nl=npair, nr=1 => m=npair). REUSED seam.
     F4Blocks X = core::qpadm::assemble_f3_triples(be, f2, std::span<const int>(flat), prec);
+    // INVARIANT: X.nl*X.nr == m.npair by the assemble_f3_triples contract. The seam was fed
+    // `flat`, which holds exactly m.npair triples (built above), so it returns nl=npair, nr=1
+    // => m=npair (== m.npop*(m.npop-1)/2). This local re-derives that count from the returned
+    // F4Blocks rather than reusing m.npair so the basis dimension tracks the seam's OWN output
+    // (it is the entry count Qinv/f_obs are sized against below); the two must not drift.
     const int npair = X.nl * X.nr;
     if (npair <= 0 || X.n_block <= 0) { res.status = Status::NonSpdCovariance; return res; }
 

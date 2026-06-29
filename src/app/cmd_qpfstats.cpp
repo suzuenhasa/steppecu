@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "app/f2_dir_writer.hpp"          // write_f2_dir, F2DirMeta
+#include "app/precision_label.hpp"        // precision_label (shared host-app helper)
 #include "core/config/exit_code.hpp"
 #include "steppe/config.hpp"              // kCentimorgansPerMorgan, Precision
 #include "device/resources.hpp"          // CUDA-FREE: Resources, build_resources
@@ -25,16 +26,6 @@ namespace steppe::app {
 namespace {
 
 namespace cfg = steppe::config;
-
-/// A human label for the resolved precision (recorded in meta.json; mirrors cmd_extract_f2).
-[[nodiscard]] const char* precision_label(const Precision& p) {
-    switch (p.kind) {
-        case Precision::Kind::EmulatedFp64: return "emu";
-        case Precision::Kind::Tf32:         return "tf32";
-        case Precision::Kind::Fp64:         return "fp64";
-    }
-    return "fp64";
-}
 
 }  // namespace
 

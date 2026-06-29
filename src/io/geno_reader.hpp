@@ -200,6 +200,33 @@ public:
     ~GenoReader() = default;
 
 private:
+    /// Build the SnpMajorTile SELECTION + pop-contiguous reorder gather list shared by
+    /// all four SNP-major readers (read_snp_major_tile / EIGENSTRAT / PLINK / ANCESTRYMAP):
+    /// set the tile geometry (src_bytes_per_record / n_snp), fill pop_offsets/pop_labels,
+    /// and push each selected source `row` into sel_rows after validating row < n_ind so
+    /// the transpose never reads a padding byte as a phantom individual (format-readers.md
+    /// §3.4). The readers differ ONLY in `reader_name`, which prefixes the out-of-range
+    /// throw (cleanup geno_reader 7.1). Throws std::runtime_error on a row >= n_ind.
+    void build_selection(const IndPartition& part,
+                         std::size_t src_bpr,
+                         std::size_t tile_snps,
+                         const char* reader_name,
+                         SnpMajorTile& tile) const;
+
+    /// Allocate the SNP-major source buffer (tile_snps * src_bpr bytes) with the checked
+    /// multiply + allocation-failure translation shared by all four SNP-major readers
+    /// (cleanup geno_reader 7.1): a SILENT size_t wrap, std::bad_alloc, and
+    /// std::length_error are each turned into the documented std::runtime_error
+    /// (EXCEPTION-TYPE CONTRACT, cleanup geno_reader 2.1). `zero_init` selects assign(0)
+    /// (the text/PLINK packers OR codes in and need a partial last byte pre-zeroed) vs a
+    /// bare resize (the raw GENO copy overwrites every byte). `reader_name` prefixes the
+    /// throws. Throws std::runtime_error on size overflow or a failed allocation.
+    void checked_alloc_snp_major(std::size_t tile_snps,
+                                 std::size_t src_bpr,
+                                 const char* reader_name,
+                                 bool zero_init,
+                                 SnpMajorTile& tile) const;
+
     std::string path_;
     GenoHeader header_;
     std::size_t records_present_ = 0;

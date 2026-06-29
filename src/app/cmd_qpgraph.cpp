@@ -12,6 +12,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -128,6 +129,66 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
        << r.worst_pop2 << sep << r.worst_pop3 << sep << stat(r.status) << "\n";
 }
 
+/// Shared device-fit dispatch for both qpgraph commands (§2.11 cross-ref: factored from the
+/// run_qpgraph_command / run_qpgraph_search_command bodies, which were byte-identical save the
+/// command-name prefix and the run call). Builds the device resources, guards the no-GPU case,
+/// uploads the f2 blocks RESIDENT (device 0), then invokes `run_fit(dev_f2, resources)` inside
+/// the one try/catch. `prefix` is the "steppe <prefix>:" diagnostic tag. On success returns
+/// std::nullopt and writes the fit into `result`; on a no-GPU / device fault returns the
+/// exit code the caller must propagate.
+template <typename Result, typename RunFit>
+[[nodiscard]] std::optional<int> dispatch_device_fit(const cfg::RunConfig& config,
+                                                     const char* prefix, const F2DirResult& dir,
+                                                     Result& result, RunFit&& run_fit) {
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (resources.gpus.empty()) {
+            std::fprintf(stderr,
+                         "steppe %s: no CUDA device available (steppe is a GPU "
+                         "product; a CUDA-capable GPU is required)\n",
+                         prefix);
+            return cfg::kExitRuntimeError;
+        }
+        const int device_id = resources.gpus.front().device_id;
+        device::DeviceF2Blocks dev_f2 =
+            device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
+        result = run_fit(dev_f2, resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe %s: device error: %s\n", prefix, e.what());
+        return cfg::kExitRuntimeError;
+    }
+    return std::nullopt;
+}
+
+/// Shared output-tail for both qpgraph commands (§2.11 cross-ref: factored from the emit tails
+/// of run_qpgraph_command / run_qpgraph_search_command, which differed only by the emit fn,
+/// the prefix, and the result type). Parses --format, then routes the emit to std::cout or the
+/// --out file (opened binary|trunc, with the open guard). `write` is invoked as write(os, fmt).
+/// `prefix` is the "steppe <prefix>:" diagnostic tag. Returns std::nullopt once emitted;
+/// otherwise the exit code the caller must propagate.
+template <typename Write>
+[[nodiscard]] std::optional<int> emit_to_destination(const cfg::RunConfig& config,
+                                                     const char* prefix, Write&& write) {
+    OutputFormat fmt = OutputFormat::Csv;
+    if (!parse_output_format(config.format(), fmt)) {
+        std::fprintf(stderr, "steppe %s: unknown --format '%s' (csv|tsv|json)\n", prefix,
+                     config.format().c_str());
+        return cfg::kExitInvalidConfig;
+    }
+    if (config.out_file().empty()) {
+        write(std::cout, fmt);
+    } else {
+        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "steppe %s: cannot open --out file: %s\n", prefix,
+                         config.out_file().c_str());
+            return cfg::kExitIoError;
+        }
+        write(out, fmt);
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 int run_qpgraph_command(const cfg::RunConfig& config) {
@@ -161,21 +222,12 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
 
     // ---- 3. build_resources -> upload f2 RESIDENT -> run_qpgraph (GPU path) ------
     steppe::QpGraphResult result;
-    try {
-        device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe qpgraph: no CUDA device available (steppe is a GPU "
-                         "product; a CUDA-capable GPU is required)\n");
-            return cfg::kExitRuntimeError;
-        }
-        const int device_id = resources.gpus.front().device_id;
-        device::DeviceF2Blocks dev_f2 =
-            device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
-        result = run_qpgraph(dev_f2, edges, dir.dir.pop_labels, opts, resources);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe qpgraph: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+    if (const auto rc = dispatch_device_fit(
+            config, "qpgraph", dir, result,
+            [&](const device::DeviceF2Blocks& dev_f2, device::Resources& resources) {
+                return run_qpgraph(dev_f2, edges, dir.dir.pop_labels, opts, resources);
+            })) {
+        return *rc;
     }
 
     if (result.status == steppe::Status::InvalidConfig) {
@@ -188,22 +240,10 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
     }
 
     // ---- 4. Emit ---------------------------------------------------------------
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe qpgraph: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-    if (config.out_file().empty()) {
-        emit(std::cout, fmt, result);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpgraph: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit(out, fmt, result);
+    if (const auto rc = emit_to_destination(
+            config, "qpgraph",
+            [&](std::ostream& os, OutputFormat fmt) { emit(os, fmt, result); })) {
+        return *rc;
     }
     return cfg::exit_code_for(result.status);
 }
@@ -276,19 +316,12 @@ int run_qpgraph_search_command(const cfg::RunConfig& config) {
     opts.fit.constrained = config.qpgraph_constrained();
 
     steppe::QpGraphSearchResult result;
-    try {
-        device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr, "steppe qpgraph-search: no CUDA device available\n");
-            return cfg::kExitRuntimeError;
-        }
-        const int device_id = resources.gpus.front().device_id;
-        device::DeviceF2Blocks dev_f2 =
-            device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
-        result = run_qpgraph_search(dev_f2, dir.dir.pop_labels, opts, resources);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe qpgraph-search: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+    if (const auto rc = dispatch_device_fit(
+            config, "qpgraph-search", dir, result,
+            [&](const device::DeviceF2Blocks& dev_f2, device::Resources& resources) {
+                return run_qpgraph_search(dev_f2, dir.dir.pop_labels, opts, resources);
+            })) {
+        return *rc;
     }
     if (result.status == steppe::Status::InvalidConfig) {
         std::fprintf(stderr,
@@ -297,22 +330,10 @@ int run_qpgraph_search_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe qpgraph-search: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-    if (config.out_file().empty()) {
-        emit_search(std::cout, fmt, result);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpgraph-search: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_search(out, fmt, result);
+    if (const auto rc = emit_to_destination(
+            config, "qpgraph-search",
+            [&](std::ostream& os, OutputFormat fmt) { emit_search(os, fmt, result); })) {
+        return *rc;
     }
     return cfg::exit_code_for(result.status);
 }

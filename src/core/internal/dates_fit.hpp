@@ -84,22 +84,22 @@ inline ExpFitHost fit_exp_decay(const std::vector<double>& y, double step, bool 
     double best_v = 0.5, best_rss = std::numeric_limits<double>::infinity(), best_co0 = 0.0,
            best_c = 0.0;
     const int coarse = 4000;
-    for (int k = 1; k < coarse; ++k) {
-        const double v = static_cast<double>(k) / static_cast<double>(coarse);
-        double co0 = 0.0, c = 0.0;
-        const double rss = score(v, co0, c);
-        if (std::isnan(rss)) continue;
-        if (co0 <= 0.0) continue;
-        if (rss < best_rss) { best_rss = rss; best_v = v; best_co0 = co0; best_c = c; }
-    }
-    if (!std::isfinite(best_rss)) {
+    // Coarse 1-D grid scan over v∈(0,1), updating best_* in place. `require_positive` applies the
+    // co0>0 DATES filter; the any-sign fallback (require_positive=false) is intentional DATES
+    // behavior. Identical FP ops to the prior inlined twin loops (§12 DATES-fit parity).
+    auto coarse_grid_scan = [&](bool require_positive) {
         for (int k = 1; k < coarse; ++k) {
             const double v = static_cast<double>(k) / static_cast<double>(coarse);
             double co0 = 0.0, c = 0.0;
             const double rss = score(v, co0, c);
             if (std::isnan(rss)) continue;
+            if (require_positive && co0 <= 0.0) continue;
             if (rss < best_rss) { best_rss = rss; best_v = v; best_co0 = co0; best_c = c; }
         }
+    };
+    coarse_grid_scan(/*require_positive=*/true);
+    if (!std::isfinite(best_rss)) {
+        coarse_grid_scan(/*require_positive=*/false);
         if (!std::isfinite(best_rss)) return out;
     }
     double lo = std::max(1e-9, best_v - 1.0 / static_cast<double>(coarse));

@@ -34,6 +34,14 @@
 
 namespace steppe::device {
 
+/// Shared fail-fast message prefix for every build_resources throw (group-7: single-
+/// source so a function rename can't silently drift the four messages). A file-static
+/// constexpr is the right home — it is a message string, not a config.hpp tuning value
+/// (§2.5 names it kPascalCase; it stays local, not promoted to config.hpp). The
+/// trailing space is intentional: each throw concatenates its specific cause after it,
+/// so the emitted messages stay byte-identical to the prior copy-pasted literals.
+static constexpr const char* kBuildErrPrefix = "steppe::device::build_resources: ";
+
 namespace {
 
 /// Resolve the FIXED device ordering the combine sums over (architecture.md §11.4,
@@ -54,7 +62,8 @@ namespace {
     // alloc, no device selection — unlike the old throwaway make_cuda_backend(0)).
     if (visible < 1) {
         throw std::runtime_error(
-            "steppe::device::build_resources: auto-enumeration found no visible CUDA "
+            std::string(kBuildErrPrefix) +
+            "auto-enumeration found no visible CUDA "
             "device (cudaGetDeviceCount < 1) — cannot build Resources");
     }
     std::vector<int> order;
@@ -78,14 +87,14 @@ void validate_device_order(std::span<const int> order, int visible) {
     for (const int ord : order) {
         if (ord < 0 || ord >= visible) {
             throw std::runtime_error(
-                "steppe::device::build_resources: configured device ordinal " +
+                std::string(kBuildErrPrefix) + "configured device ordinal " +
                 std::to_string(ord) + " is not among the " + std::to_string(visible) +
                 " visible CUDA devices (architecture.md §9 build() validation)");
         }
         // ord is now in [0, visible) so the index is in-bounds for `seen`.
         if (std::exchange(seen[static_cast<std::size_t>(ord)], char{1}) != 0) {
             throw std::runtime_error(
-                "steppe::device::build_resources: configured device ordinal " +
+                std::string(kBuildErrPrefix) + "configured device ordinal " +
                 std::to_string(ord) +
                 " is duplicated in DeviceConfig::devices — the fixed g=0..G-1 combine "
                 "order must pin DISTINCT devices (architecture.md §9, §11.4/§12)");
@@ -104,7 +113,8 @@ Resources build_resources(const DeviceConfig& config) {
     // Fail-fast (architecture.md §2): a resolved Resources must own >= 1 device.
     if (device_order.empty()) {
         throw std::runtime_error(
-            "steppe::device::build_resources: resolved an empty device order — "
+            std::string(kBuildErrPrefix) +
+            "resolved an empty device order — "
             "the SPMG precompute requires at least one device (architecture.md §9)");
     }
 

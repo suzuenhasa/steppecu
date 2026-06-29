@@ -141,6 +141,16 @@ void add_qpgraph_flags(CLI::App* sub, CliArgs& a) {
                            "Drift edges >= 0 (AT2 default on)");
 }
 
+// Bind --fudge (the AT2 cc edge-solve `diag` ridge constant) into `a.fudge`. Shared by
+// qpgraph + qpgraph-search, which each bind ONLY this one QpAdmOptions override (not the
+// whole qpadm option set) so their --help shows just their flags. The help is PARAMETRIZED
+// (mirroring add_f2_dir_flag(..., help)) so each caller passes its CURRENT exact string and
+// --help stays byte-identical. The DISTINCT qpadm/qpwave/rotate --fudge in
+// add_qpadm_option_flags ("AT2 ridge constant ...") is a separate flag and stays inline there.
+void add_fudge_flag(CLI::App* sub, CliArgs& a, const char* help) {
+    sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; }, help);
+}
+
 // Bind --f2-dir (the f2_blocks directory) into `a.f2_dir`. Shared by qpadm / qpwave /
 // qpadm-rotate. The help string is PARAMETRIZED because qpadm's help is more verbose
 // ("...f2.bin + pops.txt + meta.json") than qpwave/rotate's ("The f2_blocks directory");
@@ -177,6 +187,18 @@ void add_right_flag(CLI::App* sub, CliArgs& a, const char* help) {
 void add_left_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::vector<std::string>>(
             "--left", [&a](const std::vector<std::string>& v) { a.left = v; }, help)
+        ->delimiter(',');
+}
+
+// Bind the bare --pops list (comma- or space-separated population names) into `a.pops`,
+// with `->delimiter(',')`. Shared by qpgraph-search + qpfstats + the standalone-sweep binder
+// (add_sweep_flags). The help is PARAMETRIZED because each command means a different pop-set
+// (a search leaf-set vs a smoother set vs a sweep subset); each caller passes its CURRENT
+// exact string so --help stays byte-identical. The f4/f3/f4-ratio --pops are a DISTINCT
+// groups-of-N quartet/triple/5-tuple variant and stay in their own flag helpers.
+void add_pops_flag(CLI::App* sub, CliArgs& a, const char* help) {
+    sub->add_option_function<std::vector<std::string>>(
+            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; }, help)
         ->delimiter(',');
 }
 
@@ -265,48 +287,55 @@ void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
+// Bind the shared on-device SWEEP FILTER flags (--min-z / --top-k / --sure) into
+// `a.sweep_min_z` / `a.sweep_top_k` / `a.sweep_sure`. Shared by the sweep-MODE binder
+// (add_sweep_mode_flags, on f4 / f3 / qpdstat) and the standalone-sweep binder
+// (add_sweep_flags, on f4-sweep / f3-sweep). The three help strings are PARAMETRIZED because
+// the mode variant prefixes "Sweep: " while the standalone variant does not; each caller
+// passes its CURRENT exact strings so --help stays byte-identical (the same parametrized-help
+// behavior-preserving dedup as add_f2_dir_flag / add_right_flag).
+void add_sweep_filter_flags(CLI::App* sub, CliArgs& a, const char* min_z_help,
+                            const char* top_k_help, const char* sure_help) {
+    sub->add_option_function<double>(
+        "--min-z", [&a](double v) { a.sweep_min_z = v; }, min_z_help);
+    sub->add_option_function<int>(
+        "--top-k", [&a](int v) { a.sweep_top_k = v; }, top_k_help);
+    sub->add_flag_function(
+        "--sure", [&a](std::int64_t) { a.sweep_sure = true; }, sure_help);
+}
+
 // GPU-only f-stat SWEEP MODE flags for the standalone-stat commands (f4 / f3 / qpdstat):
 // the --all-quartets / --all-triples ENABLE flag (route to the GPU sweep over the C(P,k)
-// of the --pops SUBSET — empty ⇒ the whole f2 dir), the on-device filter (--min-z |
-// --top-k), the maxcomb-cap override (--sure), and the survivor destination (--shard-dir).
-// It does NOT re-bind --pops (the f4/f3 command already binds it as the quartet/triple
-// input; in sweep mode the same --pops is read as the SUBSET). `enable_flag`/`enable_help`
-// parametrize the enable flag (f4/qpdstat: --all-quartets; f3: --all-triples) so each
-// command's --help stays exact.
+// of the --pops SUBSET — empty ⇒ the whole f2 dir), the shared on-device filter
+// (--min-z | --top-k | --sure, via add_sweep_filter_flags), and the survivor destination
+// (--shard-dir). It does NOT re-bind --pops (the f4/f3 command already binds it as the
+// quartet/triple input; in sweep mode the same --pops is read as the SUBSET).
+// `enable_flag`/`enable_help` parametrize the enable flag (f4/qpdstat: --all-quartets;
+// f3: --all-triples) so each command's --help stays exact.
 void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
                           const char* enable_help) {
     sub->add_flag_function(enable_flag, [&a](std::int64_t) { a.sweep_all_combinations = true; },
                            enable_help);
-    sub->add_option_function<double>(
-        "--min-z", [&a](double v) { a.sweep_min_z = v; },
-        "Sweep: keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
-    sub->add_option_function<int>(
-        "--top-k", [&a](int v) { a.sweep_top_k = v; },
-        "Sweep: keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.");
-    sub->add_flag_function(
-        "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
+    add_sweep_filter_flags(
+        sub, a,
+        "Sweep: keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.",
+        "Sweep: keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.",
         "Sweep: lift the maxcomb cap (a sweep over more than the cap refuses without this).");
     sub->add_option_function<std::string>(
         "--shard-dir", [&a](const std::string& v) { a.shard_dir = v; },
         "Sweep: write the survivor table to a CSV under this dir (created if absent; vs stdout/--out).");
 }
 
-// GPU-only f-stat SWEEP flags: an OPTIONAL --pops SUBSET to sweep (empty ⇒ the whole f2 dir),
-// the on-device filter (--min-z | --top-k), and the maxcomb-cap override (--sure). Reused by
-// both f4-sweep and f3-sweep.
+// GPU-only f-stat SWEEP flags: an OPTIONAL --pops SUBSET to sweep (empty ⇒ the whole f2 dir,
+// via add_pops_flag), plus the shared on-device filter (--min-z | --top-k | --sure, via
+// add_sweep_filter_flags). Reused by both f4-sweep and f3-sweep.
 void add_sweep_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
-            "Population SUBSET to sweep all combinations of (names; empty ⇒ the whole f2 dir)")
-        ->delimiter(',');
-    sub->add_option_function<double>(
-        "--min-z", [&a](double v) { a.sweep_min_z = v; },
-        "Keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.");
-    sub->add_option_function<int>(
-        "--top-k", [&a](int v) { a.sweep_top_k = v; },
-        "Keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.");
-    sub->add_flag_function(
-        "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
+    add_pops_flag(sub, a,
+                  "Population SUBSET to sweep all combinations of (names; empty ⇒ the whole f2 dir)");
+    add_sweep_filter_flags(
+        sub, a,
+        "Keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.",
+        "Keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.",
         "Lift the maxcomb cap (a sweep over more than the cap refuses without this).");
 }
 
@@ -366,8 +395,7 @@ int run_cli(int argc, char** argv) {
         add_qpgraph_flags(sub, qpgraph_args);
         // --fudge (the AT2 `diag` cc ridge) is shared with qpadm; bind ONLY that one option
         // (not the whole qpadm option set) so qpgraph's --help shows only its flags.
-        sub->add_option_function<double>("--fudge", [&qpgraph_args](double v) { qpgraph_args.fudge = v; },
-                                         "AT2 cc edge-solve ridge (diag; default 1e-4)");
+        add_fudge_flag(sub, qpgraph_args, "AT2 cc edge-solve ridge (diag; default 1e-4)");
         add_output_flags(sub, qpgraph_args);
         add_common_flags(sub, qpgraph_args);
         sub->callback([&]() {
@@ -388,10 +416,8 @@ int run_cli(int argc, char** argv) {
             "+ heterogeneous fleet, deterministic global-best)");
         qpgraphsearch_args.command = Command::QpGraphSearch;
         add_f2_dir_flag(sub, qpgraphsearch_args, "The f2_blocks directory (f2.bin + pops.txt)");
-        sub->add_option_function<std::vector<std::string>>(
-                "--pops", [&qpgraphsearch_args](const std::vector<std::string>& v) { qpgraphsearch_args.pops = v; },
-                "The bounded leaf pop-set the search enumerates topologies over (>= 3 names)")
-            ->delimiter(',');
+        add_pops_flag(sub, qpgraphsearch_args,
+                      "The bounded leaf pop-set the search enumerates topologies over (>= 3 names)");
         sub->add_option_function<int>("--max-nadmix",
                                       [&qpgraphsearch_args](int v) { qpgraphsearch_args.max_nadmix = v; },
                                       "Bounded admixture-node ceiling (v1: 0 or 1; default 1)");
@@ -399,8 +425,7 @@ int run_cli(int argc, char** argv) {
                                       "Per-candidate multistart restart count (the fleet axis; default 10)");
         sub->add_option_function<double>("--diag-f3", [&qpgraphsearch_args](double v) { qpgraphsearch_args.diag_f3 = v; },
                                          "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
-        sub->add_option_function<double>("--fudge", [&qpgraphsearch_args](double v) { qpgraphsearch_args.fudge = v; },
-                                         "AT2 cc edge-solve ridge (diag; default 1e-4)");
+        add_fudge_flag(sub, qpgraphsearch_args, "AT2 cc edge-solve ridge (diag; default 1e-4)");
         sub->add_flag_function("--constrained,!--no-constrained",
                                [&qpgraphsearch_args](std::int64_t v) { qpgraphsearch_args.constrained = (v >= 0); },
                                "Drift edges >= 0 (AT2 default on)");
@@ -623,10 +648,8 @@ int run_cli(int argc, char** argv) {
         sub->add_option_function<std::string>(
             "--prefix", [&](const std::string& v) { qpfstats_args.qpdstat_prefix = v; },
             "Genotype triple prefix (reads PREFIX.{geno,snp,ind})");
-        sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&](const std::vector<std::string>& v) { qpfstats_args.pops = v; },
-            "Population set to smooth over (sorted ASC internally = the AT2 dimnames order)")
-            ->delimiter(',');
+        add_pops_flag(sub, qpfstats_args,
+                      "Population set to smooth over (sorted ASC internally = the AT2 dimnames order)");
         sub->add_option_function<std::string>(
             "--out-dir", [&](const std::string& v) { qpfstats_args.out_dir = v; },
             "Output smoothed f2_blocks dir (f2.bin + pops.txt + meta.json)");

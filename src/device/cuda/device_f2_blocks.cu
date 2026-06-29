@@ -12,6 +12,7 @@
 
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<double>
+#include "device/cuda/device_guard.cuh"     // DeviceGuard (shared scoped device-restore RAII, §3.3)
 #include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
 #include "steppe/fstats.hpp"                // F2BlockTensor
 
@@ -55,12 +56,11 @@ F2BlockTensor DeviceF2Blocks::to_host() const {
 
     int prev = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-    // RAII-restore the caller's device on every exit (including the throw path);
-    // the dtor must not throw, so the restore discards the cudaError_t with (void)
-    // (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t). Named guard
-    // matching p2p_combine.cu's DeviceGuard; this site keeps its bare cudaSetDevice
-    // teardown (no STEPPE_CUDA_WARN) by design.
-    struct DeviceGuard { int dev; ~DeviceGuard() { (void)cudaSetDevice(dev); } } restore{prev};
+    // RAII-restore the caller's device on every exit (including the throw path) via the
+    // shared DeviceGuard (device_guard.cuh; standard §3.3 single device-restore helper):
+    // the dtor must not throw, so the restore routes through the non-throwing
+    // STEPPE_CUDA_WARN (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t).
+    DeviceGuard restore{prev};
     STEPPE_CUDA_CHECK(cudaSetDevice(device_id));
 
     const std::size_t bytes = total * sizeof(double);
@@ -91,12 +91,11 @@ DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_
 
     int prev = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-    // RAII-restore the caller's device on every exit (including the throw path);
-    // the dtor must not throw, so the restore discards the cudaError_t with (void)
-    // (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t). Named guard
-    // matching p2p_combine.cu's DeviceGuard; this site keeps its bare cudaSetDevice
-    // teardown (no STEPPE_CUDA_WARN) by design.
-    struct DeviceGuard { int dev; ~DeviceGuard() { (void)cudaSetDevice(dev); } } restore{prev};
+    // RAII-restore the caller's device on every exit (including the throw path) via the
+    // shared DeviceGuard (device_guard.cuh; standard §3.3 single device-restore helper):
+    // the dtor must not throw, so the restore routes through the non-throwing
+    // STEPPE_CUDA_WARN (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t).
+    DeviceGuard restore{prev};
     STEPPE_CUDA_CHECK(cudaSetDevice(device_id));
 
     out.impl = std::make_unique<DeviceF2Blocks::Impl>();

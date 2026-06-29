@@ -71,6 +71,21 @@ inline constexpr std::size_t kPrimaryGpu = 0;
 /// long-double oracle (tot_mode=1, cnt>0 survivor mask, weight=cnt, p=f4_two_sided_p; the
 /// reference math UNCHANGED). Native FP64 (the §12 num/den cancellation carve-out).
 
+/// Fill a DEGENERATE D table: write the per-row NaN sentinel into the four stat columns
+/// (est/se/z/p, `row_count` rows each) and keep status Ok — a domain outcome, never an
+/// exception (architecture.md §10). Writes ONLY the four columns + status, so the p1..p4
+/// label rows and precision_tag the caller already populated are PRESERVED (in-place fill,
+/// not a fresh result). De-duplicates the verbatim early-return fill that rode on the three
+/// degenerate guards (empty pop/SNP axis, no kept autosome SNP, no block).
+void fill_nan(DstatResult& res, int row_count) {
+    const auto count = static_cast<std::size_t>(row_count);
+    res.est.assign(count, std::nan(""));
+    res.se.assign(count, std::nan(""));
+    res.z.assign(count, std::nan(""));
+    res.p.assign(count, std::nan(""));
+    res.status = Status::Ok;
+}
+
 }  // namespace
 
 // ---- Public entry (include/steppe/dstat.hpp) ----------------------------------------
@@ -125,11 +140,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);
     if (P <= 0 || M <= 0) {
-        res.est.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.se.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.z.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.p.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.status = Status::Ok;
+        fill_nan(res, N);
         return res;
     }
 
@@ -190,11 +201,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     }
     const long M_kept = static_cast<long>(chrom_kept.size());
     if (M_kept <= 0) {
-        res.est.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.se.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.z.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.p.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.status = Status::Ok;
+        fill_nan(res, N);
         return res;
     }
 
@@ -204,11 +211,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
         blgsize_morgans);
     const int n_block = partition.n_block;
     if (n_block <= 0) {
-        res.est.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.se.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.z.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.p.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.status = Status::Ok;
+        fill_nan(res, N);
         return res;
     }
 

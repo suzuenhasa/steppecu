@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "app/f2_dir_writer.hpp"
+#include "app/precision_label.hpp"                // precision_label (shared host-app helper)
 #include "core/config/exit_code.hpp"
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans (--dry-run sizing)
 #include "device/resources.hpp"                   // Resources, build_resources (CUDA-FREE)
@@ -55,17 +56,6 @@ namespace steppe::app {
 namespace {
 
 namespace cfg = steppe::config;
-
-// A human label for the resolved precision (recorded in meta.json; cli-bindings §4.3
-// — the ENGAGED tag). Mirrors result_emit's emu/fp64/tf32 vocabulary.
-[[nodiscard]] const char* precision_label(const Precision& p) {
-    switch (p.kind) {
-        case Precision::Kind::EmulatedFp64: return "emu";
-        case Precision::Kind::Tf32:         return "tf32";
-        case Precision::Kind::Fp64:         return "fp64";
-    }
-    return "fp64";
-}
 
 // A human label for an OutputTier (echoed in the --dry-run plan and the post-run
 // summary so the operator sees WHICH tier was selected — Resident is the existing

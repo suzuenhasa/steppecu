@@ -105,6 +105,44 @@ namespace cfg = steppe::config;
     return true;
 }
 
+/// Resolve each quartet of NAMES to a P-axis index quad against `resolver`, carrying the
+/// resolved CANONICAL labels (label_at — the pops.txt spelling) back into l1..l4 for the
+/// emitter. Shared by BOTH qpdstat paths (--prefix and --f2-dir): the resolve loop was
+/// copy-pasted and is identical. Returns false (with the offending-name reason in `err`) on
+/// the first label that does not resolve; on success `quadruples[k]` = the four P-axis
+/// indices of quartet k and l1..l4[k] = its canonical labels. l1..l4 are AT2-parity labels
+/// (§3.2 — name frozen). The reserve is unconditional here (folds the prefix-path missing
+/// reserve into the shared path).
+[[nodiscard]] bool resolve_quartets(const PopResolver& resolver,
+                                    const std::vector<std::array<std::string, 4>>& quartet_names,
+                                    std::vector<std::array<int, 4>>& quadruples,
+                                    std::vector<std::string>& l1,
+                                    std::vector<std::string>& l2,
+                                    std::vector<std::string>& l3,
+                                    std::vector<std::string>& l4,
+                                    std::string& err) {
+    quadruples.reserve(quartet_names.size());
+    l1.reserve(quartet_names.size()); l2.reserve(quartet_names.size());
+    l3.reserve(quartet_names.size()); l4.reserve(quartet_names.size());
+    for (const std::array<std::string, 4>& q : quartet_names) {
+        std::array<int, 4> idx{};
+        for (int c = 0; c < 4; ++c) {
+            const ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
+            if (!rr.ok) {
+                err = rr.error;
+                return false;
+            }
+            idx[static_cast<std::size_t>(c)] = rr.index;
+        }
+        quadruples.push_back(idx);
+        l1.push_back(resolver.label_at(idx[0]));
+        l2.push_back(resolver.label_at(idx[1]));
+        l3.push_back(resolver.label_at(idx[2]));
+        l4.push_back(resolver.label_at(idx[3]));
+    }
+    return true;
+}
+
 /// qpDstat Part B (--prefix): the genotype-path NORMALIZED-D magnitude. Reads the genotype
 /// triple PREFIX.{geno,snp,ind} through run_dstat (the extract-f2 decode front-end + the
 /// per-SNP D kernel + the num/den block-jackknife), emitting the SAME p1..p4,est,se,z,p table
@@ -167,23 +205,11 @@ namespace cfg = steppe::config;
     }
 
     std::vector<std::array<int, 4>> quadruples;
-    quadruples.reserve(quartet_names.size());
     std::vector<std::string> l1, l2, l3, l4;
-    for (const std::array<std::string, 4>& q : quartet_names) {
-        std::array<int, 4> idx{};
-        for (int c = 0; c < 4; ++c) {
-            const ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
-            if (!rr.ok) {
-                std::fprintf(stderr, "steppe qpdstat: %s\n", rr.error.c_str());
-                return cfg::kExitInvalidConfig;
-            }
-            idx[static_cast<std::size_t>(c)] = rr.index;
-        }
-        quadruples.push_back(idx);
-        l1.push_back(resolver.label_at(idx[0]));
-        l2.push_back(resolver.label_at(idx[1]));
-        l3.push_back(resolver.label_at(idx[2]));
-        l4.push_back(resolver.label_at(idx[3]));
+    std::string rerr;
+    if (!resolve_quartets(resolver, quartet_names, quadruples, l1, l2, l3, l4, rerr)) {
+        std::fprintf(stderr, "steppe qpdstat: %s\n", rerr.c_str());
+        return cfg::kExitInvalidConfig;
     }
 
     // ---- 3/4. build_resources -> run_dstat (the genotype-path D, GPU device-resident) -
@@ -280,25 +306,11 @@ int run_qpdstat_command(const cfg::RunConfig& config) {
     // Resolve each (p1,p2,p3,p4) name quad to a P-axis index quad. Carry the resolved
     // names back for the emitter (label_at — canonical pops.txt spelling).
     std::vector<std::array<int, 4>> quartets;
-    quartets.reserve(quartet_names.size());
     std::vector<std::string> l1, l2, l3, l4;
-    l1.reserve(quartet_names.size()); l2.reserve(quartet_names.size());
-    l3.reserve(quartet_names.size()); l4.reserve(quartet_names.size());
-    for (const std::array<std::string, 4>& q : quartet_names) {
-        std::array<int, 4> idx{};
-        for (int c = 0; c < 4; ++c) {
-            const ResolveResult rr = resolver.resolve(q[static_cast<std::size_t>(c)]);
-            if (!rr.ok) {
-                std::fprintf(stderr, "steppe qpdstat: %s\n", rr.error.c_str());
-                return cfg::kExitInvalidConfig;
-            }
-            idx[static_cast<std::size_t>(c)] = rr.index;
-        }
-        quartets.push_back(idx);
-        l1.push_back(resolver.label_at(idx[0]));
-        l2.push_back(resolver.label_at(idx[1]));
-        l3.push_back(resolver.label_at(idx[2]));
-        l4.push_back(resolver.label_at(idx[3]));
+    std::string rerr;
+    if (!resolve_quartets(resolver, quartet_names, quartets, l1, l2, l3, l4, rerr)) {
+        std::fprintf(stderr, "steppe qpdstat: %s\n", rerr.c_str());
+        return cfg::kExitInvalidConfig;
     }
 
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f4 (GPU path) ----------

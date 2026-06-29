@@ -319,11 +319,17 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     // ALREADY round(maxdis/binsize) (the emitted count, the +5 pad is not allocated here), so
     // we emit ALL n_bin bins — bin k has center distance (k+1)·binsize, up to maxdis.
     const int n_emit = n_bin;
+    // Single-source the DATES bin-center distance convention (dates.c dumpit/fitexp): bin s has
+    // center distance (s+1)·binsize in MORGANS. The curve emit multiplies by kCentimorgansPerMorgan
+    // for cM; the fit-window edge test stays in Morgans. Identical FP expression at both sites, so
+    // the curve axis and the fit window cannot drift apart.
+    auto bin_center_morgans = [&](int s) -> double {
+        return (static_cast<double>(s) + 1.0) * opts.binsize_morgans;
+    };
     res.curve_cm.reserve(static_cast<std::size_t>(n_emit));
     res.curve_corr.reserve(static_cast<std::size_t>(n_emit));
     for (int s = 0; s < n_emit; ++s) {
-        const double cm = (static_cast<double>(s) + 1.0) * opts.binsize_morgans *
-                          kCentimorgansPerMorgan;
+        const double cm = bin_center_morgans(s) * kCentimorgansPerMorgan;
         res.curve_cm.push_back(cm);
         res.curve_corr.push_back(full_curve[static_cast<std::size_t>(s)]);
     }
@@ -335,7 +341,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     auto windowed = [&](const std::vector<double>& curve) -> std::vector<double> {
         std::vector<double> w;
         for (int s = 0; s < n_emit; ++s) {
-            const double d = (static_cast<double>(s) + 1.0) * opts.binsize_morgans;
+            const double d = bin_center_morgans(s);
             if (d < loval_morgans) continue;
             if (d > opts.maxdis_morgans) break;
             w.push_back(curve[static_cast<std::size_t>(s)]);

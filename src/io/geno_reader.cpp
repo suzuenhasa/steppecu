@@ -239,6 +239,25 @@ GenoHeader parse_ancestrymap_geometry(const std::string& geno_path) {
     return h;
 }
 
+// Map a GenoFormat to its human-readable name + the reader to use, shared by every
+// SNP-major dispatcher's "wrong reader" mismatch throw (each throws when the file's
+// ACTUAL format does not match its own; this names that actual format and points at
+// the correct reader). Single-sourcing this replaces the per-reader nested-ternary
+// chain that grew one arm per added format and went stale (an EIGENSTRAT-reader on a
+// PLINK file said "an unrecognized format" because its chain predated PLINK) — cleanup
+// geno_reader 7.2. GenoFormat::Unknown (or any unmapped value) yields the generic name.
+const char* geno_format_name(GenoFormat format) {
+    switch (format) {
+        case GenoFormat::Tgeno:       return "TGENO (read via read_tile)";
+        case GenoFormat::Geno:        return "GENO (read via read_snp_major_tile)";
+        case GenoFormat::Eigenstrat:  return "EIGENSTRAT (read via read_eigenstrat_snp_major_tile)";
+        case GenoFormat::Plink:       return "PLINK (read via read_plink_snp_major_tile)";
+        case GenoFormat::Ancestrymap: return "ANCESTRYMAP (read via read_ancestrymap_snp_major_tile)";
+        case GenoFormat::Unknown:     return "an unrecognized format";
+    }
+    return "an unrecognized format";  // defensive: an out-of-range enum value
+}
+
 }  // namespace
 
 GenoReader::GenoReader(const std::string& geno_path) : path_(geno_path) {
@@ -509,6 +528,87 @@ GenotypeTile GenoReader::read_tile(const IndPartition& part,
     return tile;
 }
 
+// SELECTION + pop-contiguous reorder gather list shared by all four SNP-major readers
+// (read_snp_major_tile / EIGENSTRAT / PLINK / ANCESTRYMAP). Set the tile geometry,
+// reserve + fill pop_offsets/pop_labels, and push each selected SOURCE ROW into sel_rows
+// after validating it is a real individual of THIS file (row < header_.n_ind) so the
+// transpose never reads a padding byte as a phantom individual (format-readers.md §3.4).
+// Pure index/gather bookkeeping (no FP); the four readers differ ONLY in `reader_name`,
+// which prefixes the out-of-range throw — cleanup geno_reader 7.1 (the dominant file
+// duplication). The selection moves into this LIST (the transpose applies it), not the
+// seek loop, because the SNP-major source interleaves all individuals within a SNP byte.
+void GenoReader::build_selection(const IndPartition& part,
+                                 std::size_t src_bpr,
+                                 std::size_t tile_snps,
+                                 const char* reader_name,
+                                 SnpMajorTile& tile) const {
+    tile.src_bytes_per_record = src_bpr;
+    tile.n_snp = tile_snps;
+    tile.pop_offsets.reserve(part.groups.size() + 1);
+    tile.pop_labels.reserve(part.groups.size());
+    tile.pop_offsets.push_back(0);
+    std::size_t out_ind = 0;
+    for (const auto& g : part.groups) {
+        tile.pop_labels.push_back(g.label);
+        for (std::size_t row : g.rows) {
+            if (row >= header_.n_ind) {
+                throw std::runtime_error(
+                    std::string("io::GenoReader::") + reader_name + ": individual row " +
+                    std::to_string(row) + " out of range (n_ind=" +
+                    std::to_string(header_.n_ind) + ") in " + path_);
+            }
+            tile.sel_rows.push_back(row);
+            ++out_ind;
+        }
+        tile.pop_offsets.push_back(out_ind);
+    }
+    tile.n_individuals = out_ind;
+}
+
+// CHECKED MULTIPLY before resize, shared by all four SNP-major readers (cleanup
+// geno_reader 7.1). tile_snps * src_bpr is a std::size_t product and std::size_t
+// arithmetic wraps modulo 2^N (well-defined-but-SILENT, [basic.fundamental]); on a
+// hostile header the product can wrap SMALL, the alloc under-sizes, and the gather
+// writes past it. src_bpr is provably nonzero at every call site (the ctor rejects a
+// zero bytes_per_record; packed_bytes(n_ind) is nonzero for n_ind>=1). The idiom is the
+// standard `a > MAX/b` overflow test, and `resize`'s std::bad_alloc / std::length_error
+// are TRANSLATED into the documented std::runtime_error (EXCEPTION-TYPE CONTRACT, cleanup
+// geno_reader 2.1). `zero_init` selects assign(0) — the text/PLINK packers OR codes into
+// the buffer and need a partial last SNP byte's unused high-row slots defined — vs a bare
+// resize for the raw GENO copy, whose gather overwrites every byte. The readers differ
+// only in `reader_name` (the throw prefix) and `zero_init`.
+void GenoReader::checked_alloc_snp_major(std::size_t tile_snps,
+                                         std::size_t src_bpr,
+                                         const char* reader_name,
+                                         bool zero_init,
+                                         SnpMajorTile& tile) const {
+    const std::string size_operands =
+        std::to_string(tile_snps) + " snp-records * " +
+        std::to_string(src_bpr) + " bytes/record";
+    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
+        throw std::runtime_error(
+            std::string("io::GenoReader::") + reader_name + ": source size overflow (" +
+            size_operands + " exceeds size_t) for " + path_);
+    }
+    try {
+        if (zero_init) {
+            tile.snp_major.assign(tile_snps * src_bpr, std::uint8_t{0});
+        } else {
+            tile.snp_major.resize(tile_snps * src_bpr);
+        }
+    } catch (const std::bad_alloc&) {
+        throw std::runtime_error(
+            std::string("io::GenoReader::") + reader_name +
+            ": out of memory allocating SNP-major source (" + size_operands +
+            ") for " + path_);
+    } catch (const std::length_error&) {
+        throw std::runtime_error(
+            std::string("io::GenoReader::") + reader_name +
+            ": SNP-major source too large for the allocator (" + size_operands +
+            " exceeds vector::max_size()) for " + path_);
+    }
+}
+
 SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
                                              std::size_t snp_begin,
                                              std::size_t snp_end) {
@@ -554,60 +654,15 @@ SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
             std::to_string(records_present_) + ") in " + path_);
     }
 
-    // Build the SELECTION + pop-contiguous reorder (the gather LIST the transpose
-    // applies output-driven). Each selected individual is a SOURCE ROW (its .ind /
-    // genotype-column index); validate every row is a real individual of THIS file
-    // (row < header_.n_ind) so the transpose never reads a padding byte as a phantom
-    // individual (format-readers.md §3.4) — the SNP-major twin of read_tile's
-    // row<records_present_ guard.
+    // Build the SELECTION + pop-contiguous gather list, then the validated SNP-major
+    // source allocation — both shared with the EIGENSTRAT/PLINK/ANCESTRYMAP readers
+    // (cleanup geno_reader 7.1; see build_selection / checked_alloc_snp_major). zero_init
+    // is false here: the gather below overwrites every byte (a raw full-record copy), so
+    // no pre-zero is needed.
     SnpMajorTile tile;
-    tile.src_bytes_per_record = src_bpr;
-    tile.n_snp = tile_snps;
-    tile.pop_offsets.reserve(part.groups.size() + 1);
-    tile.pop_labels.reserve(part.groups.size());
-    tile.pop_offsets.push_back(0);
-    std::size_t out_ind = 0;
-    for (const auto& g : part.groups) {
-        tile.pop_labels.push_back(g.label);
-        for (std::size_t row : g.rows) {
-            if (row >= header_.n_ind) {
-                throw std::runtime_error(
-                    "io::GenoReader::read_snp_major_tile: individual row " +
-                    std::to_string(row) + " out of range (n_ind=" +
-                    std::to_string(header_.n_ind) + ") in " + path_);
-            }
-            tile.sel_rows.push_back(row);
-            ++out_ind;
-        }
-        tile.pop_offsets.push_back(out_ind);
-    }
-    tile.n_individuals = out_ind;
-
-    // CHECKED MULTIPLY before resize (mirrors read_tile's dominant guard): the
-    // source-buffer size is tile_snps * src_bpr (std::size_t product, wraps modulo
-    // 2^N — well-defined-but-SILENT). On a hostile header the product can wrap to a
-    // SMALL value, resize allocates too little, and the gather writes past the
-    // allocation. src_bpr is provably nonzero here (the ctor rejects a zero
-    // bytes_per_record). Same idiom + same exception-type contract as read_tile.
-    const std::string size_operands =
-        std::to_string(tile_snps) + " snp-records * " +
-        std::to_string(src_bpr) + " bytes/record";
-    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: source size overflow (" +
-            size_operands + " exceeds size_t) for " + path_);
-    }
-    try {
-        tile.snp_major.resize(tile_snps * src_bpr);
-    } catch (const std::bad_alloc&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: out of memory allocating SNP-major "
-            "source (" + size_operands + ") for " + path_);
-    } catch (const std::length_error&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: SNP-major source too large for the "
-            "allocator (" + size_operands + " exceeds vector::max_size()) for " + path_);
-    }
+    build_selection(part, src_bpr, tile_snps, "read_snp_major_tile", tile);
+    checked_alloc_snp_major(tile_snps, src_bpr, "read_snp_major_tile",
+                            /*zero_init=*/false, tile);
 
     // Gather the SNP-major records: for each SNP s in [0, tile_snps), seek to
     // header_bytes + s*src_bpr and read the FULL rlen-floored record (all
@@ -641,9 +696,7 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
         throw std::runtime_error(
             "io::GenoReader::read_eigenstrat_snp_major_tile: this is the EIGENSTRAT "
             "(ASCII SNP-major) path; this file is " +
-            std::string(header_.format == GenoFormat::Tgeno ? "TGENO (read via read_tile)"
-                        : header_.format == GenoFormat::Geno ? "GENO (read via read_snp_major_tile)"
-                                                             : "an unrecognized format") +
+            std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
     if (snp_begin != 0) {
@@ -676,59 +729,16 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
             std::to_string(records_present_) + ") in " + path_);
     }
 
-    // Build the SELECTION + pop-contiguous reorder (the gather list the transpose applies
-    // output-driven) — byte-for-byte the same construction as read_snp_major_tile, since
-    // EIGENSTRAT shares the .ind/.snp and the canonical SNP-major source packing. Validate
-    // every selected row is a real individual of THIS file (row < header_.n_ind == the .geno
-    // line length) so the transpose never reads a phantom individual.
+    // Build the SELECTION + pop-contiguous gather list, then the validated SNP-major
+    // source allocation — both shared with read_snp_major_tile (cleanup geno_reader 7.1;
+    // see build_selection / checked_alloc_snp_major), since EIGENSTRAT shares the .ind/.snp
+    // and the canonical SNP-major source packing. zero_init is true: the pack loop below ORs
+    // codes in, so a partial last SNP byte's (n_ind % 4 != 0) unused high-row slots must
+    // start at 0 for the canonical source to be fully defined.
     SnpMajorTile tile;
-    tile.src_bytes_per_record = src_bpr;
-    tile.n_snp = tile_snps;
-    tile.pop_offsets.reserve(part.groups.size() + 1);
-    tile.pop_labels.reserve(part.groups.size());
-    tile.pop_offsets.push_back(0);
-    std::size_t out_ind = 0;
-    for (const auto& g : part.groups) {
-        tile.pop_labels.push_back(g.label);
-        for (std::size_t row : g.rows) {
-            if (row >= header_.n_ind) {
-                throw std::runtime_error(
-                    "io::GenoReader::read_eigenstrat_snp_major_tile: individual row " +
-                    std::to_string(row) + " out of range (n_ind=" +
-                    std::to_string(header_.n_ind) + ") in " + path_);
-            }
-            tile.sel_rows.push_back(row);
-            ++out_ind;
-        }
-        tile.pop_offsets.push_back(out_ind);
-    }
-    tile.n_individuals = out_ind;
-
-    // CHECKED MULTIPLY before resize (mirrors read_snp_major_tile's dominant guard):
-    // tile_snps * src_bpr is a std::size_t product (wraps modulo 2^N, SILENT). src_bpr is
-    // provably nonzero (the ctor sets bytes_per_record = packed_bytes(n_ind) with n_ind>=1).
-    const std::string size_operands =
-        std::to_string(tile_snps) + " snp-records * " +
-        std::to_string(src_bpr) + " bytes/record";
-    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: source size overflow (" +
-            size_operands + " exceeds size_t) for " + path_);
-    }
-    try {
-        // Zero-init: a partial last SNP byte (n_ind % 4 != 0) keeps its unused high-row
-        // slots at 0, AND every code slot is written by the pack loop below, so the
-        // canonical SNP-major source is fully defined.
-        tile.snp_major.assign(tile_snps * src_bpr, std::uint8_t{0});
-    } catch (const std::bad_alloc&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: out of memory allocating "
-            "SNP-major source (" + size_operands + ") for " + path_);
-    } catch (const std::length_error&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: SNP-major source too large for "
-            "the allocator (" + size_operands + " exceeds vector::max_size()) for " + path_);
-    }
+    build_selection(part, src_bpr, tile_snps, "read_eigenstrat_snp_major_tile", tile);
+    checked_alloc_snp_major(tile_snps, src_bpr, "read_eigenstrat_snp_major_tile",
+                            /*zero_init=*/true, tile);
 
     // PARSE + PACK the ASCII .geno into the canonical SNP-major 2-bit layout. For each
     // SNP line s in [0, tile_snps): each char c at column i is individual i's genotype;
@@ -789,10 +799,7 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
         throw std::runtime_error(
             "io::GenoReader::read_plink_snp_major_tile: this is the PLINK (.bed SNP-major) "
             "path; this file is " +
-            std::string(header_.format == GenoFormat::Tgeno ? "TGENO (read via read_tile)"
-                        : header_.format == GenoFormat::Geno ? "GENO (read via read_snp_major_tile)"
-                        : header_.format == GenoFormat::Eigenstrat ? "EIGENSTRAT (read via read_eigenstrat_snp_major_tile)"
-                                                                   : "an unrecognized format") +
+            std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
     if (snp_begin != 0) {
@@ -829,59 +836,15 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
             std::to_string(records_present_) + ") in " + path_);
     }
 
-    // Build the SELECTION + pop-contiguous reorder (the gather list the transpose applies
-    // output-driven) — byte-for-byte the same construction as read_snp_major_tile /
-    // read_eigenstrat_snp_major_tile. Validate every selected row is a real individual of
-    // THIS file (row < header_.n_ind == the .fam line count) so the transpose never reads
-    // a phantom individual.
+    // Build the SELECTION + pop-contiguous gather list, then the validated SNP-major
+    // source allocation — both shared with read_snp_major_tile (cleanup geno_reader 7.1;
+    // see build_selection / checked_alloc_snp_major). zero_init is true: the normalize loop
+    // below ORs codes in, so a partial last SNP byte's (n_ind % 4 != 0) unused high-row
+    // slots must start at 0 for the canonical source to be fully defined.
     SnpMajorTile tile;
-    tile.src_bytes_per_record = src_bpr;
-    tile.n_snp = tile_snps;
-    tile.pop_offsets.reserve(part.groups.size() + 1);
-    tile.pop_labels.reserve(part.groups.size());
-    tile.pop_offsets.push_back(0);
-    std::size_t out_ind = 0;
-    for (const auto& g : part.groups) {
-        tile.pop_labels.push_back(g.label);
-        for (std::size_t row : g.rows) {
-            if (row >= header_.n_ind) {
-                throw std::runtime_error(
-                    "io::GenoReader::read_plink_snp_major_tile: individual row " +
-                    std::to_string(row) + " out of range (n_ind=" +
-                    std::to_string(header_.n_ind) + ") in " + path_);
-            }
-            tile.sel_rows.push_back(row);
-            ++out_ind;
-        }
-        tile.pop_offsets.push_back(out_ind);
-    }
-    tile.n_individuals = out_ind;
-
-    // CHECKED MULTIPLY before resize (mirrors read_snp_major_tile's dominant guard):
-    // tile_snps * src_bpr is a std::size_t product (wraps modulo 2^N, SILENT). src_bpr is
-    // provably nonzero (the ctor sets bytes_per_record = packed_bytes(n_ind) with n_ind>=1).
-    const std::string size_operands =
-        std::to_string(tile_snps) + " snp-records * " +
-        std::to_string(src_bpr) + " bytes/record";
-    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: source size overflow (" +
-            size_operands + " exceeds size_t) for " + path_);
-    }
-    try {
-        // Zero-init: a partial last SNP byte (n_ind % 4 != 0) keeps its unused high-row
-        // slots at 0, AND every in-range code slot is written by the normalize loop below,
-        // so the canonical SNP-major source is fully defined.
-        tile.snp_major.assign(tile_snps * src_bpr, std::uint8_t{0});
-    } catch (const std::bad_alloc&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: out of memory allocating SNP-major "
-            "source (" + size_operands + ") for " + path_);
-    } catch (const std::length_error&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: SNP-major source too large for the "
-            "allocator (" + size_operands + " exceeds vector::max_size()) for " + path_);
-    }
+    build_selection(part, src_bpr, tile_snps, "read_plink_snp_major_tile", tile);
+    checked_alloc_snp_major(tile_snps, src_bpr, "read_plink_snp_major_tile",
+                            /*zero_init=*/true, tile);
 
     // READ each .bed SNP record (LSB-first, the .bed's OWN bytes) into a staging buffer,
     // then NORMALIZE it into the canonical SNP-major source: for each in-range individual
@@ -936,11 +899,7 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
         throw std::runtime_error(
             "io::GenoReader::read_ancestrymap_snp_major_tile: this is the ANCESTRYMAP "
             "(text-triple SNP-major) path; this file is " +
-            std::string(header_.format == GenoFormat::Tgeno ? "TGENO (read via read_tile)"
-                        : header_.format == GenoFormat::Geno ? "GENO (read via read_snp_major_tile)"
-                        : header_.format == GenoFormat::Eigenstrat ? "EIGENSTRAT (read via read_eigenstrat_snp_major_tile)"
-                        : header_.format == GenoFormat::Plink ? "PLINK (read via read_plink_snp_major_tile)"
-                                                              : "an unrecognized format") +
+            std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
     if (snp_begin != 0) {
@@ -973,59 +932,16 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
             std::to_string(records_present_) + ") in " + path_);
     }
 
-    // Build the SELECTION + pop-contiguous reorder (the gather list the transpose applies
-    // output-driven) — byte-for-byte the same construction as the other SNP-major readers,
-    // since ANCESTRYMAP shares the .ind/.snp and the canonical SNP-major source packing.
-    // Validate every selected row is a real individual of THIS file (row < header_.n_ind ==
-    // the .ind line count) so the transpose never reads a phantom individual.
+    // Build the SELECTION + pop-contiguous gather list, then the validated SNP-major
+    // source allocation — both shared with the other SNP-major readers (cleanup geno_reader
+    // 7.1; see build_selection / checked_alloc_snp_major), since ANCESTRYMAP shares the
+    // .ind/.snp and the canonical SNP-major source packing. zero_init is true: the pack loop
+    // below ORs codes in, so a partial last SNP byte's (n_ind % 4 != 0) unused high-row slots
+    // must start at 0 for the canonical source to be fully defined.
     SnpMajorTile tile;
-    tile.src_bytes_per_record = src_bpr;
-    tile.n_snp = tile_snps;
-    tile.pop_offsets.reserve(part.groups.size() + 1);
-    tile.pop_labels.reserve(part.groups.size());
-    tile.pop_offsets.push_back(0);
-    std::size_t out_ind = 0;
-    for (const auto& g : part.groups) {
-        tile.pop_labels.push_back(g.label);
-        for (std::size_t row : g.rows) {
-            if (row >= header_.n_ind) {
-                throw std::runtime_error(
-                    "io::GenoReader::read_ancestrymap_snp_major_tile: individual row " +
-                    std::to_string(row) + " out of range (n_ind=" +
-                    std::to_string(header_.n_ind) + ") in " + path_);
-            }
-            tile.sel_rows.push_back(row);
-            ++out_ind;
-        }
-        tile.pop_offsets.push_back(out_ind);
-    }
-    tile.n_individuals = out_ind;
-
-    // CHECKED MULTIPLY before resize (mirrors the other SNP-major readers' dominant guard):
-    // tile_snps * src_bpr is a std::size_t product (wraps modulo 2^N, SILENT). src_bpr is
-    // provably nonzero (the ctor sets bytes_per_record = packed_bytes(n_ind) with n_ind>=1).
-    const std::string size_operands =
-        std::to_string(tile_snps) + " snp-records * " +
-        std::to_string(src_bpr) + " bytes/record";
-    if (tile_snps > std::numeric_limits<std::size_t>::max() / src_bpr) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: source size overflow (" +
-            size_operands + " exceeds size_t) for " + path_);
-    }
-    try {
-        // Zero-init: a partial last SNP byte (n_ind % 4 != 0) keeps its unused high-row
-        // slots at 0, AND every in-range code slot is written by the pack loop below, so
-        // the canonical SNP-major source is fully defined.
-        tile.snp_major.assign(tile_snps * src_bpr, std::uint8_t{0});
-    } catch (const std::bad_alloc&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: out of memory allocating "
-            "SNP-major source (" + size_operands + ") for " + path_);
-    } catch (const std::length_error&) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: SNP-major source too large for "
-            "the allocator (" + size_operands + " exceeds vector::max_size()) for " + path_);
-    }
+    build_selection(part, src_bpr, tile_snps, "read_ancestrymap_snp_major_tile", tile);
+    checked_alloc_snp_major(tile_snps, src_bpr, "read_ancestrymap_snp_major_tile",
+                            /*zero_init=*/true, tile);
 
     // PARSE + PACK the TEXT-triple .geno into the canonical SNP-major 2-bit layout. The
     // .geno is POSITIONALLY addressed: line L (0-based) is SNP s = L/n_ind, individual

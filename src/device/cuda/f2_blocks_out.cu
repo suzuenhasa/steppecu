@@ -16,8 +16,9 @@
 
 #include "core/internal/host_device.hpp"   // STEPPE_ASSERT (debug-only block-index bounds check)
 #include "core/internal/log.hpp"           // STEPPE_LOG_WARN (the one teardown-warning sink)
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK, STEPPE_CUDA_WARN (device-restore guard)
+#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK (fault check on the D2H copies)
 #include "device/cuda/device_f2_blocks_impl.cuh"  // DeviceF2Blocks::Impl (f2/vpair device pointers; pulls device_buffer.cuh)
+#include "device/cuda/device_guard.cuh"     // DeviceGuard (shared scoped device-restore RAII, §3.3)
 #include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
 #include "device/f2_disk_format.hpp"        // F2DiskHeader, offsets
 
@@ -92,13 +93,13 @@ void F2BlocksOut::read_block_to_host(int b, double* f2_slab_out, double* vpair_s
             if (!f2_dev || !vpair_dev) return;
             int prev = 0;
             STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-            // Dtor-must-not-throw, so the restore can't go through the throwing
-            // STEPPE_CUDA_CHECK; route it through the non-throwing STEPPE_CUDA_WARN
-            // so a failed restore logs one diagnostic line (debug) and yields its
-            // status instead of vanishing — cudaSetDevice can surface a prior async
-            // launch error (CUDA-13 Device-Management). The [[nodiscard]] return is
-            // (void)-discarded for the -Werror build; happy path is byte-identical.
-            struct DeviceGuard { int dev; ~DeviceGuard() { (void)STEPPE_CUDA_WARN(cudaSetDevice(dev)); } } restore{prev};
+            // Restore the caller's device on scope exit via the shared DeviceGuard
+            // (device_guard.cuh; standard §3.3 single device-restore helper). The dtor
+            // must not throw, so its restore routes through the non-throwing
+            // STEPPE_CUDA_WARN — a failed restore logs one diagnostic line (debug) and
+            // yields its status instead of vanishing; cudaSetDevice can surface a prior
+            // async launch error (CUDA 13.x Device Management). Happy path byte-identical.
+            DeviceGuard restore{prev};
             STEPPE_CUDA_CHECK(cudaSetDevice(resident.device_id));
             const std::size_t off = slab * static_cast<std::size_t>(b);
             // PIN the caller's pageable D2H destinations for the copy window

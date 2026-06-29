@@ -136,21 +136,33 @@ int outpop_of(const IGraph& g, int nleaf) {
     return count == 1 ? found : -1;
 }
 
-// is `target` reachable FROM `src` along out-edges (src excluded)?
-bool reachable_from(const IGraph& g, int src, int target) {
-    std::unordered_map<int, std::vector<int>> adj;
-    for (const IEdge& e : g) adj[e.p].push_back(e.c);
+// is `target` reachable FROM `src` along out-edges (src excluded), reusing a prebuilt
+// out-adjacency map. Overload for the loop-invariant case (admix1_children_of's (si,di)
+// double loop), where rebuilding `adj` from the same graph on every probe is wasted O(E) work.
+bool reachable_from(const std::unordered_map<int, std::vector<int>>& adj, int src, int target) {
     std::vector<int> st{src};
     std::unordered_set<int> seen;
     while (!st.empty()) {
         const int u = st.back();
         st.pop_back();
-        for (int v : adj[u]) {
+        const auto it = adj.find(u);
+        if (it == adj.end()) continue;  // no out-edges (matches operator[]'s empty-vector case).
+        for (int v : it->second) {
             if (v == target) return true;
             if (!seen.count(v)) { seen.insert(v); st.push_back(v); }
         }
     }
     return false;
+}
+
+// is `target` reachable FROM `src` along out-edges (src excluded)? Builds the out-adjacency
+// from `g` once and delegates to the prebuilt-adjacency overload (the single source of the BFS).
+// [[maybe_unused]]: the lone in-TU caller (admix1_children_of) now passes a hoisted prebuilt
+// `adj` directly; this graph-taking convenience overload is kept as the documented entry point.
+[[maybe_unused]] bool reachable_from(const IGraph& g, int src, int target) {
+    std::unordered_map<int, std::vector<int>> adj;
+    for (const IEdge& e : g) adj[e.p].push_back(e.c);
+    return reachable_from(adj, src, target);
 }
 
 // ---- the tree enumerator (sequential leaf-insertion) --------------------------------
@@ -365,6 +377,11 @@ void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::st
     const int op = outpop_of(tree, nleaf);
     IGraph base;
     for (const IEdge& e : tree) if (!(op >= 0 && e.p == r && e.c == op)) base.push_back(e);
+    // `tree` is loop-invariant across the (si,di) double loop below, so its out-adjacency is
+    // too; build it ONCE here and reuse it on every reachability probe (was an O(E) rebuild
+    // per probe -> O(E^2) rebuilds; now O(E) once). Behavior-identical to the per-call build.
+    std::unordered_map<int, std::vector<int>> tree_adj;
+    for (const IEdge& e : tree) tree_adj[e.p].push_back(e.c);
     int next_id = kFreshNodeBase;
     for (std::size_t si = 0; si < base.size(); ++si) {
         for (std::size_t di = 0; di < base.size(); ++di) {
@@ -372,7 +389,7 @@ void admix1_children_of(const IGraph& tree, int nleaf, const std::vector<std::st
             const IEdge& s = base[si];
             const IEdge& d = base[di];
             if (s.p == d.p || s.c == d.c || s.c == d.p || d.c == s.p) continue;
-            if (reachable_from(tree, d.c, s.p)) continue;
+            if (reachable_from(tree_adj, d.c, s.p)) continue;
             const int x = next_id, a = next_id + 1;
             IGraph ng;
             for (const IEdge& e : tree)

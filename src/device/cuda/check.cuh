@@ -46,6 +46,19 @@
 
 namespace steppe::device {
 
+/// Builds the shared "file:line (function): 'expr' -> " call-site prefix for the
+/// typed CUDA / cuBLAS / cuSOLVER / cuFFT exceptions below. Each ctor appends its
+/// own per-API status rendering (cudaGetErrorName/String, or a status_name()
+/// switch) — only that trailing part differs, so the prefix lives once here to
+/// remove the four-way copy and its drift risk. `inline` because this is a header
+/// (ODR-safe). Pure host std::string formatting — no kernel / parity surface; the
+/// emitted message is byte-identical to the previously-inlined per-class build.
+[[nodiscard]] inline std::string format_call_site(
+    const std::source_location& loc, const char* expr) {
+    return std::string(loc.file_name()) + ":" + std::to_string(loc.line()) +
+           " (" + loc.function_name() + "): '" + expr + "' -> ";
+}
+
 /// Typed exception thrown on a nonzero CUDA runtime status, carrying the call
 /// site (file:line:function via std::source_location), the failing expression,
 /// and the runtime's error name + string. Thrown — never `exit()` — so tests can
@@ -57,9 +70,7 @@ public:
     CudaError(cudaError_t status, const char* expr,
               const std::source_location& loc)
         : status_(status) {
-        msg_ = std::string(loc.file_name()) + ":" +
-               std::to_string(loc.line()) + " (" + loc.function_name() +
-               "): '" + expr + "' -> " + cudaGetErrorName(status) + ": " +
+        msg_ = format_call_site(loc, expr) + cudaGetErrorName(status) + ": " +
                cudaGetErrorString(status);
     }
     [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
@@ -78,9 +89,7 @@ public:
     CublasError(cublasStatus_t status, const char* expr,
                 const std::source_location& loc)
         : status_(status) {
-        msg_ = std::string(loc.file_name()) + ":" +
-               std::to_string(loc.line()) + " (" + loc.function_name() +
-               "): '" + expr + "' -> " + status_name(status);
+        msg_ = format_call_site(loc, expr) + status_name(status);
     }
     [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
     [[nodiscard]] cublasStatus_t status() const noexcept { return status_; }
@@ -119,9 +128,7 @@ public:
     CusolverError(cusolverStatus_t status, const char* expr,
                   const std::source_location& loc)
         : status_(status) {
-        msg_ = std::string(loc.file_name()) + ":" +
-               std::to_string(loc.line()) + " (" + loc.function_name() +
-               "): '" + expr + "' -> " + status_name(status);
+        msg_ = format_call_site(loc, expr) + status_name(status);
     }
     [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
     [[nodiscard]] cusolverStatus_t status() const noexcept { return status_; }
@@ -158,9 +165,7 @@ public:
     CufftError(cufftResult status, const char* expr,
                const std::source_location& loc)
         : status_(status) {
-        msg_ = std::string(loc.file_name()) + ":" +
-               std::to_string(loc.line()) + " (" + loc.function_name() +
-               "): '" + expr + "' -> " + status_name(status);
+        msg_ = format_call_site(loc, expr) + status_name(status);
     }
     [[nodiscard]] const char* what() const noexcept override { return msg_.c_str(); }
     [[nodiscard]] cufftResult status() const noexcept { return status_; }
