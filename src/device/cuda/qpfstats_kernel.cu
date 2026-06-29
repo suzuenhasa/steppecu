@@ -21,19 +21,21 @@ namespace steppe::device {
 
 namespace {
 
-/// One thread per (comb, block) cell: zero the non-finite ymat entries in place and
+/// Grid-stride over (comb, block) cells: zero the non-finite ymat entries in place and
 /// atomically count the NaN comb-rows per block. ymat is COLUMN-MAJOR [npopcomb × n_block]
-/// (cell (c,b) at c + npopcomb*b). d_nan_per_block must be pre-zeroed.
+/// (cell (c,b) at c + npopcomb*b). d_nan_per_block must be pre-zeroed. The grid-stride loop
+/// makes coverage input-size-agnostic (no implicit "grid always covers total" coupling).
 __global__ void qpfstats_zero_nan_ymat_kernel(double* __restrict__ ymat, int npopcomb,
                                               int n_block, int* __restrict__ nan_per_block) {
-    const long cell = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
     const long total = static_cast<long>(npopcomb) * static_cast<long>(n_block);
-    if (cell >= total) return;
-    const int b = static_cast<int>(cell / npopcomb);
-    const double v = ymat[cell];
-    if (!isfinite(v)) {
-        ymat[cell] = 0.0;
-        atomicAdd(&nan_per_block[b], 1);
+    for (long cell = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x; cell < total;
+         cell += static_cast<long>(gridDim.x) * blockDim.x) {
+        const int b = static_cast<int>(cell / npopcomb);
+        const double v = ymat[cell];
+        if (!isfinite(v)) {
+            ymat[cell] = 0.0;
+            atomicAdd(&nan_per_block[b], 1);
+        }
     }
 }
 

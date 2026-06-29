@@ -7,8 +7,9 @@
 // downstream genotype pipeline is UNCHANGED — only the read-time layout transposes.
 //
 // What this TU owns:
-//   1. transpose_to_canonical_kernel — ONE thread per OUTPUT BYTE; assembles the
-//      <=4 canonical codes of that byte by gathering+encoding from the SNP-major
+//   1. transpose_to_canonical_kernel — ONE thread per OUTPUT BYTE, grid-stride over
+//      the output-byte axis (input-size-agnostic coverage); assembles the <=4
+//      canonical codes of each owned byte by gathering+encoding from the SNP-major
 //      source. Race-free by construction (each output byte has exactly one writer).
 //   2. launch_transpose_to_canonical — the narrow launch wrapper (no <<<>>> in host
 //      code; the established detect_ploidy_kernel.cu / decode_af_kernel.cu pattern).
@@ -46,7 +47,7 @@
 
 #include "core/internal/decode_af.hpp"      // core::genotype_code, kCodesPerByte, kBitsPerCode
 #include "core/internal/launch_config.hpp"  // cdiv, kMaxGridX
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK_KERNEL, STEPPE_ASSERT
+#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK_KERNEL
 
 namespace steppe::device {
 
@@ -67,56 +68,60 @@ __device__ __forceinline__ std::uint8_t apply_encoding(std::uint8_t code,
     }
 }
 
-/// ONE thread per (gathered individual g, output byte b). Assembles the up-to-4
-/// canonical codes of output SNPs {4b, 4b+1, 4b+2, 4b+3} (the codes packed into
-/// output byte b of g's canonical record) and writes the single output byte. Each
-/// code is gathered from the SNP-major source at its OWN SNP record and the gathered
-/// individual's source row, then encoded and packed MSB-first. SNPs >= n_snp (the
-/// partial last byte) contribute 0 bits — the same all-zero tail the host packer
-/// produces. Race-free: distinct (g, b) own distinct output bytes.
+/// ONE thread per OUTPUT BYTE, GRID-STRIDE over the output-byte axis so coverage is
+/// input-size-agnostic (every output byte is written even when the launch grid is
+/// clamped below one-thread-per-byte — see launch_transpose_to_canonical; matches the
+/// repack_target_kernel / qpadm_fit grid-stride idiom). For each owned byte (gathered
+/// individual g, output byte b) the thread assembles the up-to-4 canonical codes of
+/// output SNPs {4b, 4b+1, 4b+2, 4b+3} (the codes packed into output byte b of g's
+/// canonical record) and writes the single output byte. Each code is gathered from the
+/// SNP-major source at its OWN SNP record and the gathered individual's source row,
+/// then encoded and packed MSB-first. SNPs >= n_snp (the partial last byte) contribute
+/// 0 bits — the same all-zero tail the host packer produces. Race-free: distinct
+/// (g, b) own distinct output bytes.
 __global__ void transpose_to_canonical_kernel(
     const std::uint8_t* __restrict__ snp_major, std::size_t src_bytes_per_record,
     const std::size_t* __restrict__ sel_rows, std::size_t n_individuals,
     std::size_t n_snp, std::size_t out_bytes_per_record, TransposeEncoding encoding,
     std::uint8_t* __restrict__ out) {
-    const std::size_t tid =
-        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::size_t total = n_individuals * out_bytes_per_record;
-    if (tid >= total) return;
+    for (std::size_t tid =
+             static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         tid < total; tid += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        // Decompose the flat thread id into (output individual g, output byte b). The
+        // output is individual-major: record g occupies out[g*out_bpr .. (g+1)*out_bpr).
+        const std::size_t g = tid / out_bytes_per_record;
+        const std::size_t b = tid % out_bytes_per_record;
 
-    // Decompose the flat thread id into (output individual g, output byte b). The
-    // output is individual-major: record g occupies out[g*out_bpr .. (g+1)*out_bpr).
-    const std::size_t g = tid / out_bytes_per_record;
-    const std::size_t b = tid % out_bytes_per_record;
+        // The source individual ROW for this output column (selection + pop-contiguous
+        // reorder). Read once per output byte (4 SNPs share the same source row).
+        const std::size_t src_row = sel_rows[g];
+        const std::size_t src_byte_in_snp =
+            src_row / static_cast<std::size_t>(core::kCodesPerByte);  // which source byte holds src_row
+        const int src_pos =
+            static_cast<int>(src_row % static_cast<std::size_t>(core::kCodesPerByte));  // its in-byte position
 
-    // The source individual ROW for this output column (selection + pop-contiguous
-    // reorder). Read once per output byte (4 SNPs share the same source row).
-    const std::size_t src_row = sel_rows[g];
-    const std::size_t src_byte_in_snp =
-        src_row / static_cast<std::size_t>(core::kCodesPerByte);  // which source byte holds src_row
-    const int src_pos =
-        static_cast<int>(src_row % static_cast<std::size_t>(core::kCodesPerByte));  // its in-byte position
-
-    // Assemble the 4 codes of output SNPs s = 4b + k (k in 0..3), MSB-first: SNP
-    // 4b in bits 7-6, 4b+1 in 5-4, ... (the canonical code_in_byte order). A SNP
-    // past n_snp contributes 0 (the partial-last-byte tail).
-    std::uint8_t packed = 0;
-    const std::size_t s0 = b * static_cast<std::size_t>(core::kCodesPerByte);
-    for (int k = 0; k < core::kCodesPerByte; ++k) {
-        const std::size_t s = s0 + static_cast<std::size_t>(k);
-        if (s >= n_snp) break;  // remaining SNPs of this byte are 0 (all-zero tail)
-        // Gather: source SNP record s, byte holding src_row, in-byte position src_pos.
-        const std::uint8_t src_byte =
-            snp_major[s * src_bytes_per_record + src_byte_in_snp];
-        const std::uint8_t code = core::genotype_code(src_byte, src_pos);
-        const std::uint8_t canon = apply_encoding(code, encoding);
-        // Pack canon into output position k MSB-first: bits (6 - 2k)..(7 - 2k).
-        const int shift =
-            (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;  // 6,4,2,0
-        packed = static_cast<std::uint8_t>(
-            packed | static_cast<std::uint8_t>(canon << shift));
+        // Assemble the 4 codes of output SNPs s = 4b + k (k in 0..3), MSB-first: SNP
+        // 4b in bits 7-6, 4b+1 in 5-4, ... (the canonical code_in_byte order). A SNP
+        // past n_snp contributes 0 (the partial-last-byte tail).
+        std::uint8_t packed = 0;
+        const std::size_t s0 = b * static_cast<std::size_t>(core::kCodesPerByte);
+        for (int k = 0; k < core::kCodesPerByte; ++k) {
+            const std::size_t s = s0 + static_cast<std::size_t>(k);
+            if (s >= n_snp) break;  // remaining SNPs of this byte are 0 (all-zero tail)
+            // Gather: source SNP record s, byte holding src_row, in-byte position src_pos.
+            const std::uint8_t src_byte =
+                snp_major[s * src_bytes_per_record + src_byte_in_snp];
+            const std::uint8_t code = core::genotype_code(src_byte, src_pos);
+            const std::uint8_t canon = apply_encoding(code, encoding);
+            // Pack canon into output position k MSB-first: bits (6 - 2k)..(7 - 2k).
+            const int shift =
+                (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;  // 6,4,2,0
+            packed = static_cast<std::uint8_t>(
+                packed | static_cast<std::uint8_t>(canon << shift));
+        }
+        out[tid] = packed;  // tid == g*out_bytes_per_record + b (the canonical byte offset)
     }
-    out[tid] = packed;  // tid == g*out_bytes_per_record + b (the canonical byte offset)
 }
 
 }  // namespace
@@ -130,12 +135,16 @@ void launch_transpose_to_canonical(const std::uint8_t* d_snp_major,
                                    cudaStream_t stream) {
     const std::size_t total = n_individuals * out_bytes_per_record;
     if (total == 0) return;  // empty tile (no individuals or no SNPs) ⇒ nothing to pack
-    const long grid_x =
+    // One thread per OUTPUT BYTE ideally, but CLAMP the grid extent to kMaxGridX so the
+    // launch is always valid; the kernel's grid-stride loop then covers every output
+    // byte regardless (the launch_grid_stride idiom in qpadm_fit_kernels.cu). This is
+    // the safety net the old gridDim.x assert was not: that STEPPE_ASSERT compiled out
+    // under NDEBUG (Release = the gate build), so an over-cap `total` would otherwise
+    // truncate at the unsigned cast below and SILENTLY under-cover the output.
+    const long grid_l =
         core::cdiv(static_cast<long>(total), static_cast<long>(kTransposeBlock));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "transpose-to-canonical gridDim.x (output-byte axis) exceeds "
-                  "kMaxGridX (architecture.md §7) — tile the output-byte axis");
+    const long grid_cap = static_cast<long>(core::kMaxGridX);
+    const long grid_x = grid_l > grid_cap ? grid_cap : grid_l;
     transpose_to_canonical_kernel<<<static_cast<unsigned>(grid_x), kTransposeBlock,
                                     0, stream>>>(
         d_snp_major, src_bytes_per_record, d_sel_rows, n_individuals, n_snp,

@@ -50,6 +50,7 @@
 
 #include <cstddef>                         // std::size_t
 
+#include "core/internal/launch_config.hpp"  // grid_for, kMaxGridY (the launch-config home)
 #include "device/cuda/check.cuh"          // STEPPE_CUDA_CHECK
 #include "device/cuda/dstat_kernel.cuh"   // launch_dstat_block_reduce (the narrow seam)
 
@@ -266,8 +267,13 @@ void launch_dstat_block_reduce(const double* d_Q, const double* d_V, int P, long
                 cudaFuncAttributeMaxDynamicSharedMemorySize,
                 static_cast<int>(smem)));
         }
-        const unsigned tilesY =
-            static_cast<unsigned>((static_cast<long>(N) + kThreads - 1) / kThreads);
+        // The combo/scale axis N rides the CAPPED gridDim.y (max kMaxGridY = 65 535);
+        // route it through the single launch-config home so an over-limit extent
+        // fails-fast in debug (the X-7/B6 grid_for assert) instead of an opaque
+        // cudaErrorInvalidConfiguration at launch — exactly as launch_f2_feeder routes
+        // P. grid_for(N, kThreads) is the same cdiv value as the prior open-coded form,
+        // so the launch geometry is unchanged (architecture.md §7; STANDARD §3.3).
+        const unsigned tilesY = static_cast<unsigned>(core::grid_for(N, kThreads));
         const dim3 grid(static_cast<unsigned>(n_block), tilesY, 1);
         dstat_block_reduce_tiled_kernel<<<grid, kThreads, smem, stream>>>(
             d_Q, d_V, P, M, d_quad, N, d_block_begin, d_block_size, n_block,
