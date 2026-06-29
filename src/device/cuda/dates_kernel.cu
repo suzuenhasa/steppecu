@@ -67,6 +67,10 @@ __global__ void regress_dots_kernel(const double* __restrict__ src1,
     sh12[threadIdx.x] = a12;
     sh22[threadIdx.x] = a22;
     __syncthreads();
+    // Precondition: blockDim.x MUST be a power of two. This halving tree folds the upper half
+    // onto the lower each step (off >>= 1); a non-power-of-two would drop an odd remainder and
+    // skip elements. The sole caller launch_dates_regress_dots launches with kBlock=256, so the
+    // invariant holds. Do NOT add odd-remainder handling — it perturbs the §12 fixed-order sum.
     for (int off = blockDim.x / 2; off > 0; off >>= 1) {
         if (threadIdx.x < off) {
             sh12[threadIdx.x] += sh12[threadIdx.x + off];

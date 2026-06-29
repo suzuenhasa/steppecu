@@ -99,8 +99,14 @@ __global__ void compact_columns_gather_kernel(const double* __restrict__ in, int
                                               const std::uint8_t* __restrict__ flags,
                                               const long* __restrict__ keep_idx,
                                               double* __restrict__ out) {
-    const long s = static_cast<long>(blockIdx.x) * blockDim.y + threadIdx.y;
-    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
+    // DELIBERATE block-axis cross (mirrors the launch_compact_columns_gather comment
+    // above): pop `i` rides threadIdx.x — the UNIT-STRIDE axis of the column-major
+    // [P×M] arena, so adjacent lanes touch adjacent addresses (coalesced) — while SNP
+    // `s` rides threadIdx.y. This is index-consistent with block=dim3(bx,by) +
+    // grid=(cdiv(M,by), grid_for(P,bx)) and is CORRECT — not an OOB to "fix". Same
+    // thread→element map as f2_block_kernel.cu's f2_feeder_kernel.
+    const long s = static_cast<long>(blockIdx.x) * blockDim.y + threadIdx.y;  // SNP
+    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;  // pop
     if (s >= M || i >= P) return;
     if (flags[s] == 0) return;
     const std::size_t src = static_cast<std::size_t>(i) +
