@@ -40,6 +40,16 @@ top `CMakeLists.txt`). Everything ships through a manual `ssh box5090 + rsync` l
 **smoke/seam gate, not a parity gate**. The CpuBackend is the *native*-FP64 oracle; the
 shipping path is *emulated* FP64 on sm_120. Only the GPU lane proves what users run.
 
+> **Cross-cut additions (provenance: `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5).**
+> Two items below originate in **our own X1–X7 cross-cutting review** rather than the Kimi
+> assessment, and are folded in here so the cross-cut work is not lost: **A9** — the
+> provenance-token regression grep-gate (cross-cut gap **G1**, CI-half) — and the **G4**
+> bare-`cudaGetLastError` prerequisite note, folded into the new **B9** compute-sanitizer
+> lane item. Both are **comment / structure / robustness only — golden-neutral, parity-risk
+> none** — and each is tagged inline where it appears. The one-time *scrub* (G1) and the
+> 14-site *conversion* (G4) are the matching `03-low-polish.md` items; the two additions
+> here are the **CI lane half** (a regression guard + the lane that consumes the fix).
+
 ---
 
 ## 1. Constraints that scope "optimal"
@@ -64,9 +74,9 @@ it tests CUDA-free *logic*; it does not resurrect a mock backend.
 
 | Phase | Lane | Trigger | Runs on | Proves | Cost |
 |---|---|---|---|---|---|
-| **0** | Host CUDA-free | every PR + push | `ubuntu-latest` (no GPU, no toolkit) | hygiene, seams, §4 layering, CUDA-free unit + host-orchestration logic, CpuBackend-vs-golden (toolkit sub-job) | $0 |
+| **0** | Host CUDA-free | every PR + push | `ubuntu-latest` (no GPU, no toolkit) | hygiene, seams, §4 layering, **provenance-token regression (A9)**, CUDA-free unit + host-orchestration logic, CpuBackend-vs-golden (toolkit sub-job) | $0 |
 | **1** | GPU parity | nightly cron + `workflow_dispatch` + maintainer `gpu-ci` label | ephemeral vast.ai sm_120 (JIT runner) | **emulated-FP64 sm_120 parity** vs committed goldens | ~1 GPU-hr/night |
-| **2** | Hardening | nightly / pre-release | host (ASan/UBSan) + GPU (compute-sanitizer, AADR tier, §12 assertion) | memory safety, full-data parity, release readiness | low |
+| **2** | Hardening | nightly / pre-release | host (ASan/UBSan) + GPU (**compute-sanitizer (B9)**, AADR tier, §12 assertion) | memory safety, full-data parity, release readiness | low |
 
 The **honest ceiling**: of 74 ctest registrations, **11 are host-coverable now**, **~21
 after the optional refactor (Item A8)**, and the remaining **~53 are nvcc/GPU/box-bound**
@@ -78,7 +88,8 @@ lane is a *fast structural+unit* gate; **parity acceptance stays the box's job.*
 # Cluster A — Host-only, CUDA-free PR lane (Phase 0)
 
 > Priority: **HIGH** (assessment §3/§6 step 2). The cheap, honest first gate. Item A1 is
-> the hard structural prerequisite for A2/A3/A8.
+> the hard structural prerequisite for A2/A3/A8. The fast text gates (A4 / A6 / **A9**) are
+> independent and land day one.
 
 ---
 
@@ -237,8 +248,8 @@ few minutes with **no GPU and no toolkit**.
    `apt-get install -y ninja-build clang-tidy clang-format` (+ optional `libgtest-dev`),
    `cmake --preset host`, `cmake --build --preset host`,
    `ctest --preset host --output-on-failure`.
-3. Add the A4–A7 jobs (format / tidy / arch-grep / cmake-lint) as **separate, parallel,
-   independently-failing** jobs.
+3. Add the A4–A7 + A9 jobs (format / tidy / arch-grep / cmake-lint / provenance-token) as
+   **separate, parallel, independently-failing** jobs.
 4. **Resolve the `-Werror` × newer-compiler risk before flipping this to required.**
 
 **Effort.** **M.**
@@ -278,6 +289,11 @@ spelling). PR-scoped (diff) to stay fast and avoid a giant first-PR reformat.
 3. **Pin the clang-format major version** (output drifts across versions) — install a
    fixed version matching the box.
 4. Document the developer fixer: `clang-format -i <file>` (never `-i` in CI).
+
+> **Note (interaction with A9):** clang-format here runs with **comment reflow OFF** — it
+> reformats whitespace/braces but does **not** rewrite comment *content*, so it will never
+> strip internal provenance tokens (`cleanup X-N`, `M4.5`, "the spike"). Stopping those from
+> re-entering is a **separate grep step (A9)**, not a clang-format responsibility.
 
 **Effort.** **XS.**
 
@@ -467,10 +483,78 @@ is structural). **Diff the box golden suite before/after = unchanged.**
 
 ---
 
+## A9 — Provenance-token regression grep-gate (no new ticket / milestone / "spike" token in shipping comments)  *(HIGH — XS effort)*  ·  *(cross-cut gap G1 CI-half, from `docs/kimiactions/04`)*
+
+**What's needed.** The shipping + **public** source carries internal-provenance archaeology
+*inside comments* — `cleanup X-N/B-N` ticket codes, `group-N` campaign labels,
+`M4`/`M4.5`/`M5` milestone codes, and "the spike" references — and it reaches the **public
+seam** and **public include**. Verified at HEAD:
+- `cleanup X-N/B-N` on the public seam `src/device/backend.hpp:56,74,581` and the public
+  include `include/steppe/config.hpp:249,312,399,431`;
+- "the spike" on the public include `include/steppe/config.hpp:10,33,66` (and many more),
+  plus `src/device/cuda/device_buffer.cuh:9`, `stream.hpp:5`, `handles.hpp:5`;
+- aggregate density: **~119** `cleanup X-N` hits + **~57** `group-N` hits across
+  `src/`+`include/`, and milestone tokens **M4×146 / M4.5×63 / M5×56**.
+
+This is the single worst senior-first-impression signal — a public header reading as a
+private engineering journal. **The one-time SCRUB of these is a *separate* action**
+(`03-low-polish.md` G1 "Comment hygiene for an external reader", public-surface-first).
+**This item is only the regression guard** that stops new tokens from re-entering after
+(and during) the scrub.
+
+> **Critical caveat (why this cannot be a clang-format job).** The planned A4 clang-format
+> step runs with **comment reflow OFF**, so it reformats whitespace but **never rewrites
+> comment content** — it will not strip these tokens; it *entrenches* them. The regression
+> guard MUST therefore be a **separate grep step**, a sibling of the A6 arch-grep gate, not
+> a formatter responsibility.
+
+**Optimal end state.** A `scripts/provenance_token_gate.sh` wired as a fast standalone CI
+job next to A6, greping first-party comments for any NEW internal-provenance token and
+FAILing CI on a hit:
+- `cleanup [A-Z]-?[0-9]` (e.g. `cleanup X-8/B16`, `cleanup C-1`),
+- `group-[0-9]` (campaign group labels),
+- `M[0-9]\.?[0-9]*` milestone codes (`M4`, `M4.5`, `M5`) — word/comment-anchored to avoid
+  false hits on legitimate identifiers,
+- `the spike` archaeology.
+**PR-diff-scoped** on PRs (only NEW/changed `+` lines gate, so the pre-scrub backlog does
+not red every PR before `03-G1` lands), **full-tree** on `main` push once the scrub is in.
+
+**Steps.**
+1. Script restricts to first-party source comments (`*.hpp/*.cuh/*.cu/*.cpp/*.h`),
+   excluding `docs/`, `experiments/`, `tests/reference/` fixtures; match comment context
+   (`//`, `///`, `/*`, ` * `) so a token inside a string literal isn't required to trip it
+   but a comment one does.
+2. PR-diff mode:
+   `git diff -U0 origin/main... -- '*.hpp' '*.cuh' '*.cu' '*.cpp' '*.h' | grep '^+' | grep -E '<token-alternation>'`
+   → any hit prints file + the offending added line + `exit 1`.
+3. Full-tree mode for `main` push (post-scrub): grep the trees; expected zero.
+4. Dev-side message: "internal provenance tokens (cleanup / group / M-milestone / spike)
+   must not appear in shipping comments — see `docs/kimiactions/03` G1."
+5. **Sequence:** land the gate in **PR-diff mode alongside A6 immediately** (guards all new
+   code); flip to **full-tree blocking only after `03-G1`'s scrub** clears the ~119+ backlog
+   (otherwise the existing hits red every push).
+
+**Effort.** **XS.**
+
+**Parity-risk.** **None** — read-only grep over comments; no compile, no compute,
+**golden-neutral** (comment-only by construction; cannot move a golden).
+
+**Verify.** Add `// cleanup Z-9` (or `// M4.5 perf note`) to a changed `.cu` in a PR → gate
+fails with `file:line`; remove → green. Confirm full-tree mode is **not** switched to
+blocking until `03-G1` lands. Confirm a legitimate identifier (e.g. a variable named `m5`)
+is not falsely flagged (comment-anchored).
+
+**Files.** `scripts/provenance_token_gate.sh`, `.github/workflows/host-ci.yml`; *(guards,
+not edited here)* `src/device/backend.hpp`, `include/steppe/config.hpp`.
+
+---
+
 # Cluster B — GPU parity CI (Phase 1 + 2)
 
 > Priority: **HIGH** for the lane that proves production numerics (B2/B3/B5); the
-> option-evaluations (B6 Option A defer, B7 Option C reject) are recorded decisions.
+> option-evaluations (B6 Option A defer, B7 Option C reject) are recorded decisions. **B9**
+> (compute-sanitizer lane) is the Phase-2 hardening item that itemizes the sanitizer pass
+> the §0 framing/table reference.
 
 ## B.0 — GPU-runner option comparison (the decision, on the record)
 
@@ -846,12 +930,75 @@ a gate failure.
 
 ---
 
+## B9 — GPU compute-sanitizer lane (Phase 2), with the bare-`cudaGetLastError` post-launch prerequisite  *(MED)*  ·  *(cross-cut gap G4 dependency note, from `docs/kimiactions/04`)*
+
+**What's needed.** The §0 framing + the §2 phase table both name a **compute-sanitizer**
+pass as part of Phase-2 hardening, but the plan never itemizes it — and the `04` cross-cut
+doc references it as "the `02-ci-plan` one-shot compute-sanitizer pass." This item gives the
+lane a home **and records the dependency that makes it actually useful.**
+
+**The dependency (cross-cut gap G4).** There are **14 bare `STEPPE_CUDA_CHECK(cudaGetLastError())`
+post-launch sites** — verified at HEAD across **3 files** (the `04` doc says "4 files" but
+lists 3): `src/device/cuda/dates_kernel.cu` ×9 (`:341,:351,:360,:368,:377,:385,:395,:405,:417`),
+`src/device/cuda/dstat_kernel.cu` ×2 (`:281,:292`), `src/device/cuda/qpgraph_fit_kernels.cu`
+×3 (`:492,:511,:538`). The bare form checks only **synchronous launch-config** errors. The
+canonical `STEPPE_CUDA_CHECK_KERNEL()` (defined `src/device/cuda/check.cuh:332`) additionally
+performs the debug-only `cudaDeviceSynchronize` that gives compute-sanitizer proper
+**launch-site + async-fault attribution** on exactly these dates/dstat/qpgraph kernels.
+Converting the 14 → `CHECK_KERNEL` is **a PREREQUISITE / multiplier** for this lane: without
+it, the sanitizer pass loses launch-site attribution precisely where these kernels fault.
+**The 14-site conversion itself is `03-low-polish.md` G4 (the actual fix); this item records
+the dependency and consumes the result.**
+
+**Optimal end state.** A Phase-2 `slow`/nightly tier in `gpu-parity.yml` (same vast sm_120
+JIT engine as B2, the only place compute-sanitizer can run) executes
+`compute-sanitizer --tool memcheck` (plus `racecheck`/`synccheck`/`initcheck` variants) over
+`ctest -L parity` **after** the `03-G4` conversion lands — so any async kernel fault is
+attributed to its launch site rather than a downstream sync. Advisory/non-blocking at first
+(sanitizer overhead + first-run triage), promotable to a pre-release gate once clean. Kept
+**off** the per-PR path (sanitizer is slow + GPU-only); lives next to B4's AADR tier and
+B5's determinism assertion.
+
+**Steps.**
+1. **Sequence `03-G4` FIRST:** convert the 14 bare post-launch checks to
+   `STEPPE_CUDA_CHECK_KERNEL()`. Its `cudaDeviceSynchronize` is **compiled out under
+   Release/NDEBUG** (zero production cost; the attribution benefit is the sanitizer/debug
+   build). Without it, this lane loses launch-site attribution on the dates/dstat/qpgraph
+   kernels — the note belongs here so the dependency is explicit and ordered.
+2. Add a Phase-2 job to `.github/workflows/gpu-parity.yml` (schedule/dispatch only, same
+   vast JIT engine as B2) that builds a sanitizer-friendly config and runs
+   `compute-sanitizer … ctest -L parity`.
+3. Start `continue-on-error: true` (advisory) while the surface is triaged; promote to a
+   pre-release gate once clean.
+4. Keep it out of the per-PR path and out of the timing tier (B8) — sanitizer overhead
+   makes any wall-time meaningless.
+
+**Effort.** **S** (the CI lane). The 14-site prerequisite is **XS** and lives in `03-G4`.
+
+**Parity-risk.** **None** — `compute-sanitizer` is an observation tool; the
+`CHECK_KERNEL` swap only adds a **debug-only** `cudaDeviceSynchronize` (compiled out under
+NDEBUG/Release, the production path), touching no kernel math, no reduction order, no
+golden. **Golden-neutral.**
+
+**Verify.** After `03-G4` lands, inject a deliberate out-of-bounds in a dates kernel on a
+scratch branch → compute-sanitizer reports it **at the launch site** (not a later sync);
+with the old bare check the report would land at a downstream sync. Confirm the Release
+build is unaffected (the added sync is NDEBUG-gated).
+
+**Files.** `.github/workflows/gpu-parity.yml`, `src/device/cuda/check.cuh`,
+`src/device/cuda/dates_kernel.cu`, `src/device/cuda/dstat_kernel.cu`,
+`src/device/cuda/qpgraph_fit_kernels.cu`, `docs/BOX-RUNBOOK.md`.
+
+---
+
 # 3. Recommended sequence
 
 **Two independent tracks; do the cheap text gates and the structural enabler first.**
 
-1. **A6 arch-grep** + **A4 clang-format** — XS, no build, no dependency. Land day one as
-   standalone fast jobs; immediate §4-layering + style signal.
+1. **A6 arch-grep** + **A4 clang-format** + **A9 provenance-token gate** — XS, no build, no
+   dependency. Land day one as standalone fast jobs; immediate §4-layering + style +
+   provenance-hygiene signal. A9 lands in **PR-diff mode** (guards new code now; flip to
+   full-tree blocking only after the `03-G1` scrub clears the ~119+ backlog).
 2. **A1 `STEPPE_ENABLE_CUDA`** — the hard prerequisite. Nothing host-only configures until
    this lands. Verify byte-identical box configure.
 3. **A2 LABELS + test guards** → **A3 host preset + `host-ci.yml`** — the 11-test host lane
@@ -861,14 +1008,15 @@ a gate failure.
    the only lane that proves parity. **B3 hybrid wiring** + **B4 secrets/data tiering** in
    parallel.
 5. **B5 §12 determinism CI assertion** — *after* the separate High wire/doc decision;
-   golden-gated on sm_120.
+   golden-gated on sm_120. **B9 compute-sanitizer lane** — *after* `03-G4` converts the 14
+   bare post-launch checks (its multiplier); advisory first, then a pre-release gate.
 6. **B8 benches-off-gate** — confirm/lock; **B6 (Option A)** and **B7 (Option C)** are
    recorded decisions, near-zero build cost.
 7. **A8** — optional refactor lifting the host lane 11 → ~21; do it only when the
    host-orchestration logic churns enough to justify L effort.
 
 **Build order in one line:**
-`A6/A4 → A1 → A2 → A3 (+A5,A7) → B2 → B3+B4 → B5 → B8/B6/B7 → A8`.
+`A6/A4/A9 → A1 → A2 → A3 (+A5,A7) → B2 → B3+B4 → B5 → B9(after 03-G4)/B8/B6/B7 → A8`.
 
 ---
 
@@ -884,6 +1032,7 @@ a gate failure.
 | **A6** | arch-grep §4 gate | 0 | MED | XS | none | — |
 | **A7** | cmake-lint `--check` | 0 | LOW | S | none | — |
 | **A8** | host-buildable core slice (11→~21) | 0 | LOW (opt) | L | none if pure re-home (stub must throw) | A1, A2 |
+| **A9** | provenance-token regression grep-gate *(cross-cut G1)* | 0 | **HIGH** | XS | none (comment-only, golden-neutral) | — (scrub = `03` G1) |
 | **B2** | vast.ai ephemeral JIT GPU runner | 1 | **HIGH** | L | infra; REJECT-preflight + on-demand guard | A2 (labels) |
 | **B3** | hybrid topology wiring | 1 | **HIGH** | M | none (cadence) | B1, B2 |
 | **B4** | secrets / AADR tiering / sweeper | 1–2 | MED | M | none to math | B2 |
@@ -891,11 +1040,16 @@ a gate failure.
 | **B6** | Option A persistent box | — | DEFER | M | same as B2 | — |
 | **B7** | Option C hosted/cloud GPU | — | REJECT | S | N/A (risk avoided) | — |
 | **B8** | benches off the gate | 2 | MED | S | none | B2 |
+| **B9** | GPU compute-sanitizer lane *(cross-cut G4 dep)* | 2 | MED | S (CI half) | none (golden-neutral; sync is NDEBUG-gated) | B2, `03` G4 |
 
 **Net posture:** every item is build/CI infra and **behavior-neutral by construction**, held
 that way by two rules — (1) all formatters/linters run **check-only**, never `--fix` /
 auto-commit, so no parity-load-bearing literal is rewritten; (2) `STEPPE_ENABLE_CUDA`
 **defaults ON** so the box/production configure is byte-identical and host branches are dead
-code on the GPU build. The **single** exception is B5's coupled wiring half — the only thing
-in this plan that could move a golden, and it is golden-gated on sm_120 before merge. The
-host lane is a fast **smoke/seam** gate; **parity acceptance remains the box's job.**
+code on the GPU build. The two **cross-cut additions** folded in from our X1–X7 review
+(`docs/kimiactions/04`) — **A9** (a comment-only regression grep) and **B9** (a sanitizer
+*observation* lane whose only source touch, the `03-G4` `CHECK_KERNEL` swap, adds an
+NDEBUG-gated sync compiled out in production) — are likewise **golden-neutral**. The
+**single** exception that can move a golden remains B5's coupled wiring half, and it is
+golden-gated on sm_120 before merge. The host lane is a fast **smoke/seam** gate; **parity
+acceptance remains the box's job.**

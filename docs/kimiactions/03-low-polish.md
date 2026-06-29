@@ -34,6 +34,96 @@ scripts), not depth.
 first (they de-risk the separate §3-HIGH host-only CI lane), then the profiling-unlock +
 robustness fixes, then the portfolio DX surface.
 
+**Cross-cut additions (this revision).** The new **Cluster D** item **D1** and the items
+**A6–A8 / B6–B9 / C6–C9** below were folded in from our own consolidated cross-cutting review
+(`docs/release_cleanup/crosscutting/X1–X7`) via the reconciliation
+`docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5 — gaps the X-review caught (several also caught
+by Kimi) that the `a2f9d64..HEAD` source-hygiene campaign **neither fixed nor planned**. Every
+one is **comment / doc / structure / dead-code and golden-neutral by construction** (the §12
+PARITY LAW is untouched); each carries a `(cross-cut gap GN, from docs/kimiactions/04)`
+provenance tag. **Cluster D (comment hygiene for an external reader) leads the sequence** — it
+is the single highest first-impression signal at near-zero effort, and its regression
+**grep-gate lives in `02-ci-plan.md`** (next to the arch-grep A6), because the planned
+clang-format pass runs comment-reflow **OFF** and would otherwise *entrench* these tokens rather
+than strip them.
+
+---
+
+# Cluster D — Comment hygiene for an external reader (cross-cut; DO FIRST)
+
+> **Leads the sequence despite the letter.** One deliberate comment-only pass over shipping +
+> public source, public-surface first. Highest senior-first-impression signal in the whole
+> document at the lowest effort; golden-neutral by construction. The regression gate that keeps
+> it scrubbed lives in `02-ci-plan.md` (grep-gate sibling of the arch-grep A6).
+
+## D1 — Purge ticket / milestone / "spike" archaeology, public-surface first  ·  **P1 · Effort S (breadth)**
+
+> *(cross-cut gap **G1** — folds **G14** + **G15** — from `docs/kimiactions/04-crosscut-vs-kimi.md`
+> §3/§5; X7-F1/F2/F4/F5, X2-#10, X2-#11–14, X7-F8/F9.)*
+
+**What's needed.** Shipping + **public** source carries internal provenance tokens that read as a
+private engineering journal. Verified at HEAD: **119** `cleanup [A-Z]-?[0-9]` hits across **38**
+source files (the broader ticket-token total ≈252 once milestone codes are counted). The tags
+reach the **public seam** `src/device/backend.hpp:56,74,581` (e.g. `:56`
+`/// DIAGONAL CONVENTION (pinned; cleanup X-2/B4): …`) and the **public include**
+`include/steppe/config.hpp` at **8 sites** (lines 7,10,33,66,91,147,249,312, carrying
+ROADMAP/spike/milestone and `cleanup X-8`/`cleanup X-6` tokens). Bare milestone codes are dense
+in source: **M4×83, M4.5×63, M5×56** (word-bounded `grep -P`, source-only — the review's
+155/69/59 also counted docs). "the spike" archaeology persists in
+`src/device/cuda/device_buffer.cuh:9-10`, `stream.hpp:5-6,108`, `handles.hpp:5`, and
+`config.hpp:10,33,66`. **Bundle two siblings into the same pass:** **G14** stale self-changelog
+one-liners — `model_search.cpp:173-174` ("The doc once said … WRONG"),
+`qpgraph_fit_kernels.cu:254` ("unscaled q for now" though scaling completes at `:264`),
+`log.hpp:7,15,24,25` ("eventually a spdlog backend … swap later"), `check.cuh:25,227,290`
+(`TODO(M4.5)` ×3) — and **G15** ALL-CAPS / charged-vocabulary density (verified source-only:
+`NEVER×107`, `MUST×27`, `LAW×8`, `REJECTED×11`).
+
+**Optimal end state.** **Public surface first** — `include/steppe/config.hpp` and
+`src/device/backend.hpp` read self-contained with **zero** ROADMAP / milestone / ticket
+citations; the comment's *rationale* is kept, only the provenance tag is stripped (e.g.
+`/// (pinned; cleanup X-2/B4): f2(i,i) carries the FULL …` → `/// f2(i,i) carries the FULL …`).
+Then the private headers/TUs. Milestone codes survive **only** where the sentence is genuinely
+explaining that design phase, never as a bare "added in Mx" timestamp. ALL-CAPS is reserved for
+true parity/precision invariants (§12). The self-changelog lines are reworded to describe the
+code **as it is**, not the history of edits. Campaign Group-8 (`30df7c5`) removed **zero** ticket
+tags, so this is net-new work, not a re-tread.
+
+**Steps.**
+1. **Public surface FIRST.** Scrub `include/steppe/config.hpp` (the 8 sites) and
+   `src/device/backend.hpp:56,74,581`: strip the `cleanup X-N/B-N`, `ROADMAP §…`, milestone, and
+   `spike` tokens while preserving every sentence of rationale.
+2. Sweep the remaining ~36 source files for `cleanup [A-Z]-?[0-9]` / `group-[0-9]` and delete the
+   tag (keep the surrounding explanation).
+3. Reword bare milestone codes: keep `M4`/`M4.5`/`M5` only where the sentence explains that design
+   phase; drop them where they are a bare "added in Mx" timestamp.
+4. **G14**: reword the self-changelog lines (`model_search.cpp:173-174`,
+   `qpgraph_fit_kernels.cu:254`, `log.hpp:7,15,24,25`, `check.cuh:25,227,290`) to describe present
+   behavior, not a history of edits. (The `qpgraph_fit_kernels.cu:254` "unscaled q for now" is
+   simply describing an intermediate that `:264` then scales — reword to say so.)
+5. **G15**: down-case the charged vocabulary except on genuine parity/precision invariants (§12).
+6. Do this as a **deliberate comment-only edit** — the `02-ci-plan.md` clang-format pass runs
+   comment-reflow **OFF** and will *entrench* these tokens, so the scrub must be its own step, not
+   a formatter side effect.
+
+**Parity-risk.** **None — comment-only, golden-neutral by construction.** No statement, no math
+name, no reduction order, no literal value changes; nothing in the §12 statistic stream is
+touched, every golden is byte-identical. The only failure mode is deleting a token that was
+load-bearing context (e.g. a constant whose audit trail genuinely needs the "promoted from the
+spike's bare `1e-12`" note) — guarded by **keeping the rationale and stripping only the tag**,
+never the sentence.
+
+**Verify.** `grep -rIE 'cleanup [A-Z]-?[0-9]|group-[0-9]' include/steppe/config.hpp src/device/backend.hpp`
+→ **0**; whole-tree `cleanup`-token count drops from 119 toward 0; the public include + seam read
+clean to an external reviewer. The `02-ci-plan.md` grep-gate (the A6 sibling) then locks it
+against regression. No build/test behavior change (comment-only; compiles on every lane — including
+local).
+
+**Files.** `include/steppe/config.hpp`, `src/device/backend.hpp` (public, first); then the ~36
+remaining `cleanup`-tagged TUs across `src/device` + `src/core`; specifically
+`src/core/qpadm/model_search.cpp`, `src/device/cuda/qpgraph_fit_kernels.cu`,
+`src/core/internal/log.hpp`, `src/device/cuda/check.cuh`,
+`src/device/cuda/{device_buffer.cuh,stream.hpp,handles.hpp}`.
+
 ---
 
 # Cluster A — Tooling / build polish (CI + iteration enablers)
@@ -278,6 +368,151 @@ is unaffected.
 
 ---
 
+## A6 — Record the `src/core/qpadm/` directory-misnomer decision (rename to `src/core/fit/`, OR document the grab-bag)  ·  **P2 · Effort S (decision XS; execution S)**
+
+> *(cross-cut gap **G7** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X3-#3. Caught by
+> **neither** review's action plans — Kimi's closest hit (`06:60`) is build-target granularity, not
+> the dir name — so this exists only to make the misleading name read as a deliberate choice.)*
+
+**What's needed.** The directory named for qpAdm is a grab-bag of **28 files** (verified at HEAD)
+that houses far more than qpAdm: the qpGraph family (`qpgraph_enumerate.{cpp,hpp}`,
+`qpgraph_fit.cpp`, `qpgraph_model.{cpp,hpp}`, `qpgraph_objective.hpp`, `qpgraph_opt_constants.hpp`,
+`qpgraph_search.cpp` — 8 files), the f-statistics (`f3.cpp`, `f3_triples.hpp`, `f4.cpp`,
+`f4_matrix.hpp`, `f4_quartets.hpp`, `f4ratio.cpp`), the all-quartets sweep (`fstat_sweep.cpp`), the
+model-space search (`model_search*.{cpp,hpp}`, `nested_models.{cpp,hpp}`), plus the genuine qpAdm
+fit (`qpadm_fit.{cpp,hpp}`, `qpadm_bounds.hpp`, `ranktest.{cpp,hpp}`, `gls_solve.hpp`,
+`jackknife.hpp`). An external reader opening `src/core/qpadm/` to find f4 or qpGraph is misled by
+the name. **Caught NOWHERE** — no `ASSESSMENT` decision exists.
+
+**Optimal end state.** Either (a) **rename** `src/core/qpadm/ → src/core/fit/` (it is the
+fit/search/stats engine, not just qpAdm), or (b) **split** `qpgraph_* → src/core/qpgraph/` and
+`f3/f4/f4ratio/fstat_sweep → src/core/fstats/` — **note `src/core/fstats/` already exists** for the
+f2-blocks family (`f2_blocks_multigpu*`, `f2_combine`, `f2_from_blocks`, …), so a split must merge
+into it, not collide. **Even if the decision is DEFER**, the outcome is a **recorded decision** (a
+one-line note in `architecture.md`'s module map + a `// see architecture.md §… — this dir is the
+fit/search/stats engine, not qpAdm-only` header pointer) so the name reads as a weighed choice, not
+an accident. The decision must **weigh the git-history cost** (a 28-file `git mv` rewrites blame
+across the most-touched core dir) against the readability gain — that trade is the whole content of
+this item.
+
+**Steps.**
+1. **Decide** (the XS part): rename-to-`fit/`, split-into-`qpgraph/`+`fstats/`, or DEFER-and-document.
+   Pairs with Kimi `06:60` (the steppe_core sublibrary split) — coordinate so a rename does not
+   thrash a sublibrary boundary that item also moves.
+2. If **rename**: `git mv src/core/qpadm src/core/fit`; update `src/core/CMakeLists.txt` source
+   paths, every `#include "core/qpadm/…"` (grep the tree), and the `architecture.md` module map.
+   One mechanical commit; goldens re-run as the gate.
+3. If **split**: move `qpgraph_*` to a new `src/core/qpgraph/`, fold `f3/f4/f4ratio/fstat_sweep`
+   into the **existing** `src/core/fstats/`, leave the true qpAdm fit in place (or under `fit/`);
+   update includes + CMake source lists accordingly.
+4. If **DEFER**: add the recorded-decision note (module-map line + header pointer) and stop. This is
+   the XS floor and is acceptable per the cross-cut brief ("record it even if the decision is DEFER").
+
+**Parity-risk.** **None — structure/doc only, golden-neutral.** A rename/move changes no source
+text, no math, no reduction order; the goldens are the guard and stay byte-identical. The only
+hazard is a missed `#include` path after a `git mv`, which is a **compile error, not a parity
+move** — caught immediately by the build. The DEFER path touches only a comment + `architecture.md`.
+
+**Verify.** DEFER: `architecture.md` module map names the dir's true scope and a header pointer
+exists. Rename/split: `cmake --preset ci` configures, the full build links on box5090, and the
+qpAdm / qpGraph / f4 / fstat-sweep parity goldens are **bit-identical** (the move changed only file
+locations). `grep -rn 'core/qpadm/' src include bindings tests` returns zero stale include paths.
+
+**Files.** DEFER: `docs/architecture.md`, plus a one-line header pointer in
+`src/core/qpadm/qpadm_fit.hpp`. Rename/split: `src/core/qpadm/` (→ `src/core/fit/` or
+`src/core/qpgraph/` + `src/core/fstats/`), `src/core/CMakeLists.txt`, every dependent `#include`,
+`docs/architecture.md`.
+
+---
+
+## A7 — Dead `DeviceConfig` knobs: `stream_count` / `search_streams` / `use_mem_pool` (+ `kDefaultSearchStreams`)  ·  **P2 · Effort XS**
+
+> *(cross-cut gap **G8** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X6-1. Same
+> "declared-not-wired" pattern this plan already treats for `STEPPE_SANITIZER`/`STEPPE_NVTX` — see
+> B1.)*
+
+**What's needed.** Three `DeviceConfig` fields read as live throughput knobs but have **zero
+production consumers** (verified — a tree grep finds them only at their own declaration + default):
+`stream_count = 1` (`include/steppe/config.hpp:353`), `search_streams = kDefaultSearchStreams`
+(`:357`, with `kDefaultSearchStreams = 4` at `:183`), and `use_mem_pool = true` (`:362`). The
+device path opens a single statistic stream unconditionally per §12, and `cudaMallocAsync` is used
+**unconditionally** — `use_mem_pool` never gates it. The only other references are in a doc-comment
+banner at `:440,451` (prose about the parked multi-GPU recompute path), not live code. Kimi
+(`08:419`) names `stream_count` only to argue for a `validate()` hook — a *different* angle — and
+never flags it dead.
+
+**Optimal end state.** The fields no longer read as live tuning surface. Either **delete** the
+three fields + `kDefaultSearchStreams` (and the `:440,451` banner prose that describes them), or —
+if any is genuinely forward-reserved for the parked multi-GPU/S8 work — **replace the live-sounding
+paragraph with a one-line "forward-reserved for parked multi-GPU/S8; not wired" note** so a reader
+isn't misled into thinking turning a knob changes behavior. `stream_count` in particular is a §12
+trap: it *looks* tunable but **must** stay 1 on the statistic path.
+
+**Steps.**
+1. Confirm dead at HEAD (re-grep `stream_count|search_streams|use_mem_pool|kDefaultSearchStreams`
+   across `src include bindings` — only the config.hpp sites + the doc banner should appear).
+2. Choose per field: **delete** if truly vestigial, or **demote to a one-line forward-reserved
+   note** if parked-multi-GPU genuinely intends to wire it.
+3. If deleting `use_mem_pool`: leave the `cudaMallocAsync` call unconditional (it already is) and
+   drop only the field + its §7/§11.2 doc paragraph.
+4. Keep the existing `:440` banner's accurate sentence that `stream_count` is **forced to 1 on the
+   statistic path**; remove only the live-knob framing.
+
+**Parity-risk.** **None — these knobs are not wired to any compute.** Deleting an unconsumed field
+cannot move a value; the single stream + unconditional `cudaMallocAsync` behavior is unchanged, so
+every golden is byte-identical. Only failure mode: a hidden consumer the grep missed → a **compile
+error**, not a parity move; the build catches it. If any field is set by a test fixture, keep it as
+the documented forward-reserved no-op rather than deleting.
+
+**Verify.** `grep -rn 'stream_count\|search_streams\|use_mem_pool\|kDefaultSearchStreams' src include bindings tests`
+shows only intended sites after the edit; `cmake --preset ci` + full build link on box5090; the
+qpAdm/f2 goldens are bit-identical (no compute touched).
+
+**Files.** `include/steppe/config.hpp`.
+
+---
+
+## A8 — `target_compile_features(cxx_std_20)` on `steppe_core` + `steppe_device`  ·  **P3 · Effort XS**
+
+> *(cross-cut gap **G16** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X1-F7.)*
+
+**What's needed.** The C++20 standard is declared per-target with `target_compile_features(…
+cxx_std_20)` on **7** targets at HEAD — `steppe_access` (`src/access/CMakeLists.txt:34`),
+`steppe_extract` (`src/extract/CMakeLists.txt:38`), `steppe_core_internal` INTERFACE
+(`src/core/CMakeLists.txt:34`), `steppe_app` (`src/app/CMakeLists.txt:61`), `steppe_api`
+(`include/CMakeLists.txt:17`), `steppe_io` (`src/io/CMakeLists.txt:42`), `_core`
+(`bindings/CMakeLists.txt:63`). But the two **STATIC compute libraries** omit it:
+`steppe_core` (the STATIC lib at `src/core/CMakeLists.txt:67`) and `steppe_device`
+(`src/device/CMakeLists.txt:22`) declare no `target_compile_features`. They compile as C++20 today
+only by transitively inheriting it — the standard isn't declared the same way across the tree, an
+inconsistency a reader (and a future consumer of the targets) trips on.
+
+**Optimal end state.** All compile targets declare the standard the same way: add
+`target_compile_features(steppe_core PUBLIC cxx_std_20)` and
+`target_compile_features(steppe_device PUBLIC cxx_std_20)` so the C++20 floor is explicit and
+self-documenting on every target, matching the existing 7. A 2-line CMake add.
+
+**Steps.**
+1. `src/core/CMakeLists.txt` after the `add_library(steppe_core STATIC …)` block (`:67`): add
+   `target_compile_features(steppe_core PUBLIC cxx_std_20)`.
+2. `src/device/CMakeLists.txt` after `add_library(steppe_device STATIC …)` (`:22`): add
+   `target_compile_features(steppe_device PUBLIC cxx_std_20)`.
+3. Use `PUBLIC` to match the access/extract/io STATIC libs (so the requirement propagates the same
+   way), not `PRIVATE`.
+
+**Parity-risk.** **None — build-metadata only.** These targets already compile as C++20 by
+inheritance; declaring it explicitly changes no flags that reach codegen on a correctly-configured
+build (the standard is identical), so objects are byte-identical and no golden moves. Only failure
+mode: a stale toolchain that was silently compiling these as a *lower* standard would now fail to
+configure — which is the **desired** surfacing, not a regression.
+
+**Verify.** `cmake --preset ci` configures clean; `grep -rn cxx_std_20 src include bindings` now
+shows **9** targets (7 + the two added); full build links on box5090; qpAdm/f2 goldens bit-identical.
+
+**Files.** `src/core/CMakeLists.txt`, `src/device/CMakeLists.txt`.
+
+---
+
 # Cluster B — Small code / robustness polish
 
 > NVTX is the highest-leverage single item in the document: it unlocks real Nsight profiling
@@ -498,11 +733,178 @@ allocation-count tidiness + a defensive cap, **not a measured win** — file as 
 
 ---
 
+## B6 — 14 bare `STEPPE_CUDA_CHECK(cudaGetLastError())` → canonical `STEPPE_CUDA_CHECK_KERNEL()`  ·  **P1 · Effort S (breadth) — do before the compute-sanitizer pass**
+
+> *(cross-cut gap **G4** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X1-F1. Framed as a
+> prerequisite/multiplier for the `02-ci-plan.md` §3-High one-shot compute-sanitizer pass — do this
+> FIRST so that pass keeps launch-site attribution.)*
+
+**What's needed.** Fourteen post-launch error checks call the bare
+`STEPPE_CUDA_CHECK(cudaGetLastError())` instead of the canonical `STEPPE_CUDA_CHECK_KERNEL()` macro
+(defined at `src/device/cuda/check.cuh:332`). Verified at HEAD — **14** sites across 3 files:
+`dates_kernel.cu` (×9), `qpgraph_fit_kernels.cu` (×3), `dstat_kernel.cu` (×2). (A 15th
+`STEPPE_CUDA_CHECK(cudaGetLastError())` lives inside `check.cuh` itself — the macro's own body — and
+is **not** a site to change.) The bare form only pops the launch-config error; `CHECK_KERNEL` adds
+the **debug-only** `cudaDeviceSynchronize` that attributes an *async* kernel fault to the launch
+site under compute-sanitizer.
+
+**Optimal end state.** All 14 post-launch sites use `STEPPE_CUDA_CHECK_KERNEL()`, so the
+*already-planned* compute-sanitizer pass (`02-ci-plan` §3-High) reports faults in the dates / dstat /
+qpgraph kernels **at their launch site** rather than at some later unrelated sync. The canonical
+macro becomes the one post-launch check pattern across the device layer. Zero behavior change in a
+release build (the extra sync is debug-only inside the macro).
+
+**Steps.**
+1. In `dates_kernel.cu` (9 sites), `qpgraph_fit_kernels.cu` (3), `dstat_kernel.cu` (2): replace each
+   post-launch `STEPPE_CUDA_CHECK(cudaGetLastError());` with `STEPPE_CUDA_CHECK_KERNEL();`.
+2. Confirm each is genuinely a **post-kernel-launch** check (not a generic API-return check) so the
+   semantic swap is correct; leave the `check.cuh:332` macro definition and its internal
+   `cudaGetLastError` untouched.
+3. Re-grep to confirm 0 bare `STEPPE_CUDA_CHECK(cudaGetLastError())` remain outside `check.cuh`.
+
+**Parity-risk.** **None — golden-neutral.** `STEPPE_CUDA_CHECK_KERNEL` checks the *same* launch
+error and adds only a **debug-only** synchronize; in the release/parity build the emitted check is
+equivalent, no math, no stream, no reduction order changes, every golden byte-identical. Only
+failure mode: applying the swap to a non-launch `cudaGetLastError` site (semantically wrong) —
+guarded by the per-site "is this a post-launch check" audit in step 2.
+
+**Verify.** `grep -rn 'STEPPE_CUDA_CHECK(cudaGetLastError())' src` returns only `check.cuh`;
+release build on box5090 links and the dates/dstat/qpgraph parity goldens are bit-identical; under a
+debug `compute-sanitizer` run, an injected fault in one of these kernels now reports the launch
+site (the multiplier the planned sanitizer pass wants).
+
+**Files.** `src/device/cuda/dates_kernel.cu`, `src/device/cuda/qpgraph_fit_kernels.cu`,
+`src/device/cuda/dstat_kernel.cu`.
+
+---
+
+## B7 — Remove the vestigial `rank_test` virtual (base throws, both backends override, only caller is an uncalled wrapper)  ·  **P2 · Effort XS**
+
+> *(cross-cut gap **G9** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X6-2. A concrete
+> down-payment on `ASSESSMENT §5.2` "slim the backend.hpp seam (DEFER)" — trims one virtual without
+> the full role-split.)*
+
+**What's needed.** `ComputeBackend::rank_test` is a vestigial virtual: the base declaration
+**throws** "not implemented by this backend" (`src/device/backend.hpp:1692`, throw at `:1698`), both
+backends override it (`cuda_backend.cu:4386`, `cpu_backend.cpp:1556`), and its **only** "caller" is
+a free-function wrapper `rank_test(ComputeBackend&, …)` in `src/core/qpadm/gls_solve.hpp:17` that
+**has zero callers itself** (verified — a tree grep for `rank_test` outside the four
+declaration/override/wrapper sites is empty). The live rank path uses `rank_sweep` + `gls_weights`,
+not `rank_test`. So the virtual + two overrides + wrapper are dead weight on the already-fat
+56-virtual `backend.hpp` seam.
+
+**Optimal end state.** The `rank_test` pure-virtual declaration, the two backend overrides, and the
+`gls_solve.hpp` wrapper are all deleted. The `ComputeBackend` interface shrinks by one virtual; the
+backends drop ~30 lines each of unreachable seed-factor code; `gls_solve.hpp` loses an unused entry
+point. Nothing in the live `rank_sweep`/`gls_weights` path changes.
+
+**Steps.**
+1. Confirm dead at HEAD: `grep -rn 'rank_test' src bindings tests` shows only `backend.hpp:1692/1698`,
+   `cuda_backend.cu:4386`, `cpu_backend.cpp:1556`, `gls_solve.hpp:17,20` — no live caller.
+2. Delete the `gls_solve.hpp` free-function wrapper (`:17–20`) first (it is the only named consumer).
+3. Delete the `rank_test` override in `cuda_backend.cu:4386…` and in `cpu_backend.cpp:1556…`.
+4. Delete the base virtual declaration + throw body in `backend.hpp:1692–1698`; tidy the adjacent
+   doc comment at `:1704` that references the `rank_test seed → als refine → chisq` machinery if it
+   no longer applies.
+
+**Parity-risk.** **None — dead code, golden-neutral.** The deleted virtual is never invoked on the
+live path (the only wrapper that names it has zero callers), so removing it moves no value; every
+golden is byte-identical. Only failure mode: a caller the grep missed → a **compile/link error**,
+not a parity move; the build catches it immediately.
+
+**Verify.** `grep -rn 'rank_test' src bindings tests` returns **0** after the edit; full build links
+on box5090; the qpAdm fit + rank-related parity goldens (`golden_fit0`, `golden_fit1_NRBIG`) are
+bit-identical (the live `rank_sweep`/`gls_weights` path is untouched).
+
+**Files.** `src/device/backend.hpp`, `src/device/cuda/cuda_backend.cu`,
+`src/device/cpu/cpu_backend.cpp`, `src/core/qpadm/gls_solve.hpp`.
+
+---
+
+## B8 — Device-layer convention re-align (the two lone-deviator files)  ·  **P3 · Effort XS**
+
+> *(cross-cut gap **G11** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X1-F2/F3/F4. One
+> tiny cosmetic commit collapsing the few device-TU convention deviations.)*
+
+**What's needed.** A handful of device TUs deviate from the established conventions the other 43
+device TUs follow. Verified at HEAD: (a) `qpgraph_fit_kernels.{cu,cuh}` open
+`namespace steppe::device::cuda` (`qpgraph_fit_kernels.cuh:12`, `.cu:37`) where 43 other device TUs
+use `namespace steppe::device`; (b) `qpgraph_fit_kernels.cuh:55` spells the raw qualifier
+`__host__ __device__` (`make_layout`) instead of the project macro `STEPPE_HD`; (c)
+`qpadm_fit_kernels.cuh` names device-pointer inputs `f2`/`vpair` with **no `d_` prefix** at the
+`launch_assemble_*` signatures (`:37` `launch_assemble_f4_gather(const double* f2, …)`, `:53`
+`launch_assemble_f4_quartets_gather`, `:69` `launch_assemble_f3_triples_gather`, `:357`
+`launch_assemble_f4_gather_models_batched`) alongside correctly-prefixed `int* d_keep`.
+
+**Optimal end state.** The deviators match the device-layer house style: `namespace steppe::device`
+(drop the extra `::cuda`), `STEPPE_HD` for the host/device qualifier, and a `d_` prefix on the
+device-pointer parameters so the same convention reads uniformly across all device TUs. One
+cosmetic re-align commit.
+
+**Steps.**
+1. `qpgraph_fit_kernels.{cu,cuh}`: change `namespace steppe::device::cuda { … }` to
+   `namespace steppe::device { … }` (open + close), and update any internal qualified references
+   accordingly.
+2. `qpgraph_fit_kernels.cuh:55`: replace raw `__host__ __device__` on `make_layout` with `STEPPE_HD`.
+3. `qpadm_fit_kernels.cuh` (`:37,:53,:69,:357`) + the matching `.cu` definitions: rename the
+   device-pointer params `f2`→`d_f2`, `vpair`→`d_vpair` to match the `d_keep` convention; update
+   call sites. **Mechanical rename only** — no logic, no argument reordering.
+
+**Parity-risk.** **None — cosmetic, golden-neutral.** A namespace move, a qualifier-macro swap, and
+parameter renames change no statement, no math, no ABI that any golden inspects; the kernels emit
+identical code. Only failure mode: a missed reference after the namespace change → a **compile
+error**, not a parity move; the build catches it.
+
+**Verify.** Full build links on box5090; `grep -rn 'steppe::device::cuda' src/device` returns 0 (or
+only intended sites); `grep -n '__host__ __device__' src/device/cuda/qpgraph_fit_kernels.cuh` returns
+0; the qpGraph + qpAdm fit parity goldens are bit-identical.
+
+**Files.** `src/device/cuda/qpgraph_fit_kernels.cu`, `src/device/cuda/qpgraph_fit_kernels.cuh`,
+`src/device/cuda/qpadm_fit_kernels.cuh`, `src/device/cuda/qpadm_fit_kernels.cu`.
+
+---
+
+## B9 — Rename the confusable sibling TUs `f2_block_kernel` vs `f2_blocks_kernel` (one `s`)  ·  **P3 · Effort XS**
+
+> *(cross-cut gap **G13** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X7-F6. X7-unique;
+> Kimi touches `f2_block_kernel.cu` for magic numbers but never flags the name trap.)*
+
+**What's needed.** Two distinct device TUs differ only by a single `s` and are trivially confused:
+`src/device/cuda/f2_block_kernel.{cu,cuh}` vs `src/device/cuda/f2_blocks_kernel.{cu,cuh}` (both
+present at HEAD). A reader or grep can't tell at a glance which is the per-block primitive and which
+is the batched-blocks path; an `#include` typo silently picks the wrong one.
+
+**Optimal end state.** One of the pair is renamed to a name that states its role unambiguously (e.g.
+the batched path → `f2_batched_kernel.{cu,cuh}`, or the singular primitive → `f2_single_block_kernel`),
+so the two filenames are no longer one keystroke apart. Includes + CMake source lists updated.
+
+**Steps.**
+1. Decide which TU is the per-block primitive and which is the batched-blocks path (read both
+   headers); pick the clearer rename (`f2_batched_kernel` is the suggested target for the `…blocks…`
+   batched TU).
+2. `git mv` the chosen `.cu` + `.cuh`; update `src/device/CMakeLists.txt` source list and every
+   `#include "…/f2_block(s)_kernel.cuh"`.
+3. Re-grep to confirm no stale include path remains.
+
+**Parity-risk.** **None — file rename only, golden-neutral.** No source text, no math, no kernel
+behavior changes; the goldens are the guard and stay byte-identical. Only failure mode: a missed
+include after the `git mv` → a **compile error**, not a parity move.
+
+**Verify.** `grep -rn 'f2_block_kernel\|f2_blocks_kernel' src include tests` shows only the
+intended (renamed) paths; full build links on box5090; the f2 / qpAdm goldens are bit-identical.
+
+**Files.** `src/device/cuda/f2_block_kernel.{cu,cuh}` and/or
+`src/device/cuda/f2_blocks_kernel.{cu,cuh}` (one pair renamed), `src/device/CMakeLists.txt`,
+dependent `#include` sites.
+
+---
+
 # Cluster C — API / developer-experience polish (portfolio value)
 
 > Five items. Three are zero-risk XS header/sugar edits that **batch into one commit**
 > (C1/C2/C3). The examples + Doxygen are S-effort portfolio surface; write the examples
 > **after** the header sugar so they showcase `Precision::emulated_fp64()` + `f2_at`.
+> *(Cross-cut additions C6–C9 below extend this cluster; C9 joins the C1/C2/C3 header-sugar batch.)*
 
 ## C1 — `Precision` named factories: `fp64()` / `emulated_fp64(bits)` / `tf32()`  ·  **P2 · Effort XS**
 
@@ -718,54 +1120,276 @@ the §3-Med host-only CI lane).
 
 ---
 
+## C6 — Unify the precision-token vocabulary across CLI / Python / emit (add `emu32` to Python)  ·  **P2 · Effort XS (sibling of C1)**
+
+> *(cross-cut gap **G6** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X4-2. The missing
+> string-token sibling of C1 — C1 fixes the C++ `Precision{Kind,bits}` struct ergonomics; this fixes
+> the **user-facing token strings** that don't agree across the three surfaces.)*
+
+**What's needed.** The precision token vocabulary splits three ways. **CLI** (`config_builder.cpp:268–280`)
+accepts `emu40|emu | emu32 | fp64 | tf32`. **Python** (`module.cpp:170–178`, `parse_precision`)
+accepts `fp64|native | emulated_fp64|emu | tf32` — **no `emu32`, so the 32-bit mantissa is
+UNSELECTABLE from Python** (verified at HEAD). The **emit** token is a third spelling (`emu|tf32|fp64`).
+So the same precision is named differently depending on the surface, and one mode is reachable from
+the CLI but not the facade. C1 does **not** address this — it's about the C++ struct, not the strings.
+
+**Optimal end state.** One accepted token set + one emitted token, consistent across CLI, Python, and
+emit. Concretely: **add `emu32`** (and the `emulated_fp64_32` long form if matching the Python style)
+to the Python `parse_precision` acceptor so 32-bit emulation is selectable; keep `native` as a
+**documented alias** of `fp64`; document the canonical set in `cli-bindings.md` and the facade
+docstrings. The emitted token agrees with one of the accepted spellings so a round-trip
+(emit → re-parse) is lossless.
+
+**Steps.**
+1. `module.cpp:170–178` `parse_precision`: add an `emu32` branch (and the long form if used) →
+   `prec.kind = EmulatedFp64; prec.mantissa_bits = 32;` mirroring the CLI's `emu32` at
+   `config_builder.cpp:271`. Note the current Python path never sets `mantissa_bits` per-token — the
+   `emu32` branch must set it explicitly (the CLI does).
+2. Reconcile the three spellings: pick the canonical accepted set (recommend the CLI's
+   `emu40|emu32|fp64|tf32` plus the documented aliases `emu`=`emu40`, `native`=`fp64`,
+   `emulated_fp64`=`emu40`) and ensure the **emit** token is one of them.
+3. Document the canonical token set + aliases in `docs/cli-bindings.md` §4.1 and the relevant facade
+   docstrings (`bindings/steppe/__init__.py`).
+4. (Optional) a static cross-check table / test asserting every CLI-accepted token has a Python
+   equivalent and vice-versa.
+
+**Parity-risk.** **None to existing goldens** — this only *adds* an accepted Python token (`emu32`)
+and aligns spellings; every previously-accepted token still maps to the same `{kind,bits}`, so no
+existing run changes precision and no golden moves. The **only** way to move a value is mis-mapping a
+token to the wrong mantissa — guarded by mirroring the CLI's exact `emu32 → {EmulatedFp64, 32}`
+mapping and a round-trip emit/parse check. (Selecting `emu32` from Python is a *new* capability, not a
+change to any committed golden, which all pin their own precision.)
+
+**Verify.** From Python, `steppe.qpadm(..., precision="emu32")` now resolves to `{EmulatedFp64, 32}`
+(previously raised); `native` still aliases `fp64`; the emitted precision token re-parses to the same
+`Precision`. CLI tokens unchanged. The qpAdm goldens (which pin their precision) are bit-identical.
+
+**Files.** `bindings/module.cpp`, `src/core/config/config_builder.cpp` (reconcile only if the emit
+token spelling moves), `docs/cli-bindings.md`, `bindings/steppe/__init__.py`.
+
+---
+
+## C7 — `dates()` typed result (`DatesResult` class), not a bare untyped dict  ·  **P3 · Effort XS**
+
+> *(cross-cut gap **G10** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X4-4. The one
+> ergonomic outlier in the Python facade — sibling of C1/C2/C3; the C++ `DatesResult` value type
+> already exists in `dates.hpp`.)*
+
+**What's needed.** Every other facade entry returns a typed result class (`QpAdmResult`,
+`QpWaveResult`, `F4Result`, `F3Result`, `F4RatioResult`, `QpGraphResult`, `QpGraphSearchResult` —
+all in `bindings/steppe/__init__.py`), but `dates()` (`__init__.py:855–881`) returns the **bare
+dict** straight from `_core.run_dates(...)` with **no return type hint** and no wrapper class. Its
+docstring even says *"Returns a dict ``{target, source1, source2, date_gen, se, fit_error_sd,
+curve_cm, curve_corr, status}``"*. This is the lone ergonomic outlier; the C++ side already has a
+`DatesResult` value type (`dates.hpp`).
+
+**Optimal end state.** A `DatesResult` facade class (matching the sibling result classes' shape:
+attribute accessors over the underlying dict, an optional `.table`/DataFrame for the
+`curve_cm`/`curve_corr` decay curve, a `__repr__`), and `dates()` annotated `-> DatesResult` (or
+`-> DatesResult | dict` if a back-compat dict escape is kept). The keys exposed today
+(`date_gen`, `se`, `fit_error_sd`, `curve_cm`, `curve_corr`, `status`, …) become typed attributes so
+`help(steppe.dates)` and IDE completion match the other tools.
+
+**Steps.**
+1. Add a `class DatesResult:` near the other result classes (`__init__.py`), wrapping the
+   `run_dates` dict; expose `date_gen`, `se`, `fit_error_sd`, `status`, `target`/`source1`/`source2`,
+   and the `curve_cm`/`curve_corr` arrays (optionally a `.curve` DataFrame), with a `__repr__`.
+2. Change `dates()` to `res = DatesResult(_core.run_dates(...)); return res` and annotate
+   `-> DatesResult`; update the docstring from "Returns a dict" to "Returns a :class:`DatesResult`".
+3. Mirror the existing classes' `as_dataframe`/`.table` convention if dates has a natural tabular
+   view (the binned decay curve).
+4. Keep the underlying dict reachable (e.g. `res.raw` or the curve accessors) so nothing that
+   consumed the dict breaks.
+
+**Parity-risk.** **None — pure Python facade shaping, golden-neutral.** No compiled code, no compute,
+no statistic stream; `_core.run_dates` is unchanged, so the numbers are identical — only the Python
+return *type* gains structure. The only failure mode is a downstream caller that indexed the dict
+(`res["date_gen"]`) — guarded by keeping a dict-style accessor / `.raw` for back-compat and by the
+`test_py_*` dates test.
+
+**Verify.** `python -c "import steppe; help(steppe.dates)"` shows `-> DatesResult`; a dates run on
+the box yields `res.date_gen`/`res.se` equal to the previous `dict["date_gen"]`/`["se"]`; the
+committed dates parity values are unchanged (compute untouched); `tests/python` dates test passes.
+
+**Files.** `bindings/steppe/__init__.py`.
+
+---
+
+## C8 — Split the 1,170-LOC `bindings/module.cpp` single TU into per-tool `register_*` units  ·  **P3 · Effort S**
+
+> *(cross-cut gap **G12** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X3-#6. Untracked
+> TU split, placed next to C3 which already edits `module.cpp`. Kimi reviewed `module.cpp` but flagged
+> only the f2 loop / exception mapping, not the TU split.)*
+
+**What's needed.** `bindings/module.cpp` is a single **1,170-LOC** translation unit (verified at
+HEAD) that binds every tool (qpAdm, qpWave, f3, f4, f4ratio, dstat, qpfstats, qpgraph, dates, the
+F2Handle export) in one `PYBIND11_MODULE`. It is the largest, most-edited bindings file and a merge
+hotspot; a reader must scroll the whole TU to find one tool's binding.
+
+**Optimal end state.** Per-tool binding TUs (`bind_qpadm.cpp`, `bind_dates.cpp`, `bind_fstats.cpp`,
+`bind_qpgraph.cpp`, `bind_f2handle.cpp`, …) each exposing a `void register_<tool>(py::module_& m)`;
+`module.cpp` becomes a thin assembler whose `PYBIND11_MODULE` body just calls
+`register_qpadm(m); register_dates(m); …`. Shared helpers (`parse_precision`, `f2_to_numpy`, the
+result-struct converters) move to a small `bindings/internal/…` header so each TU reuses them.
+`bindings/CMakeLists.txt` compiles the new TUs into the `_core` target.
+
+**Steps.**
+1. Carve shared helpers (`parse_precision`, `raise_value`, `f2_to_numpy`, the resident-f2 fit
+   prologue/epilogue, result converters) into `bindings/internal/bind_common.hpp` (+ `.cpp` if
+   needed).
+2. Move each tool's binding block into its own `bind_<tool>.cpp` exposing
+   `void register_<tool>(py::module_&)`. **Mechanical move** — copy the existing binding code
+   verbatim into the function body; do not rewrite signatures or change the exposed API.
+3. Reduce `module.cpp` to the `PYBIND11_MODULE` shell that calls each `register_*` in the current
+   order (preserve registration order in case any binding depends on a prior type being registered).
+4. Update `bindings/CMakeLists.txt` source list to add the new TUs.
+5. Coordinate with **C3** (`f2_to_numpy` → `memcpy`): land C3's one-line change either before this
+   split or in the moved `bind_common` home, not both.
+
+**Parity-risk.** **None — mechanical code-move, golden-neutral.** The bound surface (function names,
+signatures, returned struct shapes) is preserved byte-for-byte; no compute, no math, no statistic
+stream. The Python import + every `tests/python` test is the guard. Only failure modes: a changed
+registration order that breaks a type dependency (guarded by preserving order in step 3) or a missed
+helper (a **compile/link error**, caught by the build).
+
+**Verify.** `_core` builds on box5090; `import steppe` succeeds; `dir(steppe._core)` lists the same
+symbols as before; `tests/python/test_py_qpadm.py` + peers pass unchanged; `wc -l bindings/module.cpp`
+drops from 1170 to a thin shell.
+
+**Files.** `bindings/module.cpp`, new `bindings/bind_*.cpp`, `bindings/internal/bind_common.hpp`,
+`bindings/CMakeLists.txt`.
+
+---
+
+## C9 — `requires std::is_trivially_copyable_v<T>` on the two unconstrained buffer templates  ·  **P3 · Effort XS (optional; joins the C1/C2/C3 header-sugar batch)**
+
+> *(cross-cut gap **G17** — from `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5; X5-2. Marginal by
+> X5's own rating — fold into the header-sugar commit, not a standalone task.)*
+
+**What's needed.** Two device-buffer class templates are unconstrained on `T`:
+`DeviceBuffer<T>` (`src/device/cuda/device_buffer.cuh:42` `template <class T>`) and `PinnedBuffer<T>`
+(`src/device/cuda/pinned_buffer.cuh:73` `template <class T>`). Both `cudaMemcpy` raw bytes of `T` to
+device / page-locked host memory, which is only valid for trivially-copyable `T` — but nothing
+*states* that contract, so a non-trivially-copyable `T` would compile and then silently corrupt. Add
+a C++20 `requires std::is_trivially_copyable_v<T>` constraint so the contract is compiler-enforced and
+self-documenting.
+
+**Optimal end state.** Both templates declare
+`template <class T> requires std::is_trivially_copyable_v<T>` (with `#include <type_traits>`), turning
+a misuse into a clear compile-time diagnostic at the instantiation site instead of UB. All current
+instantiations (`double`, `float`, `int`, the POD layout structs) already satisfy it, so nothing that
+compiles today stops compiling.
+
+**Steps.**
+1. `device_buffer.cuh`: add `requires std::is_trivially_copyable_v<T>` to the `DeviceBuffer` template
+   header (`:42`); `#include <type_traits>` if not already present.
+2. `pinned_buffer.cuh`: same on the `PinnedBuffer` template (`:73`).
+3. Build to confirm every existing instantiation still satisfies the constraint (it should — all are
+   PODs / arithmetic types).
+
+**Parity-risk.** **None — a compile-time constraint only, golden-neutral.** It changes no runtime
+code, no allocation, no `cudaMemcpy`, no math; it only *rejects* a misuse that does not exist today.
+Every current `T` is trivially-copyable, so codegen is byte-identical and no golden moves. Only
+failure mode: an existing `T` that is *not* trivially-copyable would now fail to compile — which is
+the **desired** surfacing (it would have been a latent UB), and verified absent by a clean build.
+
+**Verify.** Full build on box5090 links unchanged (every instantiation satisfies the constraint);
+a deliberate test instantiation with a non-trivially-copyable type fails to compile with a clear
+`requires`-clause diagnostic; the f2/qpAdm goldens are bit-identical.
+
+**Files.** `src/device/cuda/device_buffer.cuh`, `src/device/cuda/pinned_buffer.cuh`.
+
+---
+
 # Recommended sequence
 
 Independence is high; most items are standalone tiny commits. Suggested order maximizes
-iteration-unblock and de-risks the separate §3-HIGH CI item first.
+iteration-unblock and de-risks the separate §3-HIGH CI item first. **The two cross-cut "do-first"
+items lead:** D1 (the public-surface comment scrub — highest first-impression signal) and B6 (the
+`CHECK_KERNEL` swap — the compute-sanitizer multiplier).
 
-1. **A1 — `STEPPE_WERROR`/ccache** (smallest, unblocks faster local box iteration).
-2. **A2 — CTest labels** (the literal `ctest -LE gpu` enabler for the HIGH CI lane).
-3. **C1 + C2 + C3 — header sugar batch** (one commit: Precision factories + `f2_at` + memcpy; zero parity risk).
-4. **B2 + B3 + B4 — XS robustness** (each its own tiny commit; B2/B4 build on the local host lane).
-5. **B1 — NVTX** (profiling unlock; standalone, box-only build).
-6. **A3 — pytest/ruff/mypy** (host-only; feeds the CI lane).
-7. **B5 — workspace pool + staging cap** (one commit, box-only; frame as hygiene).
-8. **C4 — examples** (after C1/C2 so they showcase the new sugar).
-9. **C5 — Doxygen/pdoc** (iterate locally; single-source the version with the §3-Med item).
-10. **A4 — meta.json fields** + **A5 — `regenerate_goldens.sh` / delete `build_m0.sh`** (do the two architecture.md doc-sync edits together; A5 is the only golden-touching item — run it last, by hand, with the parity re-run).
+1. **D1 — comment hygiene, public-surface first** *(cross-cut G1)* — highest first-impression signal,
+   golden-neutral; do before the `02` clang-format pass entrenches the tokens. Lock with the `02`
+   grep-gate.
+2. **B6 — `CHECK_KERNEL` swap** *(cross-cut G4)* — do before the `02` §3-High compute-sanitizer pass
+   so it keeps launch-site attribution.
+3. **A1 — `STEPPE_WERROR`/ccache** (smallest, unblocks faster local box iteration).
+4. **A2 — CTest labels** (the literal `ctest -LE gpu` enabler for the HIGH CI lane).
+5. **C1 + C2 + C3 + C9 — header sugar batch** (one commit: Precision factories + `f2_at` + memcpy +
+   the trivially-copyable constraint; all zero parity risk). *(C9 = cross-cut G17.)*
+6. **B2 + B3 + B4 — XS robustness** (each its own tiny commit; B2/B4 build on the local host lane).
+7. **B7 + B8 + B9 — dead-virtual removal + device-convention re-align + confusable rename** *(cross-cut
+   G9/G11/G13)* — three tiny golden-neutral commits, box-only build.
+8. **A7 — dead DeviceConfig knobs** *(cross-cut G8)* and **C7 — `dates()` typed result** *(cross-cut
+   G10)* (each its own tiny commit; A7 builds on the host config lane).
+9. **C6 — precision-token unification (+`emu32` to Python)** *(cross-cut G6)* — sibling of C1.
+10. **B1 — NVTX** (profiling unlock; standalone, box-only build).
+11. **A3 — pytest/ruff/mypy** (host-only; feeds the CI lane).
+12. **B5 — workspace pool + staging cap** (one commit, box-only; frame as hygiene).
+13. **C4 — examples** (after C1/C2 so they showcase the new sugar).
+14. **C8 — `module.cpp` per-tool TU split** *(cross-cut G12)* — coordinate with C3 (the `memcpy`
+    change lands in the moved `bind_common`, not twice).
+15. **C5 — Doxygen/pdoc** (iterate locally; single-source the version with the §3-Med item).
+16. **A6 — record the `src/core/qpadm/` misnomer decision** *(cross-cut G7)* — DEFER-and-document is
+    the XS floor; a rename/split is a mechanical commit gated by the goldens. **A8 —
+    `target_compile_features` on the two STATIC compute libs** *(cross-cut G16)* — 2-line CMake add.
+17. **A4 — meta.json fields** + **A5 — `regenerate_goldens.sh` / delete `build_m0.sh`** (do the two
+    architecture.md doc-sync edits together; A5 is the only golden-touching item — run it last, by
+    hand, with the parity re-run).
 
-**Doc-sync batching:** A4's reproducibility-block edit, A5's `architecture.md:115` scrub, and C5's
-single-sourced version all touch `docs/architecture.md` — batch the doc edits into one pass with the
-two §3-Med architecture doc-sync items.
+**Doc-sync batching:** A4's reproducibility-block edit, A5's `architecture.md:115` scrub, A6's
+module-map note (cross-cut G7), and C5's single-sourced version all touch `docs/architecture.md` —
+batch the doc edits into one pass with the two §3-Med architecture doc-sync items.
 
 # One-glance priority table
 
 | # | Item | Cluster | Priority | Effort | Parity-risk | Builds where |
 |---|------|---------|----------|--------|-------------|--------------|
+| **D1** | **Comment hygiene, public-surface first** *(cross-cut G1)* | **Hygiene (do-first)** | **P1** | S (breadth) | None | box + local |
 | A1 | `STEPPE_WERROR=OFF` + ccache | Build/CI | **P1** | S | None | box + local |
 | A2 | CTest labels (unit/ref/cli/python + gpu/slow) | Build/CI | **P1** | S | None | box |
 | B1 | Wire NVTX behind `STEPPE_NVTX` | Robustness | **P1** | S | None | box only |
+| **B6** | **14 bare cudaGetLastError → `CHECK_KERNEL`** *(cross-cut G4)* | Robustness | **P1** | S (breadth) | None | box only |
 | A3 | pytest + ruff + mypy (facade) | Build/CI | P2 | S | None | host-only |
 | A4 | `meta_schema_version` + `pops_sha256` | Build/CI | P2 | S | None | box (app) |
+| **A6** | **Record `src/core/qpadm/` misnomer decision** *(cross-cut G7)* | Build/CI | P2 | S (decision XS) | None | box |
+| **A7** | **Dead DeviceConfig knobs** *(cross-cut G8)* | Build/CI | P2 | XS | None | host/box |
 | B2 | Forward `error_code::message()` in f2_dir_io | Robustness | P2 | XS | None | host-only |
 | B3 | geno-hash thread try/catch + exception_ptr | Robustness | P2 | XS | None | box (app) |
+| **B7** | **Remove dead `rank_test` virtual** *(cross-cut G9)* | Robustness | P2 | XS | None | box only |
 | C1 | `Precision` named factories | API/DX | P2 | XS | None* | box + local |
 | C2 | `F2BlockTensor::f2_at` accessor | API/DX | P2 | XS | None | box + local |
 | C3 | `f2_to_numpy` → `std::memcpy` | API/DX | P2 | XS | None | box only |
+| **C6** | **Precision-token unification (+`emu32`)** *(cross-cut G6)* | API/DX | P2 | XS | None | box (bindings) |
 | A5 | `regenerate_goldens.sh` + delete `build_m0.sh` | Build/CI | P3 | S | **Golden (human-run, preflight-guarded)** | box |
+| **A8** | **`cxx_std_20` on steppe_core+steppe_device** *(cross-cut G16)* | Build/CI | P3 | XS | None | box + local |
 | B4 | Drop `mutable` on `ConfigBuilder::error_message_` | Robustness | P3 | XS | None | host-only |
 | B5 | Pool cuSOLVER workspace + cap pinned staging | Robustness | P3 | S (hygiene) | None | box only |
+| **B8** | **Device-layer convention re-align** *(cross-cut G11)* | Robustness | P3 | XS | None | box only |
+| **B9** | **Rename confusable `f2_block(s)_kernel`** *(cross-cut G13)* | Robustness | P3 | XS | None | box only |
 | C4 | `examples/` C++ + Python quick-start | API/DX | P3 | S | None | py:box, cpp:box |
 | C5 | Doxygen + pdoc API reference | API/DX | P3 | S | None | **local** |
+| **C7** | **`dates()` typed `DatesResult`** *(cross-cut G10)* | API/DX | P3 | XS | None | host (facade) |
+| **C8** | **`module.cpp` per-tool TU split** *(cross-cut G12)* | API/DX | P3 | S | None | box only |
+| **C9** | **`is_trivially_copyable` on buffer templates** *(cross-cut G17)* | API/DX | P3 | XS | None | box only |
 
 \* C1's only golden vector is a *migrated* construction site silently changing a mantissa — guarded
 by keeping migration in its own commit with diff-verified identical `{kind,bits}`.
 
+**Cross-cut provenance:** the **12 bold rows** above (D1, B6, A6, A7, B7, C6, A8, B8, B9, C7, C8, C9)
+were folded in from our consolidated cross-cutting review (`docs/release_cleanup/crosscutting/X1–X7`)
+via `docs/kimiactions/04-crosscut-vs-kimi.md` §3/§5 — gaps the X-review caught that the
+`a2f9d64..HEAD` campaign neither fixed nor planned. All twelve are comment/doc/structure/dead-code and
+**golden-neutral by construction**.
+
 ---
 
-**Bottom line.** Sixteen XS–S items, **fifteen behavior-neutral by construction** and one
+**Bottom line.** Twenty-eight XS–S items, **twenty-seven behavior-neutral by construction** and one
 (`regenerate_goldens.sh`) golden-adjacent only on deliberate human invocation behind a hard
 version-preflight + mandatory parity re-run. The §12 PARITY LAW (frozen math names, deterministic
-reductions, single statistic stream) is untouched across the entire bucket. The frozen goldens
-(`golden_fit0`/`fit1_NRBIG`/`rot`) remain the guard for the two box-only compute-adjacent items
-(B1, B5); the host config/io/python unit tests guard the rest.
+reductions, single statistic stream) is untouched across the entire bucket — the twelve cross-cut
+additions (D1, A6–A8, B6–B9, C6–C9) are all comment/doc/structure/dead-code and move no golden. The
+frozen goldens (`golden_fit0`/`fit1_NRBIG`/`rot`) remain the guard for the box-only compute-adjacent
+items (B1, B5, B6–B9, C8, C9); the host config/io/python unit tests guard the rest. The D1 public
+comment scrub is the single highest-signal, lowest-risk item — do it first, and lock it with the
+`02-ci-plan.md` grep-gate.

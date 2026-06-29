@@ -2,6 +2,8 @@
 
 Lead-engineer reconciliation of OUR consolidated cross-cutting review (`docs/release_cleanup/crosscutting/X1–X7`) against the Kimi external review (`docs/kimireview/ASSESSMENT.md` + `kimiwhole/*`) and the action plans it produced (`docs/kimiactions/01-open-worth-doing.md`, `02-ci-plan.md`, `03-low-polish.md`). All findings re-verified against the code at HEAD (`a2f9d64..HEAD` campaign landed; both reviews predate parts of it).
 
+> **STATUS — gaps folded in.** The §3 GAPS (G1–G17) have been **folded into the action plans** (`01` Cluster F + decision notes, `02` the ticket-ID regression gate + sanitizer-dependency note, `03` the comment-hygiene scrub + A4–A8 + LOW tail), each tagged with its `(gap GN)` provenance. **`01/02/03` are now the single complete actionable source.** This document is retained as the **standalone reconciliation analysis** — the overlap matrix (§2), the meta-findings (Kimi over-credited the campaign on comments; Kimi missed G7), and the audit trail of having cross-checked both reviews. Act from `01/02/03`; read `04` for *why*.
+
 ---
 
 ## 1. Verdict

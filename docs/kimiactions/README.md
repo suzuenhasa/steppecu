@@ -12,7 +12,14 @@ design, the protected math vocabulary, the kernel ABI, or the single-GPU / GPU-o
 shape. Standing constraint: **nothing builds locally** (RTX 2070 / CUDA 11.8) — every
 GPU/golden/CLI check runs on `box5090`; only doc/host-unit items verify off-box.
 
-## The three plans
+## The plans
+
+> The three action plans below are the **single complete actionable source**. They now also carry
+> the **cross-cutting gaps** (G1–G17) surfaced by reconciling our own X1–X7 review against Kimi
+> (`04-crosscut-vs-kimi.md`) — items neither fixed by the campaign nor originally planned: the
+> internal ticket-ID scrub + comment-essay relocation + god-file decision note + `qpadm/`-dir
+> misnomer + dead seams. Each folded item is tagged `(gap GN)`. **`04-crosscut-vs-kimi.md`** is the
+> standalone reconciliation analysis (overlap matrix + meta-findings) — read it for *why*, act from `01/02/03`.
 
 - **`01-open-worth-doing.md`** — the High + Med non-CI work, in five clusters:
   **A** §12 parity-law integrity (wire `cusolverDnSetDeterministicMode` + assert + fix the

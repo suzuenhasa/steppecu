@@ -34,6 +34,17 @@ paths the small committed goldens (`golden_fit0` / `fit1_NRBIG` / `rot`) never e
 Cluster A, whose one bounded parity touch is the loose-tier NRBIG cuSOLVER `gesvd` path and is fully
 golden-gated. No item requires regenerating an AT2 golden.
 
+> **Cross-cut additions (from `docs/kimiactions/04-crosscut-vs-kimi.md`).** Three items below
+> originate in **our own X1–X7 cross-cutting review** (`docs/release_cleanup/crosscutting/`), *not* the
+> Kimi assessment — they are the §3 "shop-window / first-impression" gaps the campaign deferred and the
+> `kimiactions` triage chain dropped: **Cluster F** (F1 — relocate six design-doc comment-essays to
+> `docs/` behind 1-line `// see docs/…` pointers, cross-cut gap G2; F2 — write the *accepted but undone*
+> `cuda_backend.cu` single-seam header note + a DECISIONS record for the parked structural debt,
+> cross-cut gap G3) and **D3** (correct the stale `run_qpdstat` "Part B, not yet implemented" docstring
+> on the now-shipped genotype-D, cross-cut gap G5). All three are **comment / doc / structure-only and
+> golden-neutral by construction** (see each item's Parity-risk). Each carries a
+> `(cross-cut gap GN, from docs/kimiactions/04)` provenance tag.
+
 ---
 
 ## Cluster A — §12 parity-law integrity gap (cuSOLVER determinism) — **HIGH**
@@ -758,6 +769,194 @@ to `0.1.1`, rebuild, confirm both surfaces move and **no other file** was edited
 `include/steppe/version.hpp.in`, `src/app/cli_parse.cpp:54`, `src/app/cmd_extract_f2.cpp`,
 `bindings/steppe/__init__.py:27`, `docs/architecture.md` (L879, L883-889, L892, L914).
 
+### D3. Correct the stale "Part B, not yet implemented" docstring on the SHIPPED genotype-D — **MED** *(cross-cut gap G5, from docs/kimiactions/04)*
+
+**What's needed.** The `run_qpdstat` nanobind docstring ends with a **false promise on a shipped
+feature**: `bindings/module.cpp:1107` reads `"The normalized-D magnitude needs a genotype prefix (Part
+B, not yet implemented)."`. **Part B ships.** The genotype-path normalized-D is bound right below at
+`module.cpp:1109` (`m.def("run_dstat", &run_dstat_py, …)`, C++ impl `run_dstat_py` at
+`module.cpp:647`) and is exposed in the public Python facade as `steppe.dstat(...)`
+(`bindings/steppe/__init__.py:818`, calling `_core.run_dstat` at `:850`); the CLI also ships it
+(`qpdstat --prefix PREFIX.{geno,snp,ind}`). So `help(steppe._core.run_qpdstat)` tells a user the exact
+capability they already have is unimplemented — a user-facing doc-vs-as-built lie of the same class as
+Cluster D's `architecture.md` items. (Verified at HEAD: the `__init__.py` `qpdstat` wrapper already
+points readers at the right place — `__init__.py:803` says "normalized-D, Part B; or the CLI `qpdstat
+--prefix …`" — so only the C-extension docstring is stale.)
+
+**Optimal end state.** The trailing clause of the `run_qpdstat` docstring no longer claims "not yet
+implemented"; instead it points at the shipped path, mirroring the wording the `__init__.py:803`
+wrapper already uses: e.g. `"…The normalized-D magnitude needs the genotype path — call
+steppe.dstat(prefix, quadruples) (binding run_dstat below), or the CLI qpdstat --prefix
+PREFIX.{geno,snp,ind}."`. Nothing else changes — `run_qpdstat` (Part A, f2-path f4) keeps its current
+behaviour and the rest of its docstring verbatim.
+
+**Steps.**
+1. Edit the trailing sentence of the `run_qpdstat` docstring literal at `bindings/module.cpp:1101-1107`
+   to remove "(Part B, not yet implemented)" and cross-reference `run_dstat` / `steppe.dstat` / the
+   `qpdstat --prefix` CLI as the shipped genotype-D path.
+2. (Cheap consistency sweep, same pass) confirm no sibling docstring still calls genotype-D
+   unimplemented; the `__init__.py:786-816` `qpdstat` wrapper is already correct — leave it.
+
+**Effort.** **XS** (one docstring literal).
+
+**Parity-risk.** **None — golden-neutral.** A help-string edit only; no compute, no CUDA, no emitted
+result byte, no §12 path. No statistic, golden, or CLI byte-output moves; only `help()` / docstring
+introspection text changes.
+
+**Verify.** On box5090 after a Release wheel build: `python -c "import steppe;
+help(steppe._core.run_qpdstat)"` no longer contains "not yet implemented" and names `steppe.dstat` /
+`qpdstat --prefix`; `steppe.dstat(...)` runs (already shipping). Grep: `grep -rn "not yet implemented"
+bindings/module.cpp` returns 0 hits. No golden re-run (docstring-only).
+
+**Files.** `bindings/module.cpp` (`run_qpdstat` docstring :1101-1107, `run_dstat` binding :1109,
+`run_dstat_py` :647), `bindings/steppe/__init__.py` (:786-816 `qpdstat` wrapper, `:818` `dstat`,
+`:850` `_core.run_dstat`).
+
+---
+
+## Cluster F — source-comment altitude / first-impression — **LOW (polish, portfolio-facing)**
+
+> **Provenance: this entire cluster is a cross-cutting addition from our own X1–X7 review**
+> (`docs/release_cleanup/crosscutting/`, reconciled in `docs/kimiactions/04-crosscut-vs-kimi.md` §3 +
+> §5) — the "shop-window professionalism" layer the Kimi `ASSESSMENT §2` over-credited to the campaign
+> and `§3` dropped before it reached the action plans. Both items are **comment / doc / structure-only
+> and golden-neutral by construction**: they move *prose* out of the source and leave the *code* and its
+> load-bearing parity invariants exactly where they are. Functionally the lowest urgency in this plan,
+> but the highest first-impression signal — a senior reviewer opens these files first. Sibling cluster
+> to D (doc-honesty); land them together. Cross-references the comment-hygiene pass in
+> `03-low-polish.md` (G1/G14/G15 ticket-ID + ALL-CAPS scrub) — F1's relocation and that scrub touch the
+> same "comment voice" surface and should be sequenced as one editorial sweep.
+
+### F1. Relocate the six design-doc comment-essays to `docs/`, leave a 1-line `// see docs/…` pointer — **LOW** *(cross-cut gap G2, from docs/kimiactions/04)*
+
+**What's needed.** Six source files carry multi-paragraph **design-doc essays** — 30-to-64-line comment
+banners explaining *rationale* — wrapped around a few lines of code. All six are present and re-verified
+at HEAD:
+
+- `src/core/fstats/f2_blocks_multigpu.cpp` — the **"§4 COMBINE GATE"** banner (~L236-298, a `=====`
+  ASCII-boxed essay re-deriving the four-term gate predicate, WHY-it-moved, and the four terms) guarding
+  **one** call: `const bool use_p2p = select_p2p_combine(resources, G);` (`:300`). The predicate itself
+  is already single-homed in `select_p2p_combine` (`:126`).
+- `src/device/p2p_combine.hpp:1-33` — a 33-line file-header essay (CUDA-free-contract + bit-identity
+  rationale) above the `#ifndef` (`:34`).
+- `src/device/cuda/dstat_kernel.cu:1-49` — a 49-line header essay (statistic derivation, the SNP-tiled
+  reuse rationale, the golden-exact carve-out) above `#include <cuda_runtime.h>` (`:50`). Kimi cited this
+  one exactly.
+- `src/core/internal/decode_af.hpp:1-58` — a 58-line header essay (the full decode convention +
+  AT2 pseudo-haploid auto-detection narrative) above the `#ifndef` (`:59`).
+- `src/device/cuda/cuda_backend.cu` — the **39-line Stream essay** (~L5560-5586: legacy-default-stream
+  overlap, teardown declaration-order reasoning) above the one-line member `Stream stream_{};` (`~:5586`).
+- `src/core/qpadm/model_search.cpp:167-193` — the `TODO(multigpu-host-bounce)` `=====`-boxed
+  perf-narrative banner (known-problem / root-cause / fix-to-eliminate) above `struct F2Replication`
+  (`:194`). Kimi cited this at `09 §3`.
+
+Why: portfolio-facing and parity-neutral. The source reads as a private engineering design journal
+rather than shipping code; the *rationale* belongs in `docs/`, the *code* should stand on a 1-line
+pointer. **Critical nuance to carry through the move:** several essays state **load-bearing §12 parity
+invariants** (the multigpu/p2p "bit-identical to the host-staged combine & single-GPU reference; the
+transport only moves bytes", the dstat-kernel "golden-exact cancellation carve-out", the decode-af
+"bit-for-bit oracle" convention). Those one-sentence *invariants* must **stay in the code** as a terse
+1-line guard-comment so a future editor cannot silently break parity; only the multi-paragraph
+*derivation* relocates.
+
+**Optimal end state.** Each essay's prose lives in a `docs/design/` page (one per essay, or folded into
+the architecture.md section it already cross-references — the multigpu/p2p two share `§11.4`, decode-af
+maps to `§5/§13`), and each source site keeps a **2-to-3-line** stub: a 1-line `// see
+docs/design/<page>.md (architecture.md §N)` pointer **plus** the single load-bearing parity-invariant
+sentence retained inline. Net: the six files open with code or a terse contract line, the design
+narrative is one click away and version-controlled in `docs/`, and the §12 invariants are *more*
+prominent (no longer buried in a 60-line wall).
+
+**Steps.**
+1. For each of the six, create/append the destination doc page under `docs/design/` (or the named
+   architecture.md section), moving the prose verbatim so no rationale is lost; add a back-link to the
+   source file.
+2. Replace the in-source banner with the 2-3 line stub: `// see docs/design/<page>.md` + the retained
+   1-line parity invariant (for the three parity-bearing essays). For the non-parity essays
+   (cuda_backend.cu Stream teardown-ordering, model_search.cpp host-bounce TODO) keep a 1-line
+   `// see …` plus, for the Stream member, the single load-bearing "declaration order is load-bearing at
+   teardown" sentence so the reverse-destruction contract is not lost.
+3. Keep `select_p2p_combine`'s single-home status intact — the f2_blocks_multigpu stub points at the doc
+   *and* names `select_p2p_combine` as the predicate's single source.
+4. For the `model_search.cpp` `TODO(multigpu-host-bounce)`: move the perf narrative to a
+   `docs/design/multigpu-host-bounce.md` known-issue page; keep the 1-line `// DEFERRED: multi-GPU
+   rotation host-bounce-capped on no-P2P; single-GPU is the supported path — see docs/…` so the
+   deferral remains visible at the call site.
+5. Build Release on box5090 — comment-only edits are structurally byte-neutral; a clean recompile +
+   green `ctest` confirms no code line was disturbed.
+
+**Effort.** **M** (mechanical, but six source files + six destination doc pages + the careful
+invariant-retention split).
+
+**Parity-risk.** **None — comment-only relocation.** No statement, expression, kernel, or `<<<>>>` is
+touched; the produced bytes are identical, so no golden, CLI byte-output, or §12 path can move. The one
+care-point is **not dropping a load-bearing parity invariant in the move** — explicitly mitigated by
+retaining each invariant as a 1-line in-code guard-comment (Step 2). Guard = a clean box5090 recompile +
+full `ctest` (immune by construction, run as a sanity check).
+
+**Verify.** On box5090: Release build green; full `ctest` unchanged (comment-only). Grep: each of the six
+files now opens with code or a ≤3-line stub (`grep -c '^//' ` on each header drops sharply); each stub
+contains a `see docs/` pointer; the three parity-bearing sites still contain their 1-line invariant
+(`grep -n 'bit-identical\|golden-exact\|bit-for-bit'` still hits the source). No golden re-run.
+
+**Files.** `src/core/fstats/f2_blocks_multigpu.cpp` (:236-298, predicate call :300, `select_p2p_combine`
+:126); `src/device/p2p_combine.hpp` (:1-33); `src/device/cuda/dstat_kernel.cu` (:1-49);
+`src/core/internal/decode_af.hpp` (:1-58); `src/device/cuda/cuda_backend.cu` (Stream essay ~:5560-5586,
+member `Stream stream_{}` ~:5586); `src/core/qpadm/model_search.cpp` (:167-193); new `docs/design/*.md`
+pages (+ optional folds into `docs/architecture.md` §11.4 / §5 / §13).
+
+### F2. Write the accepted `cuda_backend.cu` single-seam header note + a DECISIONS record for the parked structural debt — **LOW** *(cross-cut gap G3, from docs/kimiactions/04)*
+
+**What's needed.** `src/device/cuda/cuda_backend.cu` is a **5,679-LOC god-file** (55 `ComputeBackend`
+overrides + co-located launch wrappers; LOC re-confirmed at HEAD via `wc -l`). The **cross-TU split is
+REJECTED by decision** (`ASSESSMENT §5.5`: a single C++ class cannot be partial across translation
+units, and the kernels are co-located deliberately) — that is settled and stays rejected. **But the
+*accepted half* is still undone:** the §5.5 decision also called for a **one-line header note** so the
+file reads as a deliberate *choice* rather than neglect, and the file's header banner (`:1-30`,
+re-verified) carries no such note — grep for `single.seam|single TU|intentionally.*single` returns 0
+hits. This item does that accepted down-payment, and **records two parked decisions** so the omission
+reads as weighed, not missed.
+
+**Optimal end state.** The `cuda_backend.cu` header banner gains a one-line note —
+`// CudaBackend is INTENTIONALLY a single seam TU: a C++ class cannot be partial across translation
+units, and the launch wrappers / kernels are co-located here on purpose (architecture.md §4, §7;
+ASSESSMENT §5.5). The cross-TU split is rejected by decision.` — so a reviewer opening the largest file
+sees the size is a *choice*. A short **DECISIONS** block (in this plan, and optionally mirrored as a
+2-line note near the header) records:
+- **Rejected (settled):** the Kimi cross-TU class split (`ASSESSMENT §5.5`) — a class can't be partial
+  across TUs; kernels co-located deliberately.
+- **Parked (never separately evaluated):** X3's own proposed decomposition — a **thin aggregate header +
+  per-subsystem shared `.inc` includes**, still **one class** — which *sidesteps the exact "can't be
+  partial" objection* that `ASSESSMENT` used to reject the Kimi proposal. It was never weighed on its
+  own merits. Recorded as: "the `.inc`-include split (single class, no cross-TU partitioning) is viable
+  and was not weighed; parked, not rejected."
+
+> **DECISIONS — `cuda_backend.cu` god-file (cross-cut gap G3).** (1) Cross-TU split → **REJECTED**
+> (`ASSESSMENT §5.5`). (2) One-line "intentionally a single seam TU" header note → **ACCEPTED, do now**
+> (this item). (3) X3's thin-aggregate-header + per-subsystem `.inc`-include split (single class,
+> sidesteps the partial-class objection) → **PARKED, never separately evaluated** — revisit only if the
+> file's size becomes a maintenance burden in practice.
+
+**Steps.**
+1. Add the one-line "intentionally a single seam TU; cross-TU split rejected by decision (§5.5)" note to
+   the `cuda_backend.cu` header banner (`:1-30`, adjacent to the existing §4/§8 framing).
+2. Record the DECISIONS block above in this plan (done here) so the rejected + parked structural
+   decisions are minuted; optionally mirror the 1-line `.inc`-split-parked note in the header.
+3. No code move — this item is explicitly *not* the split; it makes the existing single-TU shape read
+   as intentional.
+
+**Effort.** **XS** (one header-comment line + a DECISIONS minute).
+
+**Parity-risk.** **None — comment/doc only.** A header-comment line; no statement, kernel, or §12 path
+touched. No golden, CLI byte, or perf number moves.
+
+**Verify.** On box5090: Release build green (comment-only). Grep: `grep -ni "single seam TU"
+src/device/cuda/cuda_backend.cu` now returns the header note; the DECISIONS block is present in this
+plan. No golden re-run.
+
+**Files.** `src/device/cuda/cuda_backend.cu` (header banner :1-30); this plan (DECISIONS minute);
+reference `docs/kimireview/ASSESSMENT.md` §5.5, `docs/kimiactions/04-crosscut-vs-kimi.md` §3 G3.
+
 ---
 
 ## Recommended sequence
@@ -788,6 +987,13 @@ parity or unblock CI:
     do last, in one editorial pass, alongside D2 so §16:914 lands consistent.*
 11. **C3** (MED/polish) — `--out`/`--out-dir` alias unify. *Lowest-stakes UX polish; pick up whenever
     convenient.*
+12. **D3** (MED, cross-cut G5) — correct the stale `run_qpdstat` "Part B not yet implemented" docstring.
+    *One-string doc-vs-as-built fix; land in the same wheel-build pass as D1/D2.*
+13. **F1** (LOW, cross-cut G2) — relocate the six design-doc comment-essays to `docs/` behind 1-line
+    pointers. *Highest first-impression signal; sequence as one editorial sweep with `03-low-polish.md`'s
+    comment-hygiene scrub (G1/G14/G15) so the "comment voice" surface is touched once.*
+14. **F2** (LOW, cross-cut G3) — `cuda_backend.cu` single-seam header note + DECISIONS minute. *XS; pick
+    up alongside F1 (same file family) or whenever convenient.*
 
 **Land-together couplings:** A1's two commits (wire+test, doc) ship as a pair. D1 + D2 share the §16:914
 claim — pick the version mechanism (generated `version.hpp` *or* the doc describes the
@@ -809,6 +1015,9 @@ turns on its sanitizer lanes.
 | D2 | Single-source version (pyproject `dynamic` regex) | D doc/version | MED | S | None (string only) | host + box5090 wheel |
 | D1 | `architecture.md` doc-sync (core→io, C-ABI, 3.28) | D doc/version | MED (polish) | S | None (doc only) | reviewer diff (no build) |
 | C3 | `--out`/`--out-dir` alias unify | C IO/output | MED (polish) | S | None (CLI surface only) | box5090 (`--help` + CLI tests) |
+| D3 | Correct stale `run_qpdstat` "Part B not yet impl" docstring *(cross-cut G5)* | D doc/version | MED (polish) | XS | None (docstring string only) | box5090 wheel (help text); no golden |
+| F1 | Relocate 6 design-doc comment-essays to `docs/` + 1-line pointers *(cross-cut G2)* | F comment-altitude | LOW (polish) | M | None (comment-only; parity invariants kept inline) | box5090 recompile + `ctest` (no golden re-run) |
+| F2 | `cuda_backend.cu` single-seam header note + DECISIONS minute *(cross-cut G3)* | F comment-altitude | LOW (polish) | XS | None (comment/doc only) | reviewer diff + box5090 recompile |
 
 **Standing constraints (all items).** Nothing builds locally (RTX 2070 / CUDA 11.8, no FP64-emu) — every
 GPU/golden/CLI verification runs on box5090; only D1 (doc-only), D2's regex check, and C2's escape unit
