@@ -34,6 +34,7 @@ add_library(steppe_device STATIC
     cuda/qpfstats_jackknife_kernel.cu  # qpfstats PERF: on-device per-comb block-jackknife (y/ymat) + per-pair recenter (native FP64; §12 carve-out)
     cuda/ratio_block_jackknife_kernel.cu  # SHARED on-device RATIO-block-jackknife (f4ratio M1 + qpDstat M2; native FP64; §12 carve-out)
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
+    cuda/cuda_backend_qpgraph.cu  # qpGraph on-device fleet (split T1 / §2.3 TU-H; decoupled)
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/device_decode_result.cu  # device-resident decode seam: DeviceDecodeResult — autosome-compacted Q/V resident handle (special members + accessors)

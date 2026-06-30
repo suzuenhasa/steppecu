@@ -35,6 +35,11 @@
 
 namespace steppe::device {
 
+/// Forward declaration: the M5 block-spill sink (defined in cuda/block_sink.cuh, which
+/// travels with TU-B per §2.1). Named only as a reference parameter of
+/// stream_f2_blocks_impl below, so the incomplete type suffices in this header.
+class BlockSink;
+
 /// GPU compute backend. The 3-GEMM f2 reformulation; one CublasHandle created
 /// once (architecture.md §7) and reused, with its workspace set for emulated-FP64
 /// determinism. Move-only via the ComputeBackend base (architecture.md §8).
