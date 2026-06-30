@@ -36,6 +36,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend.cu          # implements ComputeBackend on the GPU
     cuda/cuda_backend_qpgraph.cu  # qpGraph on-device fleet (split T1 / §2.3 TU-H; decoupled)
     cuda/cuda_backend_dates.cu    # DATES cuFFT autocorrelation LD engine (split T2 / §2.3 TU-E; native-FP64 carve-out)
+    cuda/cuda_backend_decode.cu   # decode/transpose format-reader engine (split T3 / §2.3 TU-C; cub scan/select)
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/device_decode_result.cu  # device-resident decode seam: DeviceDecodeResult — autosome-compacted Q/V resident handle (special members + accessors)
