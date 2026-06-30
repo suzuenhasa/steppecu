@@ -1,13 +1,13 @@
 // src/device/cuda/check.cuh
 //
 // THE single CUDA / cuBLAS error-checking home + post-launch validation
-// (architecture.md §2 DRY, §7 idioms, §8 helpers; ROADMAP §5).
+// (architecture.md §2 DRY, §7 idioms, §8 helpers).
 //
-// Replaces the spike's THREE duplicated `CUDA_CHECK`/`CUBLAS_CHECK` macros
-// (ROADMAP §1, §5). There is exactly ONE STEPPE_CUDA_CHECK and ONE CUBLAS_CHECK
+// Replaces THREE duplicated `CUDA_CHECK`/`CUBLAS_CHECK` macros.
+// There is exactly ONE STEPPE_CUDA_CHECK and ONE CUBLAS_CHECK
 // in the codebase and every CUDA / cuBLAS *fault* call routes through them.
 //
-// Unlike the spike macros — which `std::exit(EXIT_FAILURE)` on failure (fine for
+// Unlike a `std::exit(EXIT_FAILURE)`-on-failure macro (fine for
 // a throwaway harness, fatal for a library) — these THROW a typed exception
 // carrying the call site via std::source_location, so tests can `catch (const
 // CudaError&)` / `catch (const CublasError&)` and the public API can translate to
@@ -22,7 +22,7 @@
 // cudaErrorPeerAccessAlreadyEnabled) tags-and-degrades rather than faulting. The
 // fault checks above are for unrecoverable calls; the statistic path uses only
 // those, so §12 parity is identical on both capability tiers.
-// TODO(M4.5): exercise this two-tier (CAP-1/CAP-2) §12 parity claim in CI — run
+// TODO: exercise this two-tier (CAP-1/CAP-2) §12 parity claim in CI — run
 // the goldens on both a P2P-enabled and a P2P-disabled tier so the "identical on
 // both" assertion is gated, not just asserted in prose (architecture.md §11.4).
 //
@@ -224,7 +224,7 @@ inline void cuda_check(cudaError_t status, const char* expr,
 // CudaError, via the §10 warn sink) and RETURNS the status so the caller can
 // branch on it — it does NOT throw. This is the device-cuda-check CAP-1/CAP-2
 // home (architecture.md §11.4 capability tiers, §10 log taxonomy; CI gate tracked
-// by the file-header TODO(M4.5)):
+// by the file-header TODO):
 // `cudaDeviceCanAccessPeer` returning "cannot" and `cudaDeviceEnablePeerAccess`
 // returning cudaErrorPeerAccessAlreadyEnabled are EXPECTED capability-degrade
 // outcomes on the budget tier (GeForce P2P-disabled), NOT errors — routing them
@@ -287,7 +287,7 @@ inline void cufft_check(cufftResult status, const char* expr,
 
 /// Non-throwing CUDA runtime check for RECOVERABLE statuses (capability tiers,
 /// architecture.md §11.4 / §10; CAP-1/CAP-2, CI gate tracked by the file-header
-/// TODO(M4.5)). On a non-cudaSuccess
+/// TODO). On a non-cudaSuccess
 /// status it logs ONE STEPPE_LOG_WARN line (file:line + error name/string) and
 /// CONTINUES; it does NOT throw and YIELDS the cudaError_t so the caller can
 /// branch and tag the degrade. Use for capability probes (e.g. P2P

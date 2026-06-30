@@ -1,15 +1,14 @@
 // src/device/cuda/stream.hpp
 //
-// RAII Stream / Event wrappers (architecture.md §2 RAII, §7, §8; ROADMAP §5).
+// RAII Stream / Event wrappers (architecture.md §2 RAII, §7, §8).
 //
-// Replaces the spike's bare `cudaEventCreate`/`cudaEventDestroy` pairs (one per
-// timed GEMM in f2_emu_spike.cu, f2_prec_acc.cu, f2_timing.cu — ROADMAP §1
-// "no RAII"), where every `exit()` error path leaked the events. Here lifetime
-// is tied to scope and destroyed exactly once.
+// Replaces bare `cudaEventCreate`/`cudaEventDestroy` pairs (one per
+// timed GEMM) that had no RAII, where every `exit()` error path leaked the
+// events. Here lifetime is tied to scope and destroyed exactly once.
 //
 // Shape (architecture.md §7): both types are fully move-only — move-construct AND
-// move-assign (the old draft deleting move-assign silently made `s = std::move(o)`
-// ill-formed). Copy is deleted. Destructors NEVER throw; a nonzero destroy status
+// move-assign (deleting move-assign would silently make `s = std::move(o)`
+// ill-formed). Copy is deleted. Destructors never throw; a nonzero destroy status
 // at teardown routes to a debug-only warning (architecture.md §2, §7, §10).
 //
 // Usage (architecture.md §7, §11.1): one Stream per independent lane — the single
@@ -85,7 +84,7 @@ private:
         // No create-device record/restore: unlike a raw cudaFree pointer, the runtime
         // resolves a STREAM's own device association on destroy, so destroying under a
         // different current device than the create device neither leaks nor UAFs
-        // (cleanup [17.5]; matches the device-agnostic-free invariant in
+        // (matches the device-agnostic-free invariant in
         // device_buffer.cuh). Destructor never throws (architecture.md §7); a nonzero
         // destroy status is reported to the debug-only warning sink, never thrown.
         if (s_) {
@@ -105,7 +104,7 @@ private:
 /// (`cudaEventDisableTiming`), which is the cheaper, lower-latency variant used
 /// for cross-stream ordering (architecture.md §7 "express cross-stream deps with
 /// Event"); pass `enable_timing = true` for the elapsed-time measurement path
-/// (the spike's GEMM timing, f2_timing.cu).
+/// (the GEMM-timing path).
 class Event {
 public:
     /// Create an event. `enable_timing` selects whether `elapsed_ms` is usable;
@@ -162,7 +161,7 @@ private:
         // association on destroy, so destroying under a different current device than
         // the create device is safe (no leak, no UAF) — this is also what covers the
         // per-slot block_sink events now that they are owned by this RAII Event
-        // (cleanup [17.5]). Destructor never throws (architecture.md §7); a nonzero
+        // Destructor never throws (architecture.md §7); a nonzero
         // destroy status is reported to the debug-only warning sink, never thrown.
         if (e_) {
             const cudaError_t err = cudaEventDestroy(e_);

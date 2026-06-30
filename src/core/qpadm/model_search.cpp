@@ -31,7 +31,7 @@ namespace steppe::core::qpadm {
 // assemble_f4 stays native by carve-out; the covariance SYRK engages the emulated{40}
 // default (auto-native fallback) inside jackknife_cov; SVD/Qinv/chi^2 native. NOTE:
 // assemble_f4 caches tot_line_ as a per-backend member consumed by jackknife_cov inside
-// run_impl, so the assemble and the run_impl MUST be adjacent on the SAME backend (they
+// run_impl, so the assemble and the run_impl must be adjacent on the SAME backend (they
 // are — one model at a time on one backend instance; callers invoke this sequentially
 // per device worker).
 template <class F2Src>
@@ -66,7 +66,7 @@ QpAdmResult fit_one_model_device(ComputeBackend& be,
 // common case does NOT come here — run_qpadm_search routes it to the device-BATCHED
 // virtual be.fit_models_batched. Each model is fit WHOLLY through `be`'s own device
 // virtuals (assemble_f4 reading the resident f2 → run_impl). Domain outcomes ride in
-// results[i].status, NEVER a throw.
+// results[i].status, never a throw.
 std::vector<QpAdmResult> fit_models_batched_default(
     ComputeBackend& be, const device::DeviceF2Blocks& f2,
     std::span<const QpAdmModel> models, const QpAdmOptions& opts) {

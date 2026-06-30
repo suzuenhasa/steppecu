@@ -1,12 +1,12 @@
 // src/device/cuda/qpgraph_fit_kernels.cu
 //
-// The qpGraph FLEET kernel — the PRODUCTIZED IDEA-1 optimizer spike (bench_optimizers.cu
-// idea1_fleet_kernel:373-432 + d_graph_gls_score:295-351), GENERALIZED from the fixed-
-// nadmix hard-coded fill_pwts to an ARBITRARY topology via the device path-table model,
-// and given the AT2 box-constrained (NNLS) edge solve the golden needs (the spike's
-// unconstrained d_solve was insufficient — the golden has a boundary edge at 0).
+// The qpGraph FLEET kernel — the productized per-restart fleet optimizer,
+// GENERALIZED from the fixed-nadmix hard-coded fill_pwts to an ARBITRARY topology
+// via the device path-table model, and given the AT2 box-constrained (NNLS) edge
+// solve the golden needs (an unconstrained solve is insufficient — the golden has
+// a boundary edge at 0).
 //
-// ONE THREAD per restart (the FLEET is the parallel axis; the settled IDEA-1 decision,
+// ONE THREAD per restart (the FLEET is the parallel axis; the settled fleet decision,
 // optimizer-comparison.md). Each thread runs the WHOLE multistart x maxit projected-
 // Newton loop in-kernel — per-dim forward-diff gradient + diagonal 3-point curvature,
 // projected trust-clamped step, 8-step backtracking — each objective eval the full inner
@@ -18,8 +18,8 @@
 // PRECISION: the inner SPD edge solve + the GLS quadratic form are NATIVE FP64 (the
 // cancellation carve-out, matching the host oracle). The objective is in-thread and small
 // (nedge<=the per-thread scratch cap); the EmulatedFp64 GEMM seam is the production-scale
-// cc-assembly path (batched cuBLAS), not this in-thread fleet body — the same shape the
-// spike measured GPU-bound (>=90% util).
+// cc-assembly path (batched cuBLAS), not this in-thread fleet body — the same shape
+// measured GPU-bound (>=90% util).
 //
 // SCRATCH: each thread's working arrays (pwts_c, ppwts, cc, ...) live in a per-thread slab
 // of GLOBAL memory the launcher allocates (numstart slabs) — sized to the topology at
@@ -43,7 +43,7 @@ namespace {
 // integral / floating-point type — usable directly in __device__ code (CUDA C++ PG §5.3).
 namespace opt = ::steppe::core::qpadm::qpgraph_opt;
 
-// ---- per-thread native-FP64 linear algebra (mirrors the spike d_lu_factor/d_solve) ----
+// ---- per-thread native-FP64 linear algebra (d_lu_factor/d_solve) ----
 // Column-major A(i,j) at i + n*j.
 __device__ inline bool d_lu_factor(double* a, int n, int* piv) {
     for (int i = 0; i < n; ++i) piv[i] = i;
@@ -251,7 +251,7 @@ __device__ inline double d_qpgraph_score(const QpGraphDeviceTopo& t, const doubl
         }
         double rr = 0.0;
         for (int r = 0; r < np; ++r) rr += ppwts[r + np * e1] * qf[r];
-        q1[e1] = rr;  // unscaled q for now
+        q1[e1] = rr;  // unscaled q; the AT2 sc-scaling is applied below
     }
     // AT2 ridge: diag(cc) += fudge * mean(diag(cc)).
     double trm = 0.0;

@@ -4,17 +4,17 @@
 //
 // This header is the SINGLE SOURCE OF TRUTH for the typed, immutable knobs that
 // every other layer builds against:
-//   * the precision policy (`Precision`)         -- architecture.md §9, §12; ROADMAP §0, §4
+//   * the precision policy (`Precision`)         -- architecture.md §9, §12
 //   * device/resource selection (`DeviceConfig`) -- architecture.md §9, §11.4
-//   * on-the-fly QC filters (`FilterConfig`)     -- architecture.md §1, §5 S0'; ROADMAP M2
-//   * named numeric constants that REPLACE the spike's magic numbers (ROADMAP §4)
+//   * on-the-fly QC filters (`FilterConfig`)     -- architecture.md §1, §5 S0'
+//   * named numeric constants that replace bare magic numbers
 //
 // It is deliberately CUDA-FREE and depends only on the C++ standard library, so
 // it compiles into `core`, `api`, the CLI, and the bindings without dragging in
 // the device layer (architecture.md §4 layering rule). No CUDA headers here.
 //
 // PRECISION POLICY IS THE LAW (MEASURED on real AADR v66, 2× RTX 5090, CUDA 13 --
-// never on synthetic data; ROADMAP §0 cautionary tale). The matmul-heavy f2
+// never on synthetic data). The matmul-heavy f2
 // GEMMs default to FIXED-slice Ozaki emulation at mantissa_bits = 40 (≈ native
 // FP64 accuracy, 7–17× faster). 32 bits is the faster, 8.6e-9-worst-case option.
 // Native FP64 is the oracle / fallback. DYNAMIC mantissa control is the rejected
@@ -30,16 +30,16 @@
 namespace steppe {
 
 // ---------------------------------------------------------------------------
-// Named constants — promoted from the spike's magic numbers (ROADMAP §4).
+// Named constants — promoted from bare magic numbers.
 //
-// No raw numeric literal from the spike may survive into production except true
+// No bare numeric literal may survive into production except true
 // mathematical constants (e.g. the `2` in a²−2ab+b²). These are the named homes
 // for the rest.
 // ---------------------------------------------------------------------------
 
 /// Default fixed-slice Ozaki mantissa-bit count for `Precision::EmulatedFp64`.
 /// 40 ⇒ ≈ native FP64 (worst-case f2 error 2.2e-11); 32 ⇒ 8.6e-9 (faster);
-/// 48 ⇒ exceeds native (1e-12). MEASURED on real AADR (ROADMAP §0). FIXED only —
+/// 48 ⇒ exceeds native (1e-12). MEASURED on real AADR. FIXED only —
 /// dynamic mantissa control is the rejected trap and is not selectable here.
 inline constexpr int kDefaultMantissaBits = 40;
 
@@ -63,39 +63,39 @@ inline constexpr std::size_t kFstatDefaultSweepTopK = 1000000;  // 1e6
 
 /// Square thread-block edge for the elementwise f2 assemble/numerator kernels:
 /// a `dim3(kCdivBlock, kCdivBlock)` 2-D block over the [P × P] output.
-/// Replaces the spike's `dim3 block(16,16)` (f2_emu_spike.cu:311). The single
+/// Replaces a bare `dim3 block(16,16)`. The single
 /// source of launch geometry (`cdiv`, `grid_for`, and the per-kernel block dims)
 /// lives in `core/internal/launch_config.hpp`; kernels never re-pick a block size.
 inline constexpr int kCdivBlock = 16;
 
 /// Relative-error floor: pairs whose reference |f2| is below this are scored by
 /// absolute error so near-zero entries do not blow up the relative metric, and
-/// it is the divide-by-zero guard in relative-error comparisons. Replaces the
-/// spike's bare `1e-12` (f2_prec_acc.cu:87). Used by tests / accuracy gates.
+/// it is the divide-by-zero guard in relative-error comparisons. Replaces a
+/// bare `1e-12` literal. Used by tests / accuracy gates.
 inline constexpr double kRelFloor = 1e-12;
 
 /// Absolute floor used to guard denominators in relative-error math, e.g.
-/// `max(|ref|, kAbsFloor)`. Replaces the spike's bare `1e-300`
-/// (f2_emu_spike.cu:474, f2_timing.cu:90,111). Smallest normalized-ish double
+/// `max(|ref|, kAbsFloor)`. Replaces a bare `1e-300` literal.
+/// Smallest normalized-ish double
 /// magnitude we treat as nonzero in those guards.
 inline constexpr double kAbsFloor = 1e-300;
 
 /// Het-bias-correction denominator floor: the `1` in `max(N-1, 1)` for the
 /// per-SNP het correction `q(1-q)/max(N-1,1)`. A true mathematical floor that
 /// avoids divide-by-zero when a population has a single non-missing haploid.
-/// Replaces the spike's bare `1.0` in `std::max(n - 1.0, 1.0)`
-/// (f2_emu_spike.cu:511, :709). Lives here AND is consumed by the shared
+/// Replaces a bare `1.0` in `std::max(n - 1.0, 1.0)`.
+/// Lives here AND is consumed by the shared
 /// `f2_estimator` primitive so the CPU oracle and GPU feeder cannot diverge.
 inline constexpr double kHetCorrDenomFloor = 1.0;
 
-/// Base of the per-block size-bucketing used by the M4 batched f2 path: blocks
+/// Base of the per-block size-bucketing used by the batched f2 path: blocks
 /// are grouped by `ceil_pow{kBlockGroupPadBase}(block_size)` and each group is
 /// run as one cublasDgemmStridedBatched call padded to that group's bucket width.
 /// Base 2 (power-of-two buckets) bounds the per-block padding waste to < this
 /// factor WITHIN a group while keeping the number of strided-batched calls
 /// O(log max_block_size) (MEASURED: real-AADR P=768 → 10 groups, 1.43× pad waste
-/// vs the global-s_max design's 2.76×; the grouped design is the spike-chosen M4
-/// design — fastest AND VRAM-viable, ROADMAP M4 spike). The pad columns carry
+/// vs the global-s_max design's 2.76×; the grouped design is the chosen
+/// design — fastest AND VRAM-viable). The pad columns carry
 /// V=0 ⇒ they contribute nothing to the masked GEMMs (architecture.md §5 S2).
 inline constexpr int kBlockGroupPadBase = 2;
 
@@ -105,7 +105,7 @@ inline constexpr int kBlockGroupPadBase = 2;
 /// per-dimension limit (m, n <= 32 for the batched Jacobi), reused here as the
 /// single dense-Jacobi/gesvd crossover so the qpAdm LARGE-path SVD dispatch
 /// (cuda_backend.cu large_svd_V) and the svd_path observability report cannot drift
-/// to two different thresholds (architecture.md §8 single-source; group-5 5.3/5.5).
+/// to two different thresholds (architecture.md §8 single-source).
 /// It is the cuSOLVER routine-selection threshold, NOT a warp size. FROZEN by §12
 /// parity (the NRBIG golden asserts svd_path==2 ⇒ gesvd at nr=39 > 32; the 9-pop
 /// asserts ==1 ⇒ gesvdj at nl=2,nr=5 <= 32): name only, do NOT change the value.
@@ -113,8 +113,8 @@ inline constexpr int kGesvdjMaxDim = 32;
 
 /// cuBLAS workspace bytes for the f2 GEMMs (architecture.md §12 — an explicit
 /// workspace is REQUIRED for run-to-run reproducibility of emulated FP64). Ample
-/// for the reduce-to-[P×P] GEMMs; promoted out of the spike's bare 64 MiB literal
-/// (f2_emu_spike.cu) into a named constant shared by the M0 and M4 device paths.
+/// for the reduce-to-[P×P] GEMMs; promoted out of a bare 64 MiB literal
+/// into a named constant shared by the device paths.
 inline constexpr std::size_t kCublasWorkspaceBytes = 64u * 1024u * 1024u;
 
 /// Phase-2 FIT-path chunk-budget knobs (cuda_backend.cu fit_one_bucket): the
@@ -134,7 +134,7 @@ inline constexpr std::size_t kFitBudgetHeadroomBytes = static_cast<std::size_t>(
 /// for the feeder's VRAM footprint coefficients so the tier-select policy math
 /// (tier_select.hpp resident_working_set_bytes / streamed_working_set_bytes) can
 /// derive the footprint from a single source instead of re-spelling bare literals
-/// that silently drift from the real feeder malloc in cuda_backend.cu (ROADMAP §4).
+/// that silently drift from the real feeder malloc in cuda_backend.cu.
 ///   kFeederRawBufsPerPop  = 3·P·M : the raw decoded inputs dQ_raw/dV_raw/dN_raw.
 ///   kFeederOutBufsPerPop  = 4·P·M : the persisted feeder outputs (dQt + dVt +
 ///                                   dSt, where dSt is 2·P·M = 1+1+2 = 4 per pop).
@@ -144,13 +144,13 @@ inline constexpr std::size_t kFitBudgetHeadroomBytes = static_cast<std::size_t>(
 inline constexpr unsigned kFeederRawBufsPerPop = 3u;
 inline constexpr unsigned kFeederOutBufsPerPop = 4u;
 
-/// M4 resident-tensor count: the f2 and vpair tensors held co-resident for the whole
-/// bucket loop (each [P²·n_block] FP64, the B26 2× term). Single home so the resident
+/// Resident-tensor count: the f2 and vpair tensors held co-resident for the whole
+/// bucket loop (each [P²·n_block] FP64, the 2× term). Single home so the resident
 /// footprint coefficient in vram_budget.hpp (resident_tensor_bytes) is not a bare 2.
 /// Structural count — CUDA-free, parity-neutral (changes WHERE bytes land, §12).
 inline constexpr std::size_t kResidentTensorCount = 2;
 
-/// M4 strided-batched chunk per-block stack counts (vram_budget.hpp
+/// Strided-batched chunk per-block stack counts (vram_budget.hpp
 /// per_block_chunk_bytes / tier_select.hpp per_block_chunk_elems):
 ///   kChunkInputStacks  = 4·P·s_pad : gathered inputs Qg + Vg (P·s_pad each) + Sg
 ///                                    (2·P·s_pad) = 4 stacks.
@@ -166,14 +166,14 @@ inline constexpr std::size_t kChunkOutputStacks = 4;
 /// symbol rather than a bare literal at each device-id default. CUDA-free.
 inline constexpr int kInvalidDeviceId = -1;
 
-/// M5 STREAMED-path device ring depth: the number of per-chunk [P²·max_nb] f2/vpair
+/// Streamed-path device ring depth: the number of per-chunk [P²·max_nb] f2/vpair
 /// device buffers the streamed (HostRam/Disk) backend cycles through so a chunk's D2H
 /// can drain while the next chunk computes (cuda_backend.cu stream_f2_blocks_impl).
 /// Two (not three) keeps the device ring's VRAM small — the device buffer only needs
 /// to survive its own D2H, the SINK's pinned ring absorbs the slow write. Single-homed
 /// here so the real ring alloc (cuda_backend.cu) and the tier-select working-set budget
-/// (tier_select.hpp streamed_working_set_bytes) cannot drift apart (ROADMAP §4; group-5
-/// 5.3). Plain count — CUDA-free, parity-neutral (it changes WHERE bytes land, §12).
+/// (tier_select.hpp streamed_working_set_bytes) cannot drift apart. Plain count
+/// — CUDA-free, parity-neutral (it changes WHERE bytes land, §12).
 inline constexpr int kStreamDeviceChunks = 2;
 
 /// Default number of throughput-only search lanes (streams) PER GPU for the
@@ -183,10 +183,10 @@ inline constexpr int kStreamDeviceChunks = 2;
 inline constexpr std::size_t kDefaultSearchStreams = 4;
 
 /// Target fraction of device VRAM the resident working set may occupy
-/// (architecture.md §11.1/§11.2 — the `build()`-validated budget fraction; ROADMAP
-/// §4 — promoted out of the bare `0.80` literal in cuda_backend.cu). It is the one
+/// (architecture.md §11.1/§11.2 — the `build()`-validated budget fraction;
+/// promoted out of the bare `0.80` literal in cuda_backend.cu). It is the one
 /// home for the `budget · free` fraction in §11.2's `total_vram ≤ budget · free`
-/// check AND the in-stream chunk-sizing in the M4 backend, so the up-front reject
+/// check AND the in-stream chunk-sizing in the batched backend, so the up-front reject
 /// and the runtime chunk budget can never drift to two different fractions.
 ///
 /// VALUE — reconciliation to architecture.md §11.1 ("a target fraction (say 60–70%)
@@ -194,7 +194,7 @@ inline constexpr std::size_t kDefaultSearchStreams = 4;
 /// free VRAM at chunk-size derivation time, where the headroom must also absorb the
 /// resident `f2_blocks`/`Vpair` tensors, the cuSOLVER/cuBLAS workspaces, AND the
 /// double-buffered pinned/device tile staging that §11.1 still has to allocate. The
-/// M4 chunk budget this constant gates is applied to the free VRAM that REMAINS
+/// The chunk budget this constant gates is applied to the free VRAM that REMAINS
 /// AFTER the resident tensors + the cuBLAS workspace are already subtracted (the
 /// budget helper in device/vram_budget.hpp subtracts `2·P²·n_block·8` for f2+Vpair
 /// and `kCublasWorkspaceBytes` before applying this fraction), so the residual it
@@ -205,7 +205,7 @@ inline constexpr std::size_t kDefaultSearchStreams = 4;
 /// free VRAM). Tunable policy number, NOT a mathematical constant.
 inline constexpr double kMaxVramUtilizationFraction = 0.80;
 
-/// M5 tier-select: the fraction of free VRAM the RESIDENT-tier result + its
+/// Tier-select: the fraction of free VRAM the RESIDENT-tier result + its
 /// per-call working set may occupy before tier-select declines Resident and falls
 /// to HostRam. Strictly below kMaxVramUtilizationFraction (0.80) so the resident
 /// f2/Vpair result PLUS the run_f2_blocks_resident working set (feeder outputs +
@@ -213,7 +213,7 @@ inline constexpr double kMaxVramUtilizationFraction = 0.80;
 /// co-exceed free VRAM. Tunable policy number, NOT a mathematical constant.
 inline constexpr double kResidentTierVramFraction = 0.70;
 
-/// M5 tier-select: the fraction of free HOST RAM the HOST-tier result may occupy
+/// Tier-select: the fraction of free HOST RAM the HOST-tier result may occupy
 /// before tier-select declines HostRam and falls to Disk. Below 1.0 so the host
 /// F2BlockTensor (2·P²·n_block·8 bytes) plus the small pinned staging + OS headroom
 /// stay within free RAM on a normal machine. Tunable policy number.
@@ -224,12 +224,12 @@ static_assert(kResidentTierVramFraction > 0.0 && kResidentTierVramFraction <= kM
 static_assert(kHostTierRamFraction > 0.0 && kHostTierRamFraction <= 1.0,
               "kHostTierRamFraction must lie in (0, 1].");
 
-/// M5 streamed-path: fraction of the VRAM envelope reserved for the tile feeder;
+/// Streamed-path: fraction of the VRAM envelope reserved for the tile feeder;
 /// the slabs+ring take the rest. Tunable policy number, parity-neutral §12.
 inline constexpr double kStreamTileBudgetFraction = 0.25;
 
 /// Default jackknife block size in centimorgans. ADMIXTOOLS 2's `blgsize`
-/// default is 0.05 Morgans = 5 cM (architecture.md §9; ROADMAP §4). The accessor
+/// default is 0.05 Morgans = 5 cM (architecture.md §9). The accessor
 /// surface speaks cM; the block math stores Morgans (1 cM = 0.01 Morgans). The
 /// conversion lives in exactly one place, next to `block_partition_rule.hpp`.
 inline constexpr double kDefaultBlockSizeCm = 5.0;
@@ -239,18 +239,18 @@ inline constexpr double kDefaultBlockSizeCm = 5.0;
 inline constexpr double kCentimorgansPerMorgan = 100.0;
 
 /// Inclusive autosome chromosome-code range for the `autosomes_only` filter
-/// (M2). ADMIXTOOLS 2's `extract_f2` default is `auto_only = TRUE` ("keep only
+/// ADMIXTOOLS 2's `extract_f2` default is `auto_only = TRUE` ("keep only
 /// SNPs on chromosomes 1 to 22"), so AT2 parity = chromosomes 1..22 — the sex
 /// chromosomes (X, Y) and MT/other non-autosomal codes are dropped. The exact
 /// EIGENSTRAT codes those non-autosomal labels map to (X→23, Y→24, MT→90) are
 /// single-homed as `kChromCodeX`/`kChromCodeY`/`kChromCodeMt` in
 /// src/io/eigenstrat_format.hpp — `read_snp` EMITS them and this 1..22 range is
 /// the complement that DROPS them, so the filter's correctness depends on the two
-/// agreeing on those codes (cleanup X-8/B16). Named here (not a bare 22) so the
+/// agreeing on those codes. Named here (not a bare 22) so the
 /// single AT2 autosome definition lives in one place and the filter predicate
 /// reads it.
 /// (Verified against the AT2 extract_f2 reference: auto_only default TRUE = chr
-/// 1-22. The M3 real-AADR finding — chr 1-24 → 757 blocks, chr 1-23 → 756 —
+/// 1-22. The real-AADR finding — chr 1-24 → 757 blocks, chr 1-23 → 756 —
 /// is consistent: dropping chr 23 AND 24 here is the AT2-parity autosome set.)
 inline constexpr int kAutosomeChromMin = 1;
 inline constexpr int kAutosomeChromMax = 22;
@@ -262,18 +262,17 @@ inline constexpr int kAutosomeChromMax = 22;
 /// two cannot drift. Parity-neutral filter policy.
 inline constexpr double kMindFilterInactiveThreshold = 1.0;
 
-/// M5 Disk-tier frozen default on-disk f2_blocks cache path (cwd-relative). The
+/// Disk-tier frozen default on-disk f2_blocks cache path (cwd-relative). The
 /// LAST-RESORT value used only when both the `Config::disk_cache_path` knob and
 /// the `STEPPE_F2_CACHE_PATH` env var are empty. Single-homed here (the doc on
 /// `Config::disk_cache_path` already calls it the "frozen default") so the value
 /// lives in one place and the consumer references it rather than re-spelling the
-/// literal (cleanup f2_blocks_multigpu 5.4 / 9.2; NAMING-STYLE-STANDARD §2.5
-/// single-source, §4 "Unnamed literal"). Parity-neutral: it only chooses WHERE
+/// literal. Parity-neutral: it only chooses WHERE
 /// the bytes land, never a reported number (§12). Value unchanged.
 inline constexpr char kDefaultDiskCachePath[] = "./steppe_f2_blocks.cache";
 
 // ---------------------------------------------------------------------------
-// Precision — the typed precision knob (architecture.md §9, §12; ROADMAP §4).
+// Precision — the typed precision knob (architecture.md §9, §12).
 //
 // Three named modes assigned by the CONDITIONING of the operation, not its
 // shape. The default (`EmulatedFp64`, 40-bit) governs the well-conditioned
@@ -292,8 +291,8 @@ struct Precision {
         Fp64,
 
         /// Fixed-slice Ozaki FP64 emulation — the DEFAULT for all matmul-heavy
-        /// stages including the f2 GEMMs (architecture.md §5 S2, §12; ROADMAP
-        /// §0). MEASURED 7–17× over native FP64 on real AADR at native-grade
+        /// stages including the f2 GEMMs (architecture.md §5 S2, §12).
+        /// MEASURED 7–17× over native FP64 on real AADR at native-grade
         /// accuracy. The slice count is FIXED via `mantissa_bits`: 40 ≈ native,
         /// 32 = faster/8.6e-9. Accuracy-approximate, NOT bit-identical to native
         /// and not IEEE-754 on specials — which is why `Fp64` stays the oracle.
@@ -309,7 +308,7 @@ struct Precision {
         /// DOWNGRADES to native `Fp64` with a logged capability tag rather than
         /// silently running the rejected DYNAMIC mantissa (device
         /// `emulation_honorable` / `engage_f2_precision`; architecture.md §9
-        /// build() "fall back to native Fp64 or error"; cleanup X-6/B2).
+        /// build() "fall back to native Fp64 or error").
         EmulatedFp64,
 
         /// TF32 tensor-core. Opt-in, model-space SCREENING / ranking ONLY.
@@ -325,14 +324,14 @@ struct Precision {
     /// FIXED-slice Ozaki mantissa-bit count — meaningful only when
     /// `kind == Kind::EmulatedFp64`. 40 ≈ native FP64 (default), 32 = faster
     /// (8.6e-9 worst-case), 48 = exceeds native. ALWAYS a fixed cap; the dynamic
-    /// trap is not representable by this struct (ROADMAP §0, §4). Ignored for
+    /// trap is not representable by this struct. Ignored for
     /// `Fp64` and `Tf32`.
     int mantissa_bits = kDefaultMantissaBits;
 };
 
 // ---------------------------------------------------------------------------
 // DeviceConfig — resources, injected not globally discovered (architecture.md
-// §9, §11.4). Promotes the spike's stray device-id / stream-count literals.
+// §9, §11.4). Promotes stray device-id / stream-count literals.
 // ---------------------------------------------------------------------------
 struct DeviceConfig {
     /// SINGLE source of truth for which / how many GPUs to use. Empty ⇒
@@ -349,7 +348,7 @@ struct DeviceConfig {
 
     /// Statistic streams PER GPU. Must be 1 on the bit-stable statistic path:
     /// cuBLAS reproducibility does not hold across concurrent streams
-    /// (architecture.md §12). Replaces the spike's implicit single-stream use.
+    /// (architecture.md §12). Replaces the implicit single-stream use.
     std::size_t stream_count = 1;
 
     /// Throughput-only lanes for the model-space search (S8), where results are
@@ -362,8 +361,7 @@ struct DeviceConfig {
     bool use_mem_pool = true;
 
     // -----------------------------------------------------------------------
-    // MULTI-GPU OVERRIDE-KNOB BANNER (architecture.md §11.4; cleanup overview
-    // (2).3, finding include-config 11.1/9.1).
+    // MULTI-GPU OVERRIDE-KNOB BANNER (architecture.md §11.4).
     //
     // There are TWO distinct knob types in the capability-tier design and they
     // live in TWO distinct places — do not conflate them:
@@ -371,18 +369,18 @@ struct DeviceConfig {
     //   * OVERRIDE INTENT  → here, in `DeviceConfig`. The user-facing levers
     //     that say what the run MAY or PREFERS to do. This set is APPEND-ONLY as
     //     capability levers land: `devices` (the fixed combine order, §11.4),
-    //     `enable_peer_access` (M4), `prefer_p2p_combine` (M4.5), and a future
-    //     `enable_gds_ingest` (M5/M7). Every lever is parity-NEUTRAL — it moves
+    //     `enable_peer_access`, `prefer_p2p_combine`, and a future
+    //     `enable_gds_ingest`. Every lever is parity-NEUTRAL — it moves
     //     bytes or changes observability only, never a reported number (§12), so
     //     the host-staged fixed-order combine and the device-resident P2P
     //     combine are bit-identical on both capability tiers (§11.4).
     //
-    //   * DISCOVERED CAPABILITY + the WHICH-PATH tag → NEVER here. The runtime
+    //   * DISCOVERED CAPABILITY + the WHICH-PATH tag → never here. The runtime
     //     probe result (canAccessPeer, free/total VRAM, emulated-FP64-honorable
     //     state) and the recorded "which path did this run actually take, and
     //     why did it degrade" tag are RUNTIME STATE, not intent: they live in
     //     `Resources` / the result metadata, never on `DeviceConfig` and never
-    //     on the pure-numeric `F2BlockTensor` (cleanup overview (2).2). A
+    //     on the pure-numeric `F2BlockTensor`. A
     //     non-throwing tagged-degrade path (e.g. canAccessPeer == "no") records
     //     the fallback there; it is NOT an error (§11.4).
     // -----------------------------------------------------------------------
@@ -391,17 +389,17 @@ struct DeviceConfig {
     /// canAccessPeer) for single-node multi-GPU (architecture.md §11.4). This is
     /// the MAY-WE knob: whether the backend is permitted to call
     /// cudaDeviceEnablePeerAccess at all. DISTINCT from `prefer_p2p_combine`
-    /// (which path to take WHEN peer access is available) — see below. The M4.5
+    /// (which path to take WHEN peer access is available) — see below. The
     /// combine gate (the four-term §4 gate defined ONCE in `f2_blocks_multigpu.cpp`,
     /// "THE §4 COMBINE GATE", §8 single-source) ANDs this term in: `false` here forces
     /// the host-staged baseline (tagged `HostStaged`) even when the device CAN peer
     /// and `prefer_p2p_combine` is true, since the device-resident path would call the
-    /// very `cudaDeviceEnablePeerAccess` this veto forbids (cleanup C-1).
+    /// very `cudaDeviceEnablePeerAccess` this veto forbids.
     bool enable_peer_access = true;
 
     /// Prefer the device-resident P2P combine over the host-staged combine WHEN
-    /// peer access is available (architecture.md §11.4; cleanup overview (2).3,
-    /// finding include-config 11.1). This is the WHICH-PATH knob and is DISTINCT
+    /// peer access is available (architecture.md §11.4). This is the WHICH-PATH
+    /// knob and is DISTINCT
     /// from `enable_peer_access`:
     ///   * `enable_peer_access` = MAY we call cudaDeviceEnablePeerAccess at all;
     ///   * `prefer_p2p_combine` = once peer access IS available, prefer the
@@ -421,14 +419,14 @@ struct DeviceConfig {
     /// BASELINE and the only path on a budget box with peer access disabled
     /// (e.g. stock-driver GeForce). The probe result and the which-path tag are
     /// DISCOVERED state recorded in `Resources`/result metadata, NOT here (see
-    /// the override-knob banner above). The M4.5 multi-GPU combine reads this knob in
+    /// the override-knob banner above). The multi-GPU combine reads this knob in
     /// its four-term §4 gate — defined ONCE in `f2_blocks_multigpu.cpp` ("THE §4
     /// COMBINE GATE", §8 single-source), which ANDs BOTH override-intent levers
     /// (`prefer_p2p_combine` WHICH-PATH AND `enable_peer_access` MAY-WE) with the
     /// discovered `can_access_peer` and the structural `G >= 2`. So a user who FORBIDS
     /// peer access (`enable_peer_access=false`) takes the host-staged baseline even
     /// when the device CAN peer and P2P is preferred — the device-resident path's
-    /// `cudaDeviceEnablePeerAccess` is never reached against the veto (cleanup C-1).
+    /// `cudaDeviceEnablePeerAccess` is never reached against the veto.
     bool prefer_p2p_combine = true;
 
     /// Bit-stability INTENT for the statistic path (default ON). When true the
@@ -448,13 +446,13 @@ struct DeviceConfig {
     ///     order pinned by `devices` (§11.4) rather than a non-deterministic
     ///     AllReduce.
     /// This is OVERRIDE INTENT, not discovered state: it is the knob the §12
-    /// stream_count/workspace/combine rules the M4.5 parity-recompute path relies
+    /// stream_count/workspace/combine rules the parity-recompute path relies
     /// on are phrased against, and they are inexpressible without it. Set false
     /// only for throughput-only lanes whose results are recomputed in
     /// EmulatedFp64/Fp64 before any reported number (§12).
     bool deterministic = true;
 
-    /// M5 force-tier OVERRIDE (default Auto = the select_output_tier policy). When set
+    /// Force-tier OVERRIDE (default Auto = the select_output_tier policy). When set
     /// to Resident/HostRam/Disk it PINS the output tier regardless of free VRAM/RAM, so
     /// a test can exercise the Disk or HostRam stream at SMALL P (where Auto would pick
     /// Resident). It is the higher-precedence twin of the STEPPE_FORCE_TIER env var
@@ -464,17 +462,17 @@ struct DeviceConfig {
     enum class ForceTier { Auto, Resident, HostRam, Disk };
     ForceTier force_tier = ForceTier::Auto;
 
-    /// M5 Disk-tier on-disk f2_blocks cache path (TIER 2). Used only when the resolved
+    /// Disk-tier on-disk f2_blocks cache path (TIER 2). Used only when the resolved
     /// tier is Disk; empty ⇒ the STEPPE_F2_CACHE_PATH env var, else the frozen default
     /// "./steppe_f2_blocks.cache" (cwd). The precompute-once/fit-many artifact (the
-    /// M7-style on-disk f2_blocks cache; what ADMIXTOOLS 2 also keeps). Parity-neutral
+    /// on-disk f2_blocks cache; what ADMIXTOOLS 2 also keeps). Parity-neutral
     /// (it only chooses WHERE the bytes land, never a reported number, §12).
     std::string disk_cache_path;
 };
 
 // ---------------------------------------------------------------------------
-// FilterConfig — on-the-fly QC thresholds (architecture.md §1, §5 S0'; ROADMAP
-// M2). Promotes the spike's absent-but-implied filter knobs. Defaults are
+// FilterConfig — on-the-fly QC thresholds (architecture.md §1, §5 S0').
+// Promotes the absent-but-implied filter knobs. Defaults are
 // no-ops (keep everything) so the parity / pairwise-complete path is unaffected
 // unless a filter is explicitly requested.
 // ---------------------------------------------------------------------------
@@ -502,7 +500,7 @@ struct FilterConfig {
     /// pass), since per-sample missingness is not a single-tile quantity.
     double mind_max_missing = kMindFilterInactiveThreshold;
 
-    // ----- NEW M2 flag-gated filters (each defaults to a NO-OP so the parity /
+    // ----- Flag-gated filters (each defaults to a NO-OP so the parity /
     // pairwise-complete path is untouched unless the flag is explicitly set).
     // These are the "additions beyond bare filter" (architecture.md §1): gated
     // behind explicit flags and tagged, never on by default. -----------------
@@ -529,7 +527,7 @@ struct FilterConfig {
 
     // ----- Include / exclude SNP membership (resolved against the .snp ids by
     // include_exclude.{hpp,cpp}). Empty ⇒ no constraint (no-op). An external
-    // prune.in (LD-pruned SNP id list) is READ here, NEVER computed — steppe
+    // prune.in (LD-pruned SNP id list) is READ here, never computed — steppe
     // does not compute LD itself (architecture.md §1). -----------------------
 
     /// Explicit SNP-id keep set (the `keepsnps`/`--extract` analogue). Non-empty

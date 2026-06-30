@@ -1,15 +1,15 @@
 // src/device/cuda/handles.hpp
 //
-// RAII cuBLAS handle wrapper (architecture.md §2 RAII, §7, §8, §12; ROADMAP §5).
+// RAII cuBLAS handle wrapper (architecture.md §2 RAII, §7, §8, §12).
 //
-// Replaces the spike's bare `cublasCreate`/`cublasDestroy` pairs (one per .cu in
-// the experiments, ROADMAP §1). Created ONCE at startup and reused —
+// Replaces bare `cublasCreate`/`cublasDestroy` pairs that had no RAII (one per
+// translation unit previously). Created ONCE at startup and reused —
 // `cublasDestroy` implicitly synchronizes, so a handle is never recreated
 // per-iteration (architecture.md §7). Fully move-only (move-construct AND
 // move-assign, architecture.md §7). The destructor never throws, but routes a
 // nonzero destroy status to a debug-only warning (architecture.md §2, §7, §10).
 //
-// THE (stream, workspace) INVARIANT (architecture.md §12; cleanup X-1/B1). The
+// THE (stream, workspace) INVARIANT (architecture.md §12). The
 // emulated-FP64 path needs a non-default cuBLAS workspace pinned via
 // `cublasSetWorkspace` for run-to-run reproducibility (the FIXED-slice Ozaki
 // path; cuBLAS §2.1.4 Results Reproducibility). But `cublasSetStream`
@@ -23,8 +23,8 @@
 // route stream changes through `set_stream()` and never call raw
 // `cublasSetStream(get(), …)`.
 //
-// THE DEVICE-ORDINAL INVARIANT (architecture.md §2.1.2, §9, §11.4; cleanup
-// device-cuda-handles 2.3/11.x, overview §(2).1). "A cuBLAS library context is
+// THE DEVICE-ORDINAL INVARIANT (architecture.md §2.1.2, §9, §11.4). "A cuBLAS
+// library context is
 // tightly coupled with the CUDA context that is current at the time of the
 // `cublasCreate()` call" (cuBLAS §2.1.2, CUDA 13.x). The §9 `PerGpuResources`
 // holds one `CublasHandle` PER device and §11.4 switches devices with
@@ -32,10 +32,10 @@
 // its GEMMs on the wrong GPU or fails `CUBLAS_STATUS_ARCH_MISMATCH`. So the ctor
 // RECORDS the device ordinal that was current at creation (`cudaGetDevice`), and
 // every use that mutates the cuBLAS context debug-ASSERTs the current device
-// still matches it. This is record-and-ASSERT, NEVER `cudaSetDevice`: the wrapper
+// still matches it. This is record-and-ASSERT, never `cudaSetDevice`: the wrapper
 // must not introduce hidden global mutable state (architecture.md §7) — selecting
 // the device is the caller's / `Resources`' job. This is scaffolding for the
-// M4.5 multi-GPU pass (no sharding here yet); on single-GPU the assert is a
+// multi-GPU pass (no sharding here yet); on single-GPU the assert is a
 // no-op-true and parity is unaffected (§12 — observability only).
 //
 // Despite the `.hpp` extension (matching architecture.md §4's `handles.hpp`
@@ -148,7 +148,7 @@ public:
     }
 
     /// Bind the cuBLAS stream AND re-apply the owned workspace (architecture.md
-    /// §12; cleanup X-1/B1). `cublasSetStream` "unconditionally resets the cuBLAS
+    /// §12). `cublasSetStream` "unconditionally resets the cuBLAS
     /// library workspace back to the default workspace pool" (cuBLAS §2.4.7), so
     /// re-applying the pinned workspace here is what keeps the emulated-FP64
     /// determinism guarantee intact across stream changes. The single statistic
@@ -173,7 +173,7 @@ private:
     /// the one this handle was created on (architecture.md §7 record-and-assert,
     /// §11.4). cuBLAS couples the context to the device current at `cublasCreate`
     /// (cuBLAS §2.1.2), so configuring or issuing work on the handle while a
-    /// different device is current is a multi-GPU bug. This NEVER calls
+    /// different device is current is a multi-GPU bug. This never calls
     /// `cudaSetDevice` (no hidden global mutable state in the wrapper — that is the
     /// caller's job); it only verifies the precondition. Compiled out under NDEBUG
     /// (STEPPE_DEBUG_ONLY): the query + assert add nothing to the release hot path.
@@ -193,11 +193,11 @@ private:
 
     void destroy() noexcept {
         // Debug-only record-and-ASSERT that the creation device is current at
-        // teardown too (cleanup [17.5]) — consistent with set_workspace/set_stream,
+        // teardown too — consistent with set_workspace/set_stream,
         // which guard every OTHER cuBLAS-context mutation. cuBLAS couples the context
         // to the device current at cublasCreate (cuBLAS §2.1.2); on the box today
         // cublasDestroy carries its own context device and tolerates a different
-        // current device, but the M4.5 multi-GPU teardown runs under whatever device
+        // current device, but the multi-GPU teardown runs under whatever device
         // is ambient (the owning backend has no ~CudaBackend that re-selects
         // device_id_, and guard_device() runs only on compute entries), so a future
         // toolkit that minds the current device at Destroy is caught here in debug.
@@ -233,8 +233,7 @@ private:
     int device_id_ = -1;
 };
 
-/// Scoped, RAII restore of a cuBLAS handle's math mode (architecture.md §12;
-/// cleanup device-cuda-f2_block_kernel N-5, TODO M4.5 line 98; L10).
+/// Scoped, RAII restore of a cuBLAS handle's math mode (architecture.md §12).
 ///
 /// `cublasSetMathMode` is STICKY handle state: it stays set until changed again
 /// (unlike the workspace, it is NOT reset by `cublasSetStream` — cuBLAS §2.4.7
@@ -251,11 +250,11 @@ private:
 /// dtor restores the captured mode. So the Fp64 parity-recompute can engage
 /// PEDANTIC for its scope and leave the handle exactly as it found it — the
 /// EmulatedFp64 mode the surrounding run depends on is intact afterward. This is
-/// the M4.5 scaffold (architecture.md §12 oracle pass "use
+/// the scaffold (architecture.md §12 oracle pass "use
 /// `cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH)`"); it is parity-NEUTRAL
 /// (it only restores state that was already being set imperatively, §12).
 ///
-/// Move-only (so it can be returned/held); the dtor NEVER throws — a nonzero
+/// Move-only (so it can be returned/held); the dtor never throws — a nonzero
 /// restore status routes to the §7 teardown-warning sink (`STEPPE_LOG_WARN`),
 /// consistent with the RAII wrappers above. A moved-from scope is inert (it
 /// restores nothing). Takes the raw `cublasHandle_t` (not a `CublasHandle&`) so
@@ -307,7 +306,7 @@ private:
     // Non-owning: the CublasHandle owns the context. SAFE under the documented
     // STACK-SCOPED usage (this scope is constructed strictly inside a live owning
     // handle's lifetime and always destructs before it, so restore() never touches a
-    // destroyed context; cleanup [17.1]). RE-AUDIT if this scope is ever PROMOTED to
+    // destroyed context). RE-AUDIT if this scope is ever PROMOTED to
     // a long-lived member / moved-out-and-held: then the owning handle must be proven
     // to outlive it, else restore() runs on a torn-down context (correctly swallowed
     // to a WARN, but wrong-context).
@@ -401,7 +400,7 @@ private:
     /// the one this handle was created on (architecture.md §7, §11.4) — identical in
     /// spirit to CublasHandle::assert_on_creation_device. cuSOLVER couples its
     /// context to the device current at `cusolverDnCreate`, so configuring/issuing
-    /// work while a different device is current is a multi-GPU bug. NEVER calls
+    /// work while a different device is current is a multi-GPU bug. Never calls
     /// `cudaSetDevice` (no hidden global mutable state). Compiled out under NDEBUG.
     void assert_on_creation_device() const noexcept {
         STEPPE_DEBUG_ONLY(
@@ -416,10 +415,10 @@ private:
     }
     void destroy() noexcept {
         // Debug-only record-and-ASSERT that the creation device is current at
-        // teardown too (cleanup [17.5]) — consistent with set_stream, which guards
+        // teardown too — consistent with set_stream, which guards
         // the OTHER cuSOLVER-context mutation. cuSOLVER binds the context to the
         // device current at cusolverDnCreate (like cuBLAS §2.1.2); cusolverDnDestroy
-        // carries its own context device today, but the M4.5 multi-GPU teardown runs
+        // carries its own context device today, but the multi-GPU teardown runs
         // under whatever device is ambient (no ~CudaBackend re-selects device_id_),
         // so a future toolkit that minds the current device at Destroy is caught here
         // in debug. Stays cudaSetDevice-FREE by design (architecture.md §7);
@@ -440,8 +439,8 @@ private:
 };
 
 /// Owning, move-only RAII wrapper for a cuSOLVER `gesvdjInfo_t` — the gesvdj
-/// (one-sided Jacobi SVD) parameter structure (architecture.md §2 RAII, §7, §8;
-/// cleanup device-cuda-cuda_backend group-14 [14.5]). `cusolverDnCreateGesvdjInfo`
+/// (one-sided Jacobi SVD) parameter structure (architecture.md §2 RAII, §7, §8).
+/// `cusolverDnCreateGesvdjInfo`
 /// heap-allocates the structure (it can return CUSOLVER_STATUS_ALLOC_FAILED —
 /// VERIFIED against the CUDA 13.x cuSOLVER docs) and `cusolverDnDestroyGesvdjInfo`
 /// releases it; the two are the paired create/destroy, exactly like
@@ -459,7 +458,7 @@ private:
 /// stateless w.r.t. device ordinal: a `gesvdjInfo_t` is a plain configuration
 /// structure, not bound to a CUDA context (cuSOLVER docs: `info` is host memory),
 /// so it carries no device-ordinal record-and-assert. Move-only, mirroring the
-/// other handle wrappers above; the dtor NEVER throws — a nonzero destroy status
+/// other handle wrappers above; the dtor never throws — a nonzero destroy status
 /// routes to the §7 teardown-warning sink (`STEPPE_LOG_WARN`). A moved-from
 /// wrapper owns nothing (`info_ == nullptr`) and is safe to destroy.
 class GesvdjInfo {
@@ -503,7 +502,7 @@ private:
 
 /// Owning, move-only RAII wrapper for a cuFFT `cufftHandle` — the DATES
 /// `dates_curve` autocorrelation engine's batched D2Z/Z2D plans (architecture.md
-/// §2 RAII, §7, §8; cleanup device-cuda-cuda_backend [16.1]/[13.3]). A cuFFT plan
+/// §2 RAII, §7, §8). A cuFFT plan
 /// is created by `cufftPlanMany` and released by `cufftDestroy`; the plan BACKS a
 /// cuFFT device WORKSPACE — "all the intermediate buffer allocations (on CPU/GPU
 /// memory) take place during planning ... released when the plan is destroyed"
@@ -527,7 +526,7 @@ private:
 /// current device at `cufftPlanMany`, but `cufftDestroy` carries the plan's own
 /// device, so (like `GesvdjInfo`) this wrapper carries no device-ordinal
 /// record-and-assert — dates_curve is single-stream on the backend's device.
-/// Move-only, mirroring the other handle wrappers; the dtor NEVER throws — a
+/// Move-only, mirroring the other handle wrappers; the dtor never throws — a
 /// nonzero `cufftDestroy` status routes to the §7 teardown-warning sink
 /// (`STEPPE_LOG_WARN`) via `CufftError::status_name` (the [13.3] previously-
 /// unchecked `cufftDestroy` is now checked). A moved-from wrapper owns nothing
@@ -601,8 +600,8 @@ private:
 
 // ---------------------------------------------------------------------------
 // One-shot capability tag for the cuSOLVER FP64-emulated DOWNGRADE — the
-// cuSOLVER analogue of f2_block_kernel.cu's `warn_emulated_fp64_downgraded_once`
-// (cleanup X-6/B2, T-CAP-1). Emitted AT MOST ONCE per process when an honorable
+// cuSOLVER analogue of f2_block_kernel.cu's `warn_emulated_fp64_downgraded_once`.
+// Emitted AT MOST ONCE per process when an honorable
 // EmulatedFp64 SOLVE request is asked for but the toolkit exposes no FP64-emulated
 // cuSOLVER math mode (STEPPE_HAVE_CUSOLVER_FP64_EMULATED == 0, the box today), so
 // the promotion silently-but-OBSERVABLY degrades to native rather than spamming the
@@ -610,7 +609,7 @@ private:
 // downgrade can fire); a build whose toolkit gains the mode carries no unused
 // helper (warnings-as-errors clean). Routes through the ONE warn sink
 // (STEPPE_LOG_WARN); the std::atomic_flag makes the one-shot guard thread-safe
-// (M4.5 multi-GPU may engage from more than one host thread).
+// (multi-GPU may engage from more than one host thread).
 #if !STEPPE_HAVE_CUSOLVER_FP64_EMULATED
 namespace detail {
 inline void warn_cusolver_emulated_fp64_unavailable_once() {
@@ -631,8 +630,8 @@ inline void warn_cusolver_emulated_fp64_unavailable_once() {
 #endif  // !STEPPE_HAVE_CUSOLVER_FP64_EMULATED
 
 /// Scoped, RAII restore of a dense-cuSOLVER handle's math mode — the cuSOLVER
-/// analogue of `MathModeScope` (architecture.md §12; ROADMAP §6 the fit-solve
-/// promotion seam). This is the PROMOTION SEAM the M(fit-4) GPU qpAdm fit
+/// analogue of `MathModeScope` (architecture.md §12; the fit-solve
+/// promotion seam). This is the PROMOTION SEAM the GPU qpAdm fit
 /// deliberately left for later: native FP64 is free for ONE model, but the S8
 /// model rotation runs MILLIONS of small Cholesky/SVD/GLS solves where native
 /// FP64 on Blackwell is a tensor-core-throughput wall. The seam lets a solve
@@ -663,7 +662,7 @@ inline void warn_cusolver_emulated_fp64_unavailable_once() {
 /// targets native until the toolkit grows the mode. This is NOT a no-op stub: the
 /// get/apply/restore round-trip exercises the real cuSOLVER API on every scope.
 ///
-/// Move-only (so it can be returned/held); the dtor NEVER throws — a nonzero
+/// Move-only (so it can be returned/held); the dtor never throws — a nonzero
 /// restore status routes to the §7 teardown-warning sink (`STEPPE_LOG_WARN`),
 /// mirroring `MathModeScope`. A moved-from scope is inert. Takes the raw
 /// `cusolverDnHandle_t` (not a `CusolverDnHandle&`) so it composes at the solve
@@ -742,7 +741,7 @@ private:
 
     // Non-owning: CusolverDnHandle owns the context. SAFE under the documented
     // STACK-SCOPED usage (constructed inside a live owning handle's lifetime, always
-    // destructs before it; cleanup [17.1]). RE-AUDIT if ever promoted to a long-lived
+    // destructs before it). RE-AUDIT if ever promoted to a long-lived
     // member / moved-out-and-held — the owning handle must then be proven to outlive
     // it, else restore() runs on a torn-down context (swallowed to a WARN, but wrong).
     cusolverDnHandle_t h_ = nullptr;

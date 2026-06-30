@@ -1,16 +1,15 @@
 // src/device/cuda/device_buffer.cuh
 //
 // DeviceBuffer<T> — THE move-only RAII owner of device memory (architecture.md
-// §2 RAII, §7; ROADMAP §5). This is one of the THREE allowlisted translation
+// §2 RAII, §7). This is one of the THREE allowlisted translation
 // units permitted to call `cudaMalloc`/`cudaFree` directly (architecture.md §2
 // DRY grep gate: `device_buffer.cuh`, `allocator.cu`, `pinned_buffer.cuh`); all
 // other code takes non-owning views and never touches the allocation family.
 //
-// Replaces the spike's raw `cudaMalloc`/`cudaFree` pairs scattered through
-// f2_emu_spike.cu / f2_timing.cu (ROADMAP §1 "no RAII"). Fully move-only:
+// Replaces raw `cudaMalloc`/`cudaFree` pairs that had no RAII. Fully move-only:
 // move-construct AND move-assign, so `buf = std::move(other)` is well-formed
-// (architecture.md §7 — the old draft's deleted move-assign was a bug). The
-// destructor NEVER throws, but it is not silent: a nonzero `cudaFree` status at
+// (architecture.md §7 — a deleted move-assign would be a bug). The
+// destructor never throws, but it is not silent: a nonzero `cudaFree` status at
 // teardown is routed to a debug-only warning so "fail-fast" does not become
 // "fail-silent at teardown" (architecture.md §2, §7, §10).
 //
@@ -18,7 +17,7 @@
 // `std::size_t` product whose unsigned overflow is *defined* (modular), so an
 // unchecked multiply would silently WRAP and under-allocate rather than trap.
 // The ctor rejects any `n` for which the byte product would exceed `SIZE_MAX`
-// with a typed `CudaError` (cleanup B23, architecture.md §2 fail-fast, §11.2),
+// with a typed `CudaError` (architecture.md §2 fail-fast, §11.2),
 // which makes `bytes()` exact for the §11.2 VRAM budget.
 //
 // This is a CUDA header: PRIVATE to steppe_device (architecture.md §4).
@@ -97,7 +96,7 @@ public:
     [[nodiscard]] const T* data() const noexcept { return ptr_; }
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
 
-    /// Exact logical byte footprint, `size_ * sizeof(T)`. This product can NEVER
+    /// Exact logical byte footprint, `size_ * sizeof(T)`. This product can never
     /// overflow `std::size_t`: the ctor rejects any `n` for which
     /// `n * sizeof(T)` would exceed `SIZE_MAX`, so a constructed buffer's `size_`
     /// always satisfies `size_ <= SIZE_MAX / sizeof(T)`. `bytes()` is therefore
@@ -111,11 +110,11 @@ public:
 private:
     void reset() noexcept {
         if (ptr_) {
-            // DEVICE-AGNOSTIC FREE — THE single-home deleter for the M4.5 multi-GPU
-            // escape design (architecture.md §7, §11.4; cleanup 17.5). This owner
+            // DEVICE-AGNOSTIC FREE — THE single-home deleter for the multi-GPU
+            // escape design (architecture.md §7, §11.4). This owner
             // records ONLY ptr_/size_, NOT the device ordinal that was current at
             // cudaMalloc, and reset() issues a BARE cudaFree with NO record-and-
-            // restore cudaSetDevice — INTENTIONALLY. The M4.5 design deliberately
+            // restore cudaSetDevice — INTENTIONALLY. The design deliberately
             // lets a buffer ESCAPE its device-guarded producer (it moves into a
             // DeviceF2Blocks/DevicePartial and is freed LATER by the host-side
             // combine under a possibly-different — typically entry/device-0 —
@@ -148,7 +147,7 @@ private:
             // cudaErrorContextIsDestroyed) for memory the OS reclaims regardless —
             // a non-real "leak". Treat those two teardown-order codes as BENIGN
             // (skip the warn) so a clean process exit does not emit a spurious
-            // teardown WARN (cleanup [17.1]). steppe's DeviceBuffers are normally
+            // teardown WARN. steppe's DeviceBuffers are normally
             // backend-owned (not file-scope statics), so this rarely fires.
             if (e != cudaSuccess && e != cudaErrorCudartUnloading &&
                 e != cudaErrorContextIsDestroyed) {
