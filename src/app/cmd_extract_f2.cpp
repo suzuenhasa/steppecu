@@ -39,6 +39,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/exit_code_for_caught.hpp"           // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_writer.hpp"
 #include "app/precision_label.hpp"                // precision_label (shared host-app helper)
 #include "core/config/exit_code.hpp"
@@ -337,7 +338,7 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe extract-f2: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     const F2BlockTensor& host_f2 = extracted.f2;

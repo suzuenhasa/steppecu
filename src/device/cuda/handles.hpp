@@ -324,8 +324,11 @@ private:
 /// `PerGpuResources` selects the device BEFORE constructing it. Unlike
 /// `CublasHandle`, cuSOLVER has NO workspace-reset hazard — `cusolverDnSetStream`
 /// does not touch any pinned workspace, so `set_stream` does not re-apply anything
-/// (workspaces in the modern cuSOLVER dense API are passed per-call). Created once
-/// in the backend ctor and reused; the dtor routes a nonzero
+/// (workspaces in the modern cuSOLVER dense API are passed per-call). The ctor also
+/// pins `CUSOLVER_DETERMINISTIC_RESULTS` once (the §12 parity-law cuSOLVER
+/// determinism guarantee — sticky handle state, governing ONLY the gesvd/gesvdj
+/// rank-test SVD, not potrf/potri/getrf; see the ctor + `deterministic_mode()`).
+/// Created once in the backend ctor and reused; the dtor routes a nonzero
 /// `cusolverDnDestroy` to the §7 teardown-warning sink (never throws).
 class CusolverDnHandle {
 public:
@@ -335,6 +338,25 @@ public:
     CusolverDnHandle() {
         STEPPE_CUDA_CHECK(cudaGetDevice(&device_id_));
         CUSOLVER_CHECK(cusolverDnCreate(&h_));
+        // §12 PARITY LAW: pin DETERMINISTIC results on this single dense-cuSOLVER
+        // handle, ONCE, right after create (sticky handle state — like the cuBLAS
+        // math-mode idiom — so it holds for every subsequent solve). The CUDA 13.x
+        // default is ALREADY CUSOLVER_DETERMINISTIC_RESULTS (verified against
+        // /usr/local/cuda/include/cusolver_common.h's cusolverDeterministicMode_t
+        // enum on box5090 AND the CUDA 13.x cuSOLVER docs: "By default, cuSolverDN
+        // computes deterministic results"), so this is a DEFENSIVE pin — it
+        // forecloses a future toolkit default flip silently de-determinizing the
+        // rank-test SVD, with NO behaviour change today (the goldens do not move).
+        // SCOPE (cuSOLVER docs): the mode governs ONLY the gesvd/gesvdj family —
+        // here the loose-tier large/NRBIG rank-test SVD (`large_svd_V`,
+        // cuda_backend.cu): gesvdj unconditionally, gesvd for m>=n (met by the
+        // orientation rule rows=max(nl,nr)>=cols=min(nl,nr)). It does NOT cover
+        // potrf/potri/getrf/getrs (the Qinv Cholesky + ALS/weight/LOO LU solves),
+        // which stay native FP64, outside the deterministic set. The PRIMARY
+        // bit-exact 9-pop rank test is NOT cuSOLVER at all — it is the custom
+        // on-device fixed-order Jacobi (dev_jacobi_svd_V), deterministic BY
+        // CONSTRUCTION and untouched by this API. (architecture.md §12.)
+        CUSOLVER_CHECK(cusolverDnSetDeterministicMode(h_, CUSOLVER_DETERMINISTIC_RESULTS));
     }
     CusolverDnHandle(CusolverDnHandle&& o) noexcept
         : h_(std::exchange(o.h_, nullptr)), device_id_(o.device_id_) {}
@@ -358,6 +380,21 @@ public:
     }
     [[nodiscard]] cusolverDnHandle_t get() const noexcept { return h_; }
     [[nodiscard]] int device_id() const noexcept { return device_id_; }
+
+    /// The cuSOLVER deterministic-results mode currently set on this dense handle
+    /// (`cusolverDnGetDeterministicMode`; §12 parity law). The ctor pins
+    /// `CUSOLVER_DETERMINISTIC_RESULTS`; this getter lets the `handles_unit` gate
+    /// assert that §12 promise literally (it returns the wired mode). The mode
+    /// governs ONLY the gesvd/gesvdj rank-test SVD routines — potrf/potri/getrf
+    /// stay native FP64, outside the deterministic set. NOT noexcept: a cuSOLVER
+    /// API fault routes through CUSOLVER_CHECK (this is a state query, not a
+    /// teardown path, so a throw is appropriate).
+    [[nodiscard]] cusolverDeterministicMode_t deterministic_mode() const {
+        assert_on_creation_device();
+        cusolverDeterministicMode_t mode = CUSOLVER_DETERMINISTIC_RESULTS;
+        CUSOLVER_CHECK(cusolverDnGetDeterministicMode(h_, &mode));
+        return mode;
+    }
 
 private:
     /// Debug-only record-and-ASSERT that the CURRENTLY-current CUDA device matches

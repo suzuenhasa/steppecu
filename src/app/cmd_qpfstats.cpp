@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "app/exit_code_for_caught.hpp"   // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_writer.hpp"          // write_f2_dir, F2DirMeta
 #include "app/precision_label.hpp"        // precision_label (shared host-app helper)
 #include "core/config/exit_code.hpp"
@@ -71,7 +72,7 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
                               blgsize_morgans, precision, resources);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe qpfstats: device/input error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     if (result.status != Status::Ok) {

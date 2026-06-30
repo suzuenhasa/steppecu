@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -183,29 +185,18 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives as
         // result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe f4-ratio: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
-    // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout -------------------
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe f4-ratio: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
-    if (config.out_file().empty()) {
-        emit_f4ratio_result(std::cout, fmt, result, p1_labels, p2_labels, p3_labels, p4_labels,
-                            p5_labels);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe f4-ratio: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_f4ratio_result(out, fmt, result, p1_labels, p2_labels, p3_labels, p4_labels,
-                            p5_labels);
+    // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout — open->write->flush->verify
+    // via the shared emit_to_destination (B1): a torn / short write (full disk, closed pipe)
+    // returns kExitIoError instead of silently exiting 0 with a truncated file.
+    if (const auto rc = emit_to_destination(
+            config, "f4-ratio", [&](std::ostream& os, OutputFormat fmt) {
+                emit_f4ratio_result(os, fmt, result, p1_labels, p2_labels, p3_labels, p4_labels,
+                                    p5_labels);
+            })) {
+        return *rc;
     }
 
     // A DOMAIN outcome is a table + exit 0 (record-and-continue, cli-bindings.md §1.3);

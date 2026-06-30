@@ -11,6 +11,7 @@
 #include <exception>
 
 #include "app/cli_parse.hpp"
+#include "app/exit_code_for_caught.hpp"  // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "core/config/exit_code.hpp"
 
 int main(int argc, char** argv) {
@@ -18,7 +19,7 @@ int main(int argc, char** argv) {
         return steppe::app::run_cli(argc, argv);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe: fatal: %s\n", e.what());
-        return steppe::config::kExitRuntimeError;
+        return steppe::app::exit_code_for_caught(e);
     } catch (...) {
         std::fprintf(stderr, "steppe: fatal: unknown error\n");
         return steppe::config::kExitRuntimeError;

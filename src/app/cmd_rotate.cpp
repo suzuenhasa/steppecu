@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -148,14 +150,6 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // Resolve the output format up-front (defensive — ConfigBuilder already validated it).
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe qpadm-rotate: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
     // ---- 4. Multi-GPU warning (cli-bindings.md §4.5) ------------------------------
     // The engine's G>=2 path is correct but host-bounce throughput-capped; single-GPU is
     // the supported/recommended default. A warning, NOT a fault.
@@ -189,7 +183,7 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,
         // nonzero exit. Per-model domain outcomes never throw; they arrive as row status.
         std::fprintf(stderr, "steppe qpadm-rotate: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // ---- 6. Resolve labels back onto every row + emit the per-model table ----------
@@ -203,18 +197,16 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
     // nr convention: right[0] == R0, so right_n == right.size()-1 (== metadata.nr).
     const int right_n = static_cast<int>(right_idx.size()) - 1;
 
-    if (config.out_file().empty()) {
-        emit_rotation_table(std::cout, fmt, std::span<const QpAdmResult>(results),
-                            target_label, left_labels_per_model, right_n);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpadm-rotate: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_rotation_table(out, fmt, std::span<const QpAdmResult>(results),
-                            target_label, left_labels_per_model, right_n);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write returns kExitIoError instead of silently exiting 0 with a truncated file. The
+    // helper parses --format (kExitInvalidConfig on an unknown token — defensive; ConfigBuilder
+    // already validated it).
+    if (const auto rc = emit_to_destination(
+            config, "qpadm-rotate", [&](std::ostream& os, OutputFormat fmt) {
+                emit_rotation_table(os, fmt, std::span<const QpAdmResult>(results),
+                                    target_label, left_labels_per_model, right_n);
+            })) {
+        return *rc;
     }
 
     // RECORD-AND-CONTINUE: a completed rotation emit is exit 0 even when individual rows

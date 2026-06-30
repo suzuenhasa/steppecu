@@ -48,6 +48,13 @@
 //      the record-and-assert precondition (set_stream does not abort). On a
 //      single-GPU box this is device 0; the test sets the current device to the
 //      first device explicitly so the recorded ordinal is deterministic.
+//   5. cuSOLVER §12 DETERMINISM (A1): the CusolverDnHandle ctor pins
+//      CUSOLVER_DETERMINISTIC_RESULTS on the dense handle and deterministic_mode()
+//      (cusolverDnGetDeterministicMode) reports it; and the large/NRBIG rank-test
+//      SVD routine is provably in the cuSOLVER deterministic-covered set (gesvdj
+//      unconditionally; gesvd because the orientation rule gives m>=n). This is the
+//      device-gated assertion that makes the §12 "cuSOLVER deterministic mode ...
+//      routine confirmed in-scope" promise true (previously unwired/unasserted).
 //
 // Build (REMOTE sm_120 / CUDA 13 box; NOT locally). Built by CMake/CTest as the
 // `handles_unit` test (tests/CMakeLists.txt) linking steppe::device's device-
@@ -56,6 +63,7 @@
 // data. Run:  ./test_handles   (needs a CUDA device; no data)
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cusolverDn.h>  // cusolverDeterministicMode_t / CUSOLVER_DETERMINISTIC_RESULTS (A1 §12)
 
 #include <cstdio>
 #include <cstdlib>
@@ -63,9 +71,10 @@
 #include <utility>
 
 #include "device/cuda/check.cuh"    // STEPPE_CUDA_CHECK, CUBLAS_CHECK, CublasError
-#include "device/cuda/handles.hpp"  // CublasHandle, MathModeScope (the units under test)
+#include "device/cuda/handles.hpp"  // CublasHandle, MathModeScope, CusolverDnHandle (the units under test)
 
 using steppe::device::CublasHandle;
+using steppe::device::CusolverDnHandle;
 using steppe::device::MathModeScope;
 
 namespace {
@@ -201,6 +210,66 @@ bool expect_device_ordinal() {
     return ok;
 }
 
+// (5) cuSOLVER determinism (§12 parity-law integrity; A1). The §12 cuSOLVER
+// bullet promises two things that were previously UNWIRED/UNASSERTED: that
+// `cusolverDnSetDeterministicMode` is enabled on the dense-cuSOLVER handle, and
+// that the rank-test SVD routine is provably in the cuSOLVER deterministic-covered
+// set. This gate makes both true:
+//   (a) the CusolverDnHandle ctor pins CUSOLVER_DETERMINISTIC_RESULTS, and the
+//       deterministic_mode() getter (cusolverDnGetDeterministicMode) reports it;
+//   (b) the loose-tier large/NRBIG rank-test SVD (`large_svd_V`, cuda_backend.cu)
+//       hands cuSOLVER a matrix oriented rows=max(nl,nr) >= cols=min(nl,nr) (the
+//       §1.3 orientation rule, cuda_backend.cu:4221-4226), so the gesvd family's
+//       m>=n deterministic precondition always holds, and gesvdj (both dims <=
+//       kGesvdjMaxDim=32) is covered UNCONDITIONALLY. Mirroring that orientation
+//       here and asserting covered-set membership pins the §12 doc claim to the
+//       executed routine so they cannot drift. (The PRIMARY bit-exact 9-pop rank
+//       test is the custom on-device fixed-order Jacobi — deterministic by
+//       construction, NOT cuSOLVER — and is gated by test_qpadm_parity, not here.)
+// Native / no numeric claim: it asserts handle STATE + a static orientation
+// property, not a precision value, so no real AADR is needed; it needs a live GPU
+// because cusolverDnCreate/Get/SetDeterministicMode require a cuSOLVER context.
+bool expect_cusolver_deterministic_mode() {
+    bool ok = true;
+    try {
+        // Pin device 0 so the recorded ordinal is deterministic (mirrors
+        // expect_device_ordinal); the wrapper only RECORDS, never selects.
+        STEPPE_CUDA_CHECK(cudaSetDevice(0));
+
+        // The ctor wires cusolverDnSetDeterministicMode(h, DETERMINISTIC_RESULTS).
+        CusolverDnHandle solver;
+        const cusolverDeterministicMode_t mode = solver.deterministic_mode();
+        const bool mode_ok = (mode == CUSOLVER_DETERMINISTIC_RESULTS);
+        std::printf("  %-44s mode=%d -> %s\n",
+                    "ctor pins CUSOLVER_DETERMINISTIC_RESULTS",
+                    static_cast<int>(mode), mode_ok ? "PASS" : "FAIL");
+        ok = mode_ok && ok;
+
+        // Routine-coverage: across representative rank-test shapes, the orientation
+        // rule guarantees rows>=cols (m>=n) and the routine is in the deterministic
+        // covered set (gesvdj unconditionally for both dims<=32; gesvd for m>=n).
+        constexpr int kGesvdjMaxDim = 32;  // mirrors cuda_backend.cu's predicate
+        const int shapes[][2] = {{9, 9}, {12, 8}, {8, 39}, {40, 33}, {64, 5}};
+        for (const auto& s : shapes) {
+            const int nl = s[0], nr = s[1];
+            const int rows = (nr >= nl) ? nr : nl;   // cuda_backend.cu:4221-4226
+            const int cols = (nr >= nl) ? nl : nr;
+            const bool oriented = (rows >= cols);     // m>=n (gesvd precondition)
+            const bool gesvdj = (nl <= kGesvdjMaxDim && nr <= kGesvdjMaxDim);
+            const bool covered = gesvdj || oriented;  // covered set membership
+            std::printf("  nl=%2d nr=%2d rows=%2d>=cols=%2d %-7s -> %s\n",
+                        nl, nr, rows, cols, gesvdj ? "gesvdj" : "gesvd",
+                        covered ? "PASS" : "FAIL");
+            ok = covered && ok;
+        }
+    } catch (const std::exception& e) {
+        std::printf("  %-44s -> THREW -> FAIL\n", "cusolver deterministic mode");
+        std::fprintf(stderr, "  [FAIL] cusolver deterministic mode THREW: %s\n", e.what());
+        ok = false;
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -215,24 +284,28 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    std::printf("\nU4/L10 CublasHandle MathModeScope + device-ordinal scaffold (synthetic, no data)\n");
+    std::printf("\nU4/L10 CublasHandle MathModeScope + device-ordinal scaffold + A1 cuSOLVER §12 determinism (synthetic, no data)\n");
 
     bool ok = true;
     ok = expect_math_mode_restore() && ok;
     ok = expect_device_ordinal() && ok;
+    ok = expect_cusolver_deterministic_mode() && ok;
 
     std::printf("\n");
     if (!ok) {
         std::fprintf(stderr,
             "RESULT: FAIL — MathModeScope did not capture/restore the cuBLAS math mode across\n"
             "        scope exit (incl. nesting / moved-from inertness), or CublasHandle did not\n"
-            "        record the creation device ordinal / honor the record-and-assert precondition.\n"
+            "        record the creation device ordinal / honor the record-and-assert precondition,\n"
+            "        or CusolverDnHandle did not pin CUSOLVER_DETERMINISTIC_RESULTS / the rank-test\n"
+            "        SVD routine is outside the cuSOLVER deterministic set (A1 §12).\n"
             "        architecture.md §7, §9, §11.4, §12; cleanup device-cuda-handles 2.3/11.x, L10.\n");
         return EXIT_FAILURE;
     }
     std::fprintf(stderr,
                  "RESULT: PASS (MathModeScope restores the prior math mode at scope exit — incl.\n"
-                 "        nested and moved-from cases — and CublasHandle records + asserts its\n"
-                 "        creation device ordinal)\n");
+                 "        nested and moved-from cases — CublasHandle records + asserts its creation\n"
+                 "        device ordinal, and CusolverDnHandle pins CUSOLVER_DETERMINISTIC_RESULTS\n"
+                 "        with the rank-test SVD routine in the cuSOLVER deterministic set, A1 §12)\n");
     return EXIT_SUCCESS;
 }

@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/result_emit.hpp"          // OutputFormat / parse_output_format
 #include "core/config/exit_code.hpp"
@@ -156,36 +158,7 @@ template <typename Result, typename RunFit>
         result = run_fit(dev_f2, resources);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe %s: device error: %s\n", prefix, e.what());
-        return cfg::kExitRuntimeError;
-    }
-    return std::nullopt;
-}
-
-/// Shared output-tail for both qpgraph commands (§2.11 cross-ref: factored from the emit tails
-/// of run_qpgraph_command / run_qpgraph_search_command, which differed only by the emit fn,
-/// the prefix, and the result type). Parses --format, then routes the emit to std::cout or the
-/// --out file (opened binary|trunc, with the open guard). `write` is invoked as write(os, fmt).
-/// `prefix` is the "steppe <prefix>:" diagnostic tag. Returns std::nullopt once emitted;
-/// otherwise the exit code the caller must propagate.
-template <typename Write>
-[[nodiscard]] std::optional<int> emit_to_destination(const cfg::RunConfig& config,
-                                                     const char* prefix, Write&& write) {
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe %s: unknown --format '%s' (csv|tsv|json)\n", prefix,
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-    if (config.out_file().empty()) {
-        write(std::cout, fmt);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe %s: cannot open --out file: %s\n", prefix,
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        write(out, fmt);
+        return exit_code_for_caught(e);
     }
     return std::nullopt;
 }

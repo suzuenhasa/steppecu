@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "core/config/exit_code.hpp"
+#include "app/cmd_emit.hpp"              // emit_to_destination (shared open->write->flush->verify)
 #include "app/result_emit.hpp"           // OutputFormat, parse_output_format
 #include "device/resources.hpp"          // CUDA-FREE: Resources, build_resources
 #include "io/genotype_source.hpp"        // io::resolve_genotype_triple (EIGENSTRAT-family vs PLINK --prefix)
@@ -121,23 +122,14 @@ int run_dates_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe dates: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
-    if (config.out_file().empty()) {
-        emit_dates(std::cout, fmt, result, config.target(), sources[0], sources[1]);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe dates: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_dates(out, fmt, result, config.target(), sources[0], sources[1]);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write returns kExitIoError instead of silently exiting 0 with a truncated file. The
+    // helper parses --format (kExitInvalidConfig on an unknown token).
+    if (const auto rc = emit_to_destination(
+            config, "dates", [&](std::ostream& os, OutputFormat fmt) {
+                emit_dates(os, fmt, result, config.target(), sources[0], sources[1]);
+            })) {
+        return *rc;
     }
     return cfg::exit_code_for(result.status);
 }

@@ -1569,6 +1569,13 @@ public:
         return gw;
     }
 
+    /// CAPABILITY QUERY (backend.hpp): the CpuBackend oracle DOES override
+    /// `rank_sweep` (below) ⇒ true, so the host orchestrator runs the rankdrop/popdrop
+    /// path on the oracle. It does NOT override `fit_models_batched` (it inherits the
+    /// per-model default — the correct oracle shape), so `provides_batched_fit` stays
+    /// the inherited `false`.
+    [[nodiscard]] bool provides_rank_sweep() const override { return true; }
+
     /// S5 SWEEP — the qpWave / qpAdm RANK TEST over r = 0..rmax (rmax =
     /// min(nl,nr)-1). The native ORACLE the GPU rank_sweep is diffed against
     /// (M(fit-2)). Per r: chisq(r) = the rank-r ALS-refined residual quadratic form

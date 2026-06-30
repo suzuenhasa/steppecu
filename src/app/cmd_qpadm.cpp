@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -120,34 +122,24 @@ int run_qpadm_command(const cfg::RunConfig& config) {
         // FAULT, nonzero exit (cli-bindings.md §1.3). A domain outcome never throws;
         // it arrives as result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpadm: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout -------------------
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        // ConfigBuilder::build() already validates --format, so this is defensive.
-        std::fprintf(stderr, "steppe qpadm: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
     // Resolve the labels back onto the rows so the output is name-readable.
     std::vector<std::string> left_labels;
     left_labels.reserve(model.left.size());
     for (int idx : model.left) left_labels.push_back(resolver.label_at(idx));
     const std::string target_label = resolver.label_at(model.target);
 
-    if (config.out_file().empty()) {
-        emit_qpadm_result(std::cout, fmt, result, target_label, left_labels);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpadm: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_qpadm_result(out, fmt, result, target_label, left_labels);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
+    // a truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
+    if (const auto rc = emit_to_destination(
+            config, "qpadm", [&](std::ostream& os, OutputFormat fmt) {
+                emit_qpadm_result(os, fmt, result, target_label, left_labels);
+            })) {
+        return *rc;
     }
 
     // A per-model DOMAIN outcome (RankDeficient/NonSpd/ChisqUndefined) is a row +

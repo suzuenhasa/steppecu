@@ -33,7 +33,9 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
 #include "app/cmd_fstat_sweep.hpp"      // run_fstat_sweep (the GPU sweep, --all-quartets mode)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -229,33 +231,24 @@ namespace cfg = steppe::config;
                            blgsize_morgans, resources);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe qpdstat: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // ---- 5. Emit (CSV/TSV/JSON) — REUSE emit_f4_result via an F4Result shim -----------
     // DstatResult mirrors F4Result (p1..p4,est,se,z,p); shim it across so the emitter +
     // the f2-path output schema are IDENTICAL (the D est/se/z/p ARE the AT2 D convention).
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe qpdstat: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
     F4Result shim;
     shim.p1 = result.p1; shim.p2 = result.p2; shim.p3 = result.p3; shim.p4 = result.p4;
     shim.est = result.est; shim.se = result.se; shim.z = result.z; shim.p = result.p;
     shim.status = result.status; shim.precision_tag = result.precision_tag;
 
-    if (config.out_file().empty()) {
-        emit_f4_result(std::cout, fmt, shim, l1, l2, l3, l4);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpdstat: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_f4_result(out, fmt, shim, l1, l2, l3, l4);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write returns kExitIoError instead of silently exiting 0 with a truncated file.
+    if (const auto rc = emit_to_destination(
+            config, "qpdstat", [&](std::ostream& os, OutputFormat fmt) {
+                emit_f4_result(os, fmt, shim, l1, l2, l3, l4);
+            })) {
+        return *rc;
     }
     return cfg::exit_code_for(result.status);
 }
@@ -338,28 +331,18 @@ int run_qpdstat_command(const cfg::RunConfig& config) {
         // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives as
         // result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpdstat: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout — REUSE emit_f4_result --
     // The D-output convention IS f4's est/se/z/p (the qpdstat f2-path == f4); NO new emitter.
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        std::fprintf(stderr, "steppe qpdstat: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
-    if (config.out_file().empty()) {
-        emit_f4_result(std::cout, fmt, result, l1, l2, l3, l4);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpdstat: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_f4_result(out, fmt, result, l1, l2, l3, l4);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write returns kExitIoError instead of silently exiting 0 with a truncated file.
+    if (const auto rc = emit_to_destination(
+            config, "qpdstat", [&](std::ostream& os, OutputFormat fmt) {
+                emit_f4_result(os, fmt, result, l1, l2, l3, l4);
+            })) {
+        return *rc;
     }
 
     // A DOMAIN outcome (NonSpd over the m-batch) is a table + exit 0 (record-and-continue,

@@ -77,8 +77,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>    // std::memcpy — staging->result slice copy (P5/d2h-speed)
+#include <exception>  // std::exception — the device_fault_status translator param (B2)
 #include <limits>     // std::numeric_limits<int>::max — the M0 k-narrowing guard (B22)
 #include <memory>
+#include <optional>   // std::optional / std::nullopt — device_fault_status return (B2)
 #include <span>
 #include <stdexcept>  // std::runtime_error — the M0 M>INT_MAX fail-fast (B22)
 #include <string>     // std::to_string — diagnostic message for the B22 guard
@@ -91,6 +93,7 @@
 #include "core/qpadm/qpadm_bounds.hpp"       // core::qpadm::model_fits_small_path — the SINGLE-SOURCE small-path envelope (kQpMax*)
 #include "device/backend.hpp"               // ComputeBackend, F2Result, F2BlockTensor, MatView
 #include "device/backend_factory.hpp"       // steppe::device::make_cuda_backend (the single-source decl, X-9/B8)
+#include "device/resources.hpp"             // steppe::device::device_fault_status (the CUDA-free fault-taxonomy seam this TU defines, B2)
 #include "device/device_partial.hpp"        // steppe::device::DevicePartial (the M4.5 resident handle)
 #include "device/cuda/device_partial_impl.cuh" // DevicePartial::Impl (the DeviceBuffer<double> owners)
 #include "device/device_f2_blocks.hpp"      // steppe::device::DeviceF2Blocks (the M4.5 device-resident FULL result handle)
@@ -4449,6 +4452,11 @@ public:
         return gw;
     }
 
+    /// CAPABILITY QUERY (backend.hpp): the CudaBackend deliverable DOES override
+    /// `rank_sweep` (below) ⇒ true, so the host orchestrator runs the rankdrop/popdrop
+    /// path on the GPU (the explicit replacement for the old sentinel-catch detection).
+    [[nodiscard]] bool provides_rank_sweep() const override { return true; }
+
     /// S5 SWEEP — the qpWave / qpAdm RANK TEST over r = 0..rmax (rmax = min(nl,nr)-1)
     /// ON THE GPU (M(fit-2), THE deliverable). Mirrors the CpuBackend oracle
     /// (cpu_backend.cpp rank_sweep) op-for-op but runs the per-rank fit on the device:
@@ -4892,6 +4900,12 @@ private:
     }
 
 public:
+    /// CAPABILITY QUERY (backend.hpp): the CudaBackend DOES override
+    /// `fit_models_batched` (below) with the genuine model-BATCHED rotation ⇒ true, so
+    /// the S8 shard dispatch (model_search.cpp) routes small-path models to the batched
+    /// override (the explicit replacement for the old sentinel-catch detection).
+    [[nodiscard]] bool provides_batched_fit() const override { return true; }
+
     /// S8 — the BATCHED MODEL-SPACE ROTATION on the GPU (the M(fit-6) deliverable; the
     /// FROZEN CONTRACT §2.2). Fits a BUCKET of same-shape SMALL-path models (nl<=5,
     /// nr<=10, r<=4 — the rotation common case) in ONE batched dispatch:
@@ -5674,6 +5688,39 @@ private:
     int count = 0;
     STEPPE_CUDA_CHECK(cudaGetDeviceCount(&count));
     return count;
+}
+
+// Definition of the CUDA-free fault-taxonomy seam declared in device/resources.hpp
+// (B2). This TU is the ONLY layer that may inspect the typed device exceptions:
+// CudaError / CublasError / CusolverError + their cudaError_t/cublasStatus_t/
+// cusolverStatus_t status enums are PRIVATE to steppe_device (cuda/check.cuh, a .cuh),
+// so the CUDA-free app cannot dynamic_cast to them — it calls this instead. A genuine
+// device ALLOCATION failure (cudaErrorMemoryAllocation == 2, verified against the
+// CUDA 13.x Runtime API cudaError_t enum; CUBLAS_STATUS_ALLOC_FAILED /
+// CUSOLVER_STATUS_ALLOC_FAILED, the same enumerators cuda/check.cuh already renders)
+// maps to Status::DeviceOom → kExitDeviceOom (3); every other exception (including a
+// non-alloc CUDA/cuBLAS/cuSOLVER fault, or a host std::bad_alloc — host RAM, not
+// device VRAM) yields std::nullopt so the app keeps its catch-all kExitRuntimeError
+// (5). dynamic_cast is well-defined: one statically-linked executable ⇒ one typeinfo
+// per type. noexcept (RTTI + integral compares only; no allocation, no throw).
+[[nodiscard]] std::optional<Status> device_fault_status(
+    const std::exception& e) noexcept {
+    if (const auto* ce = dynamic_cast<const CudaError*>(&e)) {
+        return ce->status() == cudaErrorMemoryAllocation
+                   ? std::optional<Status>(Status::DeviceOom)
+                   : std::nullopt;
+    }
+    if (const auto* be = dynamic_cast<const CublasError*>(&e)) {
+        return be->status() == CUBLAS_STATUS_ALLOC_FAILED
+                   ? std::optional<Status>(Status::DeviceOom)
+                   : std::nullopt;
+    }
+    if (const auto* se = dynamic_cast<const CusolverError*>(&e)) {
+        return se->status() == CUSOLVER_STATUS_ALLOC_FAILED
+                   ? std::optional<Status>(Status::DeviceOom)
+                   : std::nullopt;
+    }
+    return std::nullopt;
 }
 
 }  // namespace steppe::device

@@ -398,6 +398,24 @@ target_link_libraries(test_cuda_check
 set_target_properties(test_cuda_check PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_test(NAME cuda_check_unit COMMAND test_cuda_check)
 
+# --- B2 OOM fault-taxonomy translator gate (device_fault_status + exit_code_for_caught) ---
+# CUDA TU, DATA-FREE, NO GPU (sibling of test_cuda_check): the typed device exceptions
+# are host objects whose ctors only format a std::string, so this runs on every lane
+# with no CUDA device. It pins that a genuine device allocation fault
+# (cudaErrorMemoryAllocation / CUBLAS_STATUS_ALLOC_FAILED / CUSOLVER_STATUS_ALLOC_FAILED)
+# maps to Status::DeviceOom -> kExitDeviceOom (3) through BOTH the device seam
+# (device::device_fault_status, defined in cuda/cuda_backend.cu) and the app helper
+# (app::exit_code_for_caught), while every non-alloc fault keeps the catch-all
+# kExitRuntimeError (5) (architecture.md §10 fault taxonomy; cli-bindings.md §4.4; B2).
+# It includes check.cuh (a .cuh — PRIVATE to steppe_device) so it is a CUDA TU. Links
+# steppe::device (check.cuh + the device_fault_status definition) + steppe::api
+# (steppe::Status). No io / no data / no GPU. Self-checking main(); CTest gates on exit.
+add_executable(test_device_fault_status reference/test_device_fault_status.cu)
+target_link_libraries(test_device_fault_status
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_device_fault_status PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+add_test(NAME device_fault_status_unit COMMAND test_device_fault_status)
+
 # --- M4.5 U4/L10 CublasHandle MathModeScope + device-ordinal scaffold gate -----
 # CUDA TU, DATA-FREE (sibling of test_device_buffer.cu): exercises the device-
 # private handles.hpp RAII cuBLAS-handle wrapper directly. handles.hpp includes
@@ -1445,6 +1463,23 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_f4 steppe_app)
   add_test(NAME cli_f4
            COMMAND test_cli_f4
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+
+  # --- B1 I/O fault taxonomy gate: a torn / short --out write returns kExitIoError(4) ----
+  # PLAIN C++ host TU (NO CUDA): writes the committed real-AADR 9-pop f2 fixture into a temp
+  # f2-dir, then runs the BUILT `steppe f4 ... --out /dev/full` (open succeeds, every write
+  # ENOSPCs) and asserts exit == 4 with a "write failed" diagnostic — the shared
+  # emit_to_destination open->write->flush->good() contract (src/app/cmd_emit.hpp). A control
+  # `--out <tmp>/ok.csv` run asserts exit 0 + a non-empty, header-bearing file (the success
+  # path is byte-unchanged). f4 is the representative emit site (every cmd_*.cpp routes through
+  # the SAME helper). SKIPs cleanly (exit 0) when no CUDA device is visible.
+  add_executable(test_cli_io_fault cli/test_cli_io_fault.cpp)
+  target_link_libraries(test_cli_io_fault
+      PRIVATE steppe::core_internal steppe::api steppe::warnings)
+  add_dependencies(test_cli_io_fault steppe_app)
+  add_test(NAME cli_io_fault
+           COMMAND test_cli_io_fault
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
 

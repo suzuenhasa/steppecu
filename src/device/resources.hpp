@@ -24,11 +24,14 @@
 #define STEPPE_DEVICE_RESOURCES_HPP
 
 #include <cstddef>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
 #include "steppe/config.hpp"   // steppe::DeviceConfig (CUDA-free)
+#include "steppe/error.hpp"    // steppe::Status (CUDA-free fault taxonomy)
 #include "device/backend.hpp"  // steppe::ComputeBackend, steppe::BackendCapabilities (CUDA-free seam)
 
 namespace steppe::device {
@@ -227,6 +230,27 @@ void validate_device_order(std::span<const int> order, int visible);
 /// @throws steppe::device::CudaError if a configured ordinal cannot be cudaSetDevice-
 ///         bound / a backend constructed on it (via make_cuda_backend, fail-fast §2).
 [[nodiscard]] Resources build_resources(const DeviceConfig& config);
+
+/// Classify a caught exception as a genuine DEVICE resource-exhaustion fault — the
+/// CUDA-FREE seam of the §10 fault taxonomy (architecture.md §10; cli-bindings.md
+/// §4.4). Returns `Status::DeviceOom` iff `e` is one of the typed device exceptions
+/// (steppe::device::CudaError / CublasError / CusolverError) carrying an ALLOCATION
+/// status (cudaErrorMemoryAllocation / CUBLAS_STATUS_ALLOC_FAILED /
+/// CUSOLVER_STATUS_ALLOC_FAILED); `std::nullopt` for any other exception (incl. a
+/// host `std::bad_alloc`, which is host RAM, not device VRAM).
+///
+/// THE LAYERING POINT (architecture.md §4): those typed exceptions and their CUDA
+/// status enums are PRIVATE to steppe_device (they live in the CUDA-only
+/// `cuda/check.cuh`), so a CUDA-free consumer — the app — cannot dynamic_cast to them
+/// itself. This declaration is CUDA-FREE (it names only std + steppe::Status); the
+/// definition lives in a steppe_device TU (`cuda/cuda_backend.cu`) that CAN include
+/// `check.cuh`. The app helper `app::exit_code_for_caught` calls this so a real device
+/// OOM exits `kExitDeviceOom (3)` instead of the catch-all `kExitRuntimeError (5)`,
+/// while `src/app` stays CUDA-free (it links steppe::device, so the symbol resolves).
+/// `dynamic_cast` is well-defined here: one statically-linked executable ⇒ one
+/// typeinfo per type. `noexcept`: pure RTTI + status compares, no allocation.
+[[nodiscard]] std::optional<Status> device_fault_status(
+    const std::exception& e) noexcept;
 
 }  // namespace steppe::device
 

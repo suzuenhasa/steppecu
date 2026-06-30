@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"      // emit_to_destination / finish_emit (open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"  // OutputFormat, parse_output_format
@@ -143,7 +145,7 @@ int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
                           : run_f3_sweep(dev_f2, req, resources);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe %s: device error: %s\n", cmd, e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // A CAPPED sweep is a hard, actionable refusal (not a domain row): tell the user and fail.
@@ -186,22 +188,23 @@ int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
             return cfg::kExitIoError;
         }
         emit_sweep(out, fmt, result, resolver, k);
-        out.flush();
+        // open->write->flush->verify (B1): a torn / short shard write returns kExitIoError
+        // instead of silently exiting 0 with a truncated survivors file.
+        if (const auto rc = finish_emit(out, cmd, shard_path.string())) return *rc;
         std::fprintf(stderr, "steppe %s: enumerated %zu, %zu survivors -> %s\n",
                      cmd, result.enumerated, result.survivors, shard_path.string().c_str());
         return cfg::exit_code_for(result.status);
     }
 
-    if (config.out_file().empty()) {
-        emit_sweep(std::cout, fmt, result, resolver, k);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe %s: cannot open --out file: %s\n",
-                         cmd, config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_sweep(out, fmt, result, resolver, k);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
+    // a truncated file. (The --format token was validated above; the helper re-maps it
+    // harmlessly to the same OutputFormat.)
+    if (const auto rc = emit_to_destination(
+            config, cmd, [&](std::ostream& os, OutputFormat out_fmt) {
+                emit_sweep(os, out_fmt, result, resolver, k);
+            })) {
+        return *rc;
     }
 
     // Report the sweep summary to stderr (observability; not on the data stream).

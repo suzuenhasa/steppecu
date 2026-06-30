@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -112,18 +114,10 @@ int run_qpwave_command(const cfg::RunConfig& config) {
         // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives
         // as result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpwave: device error: %s\n", e.what());
-        return cfg::kExitRuntimeError;
+        return exit_code_for_caught(e);
     }
 
     // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout -------------------
-    OutputFormat fmt = OutputFormat::Csv;
-    if (!parse_output_format(config.format(), fmt)) {
-        // ConfigBuilder::build() already validates --format, so this is defensive.
-        std::fprintf(stderr, "steppe qpwave: unknown --format '%s' (csv|tsv|json)\n",
-                     config.format().c_str());
-        return cfg::kExitInvalidConfig;
-    }
-
     // Resolve the left labels back for the output header (left[0] is the reference).
     std::vector<std::string> left_labels;
     left_labels.reserve(left_idx.size());
@@ -136,16 +130,14 @@ int run_qpwave_command(const cfg::RunConfig& config) {
                   "right_idx non-empty: R0 convention (validated at config.right() check)");
     const int right_n = static_cast<int>(right_idx.size()) - 1;
 
-    if (config.out_file().empty()) {
-        emit_qpwave_result(std::cout, fmt, result, left_labels, right_n);
-    } else {
-        std::ofstream out(config.out_file(), std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::fprintf(stderr, "steppe qpwave: cannot open --out file: %s\n",
-                         config.out_file().c_str());
-            return cfg::kExitIoError;
-        }
-        emit_qpwave_result(out, fmt, result, left_labels, right_n);
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
+    // a truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
+    if (const auto rc = emit_to_destination(
+            config, "qpwave", [&](std::ostream& os, OutputFormat fmt) {
+                emit_qpwave_result(os, fmt, result, left_labels, right_n);
+            })) {
+        return *rc;
     }
 
     // A DOMAIN outcome (RankDeficient/NonSpd/ChisqUndefined) is a row + exit 0

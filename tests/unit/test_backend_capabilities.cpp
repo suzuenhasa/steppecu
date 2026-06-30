@@ -27,6 +27,7 @@
 // (tests/CMakeLists.txt). No CUDA here.
 #include <cstddef>
 #include <cstdio>
+#include <stdexcept>
 #include <type_traits>
 
 #include "device/backend.hpp"  // steppe::BackendCapabilities, steppe::ComputeBackend (CUDA-FREE)
@@ -120,6 +121,37 @@ struct DefaultCapsBackend final : steppe::ComputeBackend {
     return defaults_all_unknown(base.capabilities());
 }
 
+// ---- (4) the B3 capability-query virtuals: base default false, consistent with the
+//          sentinel throw (docs/kimiactions/01-open-worth-doing.md §B3) --------------
+// provides_rank_sweep()/provides_batched_fit() are the EXPLICIT, type-safe replacement
+// for the old try/catch-as-capability-detection: the host orchestrator (qpadm_fit.cpp /
+// model_search.cpp) branches on these instead of CATCHING the rank_sweep /
+// fit_models_batched sentinel std::runtime_error. The base default is false, and a
+// backend that does NOT override the underlying virtual MUST throw the sentinel from
+// it — so the query and the throw are two views of ONE fact and cannot drift.
+// DefaultCapsBackend (above) overrides NEITHER sentinel virtual, so it is exactly that
+// "no real implementation" backend. The throw half is exercised through rank_sweep,
+// whose args are all header-only CUDA-free PODs; fit_models_batched's DeviceF2Blocks
+// arg has its ctor in steppe_device (not linkable into this CUDA-free host TU), so only
+// its query half is checked here — the CudaBackend true-path is golden-gated.
+[[nodiscard]] bool test_capability_query_base_default_consistent() {
+    DefaultCapsBackend backend;  // overrides neither rank_sweep nor fit_models_batched
+    const steppe::ComputeBackend& base = backend;
+    if (base.provides_rank_sweep() != false) return false;
+    if (base.provides_batched_fit() != false) return false;
+
+    // false ⇒ the matching sentinel virtual throws (the consistency the query stands in
+    // for). Base rank_sweep body throws std::runtime_error("not implemented...").
+    bool rank_sweep_threw = false;
+    try {
+        (void)backend.rank_sweep(steppe::F4Blocks{}, steppe::JackknifeCov{}, 0.05,
+                                 steppe::QpAdmOptions{}, steppe::Precision{});
+    } catch (const std::runtime_error&) {
+        rank_sweep_threw = true;
+    }
+    return rank_sweep_threw;
+}
+
 struct Case {
     const char* name;
     bool (*fn)();
@@ -130,6 +162,8 @@ constexpr Case kCases[] = {
      test_value_initialized_defaults},
     {"ComputeBackend::capabilities() base default returns unknown (no override needed)",
      test_base_capabilities_default_unknown},
+    {"capability-query virtuals: base default false ⇒ rank_sweep sentinel throws (B3)",
+     test_capability_query_base_default_consistent},
 };
 
 }  // namespace

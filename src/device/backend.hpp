@@ -1721,6 +1721,22 @@ public:
             "ComputeBackend::rank_sweep: not implemented by this backend");
     }
 
+    /// CAPABILITY QUERY — does THIS backend override `rank_sweep` (and so the
+    /// rankdrop/popdrop path that routes through it) with a REAL implementation?
+    /// The EXPLICIT, type-safe replacement for try/catch-as-capability-detection:
+    /// the host orchestrator (core/qpadm/qpadm_fit.cpp) branches on this instead of
+    /// CATCHING the `rank_sweep` sentinel `std::runtime_error`, so a GENUINE
+    /// numerical throw from INSIDE an overridden sweep now PROPAGATES as a fault
+    /// rather than being silently swallowed (which used to blank rankdrop/popdrop
+    /// with no diagnostic). NON-PURE — the sanctioned base-default idiom, exactly
+    /// like `capabilities()` (:1840) and `batched_dispatch_count()` (:1852): the
+    /// base returns `false` (the sentinel-throwing `rank_sweep` above is NOT a real
+    /// implementation), and BOTH CpuBackend (the oracle) and CudaBackend (the
+    /// deliverable) override `rank_sweep`, so both override this to `true`. The
+    /// unit test pins `false ⇒ rank_sweep throws the sentinel` so the two cannot
+    /// drift apart.
+    [[nodiscard]] virtual bool provides_rank_sweep() const { return false; }
+
     /// S6 — GLS weights via AT2 ALS (OQ-1, the load-bearing primitive). Seed A,B
     /// from svd(X_total) at rank r; refine by opt_A/opt_B for opts.als_iterations
     /// (default 20) with the fudge ridge; then the CONSTRAINED weight solve on the
@@ -1817,6 +1833,19 @@ public:
             "ComputeBackend::fit_models_batched: this backend has no batched override "
             "(route through core::qpadm::fit_models_batched_default instead)");
     }
+
+    /// CAPABILITY QUERY — does THIS backend override `fit_models_batched` with a
+    /// GENUINE model-BATCHED device path (not the per-model sentinel fallback)? The
+    /// EXPLICIT replacement for try/catch-as-capability-detection at the S8 shard
+    /// dispatch (core/qpadm/model_search.cpp): the orchestrator branches on this
+    /// instead of CATCHING the `fit_models_batched` sentinel, routing small-path
+    /// models to the batched override when present and to the per-model
+    /// fit_models_batched_default otherwise. NON-PURE — the base-default idiom: the
+    /// base returns `false` (the sentinel above is the per-model fallback marker, NOT
+    /// a batched override). Only CudaBackend overrides `fit_models_batched`, so only
+    /// it overrides this to `true`; CpuBackend (the oracle) inherits `false` and
+    /// routes every model through the per-model default (the correct oracle shape).
+    [[nodiscard]] virtual bool provides_batched_fit() const { return false; }
 
     /// Probe the capability tier of THE device this backend instance is bound to
     /// (the per-device-instance contract above): compute capability, total/free

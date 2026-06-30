@@ -108,8 +108,8 @@ void scatter_by_pos(std::vector<QpAdmResult>& out, std::vector<QpAdmResult>& res
 // single batched dispatch per same-shape bucket, NOT a per-model loop); the LARGE/>32
 // tail goes through the per-model fit_models_batched_default. Returns results aligned
 // to `models` order (each result echoes its model_index for the caller's re-sort). The
-// CpuBackend's fit_models_batched throws the sentinel ⇒ the oracle path skips the
-// virtual and routes EVERY model through the per-model default (correct for the oracle).
+// CpuBackend does NOT provide a batched override (provides_batched_fit()==false) ⇒ the
+// oracle routes EVERY model through the per-model default (correct for the oracle).
 std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blocks& f2,
                                    std::span<const QpAdmModel> models,
                                    const QpAdmOptions& opts) {
@@ -130,14 +130,15 @@ std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blo
     }
 
     if (!small.empty()) {
-        std::vector<QpAdmResult> small_results;
-        try {
-            small_results = be.fit_models_batched(f2, std::span<const QpAdmModel>(small), opts, prec);
-        } catch (const std::runtime_error&) {
-            // No batched override on this backend (the CpuBackend oracle sentinel) —
-            // route the small-path models through the per-model default too.
-            small_results = fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
-        }
+        // EXPLICIT capability query (backend.hpp provides_batched_fit) — NOT a
+        // try/catch sentinel probe: the CudaBackend exposes the genuine batched
+        // rotation override; the CpuBackend oracle does not and routes the small-path
+        // models through the per-model default too. A real throw from INSIDE the
+        // batched override now PROPAGATES (it is a fault), not swallowed as "no override".
+        std::vector<QpAdmResult> small_results =
+            be.provides_batched_fit()
+                ? be.fit_models_batched(f2, std::span<const QpAdmModel>(small), opts, prec)
+                : fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
         scatter_by_pos(out, small_results, small_pos);  // [7.4] dedup
     }
     if (!large.empty()) {

@@ -148,19 +148,18 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
     // r=0..rmax + f4rank). Reuses the same X + cov; the precision carve-out (§4)
     // holds the SVD/chisq native. The popdrop is filled by the run_qpadm overloads
     // (it re-gathers a reduced X from the f2 SOURCE, which run_impl does not hold).
-    // NOTE (M(fit-2) build order): the CpuBackend (the ORACLE) implements rank_sweep
-    // now; the CudaBackend (THE deliverable) implements it in the NEXT phase. Until
-    // then a backend without the override throws "not implemented" — caught here so
-    // the existing green GPU fit path is not broken (the rankdrop/popdrop fields stay
-    // empty on such a backend, a non-breaking absence). The GPU-deliverable phase
-    // replaces this with the CudaBackend override and the test asserts the GPU path.
-    // NOTE: the popdrop (AT2 res$popdrop) operates on the SAME already-computed X +
-    // cov (admixtools::drop_pops subsets rows of f4_est + the qinv block; NO
-    // re-gather, NO re-jackknife), so it is filled HERE inside run_impl (it does not
-    // need the f2 source). Both rankdrop + popdrop route through rank_sweep, guarded
-    // together: a backend without the override (the GPU deliverable phase) leaves
-    // these fields empty (non-breaking) rather than throwing out of the fit.
-    try {
+    // The popdrop (AT2 res$popdrop) operates on the SAME already-computed X + cov
+    // (admixtools::drop_pops subsets rows of f4_est + the qinv block; NO re-gather,
+    // NO re-jackknife), so it is filled HERE inside run_impl (it does not need the f2
+    // source). Both rankdrop + popdrop route through rank_sweep, so they are guarded
+    // TOGETHER by the EXPLICIT backend capability query (backend.hpp
+    // provides_rank_sweep) — NOT the old try/catch-as-capability-detection: a backend
+    // that does not provide rank_sweep leaves these fields empty (a non-breaking
+    // absence). BOTH real backends (CpuBackend oracle, CudaBackend deliverable)
+    // override rank_sweep, so a GENUINE std::runtime_error thrown from INSIDE a real
+    // sweep now PROPAGATES as a fault instead of being silently swallowed (which used
+    // to blank rankdrop/popdrop with no diagnostic).
+    if (be.provides_rank_sweep()) {
         const RankSweep rs = run_rank_sweep(be, X, cov, opts.rank_alpha, opts, prec);
         res.rank_chisq = rs.chisq;
         res.rank_dof = rs.dof;
@@ -184,9 +183,6 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
             res.popdrop_p.push_back(row.p);
             res.popdrop_feasible.push_back(row.feasible ? char{1} : char{0});
         }
-    } catch (const std::runtime_error&) {
-        // backend has no rank_sweep override yet (the GPU deliverable phase) — the
-        // rankdrop/popdrop fields remain empty; the single-rank fit is unaffected.
     }
 
     // dof<=0 ⇒ ChisqUndefined (architecture.md §10). The fit itself succeeded
