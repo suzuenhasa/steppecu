@@ -40,6 +40,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_dstat.cu    # qpDstat block-reduce + shared ratio-block-jackknife (split T4 / §2.3 TU-D; calls device_survivor_blocks via header decl)
     cuda/cuda_backend_qpfstats.cu # qpfstats smoothing-solve (split T5 / §2.3 TU-F; SYRK gram + Cholesky multi-RHS solve; reads solve_precision_/blas_/solver_/solver_work_)
     cuda/cuda_backend_fstats_assemble.cu # f-stat sweep + f4/f3 assemble (split T6 / §2.3 TU-G; device_survivor_blocks DEFINITION home; tot_line_ writer)
+    cuda/cuda_backend_f2_blocks.cu # compute_f2 + resident/streamed f2 block tensors (split T7 / §2.3 TU-B; vtable key-function home; owns Bucket/BlockLayout/compute_block_layout/size_buckets + method-local Ring)
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/device_decode_result.cu  # device-resident decode seam: DeviceDecodeResult — autosome-compacted Q/V resident handle (special members + accessors)
