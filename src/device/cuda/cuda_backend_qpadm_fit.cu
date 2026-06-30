@@ -208,12 +208,21 @@ JackknifeCov CudaBackend::jackknife_cov(const F4Blocks& x,
     int lwork_f = 0;
     CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
                                                m, dQf.data(), m, &lwork_f));
-    // POOLED potrf/potri workspace (B5): one persistent solver_work_ grown to
-    // lwork_f (monotonic, never-shrink), reused by BOTH the potrf below and the
-    // potri further down (same lwork_f) instead of two per-call allocations. Same
-    // bytes fed to each routine ⇒ bit-identical (§12); queried AFTER the math-mode
-    // scope so lwork_f reflects the engaged mode (CUDA 13.x cuSOLVER).
-    const std::size_t lwork_need = static_cast<std::size_t>(lwork_f > 0 ? lwork_f : 1);
+    // POOLED potrf/potri workspace (B5): one persistent solver_work_ reused by BOTH
+    // the potrf below and the potri further down. The two routines have DIFFERENT
+    // workspace requirements — cuSOLVER's potri (Xtrtri path) needs far more than
+    // potrf (e.g. m=10 ⇒ lwork_potrf=20 doubles but lwork_potri=65536) — so query
+    // EACH and size the pool to the max, feeding each routine ITS OWN lwork. Sizing
+    // by potrf alone under-allocates potri ⇒ the cuSOLVER trtri_set_identity kernel
+    // overruns the buffer (a silent device-heap overrun on most arches; a fatal
+    // illegal __global__ write trapped by compute-sanitizer, and CUSOLVER_STATUS_
+    // INTERNAL_ERROR, on sm_80). Numeric-neutral: more scratch, same math (§12).
+    // Queried AFTER the math-mode scope so the sizes reflect the engaged mode.
+    int lwork_i = 0;
+    CUSOLVER_CHECK(cusolverDnDpotri_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
+                                               m, dQf.data(), m, &lwork_i));
+    const int lwork_max = std::max(lwork_f, lwork_i);
+    const std::size_t lwork_need = static_cast<std::size_t>(lwork_max > 0 ? lwork_max : 1);
     if (solver_work_.size() < lwork_need) solver_work_ = DeviceBuffer<double>(lwork_need);
     CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
                                     dQf.data(), m, solver_work_.data(), lwork_f, dInfo.data()));
@@ -226,7 +235,7 @@ JackknifeCov CudaBackend::jackknife_cov(const F4Blocks& x,
         return out;
     }
     CUSOLVER_CHECK(cusolverDnDpotri(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
-                                    dQf.data(), m, solver_work_.data(), lwork_f, dInfo.data()));
+                                    dQf.data(), m, solver_work_.data(), lwork_i, dInfo.data()));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
                                       cudaMemcpyDeviceToHost, stream_.get()));
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
@@ -1120,18 +1129,24 @@ void CudaBackend::fit_chunk(const steppe::device::DeviceF2Blocks& f2,
         dBptrAll.data(), h_BptrAll.data(),
         static_cast<std::size_t>(m) * B * sizeof(double*), cudaMemcpyHostToDevice,
         stream_.get()));
+    // solve_info: cuSOLVER documents cusolverDnDpotrsBatched `info` as a DEVICE
+    // scalar out-arg (CUDA 13.3 Table 23: Memory=device — UNLIKE the host scalars
+    // handle/uplo/n/nrhs/lda/ldb/batchSize in the SAME table). It reports parameter
+    // validity (info<0 ⇒ i-th arg invalid — NOT per-system SPD status). Passing a
+    // HOST address is UB: on sm_80 (A100) the kernel writes info on-device ⇒ illegal
+    // __global__ write to a host pointer ⇒ CUSOLVER_STATUS_EXECUTION_FAILED (other
+    // arches validate it host-side and never deref it). Mirror the potrfBatched
+    // dInfo (device) above with a real DeviceBuffer<int>. INTENTIONAL DISCARD: per-
+    // column SPD status is already gated by the potrfBatched dInfo array checked
+    // above, so the device scalar is written and never read back. [3.4]
+    DeviceBuffer<int> dSolveInfo(1);
     for (int c = 0; c < m; ++c) {
-        // solve_info: REQUIRED non-null HOST out-arg for cusolverDnDpotrsBatched
-        // (reports parameter validity: info<0 ⇒ i-th arg invalid — NOT per-system SPD
-        // status). INTENTIONAL DISCARD: per-column SPD status is already gated by the
-        // potrfBatched dInfo array checked above. Cannot drop the arg. [3.4]
-        int solve_info = 0;
         CUSOLVER_CHECK(cusolverDnDpotrsBatched(
             solver_.get(), CUBLAS_FILL_MODE_LOWER, m, 1 /*nrhs*/, dAptr.data(), m,
-            dBptrAll.data() + static_cast<std::size_t>(c) * B, m, &solve_info,
+            dBptrAll.data() + static_cast<std::size_t>(c) * B, m, dSolveInfo.data(),
             static_cast<int>(B)));
     }
-    // The batched cuSOLVER solve writes its host `info` arg and the stream must be
+    // The batched cuSOLVER solve writes its device `info` arg and the stream must be
     // drained before the next stream op (an undrained batched-potrs lane returns
     // cudaErrorInvalidValue on the following cudaMemcpyAsync — MEASURED on box5090).
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
