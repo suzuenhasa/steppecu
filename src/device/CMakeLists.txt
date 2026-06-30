@@ -38,6 +38,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_dates.cu    # DATES cuFFT autocorrelation LD engine (split T2 / §2.3 TU-E; native-FP64 carve-out)
     cuda/cuda_backend_decode.cu   # decode/transpose format-reader engine (split T3 / §2.3 TU-C; cub scan/select)
     cuda/cuda_backend_dstat.cu    # qpDstat block-reduce + shared ratio-block-jackknife (split T4 / §2.3 TU-D; calls device_survivor_blocks via header decl)
+    cuda/cuda_backend_qpfstats.cu # qpfstats smoothing-solve (split T5 / §2.3 TU-F; SYRK gram + Cholesky multi-RHS solve; reads solve_precision_/blas_/solver_/solver_work_)
     cuda/device_partial.cu        # M4.5: DevicePartial out-of-line special members (opaque resident-handle Impl)
     cuda/device_f2_blocks.cu      # M4.5: DeviceF2Blocks — device-resident FULL result handle (special members + to_host/upload)
     cuda/device_decode_result.cu  # device-resident decode seam: DeviceDecodeResult — autosome-compacted Q/V resident handle (special members + accessors)
