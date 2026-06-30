@@ -1,4 +1,4 @@
-// src/device/cuda/f2_blocks_kernel.cu
+// src/device/cuda/f2_batched_kernel.cu
 //
 // M4 — the BATCHED per-block f2 path on the GPU (architecture.md §5 S2 "Batched
 // over all n_block blocks via cublasDgemmStridedBatched ... accumulating into the
@@ -34,7 +34,7 @@
 // CUDA TU: PRIVATE to steppe_device (architecture.md §4). Includes the SHARED
 // host/device f2 primitive so the CPU oracle and this path cannot diverge on the
 // formula (architecture.md §13).
-#include "device/cuda/f2_blocks_kernel.cuh"
+#include "device/cuda/f2_batched_kernel.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>

@@ -34,7 +34,7 @@
 #include <stdexcept>  // std::runtime_error — the nadmix > kMaxThetaDev reject-before-launch
 #include <string>     // std::to_string — the over-cap diagnostic message
 
-namespace steppe::device::cuda {
+namespace steppe::device {
 
 namespace {
 
@@ -476,7 +476,7 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
                           double* d_out_theta, double* d_out_score, cudaStream_t stream) {
     if (topo.nadmix > kMaxThetaDev)
         throw std::runtime_error(
-            "steppe::device::cuda::launch_qpgraph_fleet: topology nadmix=" +
+            "steppe::device::launch_qpgraph_fleet: topology nadmix=" +
             std::to_string(topo.nadmix) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
             std::to_string(kMaxThetaDev) + "; the in-kernel fit holds theta in fixed-size stack "
             "arrays of that length. Reduce the admixture-node count or raise kMaxThetaDev.");
@@ -489,7 +489,7 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
     qpgraph_fleet_kernel<<<blocks, TPB, 0, stream>>>(topo, numstart, maxit, tol, d_fobs, d_qinv,
                                                      L, g_dbl.data(), g_int.data(),
                                                      d_out_theta, d_out_score);
-    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK_KERNEL();
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
@@ -499,7 +499,7 @@ void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d
                                   cudaStream_t stream) {
     if (topo.nadmix > kMaxThetaDev)
         throw std::runtime_error(
-            "steppe::device::cuda::launch_qpgraph_eval_at_theta: topology nadmix=" +
+            "steppe::device::launch_qpgraph_eval_at_theta: topology nadmix=" +
             std::to_string(topo.nadmix) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
             std::to_string(kMaxThetaDev) + " (the qpGraph fit's nadmix precondition).");
     const ScratchLayout L = make_layout(topo.npop, topo.nedge_norm, topo.npair, topo.npath);
@@ -508,7 +508,7 @@ void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d
     qpgraph_eval_at_theta_kernel<<<1, 1, 0, stream>>>(topo, d_theta, d_fobs, d_qinv, L,
                                                       g_dbl.data(), g_int.data(),
                                                       d_out_bl, d_out_f3, d_out_score);
-    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK_KERNEL();
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
@@ -535,8 +535,8 @@ void launch_qpgraph_fleet_batch(const QpGraphDeviceTopoView* d_views, int ntopo,
         d_views, ntopo, numstart, maxit, tol, d_pwts0, d_pe_edge, d_pe_leaf, d_pe_path,
         d_pae_path, d_pae_admixedge, d_cmb1, d_cmb2, d_fobs, d_qinv, Lmax, d_g_dbl, d_g_int,
         d_out_score);
-    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK_KERNEL();
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
-}  // namespace steppe::device::cuda
+}  // namespace steppe::device

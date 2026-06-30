@@ -45,7 +45,7 @@ namespace steppe::core {
 /// S = [Qsq (rows 0..P-1) ; Hc (rows P..2P-1)], so S / R have `kF2StackedBlocks`
 /// vertically-stacked [P × …] blocks and a leading dimension of 2P. Single-homed
 /// here (the CUDA-FREE STEPPE_HD f2-estimator home, consumed by BOTH the single-
-/// block feeder f2_block_kernel.cu and the grouped f2_blocks_kernel.cu) so the
+/// block feeder f2_block_kernel.cu and the grouped f2_batched_kernel.cu) so the
 /// `2P` factor is defined ONCE rather than open-coded as `2 * P` in each TU — if a
 /// third stacked block were ever added the sites cannot drift (DRY;
 /// NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3). This is a structural

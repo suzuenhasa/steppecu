@@ -61,7 +61,7 @@ constexpr int kSymTile = 16;
 constexpr int kWarpSize = 32;
 /// Max gridDim.x for a 1-D launch — the CUDA hardware limit 2^31-1, single-sourced
 /// from core::kMaxGridX (launch_config.hpp), the canonical home shared with the
-/// sibling CUDA TUs (decode_af_kernel.cu, f2_block_kernel.cu, f2_blocks_kernel.cu).
+/// sibling CUDA TUs (decode_af_kernel.cu, f2_block_kernel.cu, f2_batched_kernel.cu).
 /// The kernels with a strided per-thread grid-stride loop clamp grid to this. NOTE:
 /// gridDim.x reaches 2^31-1 on every compute capability (incl. Blackwell sm_120);
 /// it is gridDim.y/z that are capped at 65535 (core::kMaxGridY/Z). DOC-VERIFIED:
@@ -1798,7 +1798,7 @@ inline int launch_grid_stride(long total, int block) {
 
 }  // namespace
 
-void launch_assemble_f4_gather_models_batched(const double* f2, int P,
+void launch_assemble_f4_gather_models_batched(const double* d_f2, int P,
                                               const int* d_left_arena,
                                               const int* d_right_arena,
                                               int nl, int nr, int nb, int n_models,
@@ -1809,7 +1809,7 @@ void launch_assemble_f4_gather_models_batched(const double* f2, int P,
     const int block = 256;
     const int grid = launch_grid_stride(total, block);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
-        f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, d_surv, dX);
+        d_f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
@@ -1912,7 +1912,7 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
-void launch_assemble_f4_gather(const double* f2, int P,
+void launch_assemble_f4_gather(const double* d_f2, int P,
                                const int* d_left, const int* d_right,
                                int nl, int nr, int nb, const int* d_surv,
                                double* dX, cudaStream_t stream) {
@@ -1920,12 +1920,12 @@ void launch_assemble_f4_gather(const double* f2, int P,
     if (total <= 0) return;
     const int block = 256;
     const int grid = launch_grid_stride(total, block);
-    assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(f2, P, d_left, d_right,
+    assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(d_f2, P, d_left, d_right,
                                                           nl, nr, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
-void launch_assemble_f4_quartets_gather(const double* f2, int P,
+void launch_assemble_f4_quartets_gather(const double* d_f2, int P,
                                         const int* d_quartets, int N, int nb,
                                         const int* d_surv,
                                         double* dX, cudaStream_t stream) {
@@ -1934,11 +1934,11 @@ void launch_assemble_f4_quartets_gather(const double* f2, int P,
     const int block = 256;
     const int grid = launch_grid_stride(total, block);
     assemble_f4_quartets_gather_kernel<<<grid, block, 0, stream>>>(
-        f2, P, d_quartets, N, nb, d_surv, dX);
+        d_f2, P, d_quartets, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
-void launch_assemble_f3_triples_gather(const double* f2, int P,
+void launch_assemble_f3_triples_gather(const double* d_f2, int P,
                                        const int* d_triples, int N, int nb,
                                        const int* d_surv,
                                        double* dX, cudaStream_t stream) {
@@ -1947,16 +1947,16 @@ void launch_assemble_f3_triples_gather(const double* f2, int P,
     const int block = 256;
     const int grid = launch_grid_stride(total, block);
     assemble_f3_triples_gather_kernel<<<grid, block, 0, stream>>>(
-        f2, P, d_triples, N, nb, d_surv, dX);
+        d_f2, P, d_triples, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
-void launch_f2_block_keep(const double* vpair, int P, int nb, int* d_keep,
+void launch_f2_block_keep(const double* d_vpair, int P, int nb, int* d_keep,
                           cudaStream_t stream) {
     if (nb <= 0) return;
     const int block = 128;
     const int grid = (nb + block - 1) / block;
-    f2_block_keep_kernel<<<grid, block, 0, stream>>>(vpair, P, nb, d_keep);
+    f2_block_keep_kernel<<<grid, block, 0, stream>>>(d_vpair, P, nb, d_keep);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

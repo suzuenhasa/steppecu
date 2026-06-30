@@ -151,7 +151,7 @@ static_assert(kMaxVramUtilizationFraction > 0.0 && kMaxVramUtilizationFraction <
 /// VRAM.
 ///
 /// GRID-Z TILING (cleanup X-7/B6). Each block of a chunk becomes one slab on
-/// `gridDim.z = n_in_group` in the M4 gather/scatter launches (f2_blocks_kernel.cu),
+/// `gridDim.z = n_in_group` in the M4 gather/scatter launches (f2_batched_kernel.cu),
 /// and z is hardware-capped at `kMaxGridZ` (65 535) on every compute capability. On
 /// the budget tier the VRAM quotient is far below that, but on the high-VRAM tier
 /// (PRO-6000 96 GB ⇒ larger `n_block`/smaller per-block footprint) the quotient can

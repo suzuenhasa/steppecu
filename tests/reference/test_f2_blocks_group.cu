@@ -3,7 +3,7 @@
 // B24 OBJECTIVE GATE — the M4 grouped-batch wrappers' empty/degenerate fail-fast
 // (cleanup F6/B24; architecture.md §2 fail-fast, §13). This is the test the verdict
 // gate requires for B24: the three device-private launch wrappers in
-// f2_blocks_kernel.cuh — launch_gather_group / run_f2_gemms_group /
+// f2_batched_kernel.cuh — launch_gather_group / run_f2_gemms_group /
 // launch_assemble_blocks_group — must fail FAST on a degenerate batch (n_in_group
 // <= 0, a zero gridDim.z = invalid launch) or a zero pad width (s_pad <= 0, a zero
 // gridDim.y / a k==0 GEMM), rather than silently issuing an invalid launch or a
@@ -60,7 +60,7 @@
 #include "core/internal/f2_estimator.hpp"   // assemble_f2_numerator, finalize_f2 (the oracle)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII device memory)
-#include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
+#include "device/cuda/f2_batched_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII cuBLAS handle)
 
 using steppe::Precision;
@@ -391,7 +391,7 @@ int main() {
             "RESULT: FAIL — the M4 grouped-batch wrappers did not produce the correct\n"
             "        scattered tensors on the happy path, or did not fail-fast on a\n"
             "        degenerate (n_in_group <= 0 / s_pad <= 0) extent (architecture.md\n"
-            "        §2 fail-fast; cleanup f2_blocks_kernel F6, B24).\n");
+            "        §2 fail-fast; cleanup f2_batched_kernel F6, B24).\n");
         return EXIT_FAILURE;
     }
     std::fprintf(stderr, "RESULT: PASS (grouped gather/GEMM/scatter correct on a reordered "

@@ -134,7 +134,7 @@ inline constexpr unsigned kMaxGridZ = kMaxGridY;
 // ===========================================================================
 
 /// The `gridDim.z = n_in_group` extent for the M4 strided-batched gather/scatter
-/// launches (f2_blocks_kernel.cu). Those wrappers set the z axis to the batch
+/// launches (f2_batched_kernel.cu). Those wrappers set the z axis to the batch
 /// count DIRECTLY (not via `grid_for`), so a `grid_for` clamp alone would not
 /// cover them (cleanup X-7/B6 fix-correctness note); this is their dedicated
 /// single-home guard. Asserts `1 ≤ n ≤ kMaxGridZ` (a zero z-extent is an invalid

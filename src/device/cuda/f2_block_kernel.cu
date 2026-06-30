@@ -174,7 +174,7 @@ __global__ void f2_feeder_kernel(const double* __restrict__ Q_raw,
 // ACCEPTED COST): lanes vary si (row i), so the own-orientation reads (column factor
 // sj) coalesce, while the MATHEMATICALLY-REQUIRED transposed sumsq_j=R(j,i) /
 // hsum_j=R(P+j,i) (column factor si) stride by twoP ⇒ uncoalesced. Same rationale as
-// assemble_blocks_group_kernel (f2_blocks_kernel.cu): the SMALL [2P×P] R buffer off
+// assemble_blocks_group_kernel (f2_batched_kernel.cu): the SMALL [2P×P] R buffer off
 // the GEMM-dominated critical path, native-FP64 catastrophic-cancellation assemble,
 // per-element math unchanged — accepted, not shared-tiled (the symmetric access would
 // need two off-diagonal tiles for a bounded off-critical-path win).

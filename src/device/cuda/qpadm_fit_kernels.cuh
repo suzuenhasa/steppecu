@@ -4,7 +4,7 @@
 // (the FROZEN CONTRACT §2). Host orchestration (cuda_backend.cu) calls these
 // `void launch_*` functions; the kernel bodies + `<<<>>>` live only in the .cu —
 // the architecture.md §7 "host code never includes kernel bodies or <<<>>>" rule,
-// mirroring f2_blocks_kernel.cuh's style. All math here is NATIVE FP64: the f4
+// mirroring f2_batched_kernel.cuh's style. All math here is NATIVE FP64: the f4
 // 4-slab combine is the cancellation-sensitive f-stat difference, and the
 // jackknife/xtau reductions reproduce the CpuBackend long-double oracle's operation
 // order in FP64 (at nb=708, m=10 this matches the golden to the gate tier; §12).
@@ -22,7 +22,7 @@ namespace steppe::device {
 /// S3 f4-gather (the FROZEN CONTRACT §2a; CpuBackend assemble_f4, src/device/cpu/cpu_backend.cpp). Build
 /// the per-block f4 matrix X[k + m*b] for k = j + nr*i (ROW-MAJOR vectorization),
 /// batched over ALL nb blocks in one launch (grid over (k, b)). Reads the RESIDENT
-/// f2 tensor `f2` (column-major i + P*j + P*P*b, VRAM) directly — NO D2H. The
+/// f2 tensor `d_f2` (column-major i + P*j + P*P*b, VRAM) directly — NO D2H. The
 /// 4-slab combine
 ///   X[j+nr*i, b] = 0.5*( f2(Li,R0,b) + f2(L0,Rj,b) - f2(L0,R0,b) - f2(Li,Rj,b) )
 /// with Li = d_left[i+1], Rj = d_right[j+1], L0 = d_left[0], R0 = d_right[0]. Native
@@ -34,7 +34,7 @@ namespace steppe::device {
 /// MISSING block (Vpair==0 for any pair; AT2 read_f2(remove_na=TRUE)) is excluded from
 /// d_surv. `d_surv==nullptr` ⇒ identity (no drop — the maxmiss=0 no-missing-block path,
 /// bit-identical to the pre-F1 gather). The keep-mask is built by launch_f2_block_keep.
-void launch_assemble_f4_gather(const double* f2, int P,
+void launch_assemble_f4_gather(const double* d_f2, int P,
                                const int* d_left, const int* d_right,
                                int nl, int nr, int nb, const int* d_surv,
                                double* dX, cudaStream_t stream);
@@ -50,7 +50,7 @@ void launch_assemble_f4_gather(const double* f2, int P,
 /// i + P*j + P*P*b) — NO D2H. Native FP64 (the cancellation carve-out). F1/OQ-12 SURVIVOR
 /// COMPACTION: `nb` is the SURVIVOR block count and `d_surv` (length nb, ASCENDING) maps a
 /// compacted survivor index to its ORIGINAL resident block id; d_surv==nullptr ⇒ identity.
-void launch_assemble_f4_quartets_gather(const double* f2, int P,
+void launch_assemble_f4_quartets_gather(const double* d_f2, int P,
                                         const int* d_quartets, int N, int nb,
                                         const int* d_surv,
                                         double* dX, cudaStream_t stream);
@@ -66,7 +66,7 @@ void launch_assemble_f4_quartets_gather(const double* f2, int P,
 /// carve-out). F1/OQ-12 SURVIVOR COMPACTION: `nb` is the SURVIVOR block count and `d_surv`
 /// (length nb, ASCENDING) maps a compacted survivor index to its ORIGINAL resident block
 /// id; d_surv==nullptr ⇒ identity.
-void launch_assemble_f3_triples_gather(const double* f2, int P,
+void launch_assemble_f3_triples_gather(const double* d_f2, int P,
                                        const int* d_triples, int N, int nb,
                                        const int* d_surv,
                                        double* dX, cudaStream_t stream);
@@ -74,11 +74,11 @@ void launch_assemble_f3_triples_gather(const double* f2, int P,
 /// F1 / OQ-12 keep-mask: one thread per resident block writes d_keep[b]=0 iff block b
 /// is PARTIALLY covered (≥1 pair Vpair==0 AND ≥1 pair Vpair>0 — AT2 read_f2's
 /// `!is.finite` drop), else 1. A fully-zero slab is the "no Vpair info" sentinel (the
-/// legacy/parity zero-fill), NOT a missing block ⇒ kept. `vpair` is the RESIDENT
+/// legacy/parity zero-fill), NOT a missing block ⇒ kept. `d_vpair` is the RESIDENT
 /// [P×P×nb] Vpair tensor; `d_keep` is length nb. The host reads d_keep down and builds
 /// the ASCENDING survivor id list. Mirrors the CpuBackend oracle survivor_blocks and
 /// shares the single-source predicate core::pair_block_is_missing.
-void launch_f2_block_keep(const double* vpair, int P, int nb, int* d_keep,
+void launch_f2_block_keep(const double* d_vpair, int P, int nb, int* d_keep,
                           cudaStream_t stream);
 
 /// S3 est_to_loo + x_total + tot_line (the FROZEN CONTRACT §2a; CpuBackend
@@ -348,13 +348,13 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
 // ---------------------------------------------------------------------------------
 
 /// S3 f4-gather, MODEL-BATCHED. Grid over (k + m*b, model). Reads the RESIDENT f2
-/// tensor `f2` (col-major i + P*j + P*P*b) with PER-MODEL index arenas
+/// tensor `d_f2` (col-major i + P*j + P*P*b) with PER-MODEL index arenas
 /// `d_left_arena` ([B][nl+1] row-major) / `d_right_arena` ([B][nr+1]) and writes the
 /// strided arena `dX` (per-model slice dX + model*(m*nb), layout k + m*bs). Native FP64.
 /// F1 / OQ-12: `nb` is the SURVIVOR block count; `d_surv` (length nb, ASCENDING, SHARED
 /// across models) maps the compacted survivor index to the original resident block id
 /// (a missing block — Vpair==0 for any pair — is dropped). `d_surv==nullptr` ⇒ identity.
-void launch_assemble_f4_gather_models_batched(const double* f2, int P,
+void launch_assemble_f4_gather_models_batched(const double* d_f2, int P,
                                               const int* d_left_arena,
                                               const int* d_right_arena,
                                               int nl, int nr, int nb, int n_models,

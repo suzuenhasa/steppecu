@@ -206,7 +206,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
 // job through build_resources (cli-bindings.md §4.5), not this CUDA-free layer.
 // ---------------------------------------------------------------------------
 
-BuildResult<RunConfig> ConfigBuilder::build() const {
+BuildResult<RunConfig> ConfigBuilder::build() {
     error_message_.clear();
     const auto fail = [this](std::string msg) -> BuildResult<RunConfig> {
         error_message_ = std::move(msg);

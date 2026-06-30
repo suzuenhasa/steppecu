@@ -6,11 +6,13 @@
 // constants (the single home so the reader cannot drift from the writer's stamps).
 #include "app/f2_dir_io.hpp"
 
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <ios>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "device/f2_disk_format.hpp"  // F2DiskHeader, kF2DiskMagic/Version/DtypeFp64 (CUDA-FREE)
@@ -40,7 +42,13 @@ namespace {
                                  std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path);
     if (!f) {
-        err = "cannot open pops.txt: " + path.string();
+        // Capture errno on the line right after the failing open, before any other
+        // libc call can clobber it (libstdc++'s basic_filebuf::open forwards the OS
+        // open() errno). Forward the decoded OS reason so a sysadmin can tell
+        // "Permission denied" (EACCES) from "No such file or directory" (ENOENT).
+        const int open_errno = errno;
+        err = "cannot open pops.txt (" + std::generic_category().message(open_errno) +
+              "): " + path.string();
         return false;
     }
     std::string line;
@@ -58,10 +66,14 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
 
     // The dir itself must exist and be a directory (a clear fault, not a crash).
+    // ec is populated by fs::exists/is_directory; when the probe itself failed at the
+    // OS layer (e.g. a permission-denied parent traversal) forward the decoded reason
+    // so the fault arm distinguishes a real OS error from a plain wrong-type path.
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
-        return fail(Status::InvalidConfig,
-                    "--f2-dir is not a directory: " + dir.string());
+        std::string reason = "--f2-dir is not a directory: " + dir.string();
+        if (ec) reason += " (" + ec.message() + ")";
+        return fail(Status::InvalidConfig, std::move(reason));
     }
 
     const fs::path bin_path = dir / "f2.bin";
@@ -70,7 +82,12 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     // ---- f2.bin (STPF2BK1) -> F2BlockTensor --------------------------------------
     std::ifstream bin(bin_path, std::ios::binary);
     if (!bin) {
-        return fail(Status::InvalidConfig, "cannot open f2.bin: " + bin_path.string());
+        // errno captured immediately (see read_pops_txt) so EACCES vs ENOENT is
+        // surfaced in the human-readable reason; Status stays InvalidConfig.
+        const int open_errno = errno;
+        return fail(Status::InvalidConfig,
+                    "cannot open f2.bin (" + std::generic_category().message(open_errno) +
+                        "): " + bin_path.string());
     }
 
     device::F2DiskHeader hdr{};

@@ -96,6 +96,7 @@
 
 #include "core/domain/block_partition_rule.hpp" // core::block_ranges, core::BlockRange (the X-3/B3 single-source inverse)
 #include "core/internal/pchisq.hpp"         // core::internal::pchisq_upper (M(fit-2) rank-test p; the ONE shared special fn)
+#include "core/internal/nvtx.hpp"           // STEPPE_NVTX_RANGE (coarse phase-boundary markers; empty unless -DSTEPPE_NVTX)
 #include "core/internal/qpfstats_jackknife.hpp"  // core::f2blocks_pair_est (the partial-NaN fallback recenter; cold path)
 #include "core/internal/small_linalg.hpp"   // core::solve (the host downdated-A partial-NaN solve; rank_Q is now ON-DEVICE — L1)
 #include "core/qpadm/qpadm_bounds.hpp"       // core::qpadm::model_fits_small_path — the SINGLE-SOURCE small-path envelope (kQpMax*)
@@ -120,7 +121,7 @@
 #include "device/cuda/ratio_block_jackknife_kernel.cuh"  // launch_ratio_block_jackknife (the SHARED f4ratio M1 + qpDstat M2 engine)
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII)
 #include "device/cuda/f2_block_kernel.cuh"  // launch_f2_feeder, engage_f2_precision, emulation_honorable (the X-6/B2 probe)
-#include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
+#include "device/cuda/f2_batched_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/block_sink.cuh"       // M5: BlockSink, HostRamSink, DiskSink, kStreamStagingSlots
 #include "device/stream_f2_blocks.hpp"      // M5: StreamTarget (the CUDA-free streamed-tier request)
 #include "device/f2_blocks_out.hpp"         // M5: DiskF2Blocks (the Disk descriptor DiskSink populates)
@@ -545,6 +546,20 @@ public:
             // calls, so this allocates on the first call and is a no-op after. Never
             // shrink. Two separate buffers so the f2 and vpair D2Hs stage independently
             // (one buffer would falsely serialize the two copies on the one stream).
+            //
+            // CAP (B5): the staging grows monotonically and NEVER shrinks, so a
+            // pathological `total` would silently pin an unbounded non-pageable host
+            // buffer. Assert `total` equals the expected per-device partial bound
+            // P²·n_block_local — which is exactly rb.f2's element count and is already
+            // VRAM-bounded (rb.f2/rb.vpair are device-resident DeviceBuffers that passed
+            // the §11.2 budget), so the pinned staging can never exceed what already fit
+            // in VRAM. Debug-only (compiles out under NDEBUG); cross-checks rb.f2.size()
+            // against the independently-formed P*P*n_block before any host pin.
+            STEPPE_ASSERT(total == static_cast<std::size_t>(rb.P) *
+                                       static_cast<std::size_t>(rb.P) *
+                                       static_cast<std::size_t>(rb.n_block),
+                          "compute_f2_blocks_into: pinned staging exceeds the "
+                          "P*P*n_block partial bound");
             if (stage_f2_.size()    < total) stage_f2_    = PinnedBuffer<double>(total);
             if (stage_vpair_.size() < total) stage_vpair_ = PinnedBuffer<double>(total);
 
@@ -616,6 +631,7 @@ public:
                                                         int n_block,
                                                         const Precision& precision) {
         guard_device();
+        STEPPE_NVTX_RANGE("f2_gemm");  // coarse phase boundary: the batched f2 GEMM body
         const int P = Q.P;
         const long M = Q.M;
 
@@ -631,7 +647,7 @@ public:
         // compute_block_layout is the SINGLE-SOURCE inverse of assign_blocks (validates
         // the partition contract ONCE, closing the OOB write/read this scan used to risk
         // on a malformed partition — cleanup X-3/B3) returning block_offsets (= each
-        // range's begin, copied to dOffsets + dereferenced by f2_blocks_kernel.cu) and
+        // range's begin, copied to dOffsets + dereferenced by f2_batched_kernel.cu) and
         // block_sizes (= each range's size, the S4 metadata / weighting denominator
         // base). size_buckets then groups into the strided-batched buckets. Both are
         // shared verbatim with stream_f2_blocks_impl so the two paths cannot drift (§8).
@@ -739,7 +755,7 @@ public:
         // FIX: allocate each slab ONCE at the MAX single-chunk footprint over all
         // buckets, OUTSIDE the loop, and REUSE it for every chunk. The kernel
         // wrappers index strictly by the passed `P`/`s_pad`/`nb` (never by buffer
-        // size; f2_blocks_kernel.cuh), so a chunk uses only the leading
+        // size; f2_batched_kernel.cuh), so a chunk uses only the leading
         // `P·s_pad·nb` / `P²·nb` elements — over-sizing changes only WHEN the VRAM is
         // committed, not a single bit (PARITY-SAFE: same buffers, same math, every
         // used element fully written before read; the gather writes all `s_pad`
@@ -1247,6 +1263,7 @@ public:
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override {
         guard_device();
+        STEPPE_NVTX_RANGE("decode");  // coarse phase boundary: genotype decode -> Q/V/N
         const int P = tile.n_pop;
         const long M = static_cast<long>(tile.n_snp);
 
@@ -1762,6 +1779,7 @@ public:
         (void)binsize;        // the output-bin width is folded into the lag->bin re-bin (floor(d/qbin)).
         (void)precision;      // native double FFT + native weight carve-out (§12).
         guard_device();
+        STEPPE_NVTX_RANGE("dates_curve");  // coarse phase boundary: the DATES FFT decay-curve pipeline
         DatesMoments out;
         out.n_chrom = n_chrom;
         out.n_bin = n_bin;
@@ -2107,9 +2125,14 @@ public:
         int lwork = 0;
         CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
                                                    npairs, dA.data(), npairs, &lwork));
-        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+        // POOLED potrf workspace (B5): grow the persistent solver_work_ to lwork
+        // (monotonic, never-shrink) instead of a per-call cudaMalloc/cudaFree. Same
+        // bytes fed to potrf ⇒ bit-identical (§12). lwork is queried AFTER the
+        // math-mode scope above so it reflects the engaged mode (CUDA 13.x cuSOLVER).
+        const std::size_t lwork_need = static_cast<std::size_t>(lwork > 0 ? lwork : 1);
+        if (solver_work_.size() < lwork_need) solver_work_ = DeviceBuffer<double>(lwork_need);
         CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
-                                        dA.data(), npairs, dWork.data(), lwork, dInfo.data()));
+                                        dA.data(), npairs, solver_work_.data(), lwork, dInfo.data()));
         int info = 0;
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -2222,6 +2245,7 @@ public:
         std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
         std::span<const int> block_sizes, double ridge, const Precision& precision) override {
         guard_device();
+        STEPPE_NVTX_RANGE("qpfstats");  // coarse phase boundary: fused reduce->jackknife->smooth->recenter
         if (npopcomb <= 0 || npairs <= 0 || n_block <= 0 || P <= 0 || M <= 0 ||
             quadruples.size() < 4) {
             QpfstatsSmooth out;
@@ -2372,9 +2396,12 @@ public:
         int lwork = 0;
         CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
                                                    npairs, dA.data(), npairs, &lwork));
-        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork > 0 ? lwork : 1));
+        // POOLED potrf workspace (B5): grow the persistent solver_work_ to lwork
+        // (monotonic, never-shrink); same bytes fed to potrf ⇒ bit-identical (§12).
+        const std::size_t lwork_need = static_cast<std::size_t>(lwork > 0 ? lwork : 1);
+        if (solver_work_.size() < lwork_need) solver_work_ = DeviceBuffer<double>(lwork_need);
         CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
-                                        dA.data(), npairs, dWork.data(), lwork, dInfo.data()));
+                                        dA.data(), npairs, solver_work_.data(), lwork, dInfo.data()));
         int info = 0;
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -3272,6 +3299,7 @@ public:
         double setmiss_thresh, const Precision& precision) override {
         (void)precision;  // native FP64 (the cancellation-sensitive ratio diff)
         guard_device();
+        STEPPE_NVTX_RANGE("jackknife");  // coarse phase boundary: f4ratio block-jackknife
         RatioBlockJackknife jk;
         jk.N = N;
         const int nb = f2.n_block;
@@ -3639,11 +3667,11 @@ public:
         const int D = topo.nadmix;
         // The in-kernel fit holds theta in a fixed-size per-thread stack (kMaxThetaDev) —
         // reject an over-cap topology before launch (a clear throw) instead of overrunning it.
-        if (D > cuda::kMaxThetaDev)
+        if (D > kMaxThetaDev)
             throw std::runtime_error(
                 "steppe::device::CudaBackend::qpgraph_fit_fleet: topology nadmix=" +
                 std::to_string(D) + " exceeds the per-thread theta-stack cap kMaxThetaDev=" +
-                std::to_string(cuda::kMaxThetaDev) + ".");
+                std::to_string(kMaxThetaDev) + ".");
         const int npair = topo.npair, ne = topo.nedge_norm;
 
         // ---- upload the resident basis + the topology arenas ----------------------
@@ -3674,7 +3702,7 @@ public:
         up_i(dPaePath, topo.pae_path); up_i(dPaeEdge, topo.pae_admixedge);
         up_i(dCmb1, topo.cmb1); up_i(dCmb2, topo.cmb2);
 
-        cuda::QpGraphDeviceTopo dt{};
+        QpGraphDeviceTopo dt{};
         dt.npop = topo.npop; dt.nedge_norm = ne; dt.nadmix = D; dt.npair = npair;
         dt.npath = topo.npath; dt.base_leaf = topo.base_leaf;
         dt.n_pe = static_cast<int>(topo.pe_edge.size());
@@ -3699,7 +3727,7 @@ public:
             DeviceBuffer<double> dBl0(static_cast<std::size_t>(ne > 0 ? ne : 1));
             DeviceBuffer<double> dF30(static_cast<std::size_t>(npair > 0 ? npair : 1));
             DeviceBuffer<double> dSc0(1);
-            cuda::launch_qpgraph_eval_at_theta(dt, /*d_theta=*/nullptr, dFobs.data(),
+            launch_qpgraph_eval_at_theta(dt, /*d_theta=*/nullptr, dFobs.data(),
                                                dQinv.data(), dBl0.data(), dF30.data(),
                                                dSc0.data(), stream_.get());
             std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
@@ -3722,7 +3750,7 @@ public:
         }
 
         // ---- the on-device fleet (ONE launch; whole multistart x maxit in-kernel) ---
-        cuda::launch_qpgraph_fleet(dt, ns, maxit, tol, dFobs.data(), dQinv.data(),
+        launch_qpgraph_fleet(dt, ns, maxit, tol, dFobs.data(), dQinv.data(),
                                    dTheta.data(), dScore.data(), stream_.get());
 
         std::vector<double> h_theta(static_cast<std::size_t>(ns) * static_cast<std::size_t>(D));
@@ -3768,7 +3796,7 @@ public:
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dThetaBest.data(), out.theta.data(),
                                           static_cast<std::size_t>(D) * sizeof(double),
                                           cudaMemcpyHostToDevice, stream_.get()));
-        cuda::launch_qpgraph_eval_at_theta(dt, dThetaBest.data(), dFobs.data(), dQinv.data(),
+        launch_qpgraph_eval_at_theta(dt, dThetaBest.data(), dFobs.data(), dQinv.data(),
                                            dBl.data(), dF3.data(), dScFinal.data(), stream_.get());
         std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
         std::vector<double> fit(static_cast<std::size_t>(npair), 0.0);
@@ -3817,7 +3845,7 @@ public:
         // ---- pack every topology's arenas into contiguous host buffers + the view table -
         std::vector<double> h_pwts0;
         std::vector<int> h_pe_edge, h_pe_leaf, h_pe_path, h_pae_path, h_pae_edge, h_cmb1, h_cmb2;
-        std::vector<cuda::QpGraphDeviceTopoView> h_views(static_cast<std::size_t>(G));
+        std::vector<QpGraphDeviceTopoView> h_views(static_cast<std::size_t>(G));
         int max_npop = 0, max_ne = 0, max_npair = 0, max_npath = 0;
         for (int g = 0; g < G; ++g) {
             const QpGraphTopoArena& t = topos[static_cast<std::size_t>(g)];
@@ -3825,13 +3853,13 @@ public:
             // topology HERE (a clear throw) so the heterogeneous fleet never hands the kernel
             // an nadmix that would overrun th[]/thp[]/thm[]/thn[]. (The kernel also returns a
             // 1e30 sentinel on the over-cap path; this host reject is the loud failure.)
-            if (t.nadmix > cuda::kMaxThetaDev)
+            if (t.nadmix > kMaxThetaDev)
                 throw std::runtime_error(
                     "steppe::device::CudaBackend::qpgraph_fit_fleet_batch: candidate topology "
                     + std::to_string(g) + " has nadmix=" + std::to_string(t.nadmix) +
                     " exceeding the per-thread theta-stack cap kMaxThetaDev=" +
-                    std::to_string(cuda::kMaxThetaDev) + ".");
-            cuda::QpGraphDeviceTopoView v{};
+                    std::to_string(kMaxThetaDev) + ".");
+            QpGraphDeviceTopoView v{};
             v.npop = t.npop; v.nedge_norm = t.nedge_norm; v.nadmix = t.nadmix;
             v.npair = t.npair; v.npath = t.npath; v.base_leaf = t.base_leaf;
             v.n_pe = static_cast<int>(t.pe_edge.size());
@@ -3857,7 +3885,7 @@ public:
             max_npath = std::max(max_npath, t.npath);
         }
         // the batch-MAX per-thread layout (every topology's scratch fits this slab).
-        const cuda::ScratchLayout Lmax = cuda::make_layout(max_npop, max_ne, max_npair, max_npath);
+        const ScratchLayout Lmax = make_layout(max_npop, max_ne, max_npair, max_npath);
 
         auto up_d = [&](const std::vector<double>& h) {
             DeviceBuffer<double> d(h.size() ? h.size() : 1);
@@ -3877,9 +3905,9 @@ public:
         DeviceBuffer<int> dPeEdge = up_i(h_pe_edge), dPeLeaf = up_i(h_pe_leaf), dPePath = up_i(h_pe_path);
         DeviceBuffer<int> dPaePath = up_i(h_pae_path), dPaeEdge = up_i(h_pae_edge);
         DeviceBuffer<int> dCmb1 = up_i(h_cmb1), dCmb2 = up_i(h_cmb2);
-        DeviceBuffer<cuda::QpGraphDeviceTopoView> dViews(static_cast<std::size_t>(G));
+        DeviceBuffer<QpGraphDeviceTopoView> dViews(static_cast<std::size_t>(G));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(dViews.data(), h_views.data(),
-                                          h_views.size() * sizeof(cuda::QpGraphDeviceTopoView),
+                                          h_views.size() * sizeof(QpGraphDeviceTopoView),
                                           cudaMemcpyHostToDevice, stream_.get()));
 
         // per-thread scratch slab (ntopo*numstart threads, each a batch-MAX slab) + the
@@ -3891,7 +3919,7 @@ public:
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready.
 
         // ---- the ONE launch (the fleet fits ALL candidates) -------------------------
-        cuda::launch_qpgraph_fleet_batch(
+        launch_qpgraph_fleet_batch(
             dViews.data(), G, ns, maxit, tol, Lmax.dbl_total, Lmax.int_total, dPwts0.data(),
             dPeEdge.data(), dPeLeaf.data(), dPePath.data(), dPaePath.data(), dPaeEdge.data(),
             dCmb1.data(), dCmb2.data(), dFobs.data(), dQinv.data(), dGdbl.data(), dGint.data(),
@@ -4052,9 +4080,15 @@ public:
         int lwork_f = 0;
         CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver_.get(), CUBLAS_FILL_MODE_LOWER,
                                                    m, dQf.data(), m, &lwork_f));
-        DeviceBuffer<double> dWork(static_cast<std::size_t>(lwork_f > 0 ? lwork_f : 1));
+        // POOLED potrf/potri workspace (B5): one persistent solver_work_ grown to
+        // lwork_f (monotonic, never-shrink), reused by BOTH the potrf below and the
+        // potri further down (same lwork_f) instead of two per-call allocations. Same
+        // bytes fed to each routine ⇒ bit-identical (§12); queried AFTER the math-mode
+        // scope so lwork_f reflects the engaged mode (CUDA 13.x cuSOLVER).
+        const std::size_t lwork_need = static_cast<std::size_t>(lwork_f > 0 ? lwork_f : 1);
+        if (solver_work_.size() < lwork_need) solver_work_ = DeviceBuffer<double>(lwork_need);
         CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
-                                        dQf.data(), m, dWork.data(), lwork_f, dInfo.data()));
+                                        dQf.data(), m, solver_work_.data(), lwork_f, dInfo.data()));
         int info = 0;
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
@@ -4064,7 +4098,7 @@ public:
             return out;
         }
         CUSOLVER_CHECK(cusolverDnDpotri(solver_.get(), CUBLAS_FILL_MODE_LOWER, m,
-                                        dQf.data(), m, dWork.data(), lwork_f, dInfo.data()));
+                                        dQf.data(), m, solver_work_.data(), lwork_f, dInfo.data()));
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
                                           cudaMemcpyDeviceToHost, stream_.get()));
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
@@ -4314,30 +4348,40 @@ public:
         }
     }
 
-    /// Single-shot convenience overload: allocate the gesvd scratch ONCE on the stack
-    /// (RAII DeviceBuffers, freed at scope exit) and delegate to the scratch-taking
-    /// form above. For the per-CALL large fit (`large_fit_one`) this allocate-once is
-    /// within design (one small-LA burst per fit, not a per-block inner loop — see the
-    /// §14.2 finding's "OTHER hot paths" note); the Stage-A LOO SWEEP must NOT use this
-    /// overload — it hoists the scratch above its loop and calls the scratch-taking
-    /// form, so it does not pay a device-wide `cudaFree` per block.
+    /// Single-shot convenience overload: grow the persistent per-backend gesvd scratch
+    /// members to the queried per-shape sizes (B5 pool; monotonic-grow, never-shrink)
+    /// and delegate to the scratch-taking form above — instead of a fresh stack
+    /// DeviceBuffer set freed via a device-wide `cudaFree` on every call. For the
+    /// per-CALL large fit (`large_fit_one`) this is one small-LA burst per fit, not a
+    /// per-block inner loop (see the §14.2 finding's "OTHER hot paths" note); the
+    /// Stage-A LOO SWEEP must NOT use this overload — it hoists its OWN scratch above
+    /// its loop and calls the scratch-taking form, so it neither pays a device-wide
+    /// `cudaFree` per block nor touches these pooled members.
     void large_svd_V(const double* dXmat, int nl, int nr, int r,
                      double* dVout, double* dXt, cudaStream_t stream) {
         if (r <= 0) return;
         const SvdScratchSizes sz = large_svd_scratch_sizes(nl, nr);
-        DeviceBuffer<double> dS(sz.s);
-        DeviceBuffer<double> dU(sz.u);
-        DeviceBuffer<double> dVt(sz.vt);
-        DeviceBuffer<double> dA2(sz.a2);          // 0 ⇒ no alloc (nr>=nl); else nl*nr
-        // dInfo: REQUIRED non-null device out-arg for cusolverDnDgesvd/Dgesvdj (info<0 =
-        // bad param; gesvdj info>0 = non-converged Jacobi). INTENTIONAL DISCARD on this
-        // off-bit-parity large (NRBIG) path — not D2H-copied/checked; a non-converged SVD
-        // would flow into seed/ALS. Cannot drop the arg. (Cholesky dInfo IS checked; [3.4])
-        DeviceBuffer<int>    dInfo(sz.info);
-        DeviceBuffer<double> dWork(static_cast<std::size_t>(sz.lwork));
+        // POOLED gesvd/gesvdj scratch (B5): grow each member arena to its per-shape
+        // count (monotonic, never-shrink). The bytes fed to gesvd/gesvdj are UNCHANGED
+        // (data-independent bufferSize; the scratch is fully overwritten) ⇒ bit-
+        // identical (§12). solver_work_ doubles as the gesvd `lwork` buffer, shared
+        // with the potrf/potri path (sequential, single-stream, one backend per device).
+        // svd_a2_: sz.a2==0 for nr>=nl ⇒ the grow is skipped and sA2 is unread in that
+        // branch (matches the prior DeviceBuffer(0)==nullptr behavior); nl>nr grows it.
+        // svd_info_: REQUIRED non-null device out-arg for cusolverDnDgesvd/Dgesvdj
+        // (info<0 = bad param; gesvdj info>0 = non-converged Jacobi). INTENTIONAL
+        // DISCARD on this off-bit-parity large (NRBIG) path — not D2H-copied/checked; a
+        // non-converged SVD would flow into seed/ALS. Cannot drop the arg. ([3.4])
+        const std::size_t lwork_need = static_cast<std::size_t>(sz.lwork);
+        if (svd_s_.size()       < sz.s)       svd_s_       = DeviceBuffer<double>(sz.s);
+        if (svd_u_.size()       < sz.u)       svd_u_       = DeviceBuffer<double>(sz.u);
+        if (svd_vt_.size()      < sz.vt)      svd_vt_      = DeviceBuffer<double>(sz.vt);
+        if (svd_a2_.size()      < sz.a2)      svd_a2_      = DeviceBuffer<double>(sz.a2);
+        if (svd_info_.size()    < sz.info)    svd_info_    = DeviceBuffer<int>(sz.info);
+        if (solver_work_.size() < lwork_need) solver_work_ = DeviceBuffer<double>(lwork_need);
         large_svd_V(dXmat, nl, nr, r, dVout, dXt,
-                    dS.data(), dU.data(), dVt.data(), dA2.data(),
-                    dInfo.data(), dWork.data(), sz.lwork, stream);
+                    svd_s_.data(), svd_u_.data(), svd_vt_.data(), svd_a2_.data(),
+                    svd_info_.data(), solver_work_.data(), sz.lwork, stream);
     }
 
     /// Dynamic VRAM scratch sizes for the large-path ALS + weight/chisq (§2.3).
@@ -4390,74 +4434,6 @@ public:
         }
         launch_qpadm_weights_chisq_large(dXmat, dQinv, dA, dB, nl, nr, r,
                                          dW, dchisq, dStatus, dScratch, dIntScratch, stream);
-    }
-
-    /// S5 — rank test / SVD seed + chisq on the GPU (the FROZEN CONTRACT §2c).
-    /// xmat from x_total, on-device Jacobi SVD seed, chisq quadratic form. Native FP64.
-    [[nodiscard]] GlsWeights rank_test(const F4Blocks& x,
-                                       const JackknifeCov& cov,
-                                       int r,
-                                       const Precision& precision) override {
-        (void)precision;
-        guard_device();
-        GlsWeights gw;
-        gw.r = r;
-        const int nl = x.nl, nr = x.nr, m = nl * nr;
-        const bool small = model_fits_small_path(nl, nr, r);
-        gw.A.assign(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r), 0.0);
-        gw.B.assign(static_cast<std::size_t>(r) * static_cast<std::size_t>(nr), 0.0);
-        if (m <= 0) { gw.status = Status::Ok; return gw; }
-
-        DeviceBuffer<double> dTotal(static_cast<std::size_t>(m));
-        DeviceBuffer<double> dXmat(static_cast<std::size_t>(m));
-        DeviceBuffer<double> dQinv(static_cast<std::size_t>(m) * static_cast<std::size_t>(m));
-        DeviceBuffer<double> dA(static_cast<std::size_t>(nl) * static_cast<std::size_t>(r > 0 ? r : 1));
-        DeviceBuffer<double> dB(static_cast<std::size_t>(r > 0 ? r : 1) * static_cast<std::size_t>(nr));
-        DeviceBuffer<double> dW(static_cast<std::size_t>(nl));
-        DeviceBuffer<double> dchisq(1);
-        DeviceBuffer<int> dStatus(1);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTotal.data(), x.x_total.data(),
-                                          static_cast<std::size_t>(m) * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), cov.Qinv.data(),
-                                          static_cast<std::size_t>(m) * static_cast<std::size_t>(m) * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
-        launch_qpadm_xmat_from_rowmajor(dTotal.data(), nl, nr, dXmat.data(), stream_.get());
-        if (small) {
-            launch_qpadm_seed_ab(dXmat.data(), nl, nr, r, dA.data(), dB.data(), stream_.get());
-            // chisq with the SEED factors (rank_test is the seed; design §4 S5).
-            launch_qpadm_weights_chisq(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                       nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
-                                       stream_.get());
-        } else {  // LARGE path: cuSOLVER SVD seed + VRAM-scratch weight/chisq (no ALS).
-            DeviceBuffer<double> dVout(static_cast<std::size_t>(nr) * static_cast<std::size_t>(r > 0 ? r : 1));
-            DeviceBuffer<double> dXt(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nl > 0 ? nl : 1));
-            DeviceBuffer<double> dScratch(large_dbl_scratch(nl, nr, r));
-            DeviceBuffer<int>    dIntScratch(large_int_scratch(nl, nr, r));
-            if (r > 0) {
-                large_svd_V(dXmat.data(), nl, nr, r, dVout.data(), dXt.data(), stream_.get());
-                launch_qpadm_seed_from_V(dXmat.data(), dVout.data(), nl, nr, r,
-                                         dA.data(), dB.data(), stream_.get());
-            }
-            launch_qpadm_weights_chisq_large(dXmat.data(), dQinv.data(), dA.data(), dB.data(),
-                                             nl, nr, r, dW.data(), dchisq.data(), dStatus.data(),
-                                             dScratch.data(), dIntScratch.data(), stream_.get());
-        }
-        double chisq = 0.0;
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&chisq, dchisq.data(), sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        if (r > 0) {
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.A.data(), dA.data(),
-                                              gw.A.size() * sizeof(double),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(gw.B.data(), dB.data(),
-                                              gw.B.size() * sizeof(double),
-                                              cudaMemcpyDeviceToHost, stream_.get()));
-        }
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-        gw.chisq = chisq;
-        gw.status = Status::Ok;
-        return gw;
     }
 
     /// CAPABILITY QUERY (backend.hpp): the CudaBackend deliverable DOES override
@@ -4943,6 +4919,7 @@ public:
         const QpAdmOptions& opts,
         const Precision& precision) override {
         guard_device();
+        STEPPE_NVTX_RANGE("qpadm_fit");  // coarse phase boundary: model-batched qpAdm fit
         std::vector<QpAdmResult> results(models.size());
         if (models.empty()) return results;
 
@@ -5641,6 +5618,34 @@ private:
     // (architecture.md §12).
     PinnedBuffer<double> stage_f2_{};
     PinnedBuffer<double> stage_vpair_{};
+
+    // POOLED per-backend cuSOLVER scratch (B5 — group-8 robustness polish). The
+    // potrf/potri `lwork` workspace and the single-shot gesvd/gesvdj scratch were
+    // each allocated PER CALL as RAII DeviceBuffers, every one paying a device-wide
+    // cudaMalloc + a device-wide cudaFree sync. cuSOLVER itself does NO internal
+    // cudaMalloc — "the user must allocate the device workspace explicitly" (CUDA
+    // 13.x cuSOLVER) — and that workspace is uninitialized scratch the routine fully
+    // OVERWRITES, while `*_bufferSize` is data-independent ("device pointer is not
+    // used to decide the size of workspace"). So pooling these into persistent
+    // members that grow MONOTONICALLY to the max size seen (never shrink) drops the
+    // cuSOLVER malloc/free count to near-zero after warmup while the bytes fed to
+    // every routine are UNCHANGED ⇒ bit-identical (§12); only the allocation count
+    // moves. SAFE without a lock: each device owns its OWN CudaBackend
+    // (model_search.cpp fans out resources.gpus[g].backend per jthread) and §12 pins
+    // ONE statistic stream per backend, so the pooled scratch is used strictly
+    // SEQUENTIALLY on a single thread, never shared across threads. These are a
+    // DISTINCT set from the f2 D2H staging (stage_f2_/stage_vpair_, pinned host) so
+    // the two never alias. `solver_work_` is the shared `lwork` buffer for potrf,
+    // potri AND the single-shot gesvd/gesvdj solve; svd_s_/svd_u_/svd_vt_/svd_a2_/
+    // svd_info_ are that solve's output/scratch set (see large_svd_scratch_sizes).
+    // The Stage-A LOO sweep keeps its OWN hoisted arenas (§14.2) and the
+    // scratch-taking large_svd_V overload — it does NOT use these members.
+    DeviceBuffer<double> solver_work_{};  // potrf/potri/gesvd lwork scratch (max lwork seen)
+    DeviceBuffer<double> svd_s_{};        // gesvd singular values  (min(nl,nr))
+    DeviceBuffer<double> svd_u_{};        // gesvd economy U        (nl*nr)
+    DeviceBuffer<double> svd_vt_{};       // gesvd right vectors    (cols*cols)
+    DeviceBuffer<double> svd_a2_{};       // gesvd non-const A copy  (nl*nr when nl>nr)
+    DeviceBuffer<int>    svd_info_{};     // gesvd devInfo          (1 int)
 };
 
 /// Factory for the GPU backend (declared in device/backend_factory.hpp, X-9/B8;

@@ -21,7 +21,7 @@
 
 add_library(steppe_device STATIC
     cuda/f2_block_kernel.cu       # 3-GEMM reformulation + fixed-slice Ozaki + assemble (single block)
-    cuda/f2_blocks_kernel.cu      # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
+    cuda/f2_batched_kernel.cu     # M4: size-grouped strided-batched per-block f2 (gather/GEMMs/assemble)
     cuda/qpadm_fit_kernels.cu     # M(fit-4): qpAdm fit kernels — f4 gather + loo/total + xtau + on-device small-LA (SVD/ALS/weight/chisq, batched LOO)
     cuda/qpgraph_fit_kernels.cu   # qpGraph: the on-device IDEA-1 fleet (one thread/restart; the path-table fill_pwts + GLS objective + NNLS edge solve)
     cuda/decode_af_kernel.cu      # M1: 2-bit unpack + segmented allele-freq reduction → Q/V/N
@@ -74,6 +74,18 @@ target_compile_features(steppe_device PUBLIC cxx_std_20)
 # PRIVATE: it is a device-codegen detail, never leaks to consumers.
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(steppe_device PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+
+# NVTX phase-boundary ranges (architecture.md §10; cmake/SteppeOptions.cmake
+# STEPPE_NVTX, default OFF). When ON, define STEPPE_NVTX on the device TUs so
+# STEPPE_NVTX_RANGE (src/core/internal/nvtx.hpp) expands to an nvtx3::scoped_range
+# and pulls in the header-only NVTX v3 C++ API (<nvtx3/nvtx3.hpp>, in the CUDA
+# toolkit include tree — no extra link). PRIVATE: a device-side observability
+# detail, never leaked to consumers. OFF ⇒ the macro is empty, no NVTX header is
+# included, object code is byte-identical (§12 parity untouched). Mirrors the
+# STEPPE_HAVE_EMU_TUNING gate above.
+if(STEPPE_NVTX)
+  target_compile_definitions(steppe_device PRIVATE STEPPE_NVTX)
 endif()
 
 # RDC + separable compilation: the backend TU launches the kernel from another TU

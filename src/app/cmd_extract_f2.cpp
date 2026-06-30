@@ -290,16 +290,28 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     // before meta.json is written — the hash overlaps the decode+filter+f2+D2H wall time
     // instead of adding to it. The small .snp/.ind shas are left to the writer (cheap).
     const bool hash_source = config.hash_source();
-    std::string geno_sha;            // filled by the worker iff hash_source
-    std::thread geno_hash_thread;    // joined before write_f2_dir (never detached)
+    std::string geno_sha;                 // filled by the worker iff hash_source
+    std::exception_ptr geno_hash_err;     // captured iff the worker throws (B3, degrade at join)
+    std::thread geno_hash_thread;         // joined before write_f2_dir (never detached)
     if (hash_source) {
         const std::string geno_path = config.geno();
-        geno_hash_thread = std::thread([geno_path, &geno_sha]() {
-            geno_sha = sha256_file(std::filesystem::path(geno_path));
+        geno_hash_thread = std::thread([geno_path, &geno_sha, &geno_hash_err]() {
+            // TOTAL try/catch (B3): an exception escaping a std::thread's top-level callable
+            // calls std::terminate (hard crash, no diagnostic). sha256_file uses an
+            // exception-disabled ifstream and returns "" on open-failure, so the only
+            // realistic throw is bad_alloc on its 8 MiB read chunk; capture it and degrade
+            // at the join site (the provenance hash is non-essential UX) instead.
+            try {
+                geno_sha = sha256_file(std::filesystem::path(geno_path));
+            } catch (...) {
+                geno_hash_err = std::current_exception();
+            }
         });
     }
     // RAII safety: if any early return / exception fires before the explicit join below,
-    // make sure the worker is joined so the thread is never destroyed un-joined.
+    // make sure the worker is joined so the thread is never destroyed un-joined. The
+    // worker lambda catches all (B3 above), so this join — like the explicit one — can
+    // never observe an escaping exception; std::terminate is impossible on either path.
     struct ThreadJoiner {
         std::thread& t;
         ~ThreadJoiner() { if (t.joinable()) t.join(); }
@@ -388,7 +400,22 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     meta.hash_source_files = hash_source;
     if (hash_source) {
         if (geno_hash_thread.joinable()) geno_hash_thread.join();
-        meta.geno_sha256 = geno_sha;  // "" if the .geno could not be opened
+        if (geno_hash_err) {
+            // DEGRADE (B3): a throw escaped the background hash worker (realistically a
+            // bad_alloc on sha256_file's 8 MiB read chunk). The source-provenance hash is
+            // non-essential UX, so degrade to the empty-sha + source_hash_computed:false
+            // state (the writer's "not computed" semantics) rather than aborting the whole
+            // extract. Clearing hash_source_files ALSO stops the writer re-hashing on the
+            // main thread (geno_sha256 is empty here) — that would redo the very work we
+            // backgrounded and could re-throw the same bad_alloc inside write_f2_dir.
+            std::fprintf(stderr,
+                         "steppe extract-f2: warning: source .geno hash failed; writing "
+                         "meta.json with source_hash_computed:false\n");
+            meta.hash_source_files = false;
+            meta.geno_sha256.clear();
+        } else {
+            meta.geno_sha256 = geno_sha;  // "" if the .geno could not be opened
+        }
     }
 
     const F2DirWriteResult wr =

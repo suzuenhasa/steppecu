@@ -269,7 +269,7 @@ struct F2Pair { double f2 = 0.0; double vpair = 0.0; };
 ///
 /// Implements the full S0–S7 oracle surface against which the GPU backend is
 /// diffed: compute_f2 / compute_f2_blocks, decode_af, assemble_f4, jackknife_cov,
-/// rank_test, rank_sweep, gls_weights, and gls_weights_loo_batched. Move-only
+/// rank_sweep, gls_weights, and gls_weights_loo_batched. Move-only
 /// ownership via the base class's deleted copy/move (architecture.md §9).
 class CpuBackend final : public ComputeBackend {
 public:
@@ -1548,25 +1548,6 @@ public:
         return ratio_block_jackknife(num, den, weight, null, null, N, n_block,
                                      /*tot_mode=*/1, /*setmiss_thresh=*/0.0, /*compute_p=*/true,
                                      Precision{});
-    }
-
-    /// S5 — rank test / SVD seed (design §4 S5). Seeds A,B from svd(x_total) at
-    /// rank r and returns chisq = vec(E)'·Qinv·vec(E) for E = X - A·B with the
-    /// seed factors. In M(fit-1) this is the ALS seed; the rank sweep is M(fit-2).
-    [[nodiscard]] GlsWeights rank_test(const F4Blocks& x,
-                                       const JackknifeCov& cov,
-                                       int r,
-                                       const Precision& precision) override {
-        (void)precision;
-        GlsWeights gw;
-        gw.r = r;
-        const int nl = x.nl, nr = x.nr;
-        // xmat as nl×nr column-major from x_total (k = j + nr*i row-major source).
-        std::vector<double> xmat = xmat_from_total(x);
-        seed_AB(xmat, nl, nr, r, gw.A, gw.B);
-        gw.chisq = chisq_of(xmat, gw.A, gw.B, nl, nr, r, cov.Qinv);
-        gw.status = Status::Ok;
-        return gw;
     }
 
     /// CAPABILITY QUERY (backend.hpp): the CpuBackend oracle DOES override

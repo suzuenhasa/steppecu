@@ -9,7 +9,9 @@
 
 #include <cuda_runtime.h>
 
-namespace steppe::device::cuda {
+#include "core/internal/host_device.hpp"  // STEPPE_HD — the project host/device qualifier macro.
+
+namespace steppe::device {
 
 /// The device theta-stack cap. The per-restart fit holds the admixture weights theta (and
 /// its forward-diff perturbations thp/thm/thn) in FIXED-SIZE per-thread stack arrays of this
@@ -50,9 +52,9 @@ struct ScratchLayout {
     long int_total;                                               // total ints per thread
 };
 
-/// Build the per-thread scratch layout for a topology of (npop,nedge,npair,npath). __host__
-/// __device__: the host sizes the slab + the kernel reconstructs per-topology offsets.
-__host__ __device__ inline ScratchLayout make_layout(int npop, int nedge, int npair, int npath) {
+/// Build the per-thread scratch layout for a topology of (npop,nedge,npair,npath). STEPPE_HD
+/// (host + device): the host sizes the slab + the kernel reconstructs per-topology offsets.
+STEPPE_HD inline ScratchLayout make_layout(int npop, int nedge, int npair, int npath) {
     ScratchLayout L{};
     long o = 0;
     auto take = [&](int sz) { long s = o; o += sz; return s; };
@@ -144,6 +146,6 @@ void launch_qpgraph_fleet_batch(const QpGraphDeviceTopoView* d_views, int ntopo,
                                 double* d_g_dbl, int* d_g_int, double* d_out_score,
                                 cudaStream_t stream);
 
-}  // namespace steppe::device::cuda
+}  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_QPGRAPH_FIT_KERNELS_CUH

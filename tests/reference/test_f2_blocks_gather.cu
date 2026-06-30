@@ -1,7 +1,7 @@
 // tests/reference/test_f2_blocks_gather.cu
 //
 // B25 OBJECTIVE GATE — a FOCUSED gather/scatter unit test for the M4-specific
-// index math (cleanup f2_blocks_kernel F24, backlog B25; architecture.md §13
+// index math (cleanup f2_batched_kernel F24, backlog B25; architecture.md §13
 // "thin kernels get a launch-and-compare test"). The M4 path's gather
 // (launch_gather_group) and scatter (launch_assemble_blocks_group) index math is
 // only TRANSITIVELY covered today:
@@ -21,7 +21,7 @@
 //         every slab of dQg, dVg, and dSg (both the Qsq and the Hc half of the
 //         [2P × s_pad] S slab) is EXACTLY 0.0 — the bit pattern, not "close to 0".
 //         This is the contract that makes the padded GEMM identical to the unpadded
-//         one (V=0 ⇒ zero rows/cols; f2_blocks_kernel.cuh:40-41).
+//         one (V=0 ⇒ zero rows/cols; f2_batched_kernel.cuh:40-41).
 //
 //   (ii)  GATHERED COLUMN == FEEDER COLUMN. For every real column c < sz of slab k
 //         (the global block block_ids_in_group[k]), the gathered slab entries equal
@@ -60,7 +60,7 @@
 #include "core/internal/f2_estimator.hpp"   // het_correction, assemble_f2_numerator, finalize_f2
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
 #include "device/cuda/device_buffer.cuh"    // DeviceBuffer<T> (RAII device memory)
-#include "device/cuda/f2_blocks_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
+#include "device/cuda/f2_batched_kernel.cuh" // launch_gather_group, run_f2_gemms_group, launch_assemble_blocks_group
 #include "device/cuda/handles.hpp"          // CublasHandle (RAII cuBLAS handle)
 
 using steppe::Precision;
@@ -373,7 +373,7 @@ int main() {
         std::fprintf(stderr,
             "RESULT: FAIL — the M4 gather did not zero pad columns / copy the feeder\n"
             "        columns bit-for-bit, or the scatter did not land each slab at its\n"
-            "        block-id [P×P] offset (architecture.md §13; cleanup f2_blocks_kernel\n"
+            "        block-id [P×P] offset (architecture.md §13; cleanup f2_batched_kernel\n"
             "        F24, B25).\n");
         return EXIT_FAILURE;
     }

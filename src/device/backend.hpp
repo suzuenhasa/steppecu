@@ -1682,25 +1682,10 @@ public:
             "(the GPU-only sweep requires a CUDA backend)");
     }
 
-    /// S5 — rank test: chisq = vec(E)'·Qinv·vec(E), E = X_total - A·B, dof =
-    /// (nl-r)·(nr-r). Returns the SVD seed factors A (nl×r), B (r×nr) and the
-    /// statistic for rank r. This is the SEED for S6's ALS at the
-    /// single fitted rank; the qpWave rank sweep (multiple r) is the separate
-    /// rank_sweep entry.
-    /// Deterministic; native FP64 (oracle-grade).
-    [[nodiscard]] virtual GlsWeights rank_test(const F4Blocks& x,
-                                               const JackknifeCov& cov,
-                                               int r,
-                                               const Precision& precision) {
-        (void)x; (void)cov; (void)r; (void)precision;
-        throw std::runtime_error(
-            "ComputeBackend::rank_test: not implemented by this backend");
-    }
-
     /// S5 SWEEP — the qpWave / qpAdm rank test over ALL candidate ranks r = 0..rmax
     /// (rmax = min(nl,nr)-1), producing the per-rank chisq/dof/p, the AT2 res$rankdrop
     /// nested table, and f4rank (the smallest non-rejected rank). Reuses the rank-r ALS
-    /// machinery (the rank_test seed → als refine → chisq quadratic form) per r; the
+    /// machinery (the SVD seed → als refine → chisq quadratic form) per r; the
     /// SVD is recomputed per r (the deterministic on-device Jacobi is bit-identical on
     /// the same input, so per-r recompute is exact; the SVD-once kernel is an S8
     /// follow-on). `alpha` is the rank-decision significance (AT2 default 0.05; §3).

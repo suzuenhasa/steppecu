@@ -243,7 +243,7 @@ void launch_dstat_block_reduce(const double* d_Q, const double* d_V, int P, long
         dstat_block_reduce_tiled_kernel<<<grid, kThreads, smem, stream>>>(
             d_Q, d_V, P, M, d_quad, N, d_block_begin, d_block_size, n_block,
             d_numsum, d_densum, d_cnt);
-        STEPPE_CUDA_CHECK(cudaGetLastError());
+        STEPPE_CUDA_CHECK_KERNEL();
         return;
     }
 
@@ -254,7 +254,7 @@ void launch_dstat_block_reduce(const double* d_Q, const double* d_V, int P, long
     dstat_block_reduce_legacy_kernel<<<static_cast<unsigned>(blocks), kThreads, 0, stream>>>(
         d_Q, d_V, P, M, d_quad, N, d_block_begin, d_block_size, n_block,
         d_numsum, d_densum, d_cnt);
-    STEPPE_CUDA_CHECK(cudaGetLastError());
+    STEPPE_CUDA_CHECK_KERNEL();
 }
 
 }  // namespace steppe::device

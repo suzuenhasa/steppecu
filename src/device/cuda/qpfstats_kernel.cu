@@ -14,6 +14,7 @@
 // (qpfstats_kernel.cuh), never includes this body (architecture.md §7).
 #include <cuda_runtime.h>
 
+#include "core/internal/nvtx.hpp"           // STEPPE_NVTX_RANGE (coarse phase marker; empty unless -DSTEPPE_NVTX)
 #include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK_KERNEL
 #include "device/cuda/qpfstats_kernel.cuh"  // the narrow seam
 
@@ -52,6 +53,7 @@ void launch_qpfstats_zero_nan_ymat(double* d_ymat, int npopcomb, int n_block,
                                    int* d_nan_per_block, cudaStream_t stream) {
     const long total = static_cast<long>(npopcomb) * static_cast<long>(n_block);
     if (total <= 0) return;
+    STEPPE_NVTX_RANGE("qpfstats_smooth_prep");  // coarse phase boundary: ymat NaN-zero smoother prep
     STEPPE_CUDA_CHECK(cudaMemsetAsync(d_nan_per_block, 0,
                                       static_cast<std::size_t>(n_block) * sizeof(int), stream));
     constexpr int kZeroNanThreads = 256;

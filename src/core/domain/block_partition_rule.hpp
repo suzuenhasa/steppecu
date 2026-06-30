@@ -184,7 +184,7 @@ struct BlockRange {
 /// Both backends (`device/cuda/cuda_backend.cu`, `device/cpu/cpu_backend.cpp`)
 /// derive their per-block layout from `block_id` — the CUDA path as
 /// `block_offsets`/`block_sizes` it copies to the device and the kernel
-/// dereferences (`f2_blocks_kernel.cu`), the CPU oracle as `begin`/`end`. That
+/// dereferences (`f2_batched_kernel.cu`), the CPU oracle as `begin`/`end`. That
 /// scan was hand-duplicated in both backends (and a third near-copy in the M4
 /// equivalence test) and NONE validated the partition, so a malformed `block_id`
 /// (an id `< 0` or `>= n_block`, or `block_id.size() < M`) was a silent

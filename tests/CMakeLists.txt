@@ -253,8 +253,8 @@ steppe_add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_R
 # --- B24 M4 grouped-batch wrapper empty-guard + gather/scatter gate -----------
 # CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the three
 # device-private M4 wrappers (launch_gather_group / run_f2_gemms_group /
-# launch_assemble_blocks_group, f2_blocks_kernel.cuh) DIRECTLY on a tiny synthetic
-# feeder-output layout. The B24 verdict gate (cleanup f2_blocks_kernel F6, B24):
+# launch_assemble_blocks_group, f2_batched_kernel.cuh) DIRECTLY on a tiny synthetic
+# feeder-output layout. The B24 verdict gate (cleanup f2_batched_kernel F6, B24):
 #   1. POSITIVE CONTROL — a valid, REORDERED 2-block layout (block_ids_in_group =
 #      {1,0}, sizes {2,3} padded to s_pad=4) gathered -> 3 GEMMs -> scattered, with
 #      the resident [P x P x n_block] f2 + Vpair tensors diffed BLOCK-FOR-BLOCK
@@ -272,7 +272,7 @@ steppe_add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_R
 # Self-checking main() (not a GoogleTest TU); CTest gates on the exit code. Links
 # steppe::device (the wrappers + the CublasHandle/DeviceBuffer RAII) +
 # steppe::core_internal (the shared f2 primitive oracle). No io / no data.
-# architecture.md §2 fail-fast, §13; cleanup f2_blocks_kernel F6, B24.
+# architecture.md §2 fail-fast, §13; cleanup f2_batched_kernel F6, B24.
 add_executable(test_f2_blocks_group reference/test_f2_blocks_group.cu)
 target_link_libraries(test_f2_blocks_group
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
@@ -286,16 +286,16 @@ if(STEPPE_HAVE_EMU_TUNING)
 endif()
 steppe_add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group LABELS "reference;gpu")
 
-# --- B25 M4 gather/scatter FOCUSED index-math gate (f2_blocks_kernel F24) ------
+# --- B25 M4 gather/scatter FOCUSED index-math gate (f2_batched_kernel F24) -----
 # CUDA TU, DATA-FREE (sibling of test_f2_blocks_group.cu): drives the M4 gather +
 # scatter wrappers (launch_gather_group / run_f2_gemms_group /
-# launch_assemble_blocks_group, f2_blocks_kernel.cuh) on a tiny synthetic REORDERED
+# launch_assemble_blocks_group, f2_batched_kernel.cuh) on a tiny synthetic REORDERED
 # 2-block layout and reads back the INTERMEDIATE buffers to pin the M4-specific
 # index math DIRECTLY — coverage that today is only TRANSITIVE (the single-block==M0
 # arm of test_f2_blocks_equivalence.cu exercises only the IDENTITY scatter and never
 # a pad column; the B24 f2_blocks_group gate diffs only the FINAL assembled tensors,
 # inferring the pad/copy contracts rather than asserting them on the slab bytes). The
-# B25 verdict gate (cleanup f2_blocks_kernel F24):
+# B25 verdict gate (cleanup f2_batched_kernel F24):
 #   (i)   PAD-COLUMN ZERO — after launch_gather_group, every pad column c >= sz of
 #         dQg/dVg/dSg (both the Qsq and Hc halves of the [2P×s_pad] S slab) is EXACTLY
 #         0.0 (bit pattern; the slabs are pre-filled with a nonzero sentinel so the
@@ -311,7 +311,7 @@ steppe_add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group LABELS "refere
 # tuning is required. Self-checking main() (not a GoogleTest TU); CTest gates on the
 # exit code. Links steppe::device (the wrappers + the CublasHandle/DeviceBuffer RAII)
 # + steppe::core_internal (the shared f2 primitive oracle). No io / no data.
-# architecture.md §13; cleanup f2_blocks_kernel F24, B25.
+# architecture.md §13; cleanup f2_batched_kernel F24, B25.
 add_executable(test_f2_blocks_gather reference/test_f2_blocks_gather.cu)
 target_link_libraries(test_f2_blocks_gather
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)

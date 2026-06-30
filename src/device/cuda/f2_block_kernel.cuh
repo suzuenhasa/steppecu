@@ -60,7 +60,7 @@ void launch_f2_feeder(const double* dQ_raw, const double* dV_raw, const double* 
 /// emits a one-shot capability-tagged warning on the downgrade (cleanup X-6/B2),
 /// so the path NEVER silently runs cuBLAS's DYNAMIC-default emulation. Exposed
 /// (rather than inlined in run_f2_gemms) so the M4 batched/grouped path
-/// (f2_blocks_kernel.cu) engages the SAME policy ONCE before its group loop instead
+/// (f2_batched_kernel.cu) engages the SAME policy ONCE before its group loop instead
 /// of re-deriving it — the single source of the precision engagement (§2 DRY).
 void engage_f2_precision(cublasHandle_t handle, const Precision& precision);
 

@@ -1,4 +1,4 @@
-// src/device/cuda/f2_blocks_kernel.cuh
+// src/device/cuda/f2_batched_kernel.cuh
 //
 // Narrow launch-wrapper declarations for the M4 BATCHED per-block f2 path
 // (architecture.md §5 S2 "Batched over all n_block blocks", §7 "host code never
@@ -21,8 +21,8 @@
 // This header names CUDA types (cublasHandle_t) and so is PRIVATE to
 // steppe_device (architecture.md §4) — the device-internal seam between the
 // backend and the kernels, not the CUDA-free public ComputeBackend seam.
-#ifndef STEPPE_DEVICE_CUDA_F2_BLOCKS_KERNEL_CUH
-#define STEPPE_DEVICE_CUDA_F2_BLOCKS_KERNEL_CUH
+#ifndef STEPPE_DEVICE_CUDA_F2_BATCHED_KERNEL_CUH
+#define STEPPE_DEVICE_CUDA_F2_BATCHED_KERNEL_CUH
 
 #include <cublas_v2.h>
 
@@ -105,4 +105,4 @@ void launch_assemble_blocks_group(const double* dGg, const double* dVpairg, cons
 
 }  // namespace steppe::device
 
-#endif  // STEPPE_DEVICE_CUDA_F2_BLOCKS_KERNEL_CUH
+#endif  // STEPPE_DEVICE_CUDA_F2_BATCHED_KERNEL_CUH

@@ -53,8 +53,15 @@ option(STEPPE_HAVE_EMU_TUNING
        "Enable cuBLAS fixed-slice Ozaki emulation tuning calls (REQUIRED for the \
 measured precision policy; architecture.md §12, ROADMAP §0)" ON)
 
-# --- Observability / sanitizers (named now, wired in later milestones) -------
+# --- Observability / sanitizers ----------------------------------------------
 
+# NVTX phase-boundary ranges (architecture.md §10). OFF (shipping default) is
+# structurally zero-overhead: STEPPE_NVTX_RANGE (src/core/internal/nvtx.hpp)
+# expands to nothing and no NVTX header is included, so object code is byte-
+# identical to a build without it. ON maps to -DSTEPPE_NVTX on steppe_device
+# (set PRIVATE in src/device, mirroring STEPPE_HAVE_EMU_TUNING) and pulls in the
+# header-only NVTX v3 C++ API from the CUDA toolkit (no library link). HOST-side
+# annotation only — never touches the statistic stream (§12 parity untouched).
 option(STEPPE_NVTX "Emit NVTX ranges (architecture.md §10; zero-overhead off)" OFF)
 
 # Empty ⇒ no sanitizer. Accepts a list like "asan;ubsan" or "compute"

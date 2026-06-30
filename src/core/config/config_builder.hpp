@@ -103,7 +103,7 @@ public:
     ///          Status, and the fault category for every static violation here is
     ///          InvalidConfig — §10. The detailed reason is exposed via error_message()
     ///          for the app's stderr line, keeping printf out of the library, §10.)
-    [[nodiscard]] BuildResult<RunConfig> build() const;
+    [[nodiscard]] BuildResult<RunConfig> build();
 
     /// The human-readable reason the LAST build() failed (empty if it succeeded or has
     /// not run). The app prints this to stderr; the library never prints (§10).
@@ -117,7 +117,7 @@ private:
     std::filesystem::path toml_path_{};   // recorded merge_file() path (empty ⇒ none)
     bool toml_requested_ = false;          // a non-empty merge_file() path was given
 
-    mutable std::string error_message_;    // last build() failure reason (app prints it)
+    std::string error_message_;            // last build() failure reason (app prints it)
 };
 
 }  // namespace steppe::config
