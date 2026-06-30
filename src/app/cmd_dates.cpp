@@ -56,9 +56,9 @@ void emit_dates(std::ostream& os, OutputFormat fmt, const steppe::DatesResult& r
     };
     if (fmt == OutputFormat::Json) {
         os << "{\n";
-        os << "  \"target\": \"" << target << "\",\n";
-        os << "  \"source1\": \"" << src1 << "\",\n";
-        os << "  \"source2\": \"" << src2 << "\",\n";
+        os << "  \"target\": " << json_quote(target) << ",\n";
+        os << "  \"source1\": " << json_quote(src1) << ",\n";
+        os << "  \"source2\": " << json_quote(src2) << ",\n";
         os << "  \"date_gen\": " << (std::isnan(r.date_gen) ? "null" : d(r.date_gen)) << ",\n";
         os << "  \"se\": " << (std::isnan(r.se) ? "null" : d(r.se)) << ",\n";
         os << "  \"fit_error_sd\": " << (std::isnan(r.fit_error_sd) ? "null" : d(r.fit_error_sd))
@@ -70,8 +70,9 @@ void emit_dates(std::ostream& os, OutputFormat fmt, const steppe::DatesResult& r
     const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
     os << "target" << sep << "source1" << sep << "source2" << sep << "date_gen" << sep << "se"
        << sep << "fit_error_sd" << sep << "status" << "\n";
-    os << target << sep << src1 << sep << src2 << sep << d(r.date_gen) << sep << d(r.se) << sep
-       << d(r.fit_error_sd) << sep << status_text(r.status) << "\n";
+    os << csv_field(target, sep) << sep << csv_field(src1, sep) << sep << csv_field(src2, sep)
+       << sep << d(r.date_gen) << sep << d(r.se) << sep << d(r.fit_error_sd) << sep
+       << status_text(r.status) << "\n";
 }
 
 }  // namespace

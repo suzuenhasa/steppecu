@@ -184,7 +184,7 @@ struct CliArgs {
     std::optional<std::string> geno;        ///< --geno
     std::optional<std::string> snp;         ///< --snp
     std::optional<std::string> ind;         ///< --ind
-    std::optional<std::string> out_dir;     ///< --out (extract-f2 dir)
+    std::optional<std::string> out_dir;     ///< --out-dir (canonical) / --out (alias) (extract-f2 dir; also qpfstats --out-dir)
     std::vector<std::string>   pops;        ///< --pops (PopSelection::Explicit)
     std::optional<int>         auto_top_k;  ///< --auto-top-k (PopSelection::AutoTopK)
     std::optional<int>         min_n;       ///< --min-n (PopSelection::MinN)

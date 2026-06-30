@@ -26,7 +26,7 @@
 #include <vector>
 
 #include "core/internal/host_device.hpp"           // STEPPE_ASSERT (debug-only fail-fast)
-#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
+#include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DatesMoments
 #include "device/resources.hpp"                   // device::Resources
 
@@ -125,21 +125,17 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
         return res;
     }
 
-    // ---- 1. DECODE FRONT-END (REUSE — mirrors dstat.cpp:195-234) -----------------------
-    io::GenoReader reader(geno);
-    const io::GenoFormat fmt = reader.header().format;  // .snp|.bim, .ind|.fam parser (M-FR PLINK)
-    const std::size_t n_present = reader.records_present();
-    io::PopSelection sel;
-    sel.mode = io::PopSelection::Mode::Explicit;
-    sel.labels = {target, source1, source2};  // the three pops DATES needs.
-    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
-    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
-    const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
-    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is
-    // the canonical individual-major packing the decode front-end expects either way.
+    // ---- 1. DECODE FRONT-END (C1 shared helper; mirrors dstat/qpfstats) ----------------
+    // One core helper opens the GenoReader, reads the Explicit{target,source1,source2}
+    // IndPartition + the SnpTable, and reads the canonical tile (M-FR-2 format dispatch).
+    // `be` is the primary-GPU backend (forwarded to the non-TGENO transpose, reused below for
+    // the decode). DATES diverges below into the per-SNP source-freq + autosome keep.
+    const std::vector<std::string> dates_pops{target, source1, source2};  // the 3 pops DATES needs.
     ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
-    const io::GenotypeTile tile = core::read_canonical_tile(reader, part, be, 0, M0);
+    const core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, dates_pops, be);
+    const io::SnpTable& snptab = fe.snptab;
+    const io::GenotypeTile& tile = fe.tile;
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);

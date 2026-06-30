@@ -99,20 +99,23 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
         os << "  \"score\": " << r.score << ",\n";
         os << "  \"restart_spread\": " << r.restart_spread << ",\n";
         os << "  \"worst_residual_z\": " << r.worst_residual_z << ",\n";
-        os << "  \"worst_pair\": [\"" << r.worst_pop2 << "\", \"" << r.worst_pop3 << "\"],\n";
+        os << "  \"worst_pair\": [" << json_quote(r.worst_pop2) << ", " << json_quote(r.worst_pop3)
+           << "],\n";
         os << "  \"status\": \"" << stat(r.status) << "\",\n";
         os << "  \"admix\": [\n";
         for (std::size_t j = 0; j < r.weight.size(); ++j) {
-            os << "    {\"from\": \"" << r.admix_from[j] << "\", \"to\": \"" << r.admix_to[j]
-               << "\", \"weight\": " << r.weight[j]
+            os << "    {\"from\": " << json_quote(r.admix_from[j]) << ", \"to\": "
+               << json_quote(r.admix_to[j])
+               << ", \"weight\": " << r.weight[j]
                << ", \"low\": " << (j < r.weight_lo.size() ? r.weight_lo[j] : r.weight[j])
                << ", \"high\": " << (j < r.weight_hi.size() ? r.weight_hi[j] : r.weight[j]) << "}"
                << (j + 1 < r.weight.size() ? "," : "") << "\n";
         }
         os << "  ],\n  \"edges\": [\n";
         for (std::size_t e = 0; e < r.edge_length.size(); ++e) {
-            os << "    {\"from\": \"" << r.edge_from[e] << "\", \"to\": \"" << r.edge_to[e]
-               << "\", \"length\": " << r.edge_length[e] << "}"
+            os << "    {\"from\": " << json_quote(r.edge_from[e]) << ", \"to\": "
+               << json_quote(r.edge_to[e])
+               << ", \"length\": " << r.edge_length[e] << "}"
                << (e + 1 < r.edge_length.size() ? "," : "") << "\n";
         }
         os << "  ]\n}\n";
@@ -122,14 +125,17 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
     os << "# section: edges\n";
     os << "from" << sep << "to" << sep << "type" << sep << "weight\n";
     for (std::size_t j = 0; j < r.weight.size(); ++j)
-        os << r.admix_from[j] << sep << r.admix_to[j] << sep << "admix" << sep << r.weight[j] << "\n";
+        os << csv_field(r.admix_from[j], sep) << sep << csv_field(r.admix_to[j], sep) << sep
+           << csv_field("admix", sep) << sep << r.weight[j] << "\n";
     for (std::size_t e = 0; e < r.edge_length.size(); ++e)
-        os << r.edge_from[e] << sep << r.edge_to[e] << sep << "edge" << sep << r.edge_length[e] << "\n";
+        os << csv_field(r.edge_from[e], sep) << sep << csv_field(r.edge_to[e], sep) << sep
+           << csv_field("edge", sep) << sep << r.edge_length[e] << "\n";
     os << "# section: summary\n";
     os << "score" << sep << "restart_spread" << sep << "worst_z" << sep << "worst_pop2" << sep
        << "worst_pop3" << sep << "status\n";
     os << r.score << sep << r.restart_spread << sep << r.worst_residual_z << sep
-       << r.worst_pop2 << sep << r.worst_pop3 << sep << stat(r.status) << "\n";
+       << csv_field(r.worst_pop2, sep) << sep << csv_field(r.worst_pop3, sep) << sep
+       << stat(r.status) << "\n";
 }
 
 /// Shared device-fit dispatch for both qpgraph commands (§2.11 cross-ref: factored from the
@@ -245,8 +251,8 @@ void emit_search(std::ostream& os, OutputFormat fmt, const steppe::QpGraphSearch
         os << "  \"best_score\": " << r.best.score << ",\n";
         os << "  \"second_best_score\": " << r.second_best_score << ",\n";
         os << "  \"best_nadmix\": " << r.best.nadmix << ",\n";
-        os << "  \"best_hash\": \"" << r.best.hash << "\",\n";
-        os << "  \"best_edges\": \"" << edges_str(r.best.edges) << "\",\n";
+        os << "  \"best_hash\": " << json_quote(std::to_string(r.best.hash)) << ",\n";
+        os << "  \"best_edges\": " << json_quote(edges_str(r.best.edges)) << ",\n";
         os << "  \"heuristic_recovered\": " << (r.heuristic_recovered ? "true" : "false") << ",\n";
         os << "  \"fit_all_wall_ms\": " << r.fit_all_wall_ms << ",\n";
         os << "  \"topologies_per_s\": " << r.topologies_per_s << "\n}\n";
@@ -259,7 +265,7 @@ void emit_search(std::ostream& os, OutputFormat fmt, const steppe::QpGraphSearch
     os << r.n_trees << sep << r.n_admix1 << sep << r.n_candidates << sep << r.best.score << sep
        << r.second_best_score << sep << r.best.nadmix << sep << (r.heuristic_recovered ? 1 : 0)
        << sep << r.fit_all_wall_ms << sep << r.topologies_per_s << "\n";
-    os << "# section: best_edges\n" << edges_str(r.best.edges) << "\n";
+    os << "# section: best_edges\n" << csv_field(edges_str(r.best.edges), sep) << "\n";
 }
 
 }  // namespace

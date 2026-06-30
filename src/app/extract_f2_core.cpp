@@ -24,7 +24,7 @@
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
 #include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_tiered (CUDA-FREE)
-#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
+#include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "core/internal/views.hpp"                // steppe::core::MatView
 #include "device/backend.hpp"                     // DecodeTileView, DecodeResult (CUDA-FREE)
 #include "device/f2_blocks_out.hpp"               // F2BlocksOut (CUDA-FREE)
@@ -94,20 +94,19 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     // SnpTable + IndPartition reads dispatch the parser on that format (read_snp/read_ind
     // for the EIGENSTRAT family; read_bim/read_fam for PLINK) — M-FR PLINK. The geno/snp/
     // ind paths already carry the correct extensions (config resolve_genotype_triple).
-    io::GenoReader reader(geno);
-    const io::GenoFormat fmt = reader.header().format;
-    const std::size_t n_present = reader.records_present();
-    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
-    validate_explicit_pops(sel, part);
-
-    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
-    const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
-    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. Either way
-    // `tile` is the canonical individual-major packing the rest of the chain expects.
+    // The shared genotype DECODE FRONT-END (C1): one core helper opens the GenoReader, reads
+    // the IndPartition for `sel` + the SnpTable, and reads the canonical individual-major tile
+    // (M-FR-2 format dispatch). `backend` is bound here (forwarded to the non-TGENO transpose,
+    // reused below for the decode). validate_explicit_pops stays in THIS caller (the library
+    // contract — it needs the resolved partition); folding both reads into the helper only
+    // reorders which fault fires on a malformed-pops input (an error path, never a golden).
     steppe::ComputeBackend& backend = *resources.gpus.front().backend;
-    const io::GenotypeTile tile =
-        steppe::core::read_canonical_tile(reader, part, backend, 0, M0);
+    const steppe::core::GenotypeFrontEnd fe =
+        steppe::core::read_genotype_front_end(geno, snp, ind, sel, backend);
+    validate_explicit_pops(sel, fe.part);
+    const io::IndPartition& part = fe.part;
+    const io::SnpTable& snptab = fe.snptab;
+    const io::GenotypeTile& tile = fe.tile;
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);

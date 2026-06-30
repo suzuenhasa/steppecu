@@ -19,14 +19,14 @@ Notes: always `--device 0` (single-GPU; multi-GPU is parked). Default precision 
 
 ### no-hash (the default — fast)
 ```bash
-$S extract-f2 --prefix $HO --out /tmp/f2_haak \
+$S extract-f2 --prefix $HO --out-dir /tmp/f2_haak \
   --pops Czechia_EBA_CordedWare,Czechia_BellBeaker,Sardinian,Russia_Samara_EBA_Yamnaya,Turkey_N,Serbia_IronGates_Mesolithic,Mbuti,Russia_UstIshim_IUP,Russia_Kostenki_UP,Russia_Malta_UP,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian \
   --device 0 --blgsize 0.05 --maxmiss 0 --auto-only
 ```
 
 ### with the provenance hash (`--hash`; overlapped on a background thread)
 ```bash
-$S extract-f2 --prefix $HO --out /tmp/f2_haak_hashed --pops <...> \
+$S extract-f2 --prefix $HO --out-dir /tmp/f2_haak_hashed --pops <...> \
   --device 0 --blgsize 0.05 --maxmiss 0 --auto-only --hash
 ```
 `--hash` adds the source-`.geno` SHA-256 to `meta.json` (`geno_sha256`); without it, `meta.json` records `source_hash_computed: false`. (Default OFF — the hash was ~37 s of the old ~40 s wall.)
@@ -38,11 +38,11 @@ $S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --dry-ru
 
 ### big-P streaming (700 pops on 1240K) — auto-selects a streamed tier, ~58 s
 ```bash
-$S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --out /workspace/f2_700
+$S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --out-dir /workspace/f2_700
 ```
 `--auto-top-k 700` keeps the 700 largest pops. Default `--tier auto` streams to `host`/`disk` when the result/feeder won't fit resident (this is what lets P>~250 complete on one 32 GB card). Force it explicitly:
 ```bash
-$S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --tier disk --out /workspace/f2_700_disk
+$S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --tier disk --out-dir /workspace/f2_700_disk
 ```
 `--tier auto|resident|host|disk` (default auto). `host`/`disk` use the SNP-tile input streaming; `resident` is the all-in-VRAM path (OOMs past ~250 pops on a full SNP set).
 
@@ -55,7 +55,7 @@ $S extract-f2 --prefix $K1240 --auto-top-k 700 --maxmiss 0.5 --device 0 --tier d
 
 ### timing a run
 ```bash
-/usr/bin/time -v $S extract-f2 --prefix $K1240 --pops <...> --out /tmp/x --device 0 --blgsize 0.05 --maxmiss 0 --auto-only
+/usr/bin/time -v $S extract-f2 --prefix $K1240 --pops <...> --out-dir /tmp/x --device 0 --blgsize 0.05 --maxmiss 0 --auto-only
 ```
 
 ---
@@ -165,7 +165,7 @@ NOTE (B3): steppe's decode is **TGENO-only**, so extract reads the raw HO TGENO 
 ## 6. Full study end-to-end (Haak 2015, the exact run)
 ```bash
 # 1) build the f2 dir for the 15-pop union (no-hash, autosomes, maxmiss 0)
-$S extract-f2 --prefix $HO --out /tmp/haak \
+$S extract-f2 --prefix $HO --out-dir /tmp/haak \
   --pops Czechia_EBA_CordedWare,Czechia_BellBeaker,Sardinian,Russia_Samara_EBA_Yamnaya,Turkey_N,Serbia_IronGates_Mesolithic,Mbuti,Russia_UstIshim_IUP,Russia_Kostenki_UP,Russia_Malta_UP,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian \
   --device 0 --blgsize 0.05 --maxmiss 0 --auto-only
 

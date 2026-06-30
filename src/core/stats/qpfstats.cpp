@@ -50,7 +50,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, BlockPartition
-#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
+#include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, QpfstatsSmooth
 #include "device/resources.hpp"                   // device::Resources
 
@@ -228,20 +228,14 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     // ---- 1. DECODE FRONT-END (REUSE qpDstat-B; mirrors stats/dstat.cpp:185-264) -------
     // read_ind(Explicit{sp}) decodes ONLY these pops (the AT2 indvec), sorted ASC by label
     // (== sp). FORCED diploid (the AT2 plain ref/an/2 pin). An io fault PROPAGATES.
-    io::GenoReader reader(geno);
-    const io::GenoFormat fmt = reader.header().format;  // .snp|.bim, .ind|.fam parser (M-FR PLINK)
-    const std::size_t n_present = reader.records_present();
-    io::PopSelection sel;
-    sel.mode = io::PopSelection::Mode::Explicit;
-    sel.labels = sp;
-    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
-    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
-    const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
-    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is
-    // the canonical individual-major packing the decode front-end expects either way.
+    // The shared genotype DECODE FRONT-END (C1): one core helper opens the GenoReader, reads
+    // the Explicit{sp} IndPartition + the SnpTable, and reads the canonical tile (M-FR-2 format
+    // dispatch). `sp` is the AT2-sorted indvec; `be` is the primary-GPU backend (forwarded to
+    // the non-TGENO transpose, reused below for the decode). The decode diverges below.
     ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
-    const io::GenotypeTile tile = core::read_canonical_tile(reader, part, be, 0, M0);
+    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sp, be);
+    const io::SnpTable& snptab = fe.snptab;
+    const io::GenotypeTile& tile = fe.tile;
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);

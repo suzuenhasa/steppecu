@@ -95,7 +95,7 @@ void add_common_flags(CLI::App* sub, CliArgs& a) {
 void add_output_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::string>(
         "--out", [&a](const std::string& v) { a.out_file = v; },
-        "Output file (stdout if omitted)");
+        "Output FILE (stdout if omitted)");
     sub->add_option_function<std::string>(
         "--format", [&a](const std::string& v) { a.format = v; },
         "Output format: csv | tsv | json (default csv)");
@@ -700,7 +700,8 @@ int run_cli(int argc, char** argv) {
         sub->add_option_function<std::string>("--geno", [&](const std::string& v) { extract_args.geno = v; }, "Genotype file (overrides --prefix)");
         sub->add_option_function<std::string>("--snp",  [&](const std::string& v) { extract_args.snp = v; },  "SNP file (overrides --prefix)");
         sub->add_option_function<std::string>("--ind",  [&](const std::string& v) { extract_args.ind = v; },  "Individual file (overrides --prefix)");
-        sub->add_option_function<std::string>("--out",  [&](const std::string& v) { extract_args.out_dir = v; }, "Output f2_blocks dir");
+        // Canonical --out-dir (a DIRECTORY); --out kept as a back-compat alias (both bind out_dir).
+        sub->add_option_function<std::string>("--out-dir,--out",  [&](const std::string& v) { extract_args.out_dir = v; }, "Output f2_blocks DIRECTORY (f2.bin + pops.txt + meta.json)");
         sub->add_option_function<std::vector<std::string>>(
             "--pops", [&](const std::vector<std::string>& v) { extract_args.pops = v; },
             "Explicit population list")->delimiter(',');

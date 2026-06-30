@@ -137,6 +137,14 @@ add_library(steppe_core STATIC
     # backend seam (NOT a CUDA TU); reused by steppe_core's tools AND steppe_extract's
     # run_extract_f2 (which links steppe::core).
     stats/read_canonical_tile.cpp
+    # C1 shared genotype DECODE FRONT-END: the single place the four genotype-path tools
+    # (extract_f2 / qpDstat-B / qpfstats / DATES) turn the genotype triple into the canonical
+    # io::GenotypeTile + the parsed SnpTable/IndPartition, WRAPPING read_canonical_tile and
+    # stopping at the {tile, snptab, part, fmt, M0} handoff (each caller diverges into its own
+    # decode after). One edit point for any read-time front-end change (the parity-divergence
+    # risk of four lockstep copies, closed). Same orchestration seam (NO CUDA TU); reused by
+    # steppe_core's tools AND steppe_extract's run_extract_f2.
+    stats/genotype_front_end.cpp
     # M(cli-0) ACCESS LAYER config (architecture.md §9; cli-bindings.md §4.5): the
     # CUDA-FREE, host-pure ConfigBuilder/RunConfig/CliArgs — the §9 precedence merge
     # (compiled defaults < TOML < env STEPPE_* < CLI) + the validating build() that maps

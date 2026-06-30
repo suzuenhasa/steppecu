@@ -42,7 +42,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, BlockPartition
-#include "core/stats/read_canonical_tile.hpp"     // M-FR-2 TGENO/GENO format dispatch
+#include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "device/backend.hpp"                     // ComputeBackend, DecodeTileView, DecodeResult
 #include "device/resources.hpp"                   // device::Resources (the injected backend bundle)
 
@@ -124,20 +124,16 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     // file) PROPAGATES as an exception; the app try/catch maps it to a nonzero IoError exit
     // (mirroring cmd_f4's device-error catch). Domain outcomes (no survivor blocks) ride on
     // the per-row NaN sentinel below, never an exception.
-    io::GenoReader reader(geno);
-    const io::GenoFormat fmt = reader.header().format;  // .snp|.bim, .ind|.fam parser (M-FR PLINK)
-    const std::size_t n_present = reader.records_present();
-    io::PopSelection sel;
-    sel.mode = io::PopSelection::Mode::Explicit;
-    sel.labels.assign(pop_union.begin(), pop_union.end());  // the AT2 indvec (only these pops).
-    const io::IndPartition part = io::read_ind_partition(fmt, ind, sel, n_present);
-    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
-    const std::size_t M0 = std::min(reader.header().n_snp, snptab.count);
-    // M-FR-2 FORMAT DISPATCH: TGENO -> read_tile (unchanged); GENO (SNP-major PA) ->
-    // the io-leaf SNP-major gather + the on-device transpose_to_canonical. `tile` is
-    // the canonical individual-major packing the decode front-end expects either way.
+    // The shared genotype DECODE FRONT-END (C1): the core helper opens the GenoReader, reads
+    // the Explicit{pop_union} IndPartition + the SnpTable, and reads the canonical individual-
+    // major tile (M-FR-2 format dispatch). `be` is the primary-GPU backend (forwarded to the
+    // non-TGENO transpose, reused below for the decode). The decode diverges below (forced
+    // diploid + autosome keep).
     ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
-    const io::GenotypeTile tile = core::read_canonical_tile(reader, part, be, 0, M0);
+    const core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, pop_union, be);
+    const io::SnpTable& snptab = fe.snptab;
+    const io::GenotypeTile& tile = fe.tile;
 
     const int P = static_cast<int>(tile.n_pop());
     const long M = static_cast<long>(tile.n_snp);

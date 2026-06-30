@@ -54,8 +54,8 @@ void emit_sweep(std::ostream& os, OutputFormat fmt, const SweepResult& r,
             if (i) os << ",";
             os << "{";
             for (int c = 0; c < k; ++c)
-                os << "\"pop" << (c + 1) << "\":\""
-                   << resolver.label_at(r.keys[i][static_cast<std::size_t>(c)]) << "\",";
+                os << "\"pop" << (c + 1) << "\":"
+                   << json_quote(resolver.label_at(r.keys[i][static_cast<std::size_t>(c)])) << ",";
             os << "\"est\":" << r.est[i] << ",\"se\":" << r.se[i] << ",\"z\":" << r.z[i]
                << ",\"p\":" << r.p[i] << "}";
         }
@@ -67,7 +67,7 @@ void emit_sweep(std::ostream& os, OutputFormat fmt, const SweepResult& r,
     os << "est" << d << "se" << d << "z" << d << "p\n";
     for (std::size_t i = 0; i < r.survivors; ++i) {
         for (int c = 0; c < k; ++c)
-            os << resolver.label_at(r.keys[i][static_cast<std::size_t>(c)]) << d;
+            os << csv_field(resolver.label_at(r.keys[i][static_cast<std::size_t>(c)]), d) << d;
         os << r.est[i] << d << r.se[i] << d << r.z[i] << d << r.p[i] << "\n";
     }
 }

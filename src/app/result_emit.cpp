@@ -96,22 +96,12 @@ namespace {
     return out;
 }
 
-// JSON string escaping (labels + status). Minimal: quotes + backslash + control.
-[[nodiscard]] std::string json_quote(const std::string& s) {
-    std::string out = "\"";
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out += c;      break;
-        }
-    }
-    out += "\"";
-    return out;
-}
+// json_quote / csv_field are PUBLIC reusable primitives (declared in result_emit.hpp,
+// defined at namespace scope below) so the JSON/CSV emitters here AND the bypassing
+// dates/qpgraph/fstat-sweep emitters share one escaping seam (C2). The anon-namespace
+// emitters below call json_quote via the header declaration (visible before this point).
+// csv_quote (above) stays file-local + ALWAYS-quote: the qpadm/f4 golden CSVs require
+// every string column wrapped, whereas csv_field is RFC-4180 CONDITIONAL.
 
 // ---- JSON parallel-array primitives -------------------------------------------
 // The three rankdrop/popdrop/per_rank array emitters, shared by emit_json and
@@ -601,6 +591,43 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
 }
 
 }  // namespace
+
+// RFC-4180 CONDITIONAL CSV field (see result_emit.hpp): bare unless `s` contains the
+// active separator, a double quote, or a CR/LF; then wrap + double embedded quotes. For
+// every real population name (no special char) this returns `s` UNCHANGED, so the
+// dates/qpgraph/fstat-sweep CSV stays byte-identical while a pathological name escapes.
+std::string csv_field(const std::string& s, char sep) {
+    bool needs_quote = false;
+    for (char c : s) {
+        if (c == sep || c == '"' || c == '\n' || c == '\r') { needs_quote = true; break; }
+    }
+    if (!needs_quote) return s;
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+// Minimal JSON string escaping (see result_emit.hpp). Promoted out of the anonymous
+// namespace (C2) so the bypassing JSON emitters reuse it; behaviour is unchanged.
+std::string json_quote(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    out += "\"";
+    return out;
+}
 
 bool parse_output_format(const std::string& token, OutputFormat& out) {
     if (token == "csv")  { out = OutputFormat::Csv;  return true; }

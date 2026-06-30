@@ -532,6 +532,21 @@ if(STEPPE_HAVE_GTEST)
 endif()
 add_test(NAME config_builder_unit COMMAND test_config_builder)
 
+# --- C2 output-escaping primitives unit test (result_emit) -------------------
+# Pure C++ host TU (NO CUDA, NO GPU, NO data): compiles src/app/result_emit.cpp
+# directly and asserts app::csv_field (RFC-4180 conditional) + app::json_quote keep
+# a NORMAL pop label byte-identical (no golden / CLI test moves) while escaping a
+# pathological comma/quote/newline label. steppe::core_internal supplies the src/
+# include root (for "app/result_emit.hpp") + steppe::api transitively (the Result
+# headers result_emit.cpp pulls in); result_emit.cpp references no core/device symbol
+# so no compiled lib is needed. Self-checking main() (CTest gates on the exit code).
+add_executable(test_result_emit
+    unit/test_result_emit.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/result_emit.cpp)
+target_link_libraries(test_result_emit
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+add_test(NAME result_emit_unit COMMAND test_result_emit)
+
 # --- qpAdm parity test (the Phase-2 fit acceptance gate, BOTH backends) ---------
 # Reads the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the
 # SAME f2 ADMIXTOOLS 2 read internally — and runs the single-model qpAdm fit

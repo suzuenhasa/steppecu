@@ -42,6 +42,21 @@ enum class OutputFormat { Csv, Tsv, Json };
 /// re-maps here at emit time so this serializer is self-contained).
 [[nodiscard]] bool parse_output_format(const std::string& token, OutputFormat& out);
 
+/// Conditionally quote a CSV field per RFC 4180: returns `s` UNCHANGED when it contains
+/// none of {sep, '"', '\n', '\r'}, otherwise wraps it in double quotes and DOUBLES any
+/// embedded quote. This is DISTINCT from the file-local always-quote primitive the qpadm/f4
+/// golden CSVs require (every string column wrapped): the dates / qpgraph / fstat-sweep
+/// emitters write BARE labels whose CLI gates split on bare tokens, so conditional quoting
+/// keeps every real population name byte-identical while still escaping a pathological name.
+[[nodiscard]] std::string csv_field(const std::string& s, char sep);
+
+/// Minimal JSON string escaping for a label/field (quotes + backslash + the \n/\r/\t
+/// controls), returning the value WITH the surrounding double quotes. Shared so the
+/// bypassing JSON emitters (dates / qpgraph / fstat-sweep) escape labels instead of
+/// concatenating a raw `"` + label + `"`. For a label with no quote/backslash/control this
+/// is byte-identical to that old manual concatenation (no committed golden / CLI test moves).
+[[nodiscard]] std::string json_quote(const std::string& s);
+
 /// Serialize one qpAdm result to `os` in `fmt`. `target_label` is the resolved target
 /// name; `left_labels` are the resolved left-source names (len == result.weight when
 /// the fit produced weights), used to label the per-source rows / popdrop columns so
