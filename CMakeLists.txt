@@ -131,7 +131,31 @@ if(STEPPE_BUILD_PYTHON)
   add_subdirectory(bindings)
 endif()
 
+# examples — the read_f2 -> qpadm -> inspect quick-starts (C++ + Python), behind the
+# opt-in STEPPE_BUILD_EXAMPLES (SteppeOptions.cmake, default OFF). The C++ quickstart
+# reuses the CUDA-free seams the CLI `qpadm` command uses (no duplicated compute), so it
+# links steppe::access — which only exists when STEPPE_BUILD_CLI (or _PYTHON) is also ON;
+# examples/CMakeLists.txt degrades gracefully (skips the C++ target with a message) when
+# that target is absent. A pure-host CXX add (NO LANGUAGES CUDA), like the app subtree.
+# Placed after the access/app/bindings targets so they exist for the link + the
+# `if(NOT TARGET steppe::access)` probe.
+if(STEPPE_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
 if(STEPPE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+# docs — opt-in GENERATED API reference (Doxygen C++ over include/steppe + pdoc Python
+# over bindings/steppe), behind STEPPE_BUILD_DOCS (SteppeOptions.cmake, default OFF).
+# DOC-ONLY: cmake/Docs.cmake defines no library target and never touches the compute
+# path; each custom target is a soft no-op when its tool is absent. The Doxygen `docs`
+# target needs NO compiler and NO CUDA (parses headers as text), so it is the one target
+# that builds on the LOCAL non-Blackwell box (architecture.md §6 names Doxygen as the
+# API-doc generator). Placed last so PROJECT_VERSION (single-sourced into the Doxyfile's
+# PROJECT_NUMBER) is set. kimiactions C5.
+if(STEPPE_BUILD_DOCS)
+  include(Docs)
 endif()

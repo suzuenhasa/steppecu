@@ -51,9 +51,22 @@ endif()
 
 # The compiled extension is `steppe._core` (the user imports the pure-Python `steppe`
 # package over it). NB_STATIC links nanobind's runtime statically into the module so the
-# wheel ships one self-contained _core*.so.
-nanobind_add_module(_core NB_STATIC module.cpp)
+# wheel ships one self-contained _core*.so. module.cpp is the thin NB_MODULE assembler;
+# the per-tool binding code lives in the bind_<tool>.cpp TUs (each a void
+# register_<tool>(nb::module_&)), with the shared marshalling helpers in
+# internal/bind_common.hpp (cli-bindings.md §5; the C8 TU split).
+nanobind_add_module(_core NB_STATIC
+    module.cpp
+    bind_f2handle.cpp
+    bind_qpadm.cpp
+    bind_qpgraph.cpp
+    bind_fstats.cpp
+    bind_dates.cpp)
 add_library(steppe::pycore ALIAS _core)
+
+# This subdir is on the include path so the bind_<tool>.cpp TUs can reach the shared
+# `internal/bind_common.hpp` home (the per-tool TUs + the assembler all include it).
+target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # CUDA-FREE seams only: steppe::access (the shared f2-dir reader + pop->index resolver),
 # steppe::extract (the shared genotype->f2 extract chain run_extract_f2 + the STPF2BK1 dir

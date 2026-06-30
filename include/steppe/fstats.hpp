@@ -25,6 +25,7 @@
 #define STEPPE_FSTATS_HPP
 
 #include <cstddef>
+#include <span>
 #include <vector>
 
 namespace steppe {
@@ -74,6 +75,51 @@ struct F2BlockTensor {
     [[nodiscard]] std::size_t size() const noexcept {
         return static_cast<std::size_t>(P) * static_cast<std::size_t>(P) *
                static_cast<std::size_t>(n_block);
+    }
+
+    /// Unchecked f2 accessor for the LAYOUT-block convention `i + P·j + P·P·b`
+    /// (see the struct-level LAYOUT note). `noexcept`, no bounds check — hot path.
+    /// The index math runs in `std::size_t` (NOT `int`): at production scale
+    /// (P≈768, n_block≈800) the flat index exceeds INT_MAX, so a plain-`int`
+    /// computation would overflow (the design-for-scale rule; same cast pattern as
+    /// `size()`). Const read overload.
+    [[nodiscard]] double f2_at(int i, int j, int b) const noexcept {
+        return f2[flat_index(i, j, b)];
+    }
+    /// Mutable overload of `f2_at` (lvalue into `f2`); identical `i + P·j + P·P·b`
+    /// index.
+    double& f2_at(int i, int j, int b) noexcept { return f2[flat_index(i, j, b)]; }
+
+    /// Vpair counterpart of `f2_at` — identical `i + P·j + P·P·b` index into
+    /// `vpair` (see the LAYOUT note). Const read overload.
+    [[nodiscard]] double vpair_at(int i, int j, int b) const noexcept {
+        return vpair[flat_index(i, j, b)];
+    }
+    /// Mutable overload of `vpair_at` (lvalue into `vpair`).
+    double& vpair_at(int i, int j, int b) noexcept {
+        return vpair[flat_index(i, j, b)];
+    }
+
+    /// The contiguous `[P × P]` f2 slab for block `b` as a span (column-major
+    /// `i + P·j` within the slab; see the LAYOUT note). Length `P · P`; the byte
+    /// offset is computed in `std::size_t` for the same scale reason as `f2_at`.
+    [[nodiscard]] std::span<const double> block(int b) const noexcept {
+        const std::size_t slab =
+            static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+        return std::span<const double>{
+            f2.data() + slab * static_cast<std::size_t>(b), slab};
+    }
+
+  private:
+    /// The SINGLE canonical home for the `i + P·j + P·P·b` flat-index convention
+    /// (the struct LAYOUT note): every accessor routes through here so the formula
+    /// cannot drift from the writer (src/app/f2_dir_writer.cpp) or the kernel
+    /// layout. `std::size_t` arithmetic, same cast pattern as `size()`.
+    [[nodiscard]] std::size_t flat_index(int i, int j, int b) const noexcept {
+        return static_cast<std::size_t>(i) +
+               static_cast<std::size_t>(P) * static_cast<std::size_t>(j) +
+               static_cast<std::size_t>(P) * static_cast<std::size_t>(P) *
+                   static_cast<std::size_t>(b);
     }
 };
 

@@ -24,6 +24,12 @@
 #ifndef STEPPE_QPADM_HPP
 #define STEPPE_QPADM_HPP
 
+/// \file
+/// \brief Public, CUDA-free qpAdm fit-engine value types and entry points
+///        (run_qpadm / run_qpwave / run_qpadm_search over QpAdmModel ->
+///        QpAdmResult / QpWaveResult). Rendered by the opt-in Doxygen `docs`
+///        target (STEPPE_BUILD_DOCS; cmake/Docs.cmake).
+
 #include <span>
 #include <string>
 #include <vector>

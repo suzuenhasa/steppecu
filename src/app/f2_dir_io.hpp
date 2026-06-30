@@ -7,8 +7,9 @@
 //   <dir>/f2.bin     the STPF2BK1 numeric payload (src/device/f2_disk_format.hpp):
 //                    header(64B) | f2[P*P*nb] | vpair[P*P*nb] | block_sizes[nb int32],
 //                    block-major outer, column-major i+P*j within — BYTE-IDENTICAL to
-//                    F2BlockTensor's i + P*j + P*P*b layout (so a whole-file read is a
-//                    memcpy-equivalent into the host tensor).
+//                    F2BlockTensor's i + P*j + P*P*b layout, whose canonical index
+//                    home is F2BlockTensor::f2_at / ::block (include/steppe/fstats.hpp)
+//                    — so a whole-file read is a memcpy-equivalent into the host tensor.
 //   <dir>/pops.txt   the P population labels, ONE PER LINE, in P-axis index order —
 //                    the name<->index map the compute seam lacks (cli-bindings.md §1:
 //                    "the compute seam is INDEX-ONLY; names are an app concern").

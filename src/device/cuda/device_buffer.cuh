@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <limits>           // std::numeric_limits — the n*sizeof(T) overflow guard
 #include <source_location>  // std::source_location — call site for the typed throw
+#include <type_traits>      // std::is_trivially_copyable_v — the raw-byte cudaMemcpy contract
 #include <utility>
 
 #include "core/internal/log.hpp"  // STEPPE_LOG_WARN (the one teardown-warning sink)
@@ -38,7 +39,16 @@ namespace steppe::device {
 
 /// Owning, move-only device allocation of `n` elements of `T`. Hands out a raw
 /// device pointer via `data()` for cuBLAS / kernel arguments; never copies.
+///
+/// `T` is constrained to be trivially copyable: every consumer moves the buffer
+/// to/from the device with raw-byte `cudaMemcpy`/`cudaMemcpyAsync`, which is only
+/// well-defined for trivially-copyable types (their object representation IS their
+/// value). The `requires` makes that contract compiler-enforced at the
+/// instantiation site (a non-trivially-copyable `T` is a clear diagnostic, not
+/// silent UB). All current instantiations (`double`/`float`/`int` and the POD
+/// layout structs) satisfy it, so codegen is unchanged.
 template <class T>
+    requires std::is_trivially_copyable_v<T>
 class DeviceBuffer {
 public:
     DeviceBuffer() = default;

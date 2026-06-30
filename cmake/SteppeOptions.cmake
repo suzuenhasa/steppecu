@@ -22,6 +22,26 @@ option(STEPPE_BUILD_TESTS "Build steppe tests (CTest + GoogleTest)" ON)
 option(STEPPE_BUILD_PYTHON "Build the nanobind Python bindings (Phase 3)" OFF)
 option(STEPPE_BUILD_CLI    "Build the steppe CLI app (Phase 3)"          OFF)
 
+# examples/ quick-starts (read_f2 -> qpadm -> inspect). OPT-IN, default OFF, mirroring
+# STEPPE_BUILD_CLI above. The C++ quickstart reuses the SAME CUDA-free entry points the
+# CLI `qpadm` command uses (read_f2_dir / PopResolver / build_resources /
+# upload_f2_blocks_to_device / run_qpadm) via steppe::access + steppe::device, so it
+# needs steppe::access — i.e. STEPPE_BUILD_CLI (or _PYTHON) must ALSO be ON, and it only
+# builds on a CUDA box (the local RTX 2070 / wrong arch cannot). examples/CMakeLists.txt
+# skips the C++ target with a clear message when steppe::access is absent. The Python
+# quickstart is a plain script (no build).
+option(STEPPE_BUILD_EXAMPLES "Build examples/ (read_f2 -> qpadm quick-starts)" OFF)
+
+# Generated API reference (Doxygen over include/steppe + pdoc over bindings/steppe).
+# OPT-IN, default OFF, mirroring the build-surface toggles above. cmake/Docs.cmake gates
+# each target on find_package(Doxygen) / find_program(pdoc), so it is a SOFT NO-OP when
+# the tools are absent and never breaks a normal build. DOC-ONLY: defines no library
+# target and is NOT on the compute/precision path. The Doxygen `docs` target needs NO
+# compiler and NO CUDA (it parses headers as text), so — unlike every other target — it
+# builds on the LOCAL non-Blackwell box (iterate docs locally; architecture.md §6 lists
+# Doxygen as the API-doc generator). kimiactions C5.
+option(STEPPE_BUILD_DOCS "Build the generated API reference (Doxygen + pdoc; doc-only, opt-in)" OFF)
+
 # --- Warning policy + build-iteration speedups (architecture.md §6, §8) -------
 #
 # Warnings-as-errors is the M0 contract (C++20 with warnings-as-errors), so ON is

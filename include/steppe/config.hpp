@@ -328,7 +328,54 @@ struct Precision {
     /// trap is not representable by this struct. Ignored for
     /// `Fp64` and `Tf32`.
     int mantissa_bits = kDefaultMantissaBits;
+
+    // -----------------------------------------------------------------------
+    // Named factories — sugar over the brace-init incantation, so a caller
+    // writes `Precision::emulated_fp64()` instead of `{Kind::EmulatedFp64, 40}`.
+    // Each returns byte-identical `{kind, mantissa_bits}` to the aggregate init
+    // it replaces (parity-neutral §12). Static member functions do NOT break
+    // aggregate-ness in C++20, so `Precision p{};` and `Precision{Kind::Tf32}`
+    // keep compiling. `constexpr` (⇒ implicitly inline; required because
+    // `Precision` lives in the header-only `steppe_api` INTERFACE target) also
+    // lets the static_asserts below pin the factory outputs at compile time.
+    // -----------------------------------------------------------------------
+
+    /// Native FP64 — the validation oracle / fallback (§12). `mantissa_bits`
+    /// carries the default and is ignored for `Fp64`.
+    [[nodiscard]] static constexpr Precision fp64() {
+        return Precision{Kind::Fp64, kDefaultMantissaBits};
+    }
+
+    /// Fixed-slice Ozaki emulated FP64 — the matmul-heavy default. `bits`
+    /// defaults to `kDefaultMantissaBits` so the no-arg call equals the
+    /// aggregate default (40) exactly.
+    [[nodiscard]] static constexpr Precision emulated_fp64(int bits = kDefaultMantissaBits) {
+        return Precision{Kind::EmulatedFp64, bits};
+    }
+
+    /// TF32 tensor-core — opt-in screening only (§12). `mantissa_bits` carries
+    /// the default and is ignored for `Tf32`.
+    [[nodiscard]] static constexpr Precision tf32() {
+        return Precision{Kind::Tf32, kDefaultMantissaBits};
+    }
 };
+
+// Compile-time pin: the named factories emit byte-identical {kind, mantissa_bits}
+// to the aggregate defaults — `emulated_fp64()` must equal the 40-bit f2-GEMM
+// default exactly, never a silent mode/mantissa change (architecture.md §12).
+static_assert(Precision::emulated_fp64().kind == Precision::Kind::EmulatedFp64 &&
+                  Precision::emulated_fp64().mantissa_bits == kDefaultMantissaBits,
+              "Precision::emulated_fp64() must equal {EmulatedFp64, kDefaultMantissaBits}.");
+static_assert(Precision::fp64().kind == Precision::Kind::Fp64 &&
+                  Precision::fp64().mantissa_bits == kDefaultMantissaBits,
+              "Precision::fp64() must equal {Fp64, kDefaultMantissaBits}.");
+static_assert(Precision::tf32().kind == Precision::Kind::Tf32 &&
+                  Precision::tf32().mantissa_bits == kDefaultMantissaBits,
+              "Precision::tf32() must equal {Tf32, kDefaultMantissaBits}.");
+// The struct stays a default-constructible aggregate (Precision{} == emulated_fp64()).
+static_assert(Precision{}.kind == Precision::Kind::EmulatedFp64 &&
+                  Precision{}.mantissa_bits == kDefaultMantissaBits,
+              "Precision must stay a default-constructible aggregate equal to emulated_fp64().");
 
 // ---------------------------------------------------------------------------
 // DeviceConfig — resources, injected not globally discovered (architecture.md

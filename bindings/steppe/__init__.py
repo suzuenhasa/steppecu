@@ -9,6 +9,11 @@ import it on demand and raise a clear error if it is missing.
 
 steppe is a GPU product (memory cpu-is-test-only): there is NO CPU runtime path. A fit on
 a no-CUDA box raises a clear "no CUDA device" error from the compiled layer.
+
+This module's docstrings are the source for the generated Python API reference: the
+opt-in ``docs-python`` CMake target (``STEPPE_BUILD_DOCS``) runs ``pdoc -o <out>
+bindings/steppe`` over this facade (the C++ headers are the sibling Doxygen ``docs``
+target). See docs/api/README.md.
 """
 from __future__ import annotations
 
@@ -53,6 +58,7 @@ __all__ = [
     "qpdstat",
     "dstat",
     "dates",
+    "DatesResult",
     "qpadm_search",
 ]
 
@@ -436,10 +442,13 @@ def extract_f2(
       * ``out`` is a directory path: writes an STPF2BK1 f2-dir there (``f2.bin`` + ``pops.txt``
         + ``meta.json``) and returns the path string (then ``read_f2(out)`` reloads it).
 
-    ``precision`` selects the f2-GEMM arithmetic: None (default) -> emulated FP64 (40-bit, the
-    f2 default), ``"fp64"``/``"native"`` -> native FP64 oracle, ``"emulated_fp64"``/``"emu"``,
-    ``"tf32"``. GPU-only: no CUDA device raises a clear ValueError. An unknown pop name or a
-    missing genotype file raises; every-SNP-filtered raises."""
+    ``precision`` selects the f2-GEMM arithmetic; tokens match the CLI ``--precision`` set
+    (canonical ``emu40|emu32|fp64|tf32`` plus documented aliases): None (default) -> emulated
+    FP64 40-bit, the f2 default; ``"emu40"``/``"emu"``/``"emulated_fp64"`` -> emulated FP64
+    40-bit; ``"emu32"``/``"emulated_fp64_32"`` -> emulated FP64 32-bit;
+    ``"fp64"``/``"native"`` -> native FP64 oracle; ``"tf32"`` -> TF32. GPU-only: no CUDA
+    device raises a clear ValueError. An unknown pop name or a missing genotype file raises;
+    every-SNP-filtered raises."""
     h = _core.run_extract_f2(
         str(prefix),
         list(pops),
@@ -483,9 +492,12 @@ def qpfstats(
       * ``out`` is a directory path: writes an STPF2BK1 f2-dir there and returns the path
         string (then ``read_f2(out)`` reloads it).
 
-    ``precision`` selects the matmul-substep arithmetic (the smoothing SYRK/GEMM): None
-    (default) -> emulated FP64 (the fit default), ``"fp64"``/``"native"`` -> native FP64. The
-    Cholesky/solve is native FP64 (the cancellation carve-out). GPU-only: no CUDA device raises."""
+    ``precision`` selects the matmul-substep arithmetic (the smoothing SYRK/GEMM); tokens match
+    the CLI ``--precision`` set (canonical ``emu40|emu32|fp64|tf32`` plus documented aliases):
+    None (default) -> emulated FP64 40-bit, the fit default; ``"emu40"``/``"emu"``/
+    ``"emulated_fp64"`` -> emulated FP64 40-bit; ``"emu32"``/``"emulated_fp64_32"`` -> emulated
+    FP64 32-bit; ``"fp64"``/``"native"`` -> native FP64. The Cholesky/solve is native FP64 (the
+    cancellation carve-out). GPU-only: no CUDA device raises."""
     h = _core.run_qpfstats(
         str(prefix),
         list(pops),
@@ -855,6 +867,62 @@ def dstat(
     return res.table if as_dataframe else res
 
 
+class DatesResult:
+    """A single DATES admixture-dating result (the time since admixture, in generations).
+    Built from the flat dict ``_core.run_dates`` returns — the lone Python facade outlier,
+    now a typed sibling of QpAdmResult/F4Result et al. ``date_gen`` is the generations since
+    admixture, ``se`` the leave-one-chromosome block-jackknife standard error, and
+    ``curve_cm``/``curve_corr`` the binned covariance-decay curve (cM vs the normalized
+    correlation; ``.curve`` is the tidy two-column DataFrame view). The underlying dict stays
+    reachable via ``.raw`` and dict-style ``res["date_gen"]`` indexing for back-compat."""
+
+    def __init__(self, d: dict):
+        self._d = d
+        self.target: str = d["target"]
+        self.source1: str = d["source1"]
+        self.source2: str = d["source2"]
+        self.date_gen: float = d["date_gen"]
+        self.se: float = d["se"]
+        self.fit_error_sd: float = d["fit_error_sd"]
+        # The compiled layer emits a coarse "ok"/"error" string here (NOT the full Status
+        # taxonomy), so keep it a plain str — Status("error") has no enum member.
+        self.status: str = d["status"]
+        self.curve_cm: list[float] = list(d["curve_cm"])
+        self.curve_corr: list[float] = list(d["curve_corr"])
+
+    @property
+    def raw(self) -> dict:
+        """The underlying ``_core.run_dates`` dict (back-compat escape hatch)."""
+        return self._d
+
+    @property
+    def curve(self):  # -> pandas.DataFrame [cm, corr]
+        """The binned covariance-decay curve as a tidy DataFrame: cM vs the normalized
+        correlation (the ``curve_cm``/``curve_corr`` parallel arrays)."""
+        pd = _require_pandas()
+        return pd.DataFrame({"cm": list(self.curve_cm), "corr": list(self.curve_corr)})
+
+    # --- dict back-compat: nothing that indexed the old dict (res["date_gen"]) breaks. ---
+    def __getitem__(self, key: str):
+        return self._d[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._d
+
+    def get(self, key: str, default=None):
+        return self._d.get(key, default)
+
+    def keys(self):
+        return self._d.keys()
+
+    def __repr__(self) -> str:
+        return (
+            f"DatesResult(target={self.target!r}, source1={self.source1!r}, "
+            f"source2={self.source2!r}, date_gen={self.date_gen!r}, se={self.se!r}, "
+            f"status={self.status!r})"
+        )
+
+
 def dates(
     prefix: Any,
     target: str,
@@ -862,7 +930,7 @@ def dates(
     source2: str,
     *,
     device: int = 0,
-):
+) -> DatesResult:
     """Admixture DATING on the GPU — the DATES tool (the time since admixture, in generations).
 
     Reads the GENOTYPE TRIPLE ``<prefix>.{geno,snp,ind}`` directly (NOT the f2 cache) and
@@ -874,12 +942,14 @@ def dates(
     reference sources (the weight is ``freq(source1) - freq(source2)``). The ``.snp`` MUST
     carry a real cM genetic map.
 
-    Returns a dict ``{target, source1, source2, date_gen, se, fit_error_sd, curve_cm,
-    curve_corr, status}``: ``date_gen`` is the generations since admixture, ``se`` the
-    leave-one-chromosome block-jackknife standard error, and ``curve_cm``/``curve_corr`` the
-    binned covariance-decay curve (cM vs the normalized correlation). A missing genotype file
-    raises a ValueError."""
-    return _core.run_dates(str(prefix), target, source1, source2, device)
+    Returns a :class:`DatesResult` with typed attributes ``target``/``source1``/``source2``,
+    ``date_gen`` (the generations since admixture), ``se`` (the leave-one-chromosome
+    block-jackknife standard error), ``fit_error_sd``, ``status``, and the
+    ``curve_cm``/``curve_corr`` binned covariance-decay curve (cM vs the normalized
+    correlation; ``.curve`` is the tidy DataFrame view). The original dict stays reachable via
+    ``res.raw`` and dict-style ``res["date_gen"]`` indexing. A missing genotype file raises a
+    ValueError."""
+    return DatesResult(_core.run_dates(str(prefix), target, source1, source2, device))
 
 
 def f3(

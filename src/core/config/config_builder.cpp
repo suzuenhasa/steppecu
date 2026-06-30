@@ -266,17 +266,22 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     // ---- --precision -> Precision (cli-bindings.md §4.1) -------------------------
     if (merged_.precision.has_value()) {
         const std::string p = to_lower(trim(*merged_.precision));
-        if (p == "emu40" || p == "emu") {
+        // Canonical set emu40|emu32|fp64|tf32 + documented aliases, kept in lockstep with
+        // the Python facade (bindings/module.cpp parse_precision) so a token is spelled the
+        // same on every surface (cli-bindings.md §4.1).
+        if (p == "emu40" || p == "emu" || p == "emulated_fp64") {
             cfg.device_.precision = Precision{Precision::Kind::EmulatedFp64, 40};
-        } else if (p == "emu32") {
+        } else if (p == "emu32" || p == "emulated_fp64_32") {
             cfg.device_.precision = Precision{Precision::Kind::EmulatedFp64, 32};
-        } else if (p == "fp64") {
+        } else if (p == "fp64" || p == "native") {
             cfg.device_.precision = Precision{Precision::Kind::Fp64, kDefaultMantissaBits};
         } else if (p == "tf32") {
             cfg.device_.precision = Precision{Precision::Kind::Tf32, kDefaultMantissaBits};
         } else {
             return fail("--precision '" + *merged_.precision +
-                        "' is unknown (use emu40 | emu32 | fp64 | tf32)");
+                        "' is unknown (use emu40 | emu32 | fp64 | tf32; aliases "
+                        "emu=emu40, emulated_fp64=emu40, emulated_fp64_32=emu32, "
+                        "native=fp64)");
         }
     }
 

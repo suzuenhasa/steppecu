@@ -302,6 +302,15 @@ Flag names mirror `QpAdmOptions` defaults exactly so the goldens reproduce with 
 overrides**. `--jackknife` on `qpadm`/`qpwave` is accepted but documented as **ignored**
 (only `run_qpadm_search` consults it; §2.1) so AT2 users are not surprised.
 
+**Precision tokens — one set across CLI `--precision`, the Python `precision=` kwarg, and the
+emitted `precision_tag`.** Canonical: `emu40` (Ozaki fixed-slice emulated FP64, 40-bit — the
+matmul-heavy f2-GEMM default, §12), `emu32` (emulated FP64, 32-bit), `fp64` (native FP64 — the
+validation oracle / fallback), `tf32` (TF32 tensor-core, opt-in screening only). Documented
+aliases accepted on **both** surfaces: `emu` = `emulated_fp64` = `emu40`, `emulated_fp64_32` =
+`emu32`, `native` = `fp64`. None (the kwarg default) = `emu40`. The emitted `precision_tag`
+(`emulated_fp64`/`fp64`/`tf32`) is itself an accepted spelling, so emit → re-parse round-trips
+to the same `Precision::Kind`.
+
 ### 4.2 Inputs: f2_blocks dir OR raw genotypes
 
 All three fit commands resolve input two ways: `--f2-dir DIR` reads the cache (§4.3) and

@@ -42,6 +42,7 @@
 #include <cstddef>
 #include <limits>           // std::numeric_limits — the n*sizeof(T) overflow guard
 #include <source_location>  // std::source_location — call site for the typed throw
+#include <type_traits>      // std::is_trivially_copyable_v — the raw-byte cudaMemcpy contract
 #include <utility>
 
 #include "core/internal/host_device.hpp"  // STEPPE_ASSERT (the one debug-only fail-fast)
@@ -70,7 +71,16 @@ namespace steppe::device {
 /// path under 14.4 (`PinnedRegistryCache::ensure`); the dtor deliberately adds no
 /// hidden sync (that would serialize the hot copy path). Latent in steady state:
 /// these owners are long-lived backend members and the staging buffer grows once.
+///
+/// `T` is constrained to be trivially copyable: the staging slot is filled and
+/// drained with raw-byte `cudaMemcpyAsync`, which is only well-defined for
+/// trivially-copyable types (their object representation IS their value). The
+/// `requires` makes that contract compiler-enforced at the instantiation site (a
+/// non-trivially-copyable `T` is a clear diagnostic, not silent UB), mirroring
+/// DeviceBuffer. Every current `T` is a POD / arithmetic type, so codegen is
+/// unchanged.
 template <class T>
+    requires std::is_trivially_copyable_v<T>
 class PinnedBuffer {
 public:
     PinnedBuffer() = default;
