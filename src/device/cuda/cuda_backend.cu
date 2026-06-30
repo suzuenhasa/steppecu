@@ -6,6 +6,14 @@
 // numerator/divide (f2_block_kernel.cu), and copy f2 + Vpair back across the
 // CUDA-free ComputeBackend seam (architecture.md §4).
 //
+// CudaBackend is INTENTIONALLY a single seam TU: a C++ class cannot be partial
+// across translation units, and the launch wrappers / kernels are co-located here on
+// purpose (architecture.md §4, §7; ASSESSMENT §5.5). The cross-TU split is REJECTED by
+// decision. (X3's thin-aggregate-header + per-subsystem `.inc`-include split — still
+// ONE class, so it sidesteps the "can't be partial" objection — is PARKED, never
+// separately evaluated; revisit only if the file size becomes a maintenance burden.
+// DECISIONS minute: docs/kimiactions/01-open-worth-doing.md §F2.)
+//
 // MULTI-GPU-READY (M4.5 capability-tier SCAFFOLD; architecture.md §9, §11.4, §12;
 // cleanup device-cuda-cuda_backend F19/F20, X-6/B2; 00-overview §(2)). One backend
 // instance is BOUND to ONE CUDA device (the per-device-instance contract,
@@ -5558,44 +5566,17 @@ private:
     int device_id_ = 0;
 
     // The ONE statistic stream PER DEVICE for bit-stability (architecture.md §12
-    // single-stream-per-device determinism rule). An OWNING, non-blocking RAII
-    // `Stream` (stream.hpp; `cudaStreamNonBlocking`), created in the ctor AFTER
-    // `device_id_`'s initializer made this device current — so the stream is
-    // associated with `device_id_` (CUDA Runtime API: a stream binds to the device
-    // current at create time). Every launch, `cudaMemcpyAsync`, and the trailing
-    // `cudaStreamSynchronize` route through `stream_.get()`. The handle is bound to
-    // this stream + the workspace ONCE in the ctor and is never re-`cublasSetStream`'d
-    // (cleanup X-1/B1), so the emulated-FP64 determinism workspace persists for every
-    // GEMM (cuBLAS §2.4.7).
+    // single-stream-per-device determinism). An OWNING, non-blocking RAII `Stream`
+    // (stream.hpp; cudaStreamNonBlocking) created in the ctor AFTER device_id_ made this
+    // device current; every launch / cudaMemcpyAsync / cudaStreamSynchronize routes through
+    // it. Why non-blocking + the M4.5 SPMG overlap rationale:
+    // see docs/design/cuda-backend-stream.md (architecture.md §7, §11.4, §12).
     //
-    // WHY NON-BLOCKING (M4.5 SPMG, perf-discovery.md P2/F1). The prior member was
-    // the NULL *legacy default* stream and the build is NOT compiled
-    // `--default-stream per-thread`, so under the §11.4 multi-GPU fan-out the two
-    // per-device worker threads' launches implicitly serialized against the single
-    // process-wide legacy default stream (CUDA C Programming Guide §3.2.8.5.2
-    // "Default Stream") — the measured 18% kernel overlap. A `cudaStreamNonBlocking`
-    // stream does NOT implicitly synchronize with the legacy default stream (CUDA
-    // Runtime API, `cudaStreamCreateWithFlags`), so each device's backend now issues
-    // on its own independent lane and the two devices' GEMMs can overlap. This is a
-    // pure scheduling change: stream choice moves no arithmetic bits, so §12 parity
-    // is unaffected. §12 mandates ONE stream PER DEVICE on the statistic path — this
-    // single per-device non-blocking stream satisfies it (we do NOT add a second
-    // statistic stream).
-    //
-    // Declaration order is load-bearing at teardown (reverse-order destruction):
-    //   1. `workspace_` declared AFTER `blas_` so it is freed FIRST — `blas_` holds a
-    //      NON-owning pointer into it; `cublasDestroy` only synchronizes (it does not
-    //      read the workspace), so freeing the workspace VRAM before the handle is
-    //      destroyed is safe (architecture.md §7).
-    //   2. `stream_` declared BEFORE `blas_` so it is destroyed AFTER it — the handle's
-    //      cuBLAS context is bound to this stream, so the stream must outlive
-    //      `cublasDestroy` (which synchronizes the bound stream); destroying the stream
-    //      only after the handle is gone avoids tearing down a stream the handle still
-    //      references (architecture.md §7 RAII teardown ordering).
-    // Construction order (declaration order) is also load-bearing: `device_id_` is
-    // declared FIRST, and its initializer makes the device current, so both `stream_`
-    // (created on the current device) and `blas_`'s cuBLAS context (cuBLAS §2.1.2)
-    // bind to `device_id_`.
+    // Declaration order is LOAD-BEARING at teardown (reverse-order destruction): stream_ is
+    // declared BEFORE blas_/solver_ so it is destroyed AFTER them — their cuBLAS/cuSOLVER
+    // contexts are bound to this stream, so the stream must outlive their cublas/cusolver
+    // destroy (workspace_ is declared after blas_ so it frees first; blas_ holds a non-owning
+    // pointer into it). Stream choice moves no arithmetic bits, so §12 parity is unaffected.
     Stream stream_{};
     CublasHandle blas_{};
     // Dense-cuSOLVER handle for the qpAdm fit small-LA (Qinv Cholesky potrf/potri,
