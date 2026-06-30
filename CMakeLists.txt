@@ -40,6 +40,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SteppeOptions)     # all option()/cache vars in one place
 include(CUDAArch)          # CMAKE_CUDA_ARCHITECTURES policy (M0: sm_120)
 include(SteppeWarnings)    # defines INTERFACE target steppe::warnings
+include(SteppeSanitizers)  # consumes STEPPE_SANITIZER (host-only asan/ubsan flags;
+                           # compute-lane marker). MUST precede add_subdirectory()
+                           # so the directory-scoped sanitizer flags propagate; the
+                           # empty default is a no-op (Release/CI parity stays clean).
 
 # Position-independent code for the whole build when the Python bindings are on: the
 # nanobind extension `_core` is a SHARED module, and it links the first-party STATIC libs

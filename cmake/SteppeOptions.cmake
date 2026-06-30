@@ -40,8 +40,10 @@ measured precision policy; architecture.md §12, ROADMAP §0)" ON)
 option(STEPPE_NVTX "Emit NVTX ranges (architecture.md §10; zero-overhead off)" OFF)
 
 # Empty ⇒ no sanitizer. Accepts a list like "asan;ubsan" or "compute"
-# (architecture.md §6 presets, §13). Wired in cmake/SteppeSanitizers.cmake at a
-# later milestone; declared here so the preset cache vars resolve.
+# (architecture.md §6 presets, §13). Consumed in cmake/SteppeSanitizers.cmake
+# (included from the top-level CMakeLists.txt right after this module): it maps
+# asan;ubsan → host-only -fsanitize flags and compute → the CI compute-sanitizer
+# lane marker. Declared here so the preset cache vars resolve.
 set(STEPPE_SANITIZER "" CACHE STRING
     "Sanitizer set: empty | asan;ubsan | compute (architecture.md §6, §13)")
 

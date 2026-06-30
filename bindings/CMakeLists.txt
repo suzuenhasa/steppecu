@@ -38,7 +38,10 @@ if(NOT nanobind_FOUND)
   else()
     message(STATUS "steppe bindings: nanobind not found — fetching v2.4.0 via CPM")
     include(CPM)
-    CPMAddPackage(NAME nanobind GITHUB_REPOSITORY wjakob/nanobind GIT_TAG v2.4.0)
+    # Pin to the IMMUTABLE commit behind the nanobind v2.4.0 tag (a movable tag could be
+    # re-pointed); same tree as the v2.4.0 annotated tag (ADR-0002, architecture §15).
+    CPMAddPackage(NAME nanobind GITHUB_REPOSITORY wjakob/nanobind
+                  GIT_TAG 0f9ce749b257fdfe701edb3cf6f7027ba029434a)  # == tag v2.4.0
     list(APPEND CMAKE_MODULE_PATH "${nanobind_SOURCE_DIR}/cmake")
     find_package(nanobind CONFIG REQUIRED PATHS "${nanobind_SOURCE_DIR}/cmake")
   endif()

@@ -23,6 +23,22 @@
       }
     },
     {
+      "name": "dev-asan",
+      "displayName": "Dev + ASan/UBSan (host C++ TUs only; .cu excluded)",
+      "inherits": "dev",
+      "cacheVariables": {
+        "STEPPE_SANITIZER": "asan;ubsan"
+      }
+    },
+    {
+      "name": "dev-compute",
+      "displayName": "Dev + compute-sanitizer lane marker (no codegen flags; wrap ctest with compute-sanitizer)",
+      "inherits": "dev",
+      "cacheVariables": {
+        "STEPPE_SANITIZER": "compute"
+      }
+    },
+    {
       "name": "release",
       "displayName": "Release (full ship arch list, tests off)",
       "inherits": "base",
@@ -43,14 +59,28 @@
     }
   ],
   "buildPresets": [
-    { "name": "dev",     "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "ci",      "configurePreset": "ci" }
+    { "name": "dev",         "configurePreset": "dev" },
+    { "name": "dev-asan",    "configurePreset": "dev-asan" },
+    { "name": "dev-compute", "configurePreset": "dev-compute" },
+    { "name": "release",     "configurePreset": "release" },
+    { "name": "ci",          "configurePreset": "ci" }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "stopOnFailure": false }
+    },
+    {
+      "name": "dev-asan",
+      "configurePreset": "dev-asan",
+      "output": { "outputOnFailure": true },
+      "execution": { "stopOnFailure": false }
+    },
+    {
+      "name": "dev-compute",
+      "configurePreset": "dev-compute",
       "output": { "outputOnFailure": true },
       "execution": { "stopOnFailure": false }
     },

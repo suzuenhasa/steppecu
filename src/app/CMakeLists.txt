@@ -18,7 +18,14 @@ find_package(CLI11 2.4 CONFIG QUIET)
 if(NOT CLI11_FOUND)
   message(STATUS "steppe CLI: CLI11 not found via find_package — fetching v2.4.2 via CPM")
   include(CPM)
-  CPMAddPackage("gh:CLIUtils/CLI11@2.4.2")
+  # Pin to the IMMUTABLE commit behind the CLI11 v2.4.2 tag (a movable tag could be
+  # re-pointed); VERSION keeps CPM's find_package/version bookkeeping aligned with the
+  # 2.4.x pin above (architecture.md §15 line 392 `gh:CLIUtils/CLI11@2.4.2`).
+  CPMAddPackage(
+      NAME CLI11
+      GITHUB_REPOSITORY CLIUtils/CLI11
+      VERSION 2.4.2
+      GIT_TAG 6c7b07a878ad834957b98d0f9ce1dbe0cb204fc9)  # == tag v2.4.2
 else()
   message(STATUS "steppe CLI: using CLI11 ${CLI11_VERSION} via find_package")
 endif()
