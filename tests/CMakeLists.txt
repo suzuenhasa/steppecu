@@ -8,8 +8,7 @@
 # GoogleTest is the project harness (architecture.md §3, §13). To keep the M0
 # slice buildable even before third_party/ CPM-fetches GTest, we use it when it
 # is discoverable and otherwise fall back to a self-checking executable that
-# returns non-zero on failure — which is all CTest needs to gate. The equivalence
-# .cu also has the standalone nvcc fallback in /home/suzunik/steppe/build_m0.sh.
+# returns non-zero on failure — which is all CTest needs to gate.
 
 # --- Optional GoogleTest (architecture.md §3) --------------------------------
 find_package(GTest CONFIG QUIET)
@@ -21,6 +20,40 @@ else()
   message(STATUS "steppe tests: GoogleTest not found — using self-checking \
 fallback (returns non-zero on failure; CTest gates on exit code)")
 endif()
+
+# --- A2: CTest LABELS taxonomy (ONE home, so a new test is tagged by construction) ---
+# Every registered test carries a PRIMARY lane label, exactly one of
+# {unit|reference|cli|python}, plus the orthogonal {gpu} and {slow} labels:
+#   * gpu  -> built by nvcc and/or needs a live CUDA device (the .cu reference
+#            suite, the binary-spawning cli suite, the _core python gate). The
+#            pure-host C++ unit/ suite carries NO gpu label.
+#   * slow -> a long runner (confirmed by RUNTIME, not name).
+# Lane selectors this unlocks:
+#   ctest -L unit   -> the pure-host C++ lane (no CUDA toolchain, no device)
+#   ctest -LE gpu   -> exactly the CUDA-free CI lane (the §3-HIGH host-only lane)
+#   ctest -L slow / -LE slow -> the fast/slow partition
+# A gpu test also takes RESOURCE_LOCK "gpu" so a future `ctest -j` never
+# oversubscribes the single GPU. Labels are pure CTest metadata: parity-NEUTRAL
+# (no assertion or golden value moves). architecture.md §13; kimiactions §A2.
+function(steppe_add_test)
+  # Classic ${ARGN} form (NOT PARSE_ARGV): a quoted multi-value `LABELS "a;b"`
+  # must split into the separate labels a, b — PARSE_ARGV would instead protect
+  # the embedded `;` and store one literal label "a;b". Safe here because no
+  # COMMAND argument contains a `;` (paths / `$<TARGET_FILE:..>` gen-exprs only).
+  cmake_parse_arguments(SAT "" "NAME" "COMMAND;LABELS" ${ARGN})
+  if(NOT SAT_NAME)
+    message(FATAL_ERROR "steppe_add_test: NAME is required")
+  endif()
+  if(NOT SAT_LABELS)
+    message(FATAL_ERROR "steppe_add_test(${SAT_NAME}): LABELS is required")
+  endif()
+  add_test(NAME ${SAT_NAME} COMMAND ${SAT_COMMAND})
+  set_tests_properties(${SAT_NAME} PROPERTIES LABELS "${SAT_LABELS}")
+  if("gpu" IN_LIST SAT_LABELS)
+    # Serialize device-touching tests under a future `ctest -j` (single GPU box).
+    set_tests_properties(${SAT_NAME} PROPERTIES RESOURCE_LOCK gpu)
+  endif()
+endfunction()
 
 # --- GPU-vs-CPU equivalence test (the central M0 trust seam) -----------------
 # CUDA TU: drives the PRODUCTION backends — steppe::device::make_cpu_backend() (the
@@ -54,7 +87,7 @@ if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_equivalence PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
 
-add_test(NAME f2_equivalence COMMAND test_f2_equivalence)
+steppe_add_test(NAME f2_equivalence COMMAND test_f2_equivalence LABELS "reference;gpu")
 
 # --- M1 genotype-decode equivalence test (the M1 trust seam) -----------------
 # CUDA TU: reads the raw TGENO triple via the `io` leaf, reproduces derived_acc's
@@ -74,7 +107,7 @@ set_target_properties(test_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILAT
 # resolve from one argument, matching the box layout.
 set(STEPPE_AADR_ROOT "/workspace/data/aadr"
     CACHE PATH "AADR data root (contains raw/ TGENO triple + derived_acc/ oracle)")
-add_test(NAME decode_equivalence COMMAND test_decode_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME decode_equivalence COMMAND test_decode_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M-FR-1 transpose+gather+encoding primitive gate (DUAL) -------------------
 # CUDA TU: the SNP-major -> canonical individual-major transpose primitive
@@ -92,7 +125,7 @@ add_executable(test_transpose_canonical reference/test_transpose_canonical.cu)
 target_link_libraries(test_transpose_canonical
     PRIVATE steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_transpose_canonical PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME transpose_canonical COMMAND test_transpose_canonical "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME transpose_canonical COMMAND test_transpose_canonical "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M-FR-2 Tier-1 PA-reader == TGENO-reader BIT-EXACT gate -------------------
 # CUDA TU (format-readers.md §5.1): drives the PRODUCTION dispatch
@@ -110,7 +143,7 @@ add_executable(test_pa_decode_equivalence reference/test_pa_decode_equivalence.c
 target_link_libraries(test_pa_decode_equivalence
     PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_pa_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME pa_decode_equivalence COMMAND test_pa_decode_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME pa_decode_equivalence COMMAND test_pa_decode_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M-FR-EIG Tier-1 EIGENSTRAT-reader == PA-reader BIT-EXACT gate -------------
 # CUDA TU (format-readers.md §5.3, the Tier-3-by-reduction-to-PA gate): drives the
@@ -129,7 +162,7 @@ add_executable(test_eigenstrat_decode_equivalence reference/test_eigenstrat_deco
 target_link_libraries(test_eigenstrat_decode_equivalence
     PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_eigenstrat_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME eigenstrat_decode_equivalence COMMAND test_eigenstrat_decode_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME eigenstrat_decode_equivalence COMMAND test_eigenstrat_decode_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M-FR PLINK TIER-1: the PLINK (.bed/.bim/.fam) reader == the PA reader, BIT-EXACT --
 # CUDA TU: drives the PRODUCTION dispatch (core::read_canonical_tile) on a PLINK .bed AND
@@ -146,7 +179,7 @@ add_executable(test_plink_decode_equivalence reference/test_plink_decode_equival
 target_link_libraries(test_plink_decode_equivalence
     PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_plink_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME plink_decode_equivalence COMMAND test_plink_decode_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME plink_decode_equivalence COMMAND test_plink_decode_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M-FR-AM TIER-1: the ANCESTRYMAP (text triple) reader == the PA reader, BIT-EXACT --
 # CUDA TU: drives the PRODUCTION dispatch (core::read_canonical_tile) on an ANCESTRYMAP .geno
@@ -163,7 +196,7 @@ add_executable(test_ancestrymap_decode_equivalence reference/test_ancestrymap_de
 target_link_libraries(test_ancestrymap_decode_equivalence
     PRIVATE steppe::core steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_ancestrymap_decode_equivalence PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME ancestrymap_decode_equivalence COMMAND test_ancestrymap_decode_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME ancestrymap_decode_equivalence COMMAND test_ancestrymap_decode_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M4 per-block f2 equivalence test (the M4 trust seam) --------------------
 # CUDA TU: loads real derived_acc Q/V/N + the .snp prefix via the io leaf, runs
@@ -188,7 +221,7 @@ set_target_properties(test_f2_blocks_equivalence PROPERTIES CUDA_SEPARABLE_COMPI
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_blocks_equivalence PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME f2_blocks_equivalence COMMAND test_f2_blocks_equivalence "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME f2_blocks_equivalence COMMAND test_f2_blocks_equivalence "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- B1 emulated-FP64 run-to-run determinism gate ----------------------------
 # CUDA TU (mirrors test_f2_blocks_equivalence.cu's data loading): loads the real
@@ -215,7 +248,7 @@ set_target_properties(test_f2_determinism PROPERTIES CUDA_SEPARABLE_COMPILATION 
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_determinism PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME f2_determinism COMMAND test_f2_determinism "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- B24 M4 grouped-batch wrapper empty-guard + gather/scatter gate -----------
 # CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the three
@@ -251,7 +284,7 @@ set_target_properties(test_f2_blocks_group PROPERTIES CUDA_SEPARABLE_COMPILATION
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_blocks_group PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group)
+steppe_add_test(NAME f2_blocks_group COMMAND test_f2_blocks_group LABELS "reference;gpu")
 
 # --- B25 M4 gather/scatter FOCUSED index-math gate (f2_blocks_kernel F24) ------
 # CUDA TU, DATA-FREE (sibling of test_f2_blocks_group.cu): drives the M4 gather +
@@ -289,7 +322,7 @@ set_target_properties(test_f2_blocks_gather PROPERTIES CUDA_SEPARABLE_COMPILATIO
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_blocks_gather PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME f2_blocks_gather COMMAND test_f2_blocks_gather)
+steppe_add_test(NAME f2_blocks_gather COMMAND test_f2_blocks_gather LABELS "reference;gpu")
 
 # --- X-6/B2 EmulatedFp64 honorability gate (the dynamic-mantissa-trap close-out)
 # CUDA TU, DATA-FREE: drives the production seam (make_cuda_backend → compute_f2)
@@ -315,7 +348,7 @@ set_target_properties(test_emu_honorability PROPERTIES CUDA_SEPARABLE_COMPILATIO
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_emu_honorability PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME emu_honorability COMMAND test_emu_honorability)
+steppe_add_test(NAME emu_honorability COMMAND test_emu_honorability LABELS "reference;gpu")
 
 # --- B12 compute_f2 degenerate-extent guard gate (X-7/E-3) -------------------
 # CUDA TU, DATA-FREE (mirrors test_emu_honorability.cu): drives the production seam
@@ -331,7 +364,7 @@ add_executable(test_f2_empty_guard reference/test_f2_empty_guard.cu)
 target_link_libraries(test_f2_empty_guard
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_f2_empty_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME f2_empty_guard COMMAND test_f2_empty_guard)
+steppe_add_test(NAME f2_empty_guard COMMAND test_f2_empty_guard LABELS "reference;gpu")
 
 # --- B22 compute_f2 M>INT_MAX narrowing guard gate (f2_block_kernel E-1) ------
 # CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the production seam
@@ -352,7 +385,7 @@ add_executable(test_f2_int_max_guard reference/test_f2_int_max_guard.cu)
 target_link_libraries(test_f2_int_max_guard
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_f2_int_max_guard PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME f2_int_max_guard COMMAND test_f2_int_max_guard)
+steppe_add_test(NAME f2_int_max_guard COMMAND test_f2_int_max_guard LABELS "reference;gpu")
 
 # --- B23 DeviceBuffer<T> n*sizeof(T) overflow guard gate (device_buffer 1.1/7.5)
 # CUDA TU, DATA-FREE (sibling of test_f2_int_max_guard.cu): exercises the
@@ -374,7 +407,7 @@ add_executable(test_device_buffer reference/test_device_buffer.cu)
 target_link_libraries(test_device_buffer
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_device_buffer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME device_buffer_unit COMMAND test_device_buffer)
+steppe_add_test(NAME device_buffer_unit COMMAND test_device_buffer LABELS "reference;gpu")
 
 # --- M4.5 CAP-1/CAP-2 non-throwing tagged-degrade check gate (device-cuda-check)
 # CUDA TU, DATA-FREE and NO GPU work (sibling of test_device_buffer.cu): drives the
@@ -396,7 +429,7 @@ add_executable(test_cuda_check reference/test_cuda_check.cu)
 target_link_libraries(test_cuda_check
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_cuda_check PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME cuda_check_unit COMMAND test_cuda_check)
+steppe_add_test(NAME cuda_check_unit COMMAND test_cuda_check LABELS "reference;gpu")
 
 # --- B2 OOM fault-taxonomy translator gate (device_fault_status + exit_code_for_caught) ---
 # CUDA TU, DATA-FREE, NO GPU (sibling of test_cuda_check): the typed device exceptions
@@ -414,7 +447,7 @@ add_executable(test_device_fault_status reference/test_device_fault_status.cu)
 target_link_libraries(test_device_fault_status
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_device_fault_status PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME device_fault_status_unit COMMAND test_device_fault_status)
+steppe_add_test(NAME device_fault_status_unit COMMAND test_device_fault_status LABELS "reference;gpu")
 
 # --- M4.5 U4/L10 CublasHandle MathModeScope + device-ordinal scaffold gate -----
 # CUDA TU, DATA-FREE (sibling of test_device_buffer.cu): exercises the device-
@@ -445,7 +478,7 @@ add_executable(test_handles reference/test_handles.cu)
 target_link_libraries(test_handles
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_handles PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME handles_unit COMMAND test_handles)
+steppe_add_test(NAME handles_unit COMMAND test_handles LABELS "reference;gpu")
 
 # --- Host-only unit test of the shared f2 estimator primitive ----------------
 # Pure C++ TU (no CUDA): proves the __host__ __device__ primitive compiles and is
@@ -457,7 +490,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_f2_estimator PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_f2_estimator PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME f2_estimator_unit COMMAND test_f2_estimator)
+steppe_add_test(NAME f2_estimator_unit COMMAND test_f2_estimator LABELS "unit")
 
 # --- Host-only unit test of the shared decode/allele-frequency primitive ------
 # Pure C++ TU (no CUDA, no data): proves the __host__ __device__ decode primitives
@@ -475,7 +508,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_decode PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_decode PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME decode_unit COMMAND test_decode)
+steppe_add_test(NAME decode_unit COMMAND test_decode LABELS "unit")
 
 # --- Host-only unit test of the B7 single-source-home headers ----------------
 # Pure C++ TU (no CUDA): pins the launch-math home (core/internal/launch_config.hpp
@@ -490,7 +523,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_launch_config PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_launch_config PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME launch_config_unit COMMAND test_launch_config)
+steppe_add_test(NAME launch_config_unit COMMAND test_launch_config LABELS "unit")
 
 # --- Host-only unit test of the public config contract (cleanup B9) -----------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free include/steppe/config.hpp
@@ -509,7 +542,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_config PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_config PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME config_unit COMMAND test_config)
+steppe_add_test(NAME config_unit COMMAND test_config LABELS "unit")
 
 # --- M(cli-0) access-layer config-builder unit test (cli-bindings.md §8 M(cli-0)) ----
 # Pure C++ TU (no CUDA, no GPU, no data): drives the CUDA-FREE ConfigBuilder/RunConfig/
@@ -530,7 +563,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_config_builder PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_config_builder PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME config_builder_unit COMMAND test_config_builder)
+steppe_add_test(NAME config_builder_unit COMMAND test_config_builder LABELS "unit")
 
 # --- C2 output-escaping primitives unit test (result_emit) -------------------
 # Pure C++ host TU (NO CUDA, NO GPU, NO data): compiles src/app/result_emit.cpp
@@ -545,7 +578,7 @@ add_executable(test_result_emit
     ${CMAKE_SOURCE_DIR}/src/app/result_emit.cpp)
 target_link_libraries(test_result_emit
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
-add_test(NAME result_emit_unit COMMAND test_result_emit)
+steppe_add_test(NAME result_emit_unit COMMAND test_result_emit LABELS "unit")
 
 # --- qpAdm parity test (the Phase-2 fit acceptance gate, BOTH backends) ---------
 # Reads the committed 9-pop f2 fixture (tests/reference/goldens/at2/fixtures/) — the
@@ -569,8 +602,8 @@ add_executable(test_qpadm_parity reference/test_qpadm_parity.cu)
 target_link_libraries(test_qpadm_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpadm_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpadm_parity
-         COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpadm_parity
+         COMMAND test_qpadm_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- qpGraph single-graph-fit parity test (the qpGraph acceptance gate, BOTH backends) --
 # Reads the committed 9-pop f2 fixture + the WELL-IDENTIFIED golden topology
@@ -587,8 +620,8 @@ add_executable(test_qpgraph_parity reference/test_qpgraph_parity.cu)
 target_link_libraries(test_qpgraph_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpgraph_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpgraph_parity
-         COMMAND test_qpgraph_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpgraph_parity
+         COMMAND test_qpgraph_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- qpGraph topology ENUMERATOR unit test (the exhaustive-coverage proof, host-only) ---
 # Plain C++ TU (NO CUDA): the host enumerator reproduces admixtools generate_all_trees /
@@ -599,8 +632,8 @@ add_test(NAME qpgraph_parity
 add_executable(test_qpgraph_enumerate reference/test_qpgraph_enumerate.cpp)
 target_link_libraries(test_qpgraph_enumerate
     PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
-add_test(NAME qpgraph_enumerate
-         COMMAND test_qpgraph_enumerate "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpgraph_enumerate
+         COMMAND test_qpgraph_enumerate "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- qpGraph topology SEARCH v1 acceptance (oracle C, BOTH backends) ---------------------
 # CUDA TU: the exhaustive bounded-space search (run_qpgraph_search) on the committed real-AADR
@@ -613,8 +646,8 @@ add_executable(test_qpgraph_search reference/test_qpgraph_search.cu)
 target_link_libraries(test_qpgraph_search
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpgraph_search PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpgraph_search
-         COMMAND test_qpgraph_search "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpgraph_search
+         COMMAND test_qpgraph_search "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- qpGraph topology-search PER-CANDIDATE parity (closes the argmin-anchored gap) --------
 # CUDA TU: runs the SAME exhaustive search, EXPOSES the full per-candidate scored vector
@@ -632,8 +665,8 @@ add_executable(test_qpgraph_search_parity reference/test_qpgraph_search_parity.c
 target_link_libraries(test_qpgraph_search_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpgraph_search_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpgraph_search_parity
-         COMMAND test_qpgraph_search_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpgraph_search_parity
+         COMMAND test_qpgraph_search_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- qpfstats SMOOTHING-SOLVE CpuBackend==CudaBackend parity (the solve primitive) -------
 # CUDA TU: a numerical-equivalence unit test of the qpfstats_smooth solve primitive (A_shared
@@ -645,7 +678,7 @@ add_executable(test_qpfstats_smooth_parity reference/test_qpfstats_smooth_parity
 target_link_libraries(test_qpfstats_smooth_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpfstats_smooth_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpfstats_smooth_parity COMMAND test_qpfstats_smooth_parity)
+steppe_add_test(NAME qpfstats_smooth_parity COMMAND test_qpfstats_smooth_parity LABELS "reference;gpu")
 
 # --- qpfstats FUSED reduce→jackknife→smooth→recenter parity (the PERF-path gate) ----
 # Directly diffs the ON-DEVICE block-jackknife kernels (qpfstats_jackknife_kernel.cu; the
@@ -656,7 +689,7 @@ add_executable(test_qpfstats_fused_parity reference/test_qpfstats_fused_parity.c
 target_link_libraries(test_qpfstats_fused_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpfstats_fused_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpfstats_fused_parity COMMAND test_qpfstats_fused_parity)
+steppe_add_test(NAME qpfstats_fused_parity COMMAND test_qpfstats_fused_parity LABELS "reference;gpu")
 
 # --- DATES cuFFT LD-engine parity test (the within-codebase FFT-engine gate) -------
 # CUDA TU: drives BOTH production backends and asserts the CudaBackend cuFFT autocorrelation
@@ -669,7 +702,7 @@ add_executable(test_dates_parity reference/test_dates_parity.cu)
 target_link_libraries(test_dates_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_dates_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME dates_parity COMMAND test_dates_parity)
+steppe_add_test(NAME dates_parity COMMAND test_dates_parity LABELS "reference;gpu")
 
 # --- GPU-ONLY f-stat SWEEP parity test (the sweep acceptance gate) ----------------
 # CUDA TU: uploads the REAL 9-pop golden f2 fixture RESIDENT to VRAM, runs the GPU-only
@@ -682,8 +715,8 @@ add_executable(test_fstat_sweep_parity reference/test_fstat_sweep_parity.cu)
 target_link_libraries(test_fstat_sweep_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_fstat_sweep_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME fstat_sweep_parity
-         COMMAND test_fstat_sweep_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME fstat_sweep_parity
+         COMMAND test_fstat_sweep_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu;slow")
 
 # --- M(fit-6) S8 qpAdm ROTATION test (the model-space search acceptance gate) ----
 # CUDA TU: reads the REAL AT2 rotation golden (goldens/at2/golden_rot.json) + the
@@ -702,8 +735,8 @@ add_executable(test_qpadm_rotation reference/test_qpadm_rotation.cu)
 target_link_libraries(test_qpadm_rotation
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpadm_rotation PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpadm_rotation
-         COMMAND test_qpadm_rotation "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpadm_rotation
+         COMMAND test_qpadm_rotation "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu;slow")
 
 # --- M(fit-5) qpAdm DOMAIN-OUTCOME test (the contract acceptance gate, BOTH backends)
 # CUDA TU: the M(fit-5) acceptance gate (fit-engine.md §2 M(fit-5); architecture.md
@@ -729,8 +762,8 @@ add_executable(test_qpadm_domain reference/test_qpadm_domain.cu)
 target_link_libraries(test_qpadm_domain
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpadm_domain PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpadm_domain
-         COMMAND test_qpadm_domain "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpadm_domain
+         COMMAND test_qpadm_domain "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # CUDA TU: the F1 / OQ-12 MISSING-BLOCK acceptance gate (fit-engine.md OQ-12). EVERY other
 # qpAdm golden is maxmiss=0 (global SNP intersection ⇒ NO missing blocks); this is the ONE
@@ -750,8 +783,8 @@ add_executable(test_qpadm_missing_block reference/test_qpadm_missing_block.cu)
 target_link_libraries(test_qpadm_missing_block
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpadm_missing_block PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpadm_missing_block
-         COMMAND test_qpadm_missing_block "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpadm_missing_block
+         COMMAND test_qpadm_missing_block "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # CUDA TU: the F4 standalone qpWave acceptance gate (fit-engine-finish-punchlist F4). The
 # first-class PUBLIC run_qpwave entry (include/steppe/qpadm.hpp; impl qpadm_fit.cpp
@@ -773,8 +806,8 @@ add_executable(test_qpwave_parity reference/test_qpwave_parity.cu)
 target_link_libraries(test_qpwave_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_qpwave_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME qpwave_parity
-         COMMAND test_qpwave_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+steppe_add_test(NAME qpwave_parity
+         COMMAND test_qpwave_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu")
 
 # --- M(fit-6) S8 model-search shard planner unit test (GPU-free) -----------------
 # Pure C++ TU (no CUDA, no GPU, no io, no data): drives
@@ -787,7 +820,7 @@ add_test(NAME qpwave_parity
 add_executable(test_model_search_core unit/test_model_search_core.cpp)
 target_link_libraries(test_model_search_core
     PRIVATE steppe::core steppe::core_internal steppe::api steppe::warnings)
-add_test(NAME model_search_core_unit COMMAND test_model_search_core)
+steppe_add_test(NAME model_search_core_unit COMMAND test_model_search_core LABELS "unit")
 
 # --- Host-only unit test of the backend-factory single source (X-9/B8) --------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend_factory.hpp
@@ -807,7 +840,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_backend_factory PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_backend_factory PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME backend_factory_unit COMMAND test_backend_factory)
+steppe_add_test(NAME backend_factory_unit COMMAND test_backend_factory LABELS "unit")
 
 # --- Host-only unit test of the M4.5 BackendCapabilities POD (U2) -------------
 # Pure C++ TU (no CUDA, no GPU): includes the CUDA-free device/backend.hpp and
@@ -832,7 +865,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_backend_capabilities PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_backend_capabilities PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME backend_capabilities_unit COMMAND test_backend_capabilities)
+steppe_add_test(NAME backend_capabilities_unit COMMAND test_backend_capabilities LABELS "unit")
 
 # --- M4.5 U5 CUDA capabilities() probe + device_id threading gate -------------
 # CUDA TU, DATA-FREE (sibling of test_f2_empty_guard.cu): drives the PRODUCTION
@@ -870,7 +903,7 @@ set_target_properties(test_backend_capabilities_probe PROPERTIES CUDA_SEPARABLE_
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_backend_capabilities_probe PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME backend_capabilities_probe COMMAND test_backend_capabilities_probe)
+steppe_add_test(NAME backend_capabilities_probe COMMAND test_backend_capabilities_probe LABELS "reference;gpu")
 
 # --- M4.5 UNIT I1 build_resources / Resources / PerGpuResources gate ----------
 # CUDA TU, DATA-FREE (sibling of test_backend_capabilities_probe.cu): drives the
@@ -906,7 +939,7 @@ set_target_properties(test_resources_build PROPERTIES CUDA_SEPARABLE_COMPILATION
 # resources.cpp's build_resources reaches the GPU only through the CUDA-free factory
 # + capabilities(); no STEPPE_HAVE_EMU_TUNING-gated symbol is touched here, so no
 # emulation-tuning define is needed for this TU.
-add_test(NAME resources_build COMMAND test_resources_build)
+steppe_add_test(NAME resources_build COMMAND test_resources_build LABELS "reference;gpu")
 
 # --- M4.5 MULTI-GPU PARITY GATE (the §12 PARITY LAW; THE verify gate) ----------
 # CUDA TU (mirrors test_f2_blocks_equivalence.cu's data loading): loads real
@@ -956,7 +989,7 @@ set_target_properties(test_f2_multigpu_parity PROPERTIES CUDA_SEPARABLE_COMPILAT
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(test_f2_multigpu_parity PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
-add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME f2_multigpu_parity COMMAND test_f2_multigpu_parity "${STEPPE_AADR_ROOT}" LABELS "reference;gpu;slow")
 
 # --- M4.5 SPMG single-GPU vs 2-GPU wall-clock BENCH (cleanup B1 fan-out) -------------
 # Manual bench (NOT a ctest gate): times core::compute_f2_blocks_multigpu G==1 vs G==2
@@ -1033,7 +1066,7 @@ add_executable(test_f2_multigpu_gate reference/test_f2_multigpu_gate.cu)
 target_link_libraries(test_f2_multigpu_gate
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_f2_multigpu_gate PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME f2_multigpu_gate COMMAND test_f2_multigpu_gate)
+steppe_add_test(NAME f2_multigpu_gate COMMAND test_f2_multigpu_gate LABELS "reference;gpu")
 
 # --- Host-only unit test of the SHARED f2-combine validator (cleanup B5 / X7) -
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the new single-home guard
@@ -1063,7 +1096,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_f2_partials_validate PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_f2_partials_validate PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate)
+steppe_add_test(NAME f2_partials_validate_unit COMMAND test_f2_partials_validate LABELS "unit")
 
 # --- Host-only unit test of the HOST-STAGED f2 combine (cleanup B7 / f2_combine T1)
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the PORTABLE PARITY
@@ -1102,7 +1135,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_f2_combine PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_f2_combine PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME f2_combine_unit COMMAND test_f2_combine)
+steppe_add_test(NAME f2_combine_unit COMMAND test_f2_combine LABELS "unit")
 
 # --- Host-only unit test of the SPMG block-aligned shard PLANNER (cleanup TST-1) -
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the host-pure deterministic
@@ -1132,7 +1165,7 @@ add_test(NAME f2_combine_unit COMMAND test_f2_combine)
 add_executable(test_shard_plan unit/test_shard_plan.cpp)
 target_link_libraries(test_shard_plan
     PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
-add_test(NAME shard_plan_unit COMMAND test_shard_plan)
+steppe_add_test(NAME shard_plan_unit COMMAND test_shard_plan LABELS "unit")
 
 # --- Host-only unit test of the SPMG ORCHESTRATOR CORE (cleanup D1/T1, B9) -----
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the HOST-PURE, P2P-FREE
@@ -1176,7 +1209,7 @@ add_test(NAME shard_plan_unit COMMAND test_shard_plan)
 add_executable(test_f2_blocks_multigpu unit/test_f2_blocks_multigpu.cpp)
 target_link_libraries(test_f2_blocks_multigpu
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
-add_test(NAME f2_blocks_multigpu_unit COMMAND test_f2_blocks_multigpu)
+steppe_add_test(NAME f2_blocks_multigpu_unit COMMAND test_f2_blocks_multigpu LABELS "unit")
 
 # --- Host-only unit test of the §9 device-ordinal validator (cleanup B8/C1/T1) -
 # Pure C++ TU (no CUDA, no GPU, no io, no data): exercises the §9 build()-validation
@@ -1209,7 +1242,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_validate_device_order PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_validate_device_order PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME validate_device_order_unit COMMAND test_validate_device_order)
+steppe_add_test(NAME validate_device_order_unit COMMAND test_validate_device_order LABELS "unit")
 
 # --- Host-only unit test of the M4 VRAM budget helper (X-5/B5 + X-13/B26) -----
 # Pure C++ TU (no CUDA, no io): exercises device/vram_budget.hpp — the host-pure
@@ -1230,7 +1263,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_vram_budget PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_vram_budget PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME vram_budget_unit COMMAND test_vram_budget)
+steppe_add_test(NAME vram_budget_unit COMMAND test_vram_budget LABELS "unit")
 
 # --- Host-only unit test of the shared SNP→block partition rule (M3) ----------
 # Pure C++ TU (no CUDA, no io): exercises core/domain/block_partition_rule on
@@ -1244,7 +1277,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_block_partition PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_block_partition PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME block_partition_unit COMMAND test_block_partition)
+steppe_add_test(NAME block_partition_unit COMMAND test_block_partition LABELS "unit")
 
 # --- Host-only unit test of the block-range INVERSE rule (M4; X-3/B3) ---------
 # Pure C++ TU (no CUDA, no io): exercises core::block_ranges — the single-source
@@ -1264,7 +1297,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_block_ranges PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_block_ranges PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME block_ranges_unit COMMAND test_block_ranges)
+steppe_add_test(NAME block_ranges_unit COMMAND test_block_ranges LABELS "unit")
 
 # Real-AADR INTERNAL-CONSISTENCY check (no synthetic, no statistic): feed the real
 # v66 .snp to assign_blocks and assert the measured block count + dense/ordering
@@ -1276,8 +1309,8 @@ add_test(NAME block_ranges_unit COMMAND test_block_ranges)
 set(STEPPE_AADR_SNP "/workspace/data/aadr/raw/v66.p1_HO.aadr.patch.PUB.snp"
     CACHE FILEPATH "Real AADR .snp file for the block-partition consistency check")
 if(NOT STEPPE_HAVE_GTEST)
-  add_test(NAME block_partition_aadr_consistency
-           COMMAND test_block_partition "${STEPPE_AADR_SNP}")
+  steppe_add_test(NAME block_partition_aadr_consistency
+           COMMAND test_block_partition "${STEPPE_AADR_SNP}" LABELS "unit")
 endif()
 
 # --- Host-only unit test of the f2 composition root (cleanup B11) -------------
@@ -1303,7 +1336,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_f2_from_blocks PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_f2_from_blocks PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME f2_from_blocks_unit COMMAND test_f2_from_blocks)
+steppe_add_test(NAME f2_from_blocks_unit COMMAND test_f2_from_blocks LABELS "unit")
 
 # --- Host-only unit test of the SHARED M2 filter predicates (no GPU, no data) -
 # Pure C++ TU: exercises the host-pure filter_decision.hpp predicates + the
@@ -1317,7 +1350,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_filters PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_filters PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME filters_unit COMMAND test_filters)
+steppe_add_test(NAME filters_unit COMMAND test_filters LABELS "unit")
 
 # --- Host-only unit test of io::GenoReader (cleanup geno_reader B17) ----------
 # Pure C++ TU (no CUDA, no real AADR data): writes tiny SYNTHETIC TGENO .geno
@@ -1336,7 +1369,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_geno_reader PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_geno_reader PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME geno_reader_unit COMMAND test_geno_reader)
+steppe_add_test(NAME geno_reader_unit COMMAND test_geno_reader LABELS "unit")
 
 # --- Host-only unit test of io::read_snp (cleanup snp_reader B14 + B15) --------
 # Pure C++ TU (no CUDA, no real AADR data): writes tiny SYNTHETIC .snp fixtures to
@@ -1361,7 +1394,7 @@ if(STEPPE_HAVE_GTEST)
   target_link_libraries(test_snp_reader PRIVATE GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_snp_reader PRIVATE STEPPE_TEST_WITH_GTEST=1)
 endif()
-add_test(NAME snp_reader_unit COMMAND test_snp_reader)
+steppe_add_test(NAME snp_reader_unit COMMAND test_snp_reader LABELS "unit")
 
 # --- M2 filter ORACLE test (real AADR; the M2 trust seam) --------------------
 # CUDA TU (mirrors test_decode_equivalence.cu): reads the raw TGENO triple via the
@@ -1376,7 +1409,7 @@ add_executable(test_filter_oracle reference/test_filter_oracle.cu)
 target_link_libraries(test_filter_oracle
     PRIVATE steppe::io steppe::device steppe::core steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_filter_oracle PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME filter_oracle COMMAND test_filter_oracle "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME filter_oracle COMMAND test_filter_oracle "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- REGIME-B on-device keep-set PARITY gate (extract_f2 FULL filter on the GPU) --
 # CUDA TU (mirrors test_decode_equivalence.cu / test_filter_oracle.cu): the central
@@ -1394,7 +1427,7 @@ add_executable(test_extract_f2_regimeB_parity reference/test_extract_f2_regimeB_
 target_link_libraries(test_extract_f2_regimeB_parity
     PRIVATE steppe::io steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_extract_f2_regimeB_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-add_test(NAME extract_f2_regimeB_parity COMMAND test_extract_f2_regimeB_parity "${STEPPE_AADR_ROOT}")
+steppe_add_test(NAME extract_f2_regimeB_parity COMMAND test_extract_f2_regimeB_parity "${STEPPE_AADR_ROOT}" LABELS "reference;gpu")
 
 # --- M(cli-1) `steppe qpadm` CLI acceptance gate (cli-bindings.md §7, §8) ---------
 # PLAIN C++ host TU (NO CUDA): writes the COMMITTED real-AADR golden f2 fixtures into a
@@ -1419,10 +1452,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_qpadm
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_qpadm steppe_app)
-  add_test(NAME cli_qpadm
+  steppe_add_test(NAME cli_qpadm
            COMMAND test_cli_qpadm
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu;slow")
 
   # --- M(cli-3) `steppe qpadm-rotate` golden gate (cli-bindings.md §7, §538) ----------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpadm-rotate` over the COMMITTED
@@ -1438,10 +1471,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_rotate
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_rotate steppe_app)
-  add_test(NAME cli_rotate
+  steppe_add_test(NAME cli_rotate
            COMMAND test_cli_rotate
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- M(cli-2) `steppe qpwave` golden gate (cli-bindings.md §7, §537) -----------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpwave` over the COMMITTED real-AADR
@@ -1458,10 +1491,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_qpwave
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_qpwave steppe_app)
-  add_test(NAME cli_qpwave
+  steppe_add_test(NAME cli_qpwave
            COMMAND test_cli_qpwave
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe f4` standalone-f4 golden gate (fit-engine §6) ---------------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe f4` over the COMMITTED real-AADR
@@ -1476,10 +1509,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_f4
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_f4 steppe_app)
-  add_test(NAME cli_f4
+  steppe_add_test(NAME cli_f4
            COMMAND test_cli_f4
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- B1 I/O fault taxonomy gate: a torn / short --out write returns kExitIoError(4) ----
   # PLAIN C++ host TU (NO CUDA): writes the committed real-AADR 9-pop f2 fixture into a temp
@@ -1493,10 +1526,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_io_fault
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_io_fault steppe_app)
-  add_test(NAME cli_io_fault
+  steppe_add_test(NAME cli_io_fault
            COMMAND test_cli_io_fault
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe qpdstat` qpDstat Part-A golden gate (D-stat/f4 over an f2-dir) -----------
   # PLAIN C++ host TU (NO CUDA): the qpDstat-Part-A clone of the cli_f4 gate. Runs the BUILT
@@ -1510,10 +1543,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_qpdstat
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_qpdstat steppe_app)
-  add_test(NAME cli_qpdstat
+  steppe_add_test(NAME cli_qpdstat
            COMMAND test_cli_qpdstat
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe qpdstat --prefix` qpDstat Part-B golden gate (genotype-path NORMALIZED-D) --
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpdstat --prefix
@@ -1531,11 +1564,11 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_dstat_geno cli/test_cli_dstat_geno.cpp)
   target_link_libraries(test_cli_dstat_geno PRIVATE steppe::warnings)
   add_dependencies(test_cli_dstat_geno steppe_app)
-  add_test(NAME cli_dstat_geno
+  steppe_add_test(NAME cli_dstat_geno
            COMMAND test_cli_dstat_geno
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe dates` DATES admixture-dating golden gate --------------------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe dates --prefix
@@ -1549,10 +1582,10 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_dates cli/test_cli_dates.cpp)
   target_link_libraries(test_cli_dates PRIVATE steppe::warnings)
   add_dependencies(test_cli_dates steppe_app)
-  add_test(NAME cli_dates
+  steppe_add_test(NAME cli_dates
            COMMAND test_cli_dates
                    "$<TARGET_FILE:steppe_app>"
-                   "${STEPPE_AADR_ROOT}")
+                   "${STEPPE_AADR_ROOT}" LABELS "cli;gpu;slow")
 
   # --- `steppe qpfstats` genotype-path smoothed-f2-TENSOR golden gate --------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpfstats --prefix
@@ -1566,11 +1599,11 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_qpfstats cli/test_cli_qpfstats.cpp)
   target_link_libraries(test_cli_qpfstats PRIVATE steppe::warnings)
   add_dependencies(test_cli_qpfstats steppe_app)
-  add_test(NAME cli_qpfstats
+  steppe_add_test(NAME cli_qpfstats
            COMMAND test_cli_qpfstats
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe f3` standalone-f3 golden gate (fit-engine §6) ---------------------------
   # PLAIN C++ host TU (NO CUDA): the THREE-slab clone of the cli_f4 gate. Runs the BUILT
@@ -1582,10 +1615,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_f3
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_f3 steppe_app)
-  add_test(NAME cli_f3
+  steppe_add_test(NAME cli_f3
            COMMAND test_cli_f3
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe qpgraph` single-graph-fit golden gate -----------------------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe qpgraph` over the COMMITTED real-AADR
@@ -1597,10 +1630,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_qpgraph
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_qpgraph steppe_app)
-  add_test(NAME cli_qpgraph
+  steppe_add_test(NAME cli_qpgraph
            COMMAND test_cli_qpgraph
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- `steppe f4-ratio` standalone-f4-ratio golden gate (fit-engine §6) ---------------
   # PLAIN C++ host TU (NO CUDA): the FIVE-column clone of the cli_f4/cli_f3 gate. Runs the
@@ -1613,10 +1646,10 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_f4ratio
       PRIVATE steppe::core_internal steppe::api steppe::warnings)
   add_dependencies(test_cli_f4ratio steppe_app)
-  add_test(NAME cli_f4ratio
+  steppe_add_test(NAME cli_f4ratio
            COMMAND test_cli_f4ratio
                    "$<TARGET_FILE:steppe_app>"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
   # --- M(cli-4) `steppe extract-f2 -> qpadm` end-to-end gate (cli-bindings.md §7, §8) -
   # PLAIN C++ host TU (NO CUDA): runs the BUILT `steppe extract-f2` on the RAW v66 AADR
@@ -1634,11 +1667,11 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_extract_qpadm cli/test_cli_extract_qpadm.cpp)
   target_link_libraries(test_cli_extract_qpadm PRIVATE steppe::warnings)
   add_dependencies(test_cli_extract_qpadm steppe_app)
-  add_test(NAME cli_extract_qpadm
+  steppe_add_test(NAME cli_extract_qpadm
            COMMAND test_cli_extract_qpadm
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
-                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu;slow")
 
   # --- M-FR-2 PA-prefix CLI AUTO-COVER gate (format-readers.md §5.2) -------------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the GENO
@@ -1653,10 +1686,10 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_pa_prefix cli/test_cli_pa_prefix.cpp)
   target_link_libraries(test_cli_pa_prefix PRIVATE steppe::warnings)
   add_dependencies(test_cli_pa_prefix steppe_app)
-  add_test(NAME cli_pa_prefix
+  steppe_add_test(NAME cli_pa_prefix
            COMMAND test_cli_pa_prefix
                    "$<TARGET_FILE:steppe_app>"
-                   "${STEPPE_AADR_ROOT}")
+                   "${STEPPE_AADR_ROOT}" LABELS "cli;gpu")
 
   # --- M-FR-EIG EIGENSTRAT-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ---------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the
@@ -1672,10 +1705,10 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_eigenstrat_prefix cli/test_cli_eigenstrat_prefix.cpp)
   target_link_libraries(test_cli_eigenstrat_prefix PRIVATE steppe::warnings)
   add_dependencies(test_cli_eigenstrat_prefix steppe_app)
-  add_test(NAME cli_eigenstrat_prefix
+  steppe_add_test(NAME cli_eigenstrat_prefix
            COMMAND test_cli_eigenstrat_prefix
                    "$<TARGET_FILE:steppe_app>"
-                   "${STEPPE_AADR_ROOT}")
+                   "${STEPPE_AADR_ROOT}" LABELS "cli;gpu")
 
   # --- M-FR PLINK PLINK-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ------------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the PLINK
@@ -1693,10 +1726,10 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_plink_prefix cli/test_cli_plink_prefix.cpp)
   target_link_libraries(test_cli_plink_prefix PRIVATE steppe::warnings)
   add_dependencies(test_cli_plink_prefix steppe_app)
-  add_test(NAME cli_plink_prefix
+  steppe_add_test(NAME cli_plink_prefix
            COMMAND test_cli_plink_prefix
                    "$<TARGET_FILE:steppe_app>"
-                   "${STEPPE_AADR_ROOT}")
+                   "${STEPPE_AADR_ROOT}" LABELS "cli;gpu")
 
   # --- M-FR-AM ANCESTRYMAP-prefix CLI AUTO-COVER gate (format-readers.md §5.3) ---------
   # PLAIN C++ host TU (NO CUDA): runs the BUILT steppe TWICE per tool — once with the
@@ -1712,10 +1745,10 @@ if(STEPPE_BUILD_CLI)
   add_executable(test_cli_ancestrymap_prefix cli/test_cli_ancestrymap_prefix.cpp)
   target_link_libraries(test_cli_ancestrymap_prefix PRIVATE steppe::warnings)
   add_dependencies(test_cli_ancestrymap_prefix steppe_app)
-  add_test(NAME cli_ancestrymap_prefix
+  steppe_add_test(NAME cli_ancestrymap_prefix
            COMMAND test_cli_ancestrymap_prefix
                    "$<TARGET_FILE:steppe_app>"
-                   "${STEPPE_AADR_ROOT}")
+                   "${STEPPE_AADR_ROOT}" LABELS "cli;gpu")
 endif()
 
 # --- M(py-1) nanobind Python gate (cli-bindings.md §7, §8) ----------------------------
@@ -1728,9 +1761,9 @@ endif()
 # data: it stages the COMMITTED fixtures into a temp f2-dir (memory real-data-only).
 if(STEPPE_BUILD_PYTHON)
   find_package(Python 3.9 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME py_qpadm
+  steppe_add_test(NAME py_qpadm
            COMMAND "${Python_EXECUTABLE}" -m pytest -v
-                   "${CMAKE_CURRENT_SOURCE_DIR}/python")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/python" LABELS "python;gpu")
   # STEPPE_AADR_ROOT is passed so test_py_dstat_geno.py finds the raw TGENO prefix steppe
   # reads (<root>/raw/v66.p1_HO.aadr.patch.PUB — the lossless transcode of the convertf-PA
   # v66_HO_pa that AT2 generated the genotype-path D golden from); it SKIPs cleanly when that

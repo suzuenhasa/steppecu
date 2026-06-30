@@ -45,6 +45,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "STEPPE_NVTX": "OFF",
+        "STEPPE_WERROR": "ON",
         "STEPPE_BUILD_TESTS": "OFF",
         "CMAKE_CUDA_ARCHITECTURES": "75-real;80-real;86-real;89-real;90-real;100-real;120-real;120-virtual"
       }
@@ -54,6 +55,7 @@
       "displayName": "CI (release config, tests on)",
       "inherits": "release",
       "cacheVariables": {
+        "STEPPE_WERROR": "ON",
         "STEPPE_BUILD_TESTS": "ON"
       }
     }
@@ -89,6 +91,12 @@
       "configurePreset": "ci",
       "output": { "outputOnFailure": true },
       "execution": { "stopOnFailure": false }
+    },
+    {
+      "name": "host",
+      "displayName": "Host-only CI lane (excludes the gpu label; the CUDA-free ctest -LE gpu subset)",
+      "inherits": "ci",
+      "filter": { "exclude": { "label": "gpu" } }
     }
   ]
 }

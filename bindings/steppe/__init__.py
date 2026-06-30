@@ -70,7 +70,7 @@ class Status(enum.Enum):
     INVALID_CONFIG = "invalid_config"
 
     @classmethod
-    def _from(cls, s: str) -> "Status":
+    def _from(cls, s: str) -> Status:
         return cls(s)
 
 
@@ -360,7 +360,7 @@ class F2Blocks:
     Wraps the compiled ``_core.F2Handle``; build_resources is cached on the handle so the
     precompute-once / fit-many path reuses one Resources across fits (ADR-0005)."""
 
-    def __init__(self, handle: "_core.F2Handle"):
+    def __init__(self, handle: _core.F2Handle):
         self._h = handle
 
     @property
@@ -558,7 +558,7 @@ class QpGraphResult:
         return float(self._d["restart_spread"])
 
     @property
-    def status(self) -> "Status":
+    def status(self) -> Status:
         return Status._from(self._d["status"])
 
     @property

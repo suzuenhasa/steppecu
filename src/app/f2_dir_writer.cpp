@@ -473,11 +473,23 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         if (!pf) return fail(Status::InvalidConfig, "write_f2_dir: pops.txt write failed");
     }
 
+    // pops_sha256 = sha256 of the EXACT pops.txt bytes JUST written (the name<->index
+    // map). A swapped/corrupted pops.txt silently reassigns every name->P-axis index and
+    // changes every downstream result undetectably; stamping its hash lets external
+    // tooling / any future reader re-hash the file to catch that. Reuses the single SHA
+    // home (sha256_file) — pops.txt is tiny, so this is not part of any hash bottleneck.
+    const std::string pops_hex = sha256_file(dir / "pops.txt");
+    const std::string pops_sha = pops_hex.empty() ? std::string{} : ("sha256:" + pops_hex);
+
     // ---- meta.json: provenance (architecture.md §12 reproducibility block) --------
     {
         std::ostringstream js;
         js << "{\n";
         js << "  \"format\": \"STPF2BK1\",\n";
+        // meta_schema_version = the meta.json SIDECAR schema version (kF2MetaSchemaVersion),
+        // DISTINCT from f2.bin's binary version (kF2DiskVersion stamped in F2DiskHeader) — a
+        // consumer keys off this for the provenance field set, not the numeric payload bytes.
+        js << "  \"meta_schema_version\": " << kF2MetaSchemaVersion << ",\n";
         js << "  \"steppe_version\": " << json_str(meta.steppe_version) << ",\n";
         js << "  \"P\": " << f2.P << ",\n";
         js << "  \"n_block\": " << f2.n_block << ",\n";
@@ -511,6 +523,11 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         js << "    \"snp_sha256\": " << json_str(snp_sha) << ",\n";
         js << "    \"ind_sha256\": " << json_str(ind_sha) << "\n";
         js << "  },\n";
+        // pops_sha256: sha256 of pops.txt (the name<->index map), "sha256:<hex>" or "" if
+        // the just-written file could not be re-read. Adjacent to f2_cache_id — both are
+        // content-addresses of a sidecar the writer controls. Lets a reader detect a
+        // pops.txt swap/corruption (which would silently change every result) by re-hashing.
+        js << "  \"pops_sha256\": " << json_str(pops_sha) << ",\n";
         js << "  \"f2_cache_id\": " << json_str(cache_id) << "\n";
         js << "}\n";
 

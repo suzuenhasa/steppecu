@@ -45,7 +45,13 @@ dependencies = [
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]   # the DataFrame accessors; soft/lazy (import steppe works without).
-test = ["pytest>=7", "pandas>=1.5", "numpy>=1.22"]
+# pytest-timeout backs the [tool.pytest.ini_options] per-test timeout below; when it is absent
+# pytest just ignores the `timeout` key (a benign config warning), so the gate is unaffected.
+test = ["pytest>=7", "pytest-timeout>=2", "pandas>=1.5", "numpy>=1.22"]
+# Host-only lint/type toolchain for the pure-Python facade + tests (ruff + mypy). Provisioned
+# as an EXTRA (not a base dep): the future CUDA-free CI lane runs `ruff check` / `mypy
+# bindings/steppe`; absent here it is a no-op (nothing imports these at runtime).
+lint = ["ruff>=0.4", "mypy>=1.8"]
 # OPTIONAL self-contained CUDA-13 runtime via the pip redistributable wheels (`pip install
 # steppe[cuda]`). Declared as an EXTRA, not a base dep, because these wheels are not yet on
 # PyPI with a real >=13 version; when they are, this extra installs libcudart/libcublas/
@@ -88,3 +94,57 @@ build-dir = "build/{wheel_tag}"
 provider = "scikit_build_core.metadata.regex"
 input = "CMakeLists.txt"
 regex = 'project\([^)]*?VERSION\s+(?P<value>\d+\.\d+\.\d+)'
+
+# ---------------------------------------------------------------------------------------------
+# Pure-Python facade: pytest / ruff / mypy config. NONE of this reaches the compiled extension
+# or the goldens — it tunes only the host-side lint/test surface (bindings/steppe + tests/python).
+# scikit-build-core reads only [build-system]/[project]/[tool.scikit-build], so these tables are
+# inert to the wheel build; only pytest reads [tool.pytest.ini_options].
+# ---------------------------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+# Bare `pytest` discovers the facade gate; the CTest `py_qpadm` wiring passes an explicit path
+# (tests/CMakeLists.txt) so testpaths is a convenience for a repo-root run, not a behavior change.
+testpaths = ["tests/python"]
+# Register the `gpu` marker so a future `@pytest.mark.gpu` resolves with no PytestUnknownMarkWarning
+# (every reference test SKIPs cleanly when no CUDA device is visible — cli-bindings.md §7).
+markers = ["gpu: requires a CUDA device"]
+# `-ra` adds an extra summary for non-passing tests (skips/errors); additive to the CTest `-v`.
+addopts = "-ra"
+# Per-test guard (seconds) via pytest-timeout; absent the plugin pytest ignores it (benign warning).
+timeout = 600
+
+[tool.ruff]
+target-version = "py39"
+# Measured from the longest existing source line (99 chars across the facade + tests/python) so the
+# rule set lints clean WITHOUT mass-reformatting the frozen-shape facade (per the A3 plan: bump
+# line-length over a churn rewrite). The result structs deliberately mirror AT2 $weights/$rankdrop.
+line-length = 100
+
+[tool.ruff.lint]
+# Curated, permissive starter set: pycodestyle (E), pyflakes (F), import-order (I), pyupgrade (UP),
+# bugbear (B). Deliberately NOT the strict bandit/blind-except families that would churn the tests.
+select = ["E", "F", "I", "UP", "B"]
+# Keep Optional[...] over PEP-604 `X | None`: requires-python is >=3.9, where an EVALUATED `str |
+# None` (e.g. via typing.get_type_hints on the public facade) is a TypeError, and rewriting the
+# frozen-shape facade is exactly the churn the A3 plan says to avoid (bump config, not a rewrite).
+ignore = ["UP045"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/python starts permissive (the A3 plan: "start permissive; per-file-ignores over a churn
+# rewrite") so the existing test layout is untouched: S101 = bare `assert`; I001 = their import
+# grouping; F841 = the intentional `pd`-availability binds in the pandas-accessor tests; UP031 =
+# the conftest %-format meta.json writer (literal JSON braces make an f-string a brace-doubling
+# churn). The inline `# noqa: BLE001` / `# noqa: WPS433` markers stay authoritative.
+"tests/python/**" = ["S101", "I001", "F841", "UP031"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_unused_ignores = true
+# disallow_untyped_defs stays OFF: the facade is partially annotated; turning it on would be an
+# annotation project, not the XS lint-config A3 scopes.
+
+[[tool.mypy.overrides]]
+# The compiled nanobind extension ships no type stub; excuse just that one import.
+module = "steppe._core"
+ignore_missing_imports = true

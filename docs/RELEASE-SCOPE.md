@@ -61,7 +61,7 @@ Eleven blocker items, de-duplicated across the seven audits. Grouped by the work
 - **[POST, S]** Obsolete `stash@{0}` ("sweep-cli-FAILED-...OOM") lingering. → `git stash drop`.
 - **[POST, S]** Untracked working-tree noise: `tests/tools/stage_qpgraph_f2dir.cpp` (one-off stager, not in CMake), `atlas_results/` (run-output, **not gitignored** — verified). → Commit+wire or delete/gitignore.
 - **[POST, M]** 137 tracked `agentscripts/` (2.1M) + stale root `handoff-ba37d95.md` ship in source; clutter + IP leak (see §2 note + P-1). → Exclude from sdist + scrub/relocate.
-- **[NICE, M/S]** Stale `docs/cleanup/` backlog (134 files, anchored to long-merged M4.5/big-refactor); root `build_m0.sh` + `experiments/` spikes (M0-era, not in CMake).
+- **[NICE, M/S]** Stale `docs/cleanup/` backlog (134 files, anchored to long-merged M4.5/big-refactor); `experiments/` spikes (M0-era, not in CMake). *(CLOSED for `build_m0.sh`: deleted in the kimiactions A5 pass — CMake is the single source of build truth; golden regeneration is now `scripts/regenerate_goldens.sh`.)*
 
 ### 3.3 CLI surface — **release-grade (1 blocker + 1 doc blocker)**
 **State:** single CLI11 app, **14 subcommands** (verified count); uniform flag vocabulary via shared `add_*_flags` helpers; centralized + thorough config validation; documented exit-code taxonomy; `main.cpp` top-level catch. No broken/half-wired subcommand — all 14 dispatch to real GPU compute.

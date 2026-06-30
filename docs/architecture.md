@@ -112,7 +112,6 @@ Pin everything; `third_party/CMakeLists.txt` is the single place `FetchContent_D
 steppe/                                  # repo root.  git: HEAD on branch phase2-fit-engine == main; fit engine BUILT + FINISHED.
 ├── CMakeLists.txt                       # [BUILT] top-level: options + add_subdirectory(include, src, tests)
 ├── CMakePresets.json                    # [BUILT] named configs (dev/release/ci); CMake >= 3.28 + Ninja
-├── build_m0.sh                          # [BUILT] fallback direct-nvcc build of the equivalence test (sm_120)
 ├── .clang-format / .clang-tidy          # [BUILT] single source of style + static analysis
 ├── .gitignore                           # [BUILT] excludes build trees, binaries, AND the real genotype DATA
 │
@@ -157,7 +156,7 @@ steppe/                                  # repo root.  git: HEAD on branch phase
 │   │   │   └── f2_partials_validate.hpp # [BUILT, M4.5] per-device partial validation
 │   │   │       # NOTE: standalone f3/f4/D-stat contractions are still planned (P2); the qpAdm fit's
 │   │   │       #       f4 assembly is BUILT but lives under core/qpadm/ (f4_matrix.hpp), not here.
-│   │   └── qpadm/                       # [BUILT, M(fit-0..6)] the qpAdm FIT ENGINE (S3-S8), host-pure orchestration
+│   │   └── qpadm/                       # [BUILT, M(fit-0..6)] the FIT / SEARCH / STATS engine (S3-S8), host-pure orchestration (NOT qpAdm-only -- see MISNOMER-DECISION NOTE)
 │   │       ├── qpadm_fit.{hpp,cpp}      # [BUILT, M(fit-1)] run_impl: drives S3 assemble_f4 -> S4 jackknife_cov -> S6 GLS
 │   │       │                            #   -> S7 chisq/p -> result assembly, all via the ComputeBackend seam
 │   │       ├── f4_matrix.hpp            # [BUILT, M(fit-1)] S3 f4-contraction driver (cancellation-sensitive, native FP64)
@@ -168,6 +167,16 @@ steppe/                                  # repo root.  git: HEAD on branch phase
 │   │       ├── qpadm_bounds.hpp         # [BUILT, M(fit-2)] feasibility/bounds predicates on the fitted weights
 │   │       └── model_search{,_core}.{hpp,cpp} # [BUILT, M(fit-6)] S8 rotation: run_qpadm_search orchestrator +
 │   │                                    #   host-pure plan_model_shards (model->device tiling; G==1 fast path, G>=2 deferred)
+│   │       # MISNOMER-DECISION (kimiactions A6 / cross-cut G7) -- DEFER, keep the `qpadm/` name. Despite
+│   │       # the name this dir is the FIT/SEARCH/STATS engine, NOT qpAdm-only: its 28 files ALSO house the
+│   │       # qpGraph family (qpgraph_enumerate/fit/model/objective/opt_constants/search), the standalone
+│   │       # f-stats (f3/f4/f4ratio/fstat_sweep), and the model-space search (model_search{,_core}/
+│   │       # nested_models). RENAME->src/core/fit/ OR SPLIT->src/core/qpgraph/ + the EXISTING
+│   │       # src/core/fstats/ was WEIGHED and DEFERRED: a 28-file `git mv` rewrites blame across the
+│   │       # most-touched core dir (high git-history cost) for a readability-only gain and would thrash
+│   │       # the planned steppe_core sublibrary boundary (Kimi 06:60) -- so the name is a DELIBERATE
+│   │       # choice, not an accident. Re-open if/when that sublibrary split lands. (Header pointer in
+│   │       # qpadm_fit.hpp.)
 │   │
 │   ├── device/                          # steppe_device -- the backend layer (CUDA isolated here)
 │   │   ├── CMakeLists.txt               # [BUILT] steppe_device; CUDA PRIVATE; links CUDA::cublas

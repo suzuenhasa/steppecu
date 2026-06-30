@@ -22,6 +22,24 @@ option(STEPPE_BUILD_TESTS "Build steppe tests (CTest + GoogleTest)" ON)
 option(STEPPE_BUILD_PYTHON "Build the nanobind Python bindings (Phase 3)" OFF)
 option(STEPPE_BUILD_CLI    "Build the steppe CLI app (Phase 3)"          OFF)
 
+# --- Warning policy + build-iteration speedups (architecture.md §6, §8) -------
+#
+# Warnings-as-errors is the M0 contract (C++20 with warnings-as-errors), so ON is
+# the DEFAULT and the shipping invariant — CI/release presets pin it ON. OFF is a
+# dev-only escape hatch: a local build keeps -Wall -Wextra but proceeds THROUGH a
+# warning instead of halting mid-experiment. cmake/SteppeWarnings.cmake consumes
+# this to gate the three -Werror tokens (host -Werror / device --Werror;all-warnings
+# / the -Xcompiler host-forward). NOT on the compute/precision path — it changes
+# only whether a warning is fatal, never codegen.
+option(STEPPE_WERROR "Treat warnings as errors (default ON; OFF for local iteration)" ON)
+
+# ccache as the compiler launcher: a no-op when ccache is absent (the top-level
+# CMakeLists.txt only wires CMAKE_{CXX,CUDA}_COMPILER_LAUNCHER when find_program
+# locates it). Byte-identical objects — ccache hashes the full compile command +
+# preprocessed source and is nvcc-aware — so it never touches codegen/parity; a
+# pure rebuild-latency win on the ephemeral box's heavy .cu recompiles.
+option(STEPPE_CCACHE "Use ccache as compiler launcher when found" ON)
+
 # --- Precision emulation tuning (architecture.md §3, §12; ROADMAP §0) --------
 #
 # The fixed-slice-Ozaki engagement symbols

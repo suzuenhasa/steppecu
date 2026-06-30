@@ -68,6 +68,22 @@ find_package(CUDAToolkit REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# --- ccache compiler launcher (architecture.md §6; build-iteration only) ------
+# Opt-in via STEPPE_CCACHE (default ON, SteppeOptions.cmake). A no-op when ccache
+# is not installed, so the box's stock build is unaffected. ccache hashes the full
+# compile command + preprocessed source and is nvcc-aware, so cached objects are
+# byte-identical — zero codegen/parity impact, purely a rebuild-latency win on the
+# heavy .cu recompiles. CMAKE_<LANG>_COMPILER_LAUNCHER is read as each target is
+# created, so this MUST precede the add_subdirectory() calls below.
+if(STEPPE_CCACHE)
+  find_program(CCACHE_PROGRAM ccache)
+  if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER  "${CCACHE_PROGRAM}")
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "steppe: ccache enabled (${CCACHE_PROGRAM})")
+  endif()
+endif()
+
 # --- Targets (one per subdirectory) ------------------------------------------
 # Order matters: api (INTERFACE) → core_internal (INTERFACE) → device → core.
 # io is an ISOLATED LEAF (architecture.md §4): genotype decode front-end, depends

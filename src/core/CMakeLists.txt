@@ -161,6 +161,8 @@ target_link_libraries(steppe_core
             steppe::io                          # qpDstat Part B (run_dstat): the genotype decode front-end (GenoReader/read_ind/read_snp)
             Threads::Threads)                   # SPMG per-device fan-out (f2_blocks_multigpu)
 
+target_compile_features(steppe_core PUBLIC cxx_std_20)
+
 # steppe_core has NO CUDA sources of its own (pure host orchestration); it links
 # steppe_device PRIVATE only to reach the GPU through ComputeBackend. Do NOT let it
 # archive its own nvcc -dlink object for steppe_device's RDC symbols

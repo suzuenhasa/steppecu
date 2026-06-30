@@ -64,6 +64,8 @@ target_link_libraries(steppe_device
     PUBLIC  steppe::api steppe::core_internal     # public, CUDA-FREE seam + shared helpers
     PRIVATE steppe::warnings CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cufft)  # CUDA stays PRIVATE → layering (cufft: the DATES autocorrelation LD engine)
 
+target_compile_features(steppe_device PUBLIC cxx_std_20)
+
 # Fixed-slice Ozaki engagement symbols (cublasSetEmulationStrategy /
 # cublasSetFixedPointEmulationMantissaControl /
 # cublasSetFixedPointEmulationMaxMantissaBitCount) are gated behind this macro in

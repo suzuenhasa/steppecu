@@ -23,6 +23,17 @@ synthetic data, no fabricated numbers.
 > `golden_fit0.json::fixture_f2_object_path` (differ from the head by the documented
 > ~1e-5 read-arg caveat).
 
+## Regenerating these goldens
+
+The canonical, version-asserting entry point is **`scripts/regenerate_goldens.sh`**
+(repo root). It preflights the pinned toolchain (admixtools 2.0.10 / R 4.3.3 /
+convertf v8621), runs the convertf TGENO→PA stage (the CORRECTION below), then the
+R generators in `scripts/` in dependency order, and prints the mandatory
+parity-test re-run reminder. It is a manual, opt-in tool — a dry preflight by
+default; pass `--apply` on box5090 to actually regenerate. The loose R scripts in
+`scripts/` are still the per-golden bodies; the shell script only orchestrates
+them. Run it instead of invoking the R scripts by hand.
+
 ## Files
 
 | File | Contents |

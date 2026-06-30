@@ -19,7 +19,7 @@
 namespace steppe::device {
 
 inline constexpr char     kF2DiskMagic[8]   = {'S','T','P','F','2','B','K','1'};  // "STPF2BK1"
-inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // on-disk format version (the writer stamps this; a future M7 reader checks it — single home so the two cannot drift)
+inline constexpr std::uint32_t kF2DiskVersion   = 1u;  // f2.bin BINARY format version (the writer stamps this into F2DiskHeader.version; read_f2_dir gates on it). DISTINCT from the meta.json SIDECAR schema version (kF2MetaSchemaVersion, src/app/f2_dir_writer.hpp) — do NOT conflate: this versions the numeric payload bytes, that versions the JSON provenance shape. Single home so the writer/reader cannot drift
 inline constexpr std::uint32_t kF2DiskDtypeFp64 = 1u;  // FP64 little-endian (storage is FP64 in every precision mode, include/steppe/fstats.hpp:17)
 
 /// 64-byte fixed header at file offset 0 (little-endian, packed). The remainder:

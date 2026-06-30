@@ -318,8 +318,10 @@ Adopt a **directory**, not the bare blob, because the engine carries no names (�
 <dir>/
   f2.bin          # the STPF2BK1 payload (f2_disk_format.hpp): header(64B) | f2 | vpair | block_sizes
   pops.txt        # the P pop labels, one per line, in P-axis index order (the name↔index map)
-  meta.json       # provenance: steppe version+SHA, precision_tag (engaged, not just requested),
-                  #   blgsize cM, n_block, filter flags, source dataset sha256s, f2_cache_id (sha256 of f2.bin)
+  meta.json       # provenance: meta_schema_version (the sidecar schema version, distinct from
+                  #   f2.bin's binary kF2DiskVersion), steppe version+SHA, precision_tag (engaged,
+                  #   not just requested), blgsize cM, n_block, filter flags, source dataset sha256s,
+                  #   pops_sha256 (sha256 of pops.txt — the name↔index map), f2_cache_id (sha256 of f2.bin)
 ```
 
 **Source-provenance hashing (`--hash`, default OFF).** The `source.{geno,snp,ind}_sha256`
@@ -339,7 +341,13 @@ beyond the standalone hash; the digests are byte-for-byte `sha256sum`-compatible
 preads straight into an `F2BlockTensor` (byte-identical layout, `f2_disk_format.hpp:7-9`).
 `meta.json` records the architecture §12 reproducibility block (R/AT2 fields N/A for a
 steppe-native run; the steppe equivalents are recorded), so `extract-f2 → qpadm` is a
-content-addressed, reproducible pipeline.
+content-addressed, reproducible pipeline. `meta_schema_version` versions the **sidecar
+JSON shape** (the `meta.json` field set) and is deliberately DISTINCT from `f2.bin`'s
+binary `kF2DiskVersion` (the reader gates on the latter; `meta.json` stays advisory).
+`pops_sha256` is the sha256 of `pops.txt` — the name↔index map — so a swapped or
+corrupted label file (which would silently reassign every population's P-axis index and
+change every downstream result) is detectable by re-hashing `pops.txt`. The core load
+path stays `meta.json`-independent: the engine reads only `f2.bin` + `pops.txt`.
 
 ### 4.4 Output: tidy CSV (default) + JSON
 

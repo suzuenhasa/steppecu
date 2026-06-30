@@ -1,5 +1,12 @@
 // src/core/qpadm/qpadm_fit.hpp
 //
+// DIRECTORY-SCOPE POINTER (see architecture.md §4 module map — the qpadm/ MISNOMER-DECISION
+// NOTE): this directory (src/core/qpadm/) is the FIT / SEARCH / STATS engine, NOT qpAdm-only.
+// It ALSO houses the qpGraph family (qpgraph_*), the standalone f-statistics (f3/f4/f4ratio/
+// fstat_sweep), and the model-space search (model_search/nested_models). The qpAdm-centric
+// name was DEFERRED (not renamed to fit/ nor split into qpgraph/+fstats/) as a deliberate,
+// git-blame-cost-weighed choice — kimiactions A6 / cross-cut G7.
+//
 // Single-model qpAdm orchestrator (design docs/design/fit-engine.md §1.3, §3.1;
 // the M(fit-1) FROZEN CONTRACT §3). HOST-PURE, CUDA-FREE: it drives the S3→S4→
 // S6→S7 chain entirely through the CUDA-free ComputeBackend seam (no GEMM/SVD/

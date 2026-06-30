@@ -14,7 +14,7 @@ CTestTestfile.cmake
 compile_commands.json
 Testing/
 
-# --- Fallback / standalone build outputs (build_m0.sh, spike build_run.sh) ---
+# --- Standalone / spike build outputs (stray direct-nvcc binaries) ---
 /test_f2_equivalence
 /test_f2_estimator
 test_f2_equivalence

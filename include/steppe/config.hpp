@@ -176,10 +176,11 @@ inline constexpr int kInvalidDeviceId = -1;
 /// — CUDA-free, parity-neutral (it changes WHERE bytes land, §12).
 inline constexpr int kStreamDeviceChunks = 2;
 
-/// Default number of throughput-only search lanes (streams) PER GPU for the
-/// model-space search (S8). Throughput knob only — results are recomputed in
-/// EmulatedFp64/Fp64 before any reported number (§12), so this is parity-neutral.
-/// Single home for the Config::search_streams default below.
+/// FORWARD-RESERVED (parked multi-GPU / S8 model-space search; NOT wired). Named
+/// home for the forward-reserved `DeviceConfig::search_streams` default below — no
+/// production consumer reads it, so it gates no compute and is parity-neutral by
+/// construction: any S8 result is recomputed in EmulatedFp64/Fp64 before it is
+/// reported (§12).
 inline constexpr std::size_t kDefaultSearchStreams = 4;
 
 /// Target fraction of device VRAM the resident working set may occupy
@@ -346,18 +347,22 @@ struct DeviceConfig {
     /// 40-bit). FP64 is the oracle/fallback; TF32 is screening-only (§12).
     Precision precision;
 
-    /// Statistic streams PER GPU. Must be 1 on the bit-stable statistic path:
-    /// cuBLAS reproducibility does not hold across concurrent streams
-    /// (architecture.md §12). Replaces the implicit single-stream use.
+    /// FORWARD-RESERVED (NOT wired): the device path opens a SINGLE statistic stream
+    /// unconditionally — this field gates no compute. Pinned to 1 because cuBLAS
+    /// reproducibility does not hold across concurrent streams (architecture.md §12);
+    /// it is a §12 trap that MUST stay 1, never a tunable throughput knob.
     std::size_t stream_count = 1;
 
-    /// Throughput-only lanes for the model-space search (S8), where results are
-    /// recomputed in EmulatedFp64/Fp64 before any reported number (§12).
+    /// FORWARD-RESERVED (parked multi-GPU / S8 model-space search; NOT wired). No
+    /// production consumer reads it; it gates no compute. Parity-neutral by
+    /// construction — any S8 result is recomputed in EmulatedFp64/Fp64 before it is
+    /// reported (§12).
     std::size_t search_streams = kDefaultSearchStreams;
 
-    /// Use a pool-backed (cudaMallocAsync) allocator so per-iteration
-    /// allocations recycle from cache rather than round-tripping the OS
-    /// (architecture.md §7, §11.2).
+    /// FORWARD-RESERVED (NOT wired): the device path uses the pool-backed
+    /// (cudaMallocAsync) allocator UNCONDITIONALLY — this field never gates that
+    /// choice and has no production consumer. Parity-neutral (architecture.md §7,
+    /// §11.2).
     bool use_mem_pool = true;
 
     // -----------------------------------------------------------------------
@@ -436,8 +441,7 @@ struct DeviceConfig {
     ///   * the statistic-bearing reductions run `run_to_run`-deterministic and
     ///     cuSOLVER runs in its scoped deterministic mode;
     ///   * `stream_count` is forced to 1 on the statistic path (cuBLAS
-    ///     reproducibility does not hold across concurrent streams, §12) — set
-    ///     >1 explicitly here while `deterministic` is the error `build()` raises;
+    ///     reproducibility does not hold across concurrent streams, §12);
     ///   * `precision == Precision::Kind::EmulatedFp64` requires the explicit
     ///     `cublasSetWorkspace` workspace (`kCublasWorkspaceBytes`), since
     ///     fixed-point emulation voids the run-to-run guarantee without an

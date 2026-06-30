@@ -14,9 +14,11 @@
 //                    it by construction.
 //   <dir>/pops.txt   the P population labels, ONE PER LINE, in P-axis index order —
 //                    the name<->index map (IndPartition.groups[].label order).
-//   <dir>/meta.json  provenance: steppe version+SHA, ENGAGED precision tag, blgsize cM,
-//                    n_block, filter flags, source dataset sha256s, pop selection,
-//                    f2_cache_id (sha256 of f2.bin).
+//   <dir>/meta.json  provenance: meta_schema_version (the SIDECAR schema, kF2MetaSchemaVersion
+//                    — NOT the f2.bin binary version kF2DiskVersion), steppe version+SHA,
+//                    ENGAGED precision tag, blgsize cM, n_block, filter flags, source dataset
+//                    sha256s, pop selection, pops_sha256 (sha256 of pops.txt — the name<->index
+//                    map, so a swapped/corrupted pops.txt is detectable), f2_cache_id (sha256 of f2.bin).
 //
 // THE REAL-vpair RULE (cli-bindings.md §4.3, the M(cli-4) load-bearing decision): the
 // vpair region carries the REAL per-block pairwise-valid SNP counts from the precompute
@@ -38,6 +40,15 @@
 #include "steppe/fstats.hpp"  // steppe::F2BlockTensor
 
 namespace steppe::app {
+
+/// The meta.json SIDECAR schema version (cli-bindings.md §4.3). This versions the JSON
+/// provenance SHAPE (the field set the writer emits / a reader expects), and is the
+/// value stamped as meta.json's `"meta_schema_version"`. It is DISTINCT from
+/// `device::kF2DiskVersion` (src/device/f2_disk_format.hpp), which versions the f2.bin
+/// BINARY payload bytes — the two evolve independently and must NOT be conflated: a
+/// provenance-field change bumps this, an on-disk-layout change bumps that. The reader
+/// gates on kF2DiskVersion (f2.bin); meta.json stays advisory / non-load-bearing.
+inline constexpr int kF2MetaSchemaVersion = 1;
 
 /// The provenance recorded in <dir>/meta.json (cli-bindings.md §4.3; architecture.md
 /// §12 reproducibility block). All fields are app-resolved strings/values so the
