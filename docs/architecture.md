@@ -17,7 +17,7 @@ The single load-bearing domain insight that shapes everything: ADMIXTOOLS 2 is *
 |---|---|---|
 | CUDA Toolkit | **13.x** (13.1+ for the CCCL-3.1 determinism API; build on latest 13.x) | Minimum arch is Turing sm_75; full Blackwell support. The 13.1+ floor is the *design-target* rationale (the determinism API ships in CCCL 3.1, which CUDA 13.0 does not bundle, §3). **[STALE — actual floor is CUDA 13: the shipped build is green on box toolkit 13.0.88; the determinism-API floor was not enforced in the as-built code. The release floor is "CUDA 13" — see `RELEASE-SCOPE.md` §2 #5.]** |
 | C++ standard | **C++20** (CUDA + host) | `std::source_location`, concepts, `std::span` parity; above CCCL's C++17 floor. |
-| Build system | **CMake ≥ 3.30 + Ninja** | 3.30 understands Blackwell arch numbers; Ninja gives correct CUDA dep tracking + `compile_commands.json`. |
+| Build system | **CMake ≥ 3.28 + Ninja** | 3.28 is the as-built floor (`CMakeLists.txt:14`); 3.30 stays the aspirational floor for the named-Blackwell release matrix. Ninja gives correct CUDA dep tracking + `compile_commands.json`. |
 | Device std lib | **CCCL ≥ 3.1** (Thrust / CUB / libcudacxx), pinned | One source for `cuda::std::span`/`mdspan`, device primitives, and the `cuda::execution` determinism controls. |
 | Dense linalg | **cuBLAS + cuSOLVER** (cuSOLVERMp deferred) | Maps directly onto GEMM/SYRK/Cholesky/SVD/batched-LAPACK with *documented, scoped* determinism (§12). |
 | RNG | **cuRAND Philox** (counter-based) | Reproducible per-replicate substreams independent of launch geometry. |
@@ -81,7 +81,7 @@ Pin everything; `third_party/CMakeLists.txt` is the single place `FetchContent_D
 | Component | Pin | One-line rationale |
 |---|---|---|
 | CUDA Toolkit | **13.x** (13.1+ = design target for CCCL 3.1) | Turing→Blackwell; **13.1 bundles CCCL 3.1**, which carries the determinism API. CUDA 13.0 bundles CCCL 3.0.x and lacks it. **[STALE — as-built floor is CUDA 13 (green on 13.0.88); the 13.1 determinism-API floor was a design target, not enforced. See `RELEASE-SCOPE.md` §2 #5.]** |
-| CMake | ≥ 3.30 | Understands Blackwell arch numbers; CUDA-13 nvcc-default handling. |
+| CMake | ≥ 3.28 | As-built floor (`CMakeLists.txt:14`, `CMakePresets.json`, `pyproject.toml:59`); 3.30 stays aspirational for the named-Blackwell release matrix. |
 | Ninja | ≥ 1.11 | Recommended CUDA generator; emits `compile_commands.json`. |
 | C++ standard | C++20 | `source_location`, concepts; above CCCL's C++17 floor. |
 | **CCCL** | **≥ 3.1.0** | Thrust/CUB/libcudacxx; `cuda::std::span`/`mdspan`; **`cuda::execution::require(determinism::…)`**. **Pin explicitly:** `find_package(CCCL)` against a 13.1+ toolkit yields 3.1; against a 13.0 toolkit it silently yields 3.0 and the determinism API vanishes — so CI asserts `CCCL_VERSION >= 3.1` and CPM-fetches 3.1 if the toolkit copy is older (§6). |
@@ -136,7 +136,7 @@ steppe/                                  # repo root.  git: HEAD on branch phase
 │                                        #   run_qpadm_search (+ QpAdmModel by-INDEX, QpAdmResult, JackknifePolicy). The fit-engine seam.
 │
 ├── src/
-│   ├── core/                            # steppe_core -- pure host C++ (NO CUDA, NO I/O)
+│   ├── core/                            # steppe_core -- host C++ orchestration (NO CUDA; links steppe::io PRIVATE for the in-core genotype front-end)
 │   │   ├── CMakeLists.txt               # [BUILT] steppe_core target
 │   │   ├── internal/                    #   DRY shared helpers (the "kernel" of the codebase)
 │   │   │   ├── views.hpp                # [BUILT] MatView -- the Q/V/N column-major [P x M] contract (element i + P*s)
@@ -205,7 +205,11 @@ steppe/                                  # repo root.  git: HEAD on branch phase
 │   │   │                                #   include_exclude + filter_plan (MAF/geno/mind/autosomes/ts-tv; drop-not-flip)
 │   │   ├── merge/ impute/               # (planned, M6) multi-dataset merge-plan + optional imputation
 │   │   └── precomputed_f2.cpp           # (planned, M7) on-disk f2_blocks cache (ADMIXTOOLS-compatible)
-│   └── app/                             # (planned, P3) CLI (extract-f2, qpadm, qpdstat)
+│   ├── access/                          # [BUILT, M(py-1)] steppe_access -- CUDA-free f2-dir reader + pop-name->index resolver (shared CLI + bindings)
+│   ├── extract/                         # [BUILT, M(py-2)] steppe_extract -- genotype->f2 run_extract_f2 + STPF2BK1 dir writer (shared CLI + bindings)
+│   └── app/                             # [BUILT, P3] steppe CLI (extract-f2, qpadm, qpdstat, ...) behind STEPPE_BUILD_CLI
+│
+├── bindings/                            # [BUILT, M(py-1)] steppe._core nanobind module + the steppe Python facade; behind STEPPE_BUILD_PYTHON
 │
 ├── tests/
 │   ├── CMakeLists.txt                   # [BUILT] CTest wiring (gtest if present, else self-checking harness)
@@ -236,7 +240,7 @@ steppe/                                  # repo root.  git: HEAD on branch phase
 └── (root strays: build_run.sh, f2_emu_spike.cu -- leftover spike dupes, slated for removal)
 ```
 
-**Dependency-direction rule.** Allowed edges only: `app/bindings → api → core → device`; `io` is a sibling leaf that produces plain data structs (genotype tiles + per-SNP genetic positions) and depends on nothing in `core`/`device`. The *app* layer is the only place that wires `io` output into compute. **Nothing depends upward; no cycles.** The one shared domain rule (`block_partition_rule.hpp`) lives in `core` and is the single exception that both `io` consumers and device kernels read — it is host-pure and CUDA-free, so it does not break the layering.
+**Dependency-direction rule.** Allowed edges only: `app/bindings → api → core → {device, io}`; `io` is a leaf that produces plain data structs (genotype tiles + per-SNP genetic positions) and depends on nothing in `core`/`device`. Two layers consume `io`: `app` wires `io` output into compute for the file-emitting commands, and `core` itself links `steppe::io` **PRIVATE** (`src/core/CMakeLists.txt`) for the shipped in-core genotype-path stats tools (`stats/dstat.cpp`, `stats/qpfstats.cpp`, `stats/dates.cpp`, `stats/read_canonical_tile.cpp`) — a deliberate `core → io` front-end edge that turns an open `io::GenoReader` into the canonical tile, then dispatches decode through `ComputeBackend`. **Nothing depends upward; no cycles** (`io` stays a leaf below `core` either way). The one shared domain rule (`block_partition_rule.hpp`) lives in `core` and is the single exception that both `io` consumers and device kernels read — it is host-pure and CUDA-free, so it does not break the layering.
 
 **How CMake enforces it.** Link visibility is the mechanism. A `PUBLIC`/`INTERFACE` dependency propagates include dirs to consumers; a `PRIVATE` one does not. We make CUDA `PRIVATE` to `steppe_device`, so `core`/`cli` *physically cannot* `#include` a CUDA header — it won't compile. `core` reaches the GPU only through `ComputeBackend` (a CUDA-free header). See §7 for the target wiring. An additional CI "architecture test" greps for cross-layer includes and asserts the link graph; IWYU prevents transitive leakage — compile-time guarantee plus verification.
 
@@ -257,6 +261,8 @@ The numerics define the layers. Each stage names its **owner** (where the orches
 | **S6 qpAdm GLS fit** — **BUILT** (M(fit-1)) | `core/qpadm/gls_solve.hpp` driver, orchestrated by `qpadm_fit.cpp`; `CudaBackend::gls_weights` override (`cuda_backend.cu` + `qpadm_fit_kernels.cu`) | `ComputeBackend::gls_weights` | `X,Q` → weights `w`, χ² | one constrained GLS (`opt_A`/`opt_B` ALS) solve per model (see note) | batched dense LA |
 | **S7 p-value / nested test** — **BUILT** (M(fit-2)) | `core/qpadm/nested_models.cpp` + `qpadm_fit.cpp` result assembly | host-only | χ², dof → p; rank-decision `f4rank` | embarrassingly parallel over models | trivial |
 | **S8 Model-space search** — **BUILT** (M(fit-6)) | `core/qpadm/model_search.{hpp,cpp}` + host-pure `model_search_core.{hpp,cpp}` (`run_qpadm_search`, `include/steppe/qpadm.hpp`); `CudaBackend::fit_models_batched` override (`cuda_backend.cu` + `qpadm_fit_kernels.cu`) | reuses backend (genuinely batched, NOT a per-model loop) | resident `f2_blocks` across many models | massive task-parallel; same-shape buckets dispatched batched (`batched_dispatch_count ≪ #models`); G≥2 shard deferred (run single-GPU, see note + §11.4) | throughput / scheduling |
+
+**Note on the genotype-path stats tools (the `core → io` edge).** Beyond the precompute pipeline above, the shipped standalone genotype tools (`dstat`/`qpfstats`/`dates` in `core/stats/`, plus `extract_f2`) read the `io` genotype front-end **directly from `core`** (`src/core/CMakeLists.txt` links `steppe::io` PRIVATE) and dispatch decode through `ComputeBackend` — so for these tools the S0 read originates in `core`, not `app`. This is the deliberate `core → io` edge in §4; `io` remains a leaf (it still depends on nothing upward).
 
 **Note on S2's 3-GEMM reformulation (the production hot path).** Per SNP block (`s` SNPs, `P = n_pop`), the fused pre-pass emits four dense `P×s` column-major matrices, where `p` is the per-pop *allele frequency* (not a dosage sum) and `N` is the per-pop *non-missing allele count* at that SNP (`2·#non-missing diploids` — alleles, not individuals; the AT2 bias-correction convention, pinned to a golden): `Q` (zero-filled allele frequencies — the zero is what makes the masked GEMM correct), `V` (validity mask, 1 valid / 0 missing), `Qsq = Q⊙Q`, and `Hc = Q⊙(1−Q)/max(N−1,1)⊙V` (per-SNP het bias correction). Stack `S = [Qsq ; Hc]` (`2P×s`). Three GEMMs then yield the reduced statistics — replacing the old "outer product over pop axis per SNP" with library dense LA:
 
@@ -287,7 +293,7 @@ The decisive consequences: keep `f2_blocks` and `Q` GPU-resident; stream and fus
 |---|---|---|---|---|
 | **S−2 Source schema + merge plan** | `io/merge` (host) | metadata-only (no genotype read) | per-source `{.bim/.fam}`/`{.snp/.ind}` → harmonized SNP set (intersection default / union optional), per-source allele-polarity map from *declared* alleles only (ref/alt swap → `2−dosage`; A/T·C/G ambiguous and multiallelic sites **dropped, never strand-flipped by frequency guesswork** — §1), sample/pop column maps, a `.missnp`-equivalent dropped-SNP list | host-pure leaf; reads `core::block_partition_rule` only as a consumer (§8) so the SNP→block map is bit-identical to the single-dataset path. No CUDA, no upward dep. Merge is a *plan*, not an on-disk rewrite (§1). |
 | **S−1 QC pre-pass (conditional)** | `io/filter/prepass` (host, streams tiles) | one light streaming pass, **only if** `--mind` requested (or an external `prune.in` supplied) | dosages → per-sample non-missing counts (`--mind`); an externally-supplied `prune.in` is read, not computed → resolved include/exclude sets folded back into the plan | streams via the same tiler; emits plain sets. We do **not** compute LD ourselves (§1). Skipped entirely when no aggregate filter is requested. |
-| **S0′ Harmonized+filtered tile produce** | `io` decode (host) → `app` wires the decoded tile into `ComputeBackend::decode` | the existing out-of-core tile loop (§11.1) | packed tile → harmonized tile in reference polarity + `V` + `N` + block ids, applying **cheap in-tile filters** (MAF/geno/include-exclude, plus flag-gated monomorphic/autosome-only/ts-tv) and the missing-data policy | this is S0 with harmonization + cheap-filter folded into the `io`-side decode; **`io` does not depend on `device`/`ComputeBackend`** — `app` is the only layer that wires `io` output into compute (§4). Same `block_partition_rule` → S2 block bins unchanged. |
+| **S0′ Harmonized+filtered tile produce** | `io` decode (host) → `app` wires the decoded tile into `ComputeBackend::decode` | the existing out-of-core tile loop (§11.1) | packed tile → harmonized tile in reference polarity + `V` + `N` + block ids, applying **cheap in-tile filters** (MAF/geno/include-exclude, plus flag-gated monomorphic/autosome-only/ts-tv) and the missing-data policy | this is S0 with harmonization + cheap-filter folded into the `io`-side decode; **`io` does not depend on `device`/`ComputeBackend`** — `app` wires `io` output into compute for this preprocessing stage, and (for the shipped genotype-path stats tools) so does `core` via the deliberate `core → io` edge (§4). Same `block_partition_rule` → S2 block bins unchanged. |
 
 Cheap filters decidable from one tile (or from `.bim/.fam` metadata) are applied *in-tile* before S2 accumulation — a dropped SNP simply contributes nothing to its block, so jackknife block identity is unchanged (the §8 DRY invariant holds). The **default missing-data handling is pairwise-complete** (emit `V`/`N`; this *is* the parity path, no new math); **imputation (mean-fill `2p`) is optional** and tagged so its outputs are never bit-compared to AT2 goldens (§12). Heavy-missingness smoothing (`qpfstats`-style) is a fit-engine mode at S3+, not a preprocessing stage.
 
@@ -299,7 +305,7 @@ Target-based, modern CMake. The top-level `CMakeLists.txt` only sets project pol
 
 ```cmake
 # CMakeLists.txt (top level)
-cmake_minimum_required(VERSION 3.30)          # 3.30 knows Blackwell arch numbers
+cmake_minimum_required(VERSION 3.28)          # as-built floor; 3.30 aspirational for the named-Blackwell release matrix
 project(steppe VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -313,13 +319,18 @@ include(cmake/SteppeOptions.cmake)
 include(cmake/CUDAArch.cmake)
 include(cmake/CompilerLauncher.cmake)
 include(cmake/SteppeWarnings.cmake)           # defines INTERFACE target steppe::warnings
-add_subdirectory(third_party)
+# (no third_party/ dir: deps are bootstrapped via cmake/CPM.cmake inside the
+#  opt-in src/app + bindings subtrees, not a top-level fetch)
 add_subdirectory(include)                     # steppe_api (INTERFACE)
 add_subdirectory(src/io)
-add_subdirectory(src/device)
 add_subdirectory(src/core)
-add_subdirectory(src/app)
-if(STEPPE_BUILD_PYTHON)  add_subdirectory(bindings) endif()
+add_subdirectory(src/device)
+if(STEPPE_BUILD_CLI OR STEPPE_BUILD_PYTHON)   # shared host helpers
+  add_subdirectory(src/access)                #   steppe_access (f2-dir reader + pop resolver)
+  add_subdirectory(src/extract)               #   steppe_extract (run_extract_f2 + STPF2BK1 writer)
+endif()
+if(STEPPE_BUILD_CLI)     add_subdirectory(src/app) endif()   # steppe CLI
+if(STEPPE_BUILD_PYTHON)  add_subdirectory(bindings) endif()  # steppe._core wheel
 if(STEPPE_BUILD_TESTS)   enable_testing(); add_subdirectory(tests) endif()
 ```
 
@@ -675,7 +686,7 @@ QpAdmResult run_qpadm(const GenotypeDataset&, const QpAdmModel&,
 
 ## 10. Error handling, logging & observability
 
-**Error taxonomy (the categories, not just the mechanism).** Callers must distinguish *recoverable domain outcomes* from *faults*. The public boundary returns a C enum `steppe_status_t` (§16); internal code carries the richer `Error` with a matching `category` and a message. The taxonomy:
+**Error taxonomy (the categories, not just the mechanism).** Callers must distinguish *recoverable domain outcomes* from *faults*. The public boundary returns a C enum `steppe_status_t` (the designed C ABI — §16, deferred to M(abi-1); as built the same-toolchain C++ surface returns the `Status` enum directly); internal code carries the richer `Error` with a matching `category` and a message. The taxonomy:
 
 | Code | Category | Recoverable? | Meaning |
 |---|---|---|---|
@@ -690,7 +701,7 @@ QpAdmResult run_qpadm(const GenotypeDataset&, const QpAdmModel&,
 
 The three **domain outcomes** are *expected* results of fitting some models in a large search; the API surfaces them as ordinary per-model statuses (the search records them and moves on), **not** as exceptions or process aborts. Faults (`CUDA_RUNTIME`, and `INVALID_CONFIG` at build time) are fail-fast.
 
-**Errors mechanism.** Internal code propagates `std::expected<T, Error>` via `STEPPE_TRY`. CUDA failures throw a typed `CudaError` (file/line/name/string) at the call site through `STEPPE_CUDA_CHECK`; `CUBLAS_CHECK`/`CUSOLVER_CHECK` translate status enums. The public API converts all of this to `steppe_status_t` and **never lets exceptions or `std::expected` cross the ABI** (§16). Fail-fast: validation at `build()`, post-launch `cudaGetLastError()` always, forced sync in debug. RAII destructors never throw but log a warning on nonzero destroy status in debug (§7).
+**Errors mechanism.** Internal code propagates `std::expected<T, Error>` via `STEPPE_TRY`. CUDA failures throw a typed `CudaError` (file/line/name/string) at the call site through `STEPPE_CUDA_CHECK`; `CUBLAS_CHECK`/`CUSOLVER_CHECK` translate status enums. The public API converts all of this to a `Status`/`steppe_status_t` outcome and **never lets exceptions or `std::expected` cross the public boundary** (§16; the cross-toolchain C ABI is deferred to M(abi-1)). Fail-fast: validation at `build()`, post-launch `cudaGetLastError()` always, forced sync in debug. RAII destructors never throw but log a warning on nonzero destroy status in debug (§7).
 
 **Logging.** Never `printf`/`std::cout` in library code. `internal/log.hpp` wraps spdlog behind `STEPPE_LOG_*` so sinks/levels/async are swappable; levels and sinks come from `RunConfig`, not globals. The Python binding installs a sink forwarding to Python's `logging`.
 
@@ -877,21 +888,31 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "steppe"
 dynamic = ["version"]
-requires-python = ">=3.10"
-# Runtime CUDA libs are NOT bundled (auditwheel --exclude, §14); declare them here so a
-# clean environment can import. Unsuffixed CUDA-13 packages per the 13.x redistributable model.
+requires-python = ">=3.9"
 dependencies = [
-  "numpy>=1.23",
-  "nvidia-cuda-runtime>=13,<14",
-  "nvidia-cublas>=13,<14",
-  "nvidia-cusolver>=13,<14",
-  "nvidia-curand>=13,<14",
+  "numpy>=1.22",            # the ONLY hard runtime dep
+]
+# The CUDA-13 runtime is a SYSTEM requirement, NOT bundled and NOT a base pip dep
+# (the cu13 redistributable wheels are not yet on PyPI with a real >=13 version, §14);
+# an OPTIONAL extra pulls the -cu13-suffixed redistributables when they ship.
+[project.optional-dependencies]
+cuda = [
+  "nvidia-cuda-runtime-cu13>=13,<14",
+  "nvidia-cublas-cu13>=13,<14",
+  "nvidia-cusolver-cu13>=13,<14",
+  "nvidia-cufft-cu13>=13,<14",   # cuFFT drives the DATES ancestry-covariance LD engine
 ]
 
 [tool.scikit-build]
-cmake.version = ">=3.30"
-build.targets = ["steppe._core"]
+cmake.version = ">=3.28"
+build.targets = ["_core"]
 wheel.packages = ["bindings/steppe"]
+# dynamic = ["version"] above resolves from CMakeLists.txt project(VERSION ...) — CMake is
+# the single version source (D2); the regex is project-anchored 3-part (NOT cmake_minimum_required).
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\([^)]*?VERSION\s+(?P<value>\d+\.\d+\.\d+)'
 [tool.scikit-build.cmake.define]
 STEPPE_BUILD_PYTHON = "ON"
 STEPPE_BUILD_CLI = "OFF"
@@ -903,15 +924,15 @@ STEPPE_BUILD_CLI = "OFF"
 
 ## 16. Documentation & ABI/versioning
 
-**ADRs** in `docs/adr/`, Michael Nygard format (*Title, Status, Context, Decision, Consequences*), one decision per immutable record; a reversal gets a new superseding ADR. Initial set: 0000 (record ADRs), 0001 (layered architecture, compiler-enforced), 0002 (nanobind over pybind11), 0003 (CPU reference backend as correctness anchor — an *oracle*, not a structural template, §2), 0004 (precision policy: Ozaki emulated-FP64 default for the well-conditioned matmul-heavy path, native-FP64 oracle AND f2 reduction, TF32 screening; single-stream determinism), 0005 (precompute-once/fit-many split & the `f2_blocks` seam), 0006 (Philox + recorded-environment reproducibility), 0007 (out-of-core SNP tiling), 0008 (**C ABI at the public boundary** — see below), 0009 (**single-node multi-GPU, day one**: SPMG + per-device streams + NCCL; SNP-tile sharding for S0–S2 and model-space sharding for S8; parity via fixed host-order `f2_blocks` combine + broadcast + CCCL `gpu_to_gpu`, *not* NCCL AllReduce; multi-node and cuSOLVERMp deferred — §11.4, §12), 0010 (**GEMM-reformulated f-statistics + fused feeders**: native cuBLAS, no array framework; the 3-GEMM bias-corrected f2 with `Vpair` carried as the jackknife weight; the f2 GEMMs use FIXED-slice Ozaki (~40-bit mantissa; measured 8–17× over native FP64 at native-grade accuracy on real AADR), dynamic-mantissa rejected as the parity trap, native FP64 the oracle/fallback — §2, §5 S2, §12), 0011 (**genotype QC / preprocessing in scope**: in-memory merge plan / on-the-fly filter / pairwise-complete default with optional imputation; no strand inference, no self-computed LD; additive `io`-leaf S−2/S−1/S0′ stages, no on-disk rewrite — §1, §5).
+**ADRs** in `docs/adr/`, Michael Nygard format (*Title, Status, Context, Decision, Consequences*), one decision per immutable record; a reversal gets a new superseding ADR. Initial set: 0000 (record ADRs), 0001 (layered architecture, compiler-enforced), 0002 (nanobind over pybind11), 0003 (CPU reference backend as correctness anchor — an *oracle*, not a structural template, §2), 0004 (precision policy: Ozaki emulated-FP64 default for the well-conditioned matmul-heavy path, native-FP64 oracle AND f2 reduction, TF32 screening; single-stream determinism), 0005 (precompute-once/fit-many split & the `f2_blocks` seam), 0006 (Philox + recorded-environment reproducibility), 0007 (out-of-core SNP tiling), 0008 (**C ABI at the public boundary** — DEFERRED to M(abi-1); as built, `include/steppe/` is a same-toolchain C++ convenience layer, not yet a C ABI — see below), 0009 (**single-node multi-GPU, day one**: SPMG + per-device streams + NCCL; SNP-tile sharding for S0–S2 and model-space sharding for S8; parity via fixed host-order `f2_blocks` combine + broadcast + CCCL `gpu_to_gpu`, *not* NCCL AllReduce; multi-node and cuSOLVERMp deferred — §11.4, §12), 0010 (**GEMM-reformulated f-statistics + fused feeders**: native cuBLAS, no array framework; the 3-GEMM bias-corrected f2 with `Vpair` carried as the jackknife weight; the f2 GEMMs use FIXED-slice Ozaki (~40-bit mantissa; measured 8–17× over native FP64 at native-grade accuracy on real AADR), dynamic-mantissa rejected as the parity trap, native FP64 the oracle/fallback — §2, §5 S2, §12), 0011 (**genotype QC / preprocessing in scope**: in-memory merge plan / on-the-fly filter / pairwise-complete default with optional imputation; no strand inference, no self-computed LD; additive `io`-leaf S−2/S−1/S0′ stages, no on-disk rewrite — §1, §5).
 
-**ABI: a true C boundary, not `std::expected` across the line.** The earlier claim that the public ABI "uses `std::expected` returns" while being ABI-stable was self-contradictory: `std::expected<T,Error>` is a `std::` type with library-defined layout, and if `T`/`Error` hold `std::string`/`std::vector` you reintroduce exactly the libstdc++/libc++/MSVC coupling you meant to avoid. We resolve it by picking one model explicitly:
+**ABI: a true C boundary, not `std::expected` across the line.** **[AS BUILT (HEAD): there is NO C ABI yet — `include/steppe/` is a same-toolchain C++ convenience layer (full C++: `std::` types / templates / classes, value/RAII, `std::expected` internally); there is no `steppe_status_t`, no `extern "C"`, no `src/c_api/`. The C-ABI boundary described in the bullets below is the DESIGNED end state, DEFERRED to M(abi-1); it is retained here as the target design + rationale, not the present-tense surface.]** The earlier claim that the public ABI "uses `std::expected` returns" while being ABI-stable was self-contradictory: `std::expected<T,Error>` is a `std::` type with library-defined layout, and if `T`/`Error` hold `std::string`/`std::vector` you reintroduce exactly the libstdc++/libc++/MSVC coupling you meant to avoid. We resolve it by picking one model explicitly:
 
-- **The installed/versioned boundary is a C ABI.** `include/steppe/` exposes **opaque handles** (`steppe_f2_blocks_t*`, `steppe_qpadm_result_t*`), functions returning **`steppe_status_t`** (the §10 enum), and accessor functions for results. **No `std::` types, no templates, and no exceptions cross this boundary.** This is what makes `find_package(steppe)` + a prebuilt library usable across toolchains and what the SemVer/ABI promise actually covers.
+- **The installed/versioned boundary will be a C ABI (designed; deferred to M(abi-1)).** `include/steppe/` will expose **opaque handles** (`steppe_f2_blocks_t*`, `steppe_qpadm_result_t*`), functions returning **`steppe_status_t`** (the §10 enum), and accessor functions for results. **No `std::` types, no templates, and no exceptions will cross this boundary.** This is what makes `find_package(steppe)` + a prebuilt library usable across toolchains and what the SemVer/ABI promise will then cover. *(As built today: `include/steppe/` is full C++; the C ABI is not yet present.)*
 - **`std::expected`/`STEPPE_TRY` are internal only.** They live in `core` and `src/`; the C API is a thin shim that converts `std::expected<T,Error>` to `steppe_status_t` + out-params at the boundary.
-- A header-only, same-toolchain C++ convenience layer *may* wrap the C ABI with `std::expected`/RAII for in-tree and Python-binding use, but it is **not** the ABI contract and carries no cross-toolchain promise. The binding (§15) links the C++ layer in-process, so it is unaffected.
+- A same-toolchain C++ convenience layer (value/RAII, `std::expected` internally) wraps — or, **as built today, stands in for** — the C ABI for in-tree and Python-binding use; it is **not** the ABI contract and carries no cross-toolchain promise. This C++ layer **is the current public surface** (`include/steppe/`); the binding (§15) links it in-process. When the M(abi-1) C ABI lands, this layer wraps it.
 
-**API docs** via Doxygen + Sphinx/Breathe from `include/steppe/`. **SemVer + stability:** the contract is exactly the C surface in `include/steppe/`; nothing in `src/` is stable. Additive C API ⇒ MINOR, breaking ⇒ MAJOR; the CUDA major version is encoded in the wheel tag and in the SONAME the wheel depends on (§14). `CHANGELOG.md` in Keep-a-Changelog; `version.hpp` generated from `project(VERSION ...)` so macro and wheel version never drift. Installed `SteppeConfig.cmake` exports `steppe::api`/`steppe::core`. This living document is mirrored at `docs/architecture.md`.
+**API docs** via Doxygen + Sphinx/Breathe from `include/steppe/`. **SemVer + stability:** as built, the stability promise tracks the **C++ surface** in `include/steppe/` (the same-toolchain convenience layer); the cross-toolchain **C-ABI** contract (`steppe_status_t`, opaque handles) is the M(abi-1) end state. Either way nothing in `src/` is stable. Additive API ⇒ MINOR, breaking ⇒ MAJOR; the CUDA major version is encoded in the wheel tag and in the SONAME the wheel depends on (§14). `CHANGELOG.md` in Keep-a-Changelog. **Version single-sourced on `project(VERSION ...)` (the top-level `CMakeLists.txt`):** the wheel version is derived from it by scikit-build-core's regex metadata provider (`pyproject.toml` `[tool.scikit-build.metadata.version]`, `dynamic = ["version"]`), and the CLI/extract `STEPPE_VERSION` macro is injected from `${PROJECT_VERSION}` (a compile definition; `src/app|extract/CMakeLists.txt`), so macro and wheel version never drift — bumping `project(VERSION)` moves every surface. (A generated `version.hpp` from `project(VERSION)`, listed in the public-header set below, is the deferred M(abi-1) end state; today the compile-definition + regex-metadata path carries the same single-source guarantee.) Installed `SteppeConfig.cmake` exports `steppe::api`/`steppe::core`. This living document is mirrored at `docs/architecture.md`.
 
 ---
 

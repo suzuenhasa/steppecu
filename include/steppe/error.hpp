@@ -3,10 +3,11 @@
 // Minimal public error/status taxonomy for steppe — the trimmed §10 set.
 //
 // This is the foundational status enum the M0 contract files build against. The
-// full ABI surface (architecture.md §10, §16) is a richer C enum
-// `steppe_status_t` plus an internal `Error` view; this header carries the small
-// strongly-typed C++ subset the early layers need so they can return outcomes
-// without dragging in the whole ABI. CUDA-free; standard-library-free.
+// full cross-toolchain C ABI (architecture.md §10, §16) -- a richer C enum
+// `steppe_status_t` plus an internal `Error` view -- is DEFERRED to M(abi-1); as
+// built this header IS the public status type: the small strongly-typed C++ subset
+// the early layers return outcomes through, without dragging in the whole ABI.
+// CUDA-free; standard-library-free.
 //
 // The three DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance,
 // ChisqUndefined) are *expected* results of fitting some models in a large

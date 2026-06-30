@@ -47,11 +47,14 @@ using steppe::config::ConfigBuilder;
 using steppe::config::RunConfig;
 namespace cfg = steppe::config;
 
-// The version string the user sees with `steppe --version`. STEPPE_VERSION is defined
-// by the build (the project VERSION); fall back to a literal if the macro is absent so
-// the TU compiles standalone.
+// The version string the user sees with `steppe --version`. STEPPE_VERSION is the SOLE
+// authority: the build injects the real value (= the top-level project(VERSION)) via
+// src/app/CMakeLists.txt (STEPPE_VERSION="${PROJECT_VERSION}"). The fallback below is a
+// non-release SENTINEL used only for a standalone TU compile where the macro is absent —
+// it is deliberately NOT a real version so a stale fallback can never impersonate a
+// release (D2: single-source the version on project(VERSION)).
 #ifndef STEPPE_VERSION
-#  define STEPPE_VERSION "0.1.0"
+#  define STEPPE_VERSION "0.0.0+unknown"
 #endif
 
 // Build the merged config from the parsed args (the §9 precedence chain). On failure

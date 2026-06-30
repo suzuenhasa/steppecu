@@ -21,10 +21,13 @@ from . import _core  # the compiled nanobind extension (steppe/_core*.so)
 try:
     from importlib.metadata import version as _pkg_version
 
+    # An installed wheel reports the version scikit-build-core derived from CMakeLists.txt
+    # project(VERSION ...) (pyproject [project] dynamic = ["version"]) — the single source (D2).
     __version__ = _pkg_version("steppe")
 except Exception:  # not installed as a distribution (e.g. an in-tree dev import)
-    # Literal fallback; single-sourced against pyproject.toml [project].version.
-    __version__ = "0.1.0"
+    # Non-release SENTINEL for the in-tree dev-import path only: deliberately NOT a real
+    # version, so a stale fallback can never impersonate a release (D2).
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "__version__",

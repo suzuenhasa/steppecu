@@ -22,7 +22,12 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "steppe"
-version = "0.1.0"
+# VERSION — single-sourced from the top-level CMakeLists.txt project(VERSION x.y.z ...) (the
+# SOLE authority) via scikit-build-core's regex metadata provider (see
+# [tool.scikit-build.metadata.version] below). There is deliberately NO static literal here:
+# the wheel version, the CLI `steppe --version` (STEPPE_VERSION = ${PROJECT_VERSION}), and
+# steppe.__version__ all derive from project(VERSION), so they cannot drift (D2).
+dynamic = ["version"]
 # RUNTIME FLOOR: CUDA 13 (a CUDA-13 runtime + matching NVIDIA driver, resolved at load — see
 # the header note above). steppe is a GPU product; `import steppe` works without a GPU, but any
 # GPU call requires a CUDA-13 device. The prebuilt wheel targets Blackwell sm_120.
@@ -73,3 +78,13 @@ cmake.args = [
 build.targets = ["_core"]
 wheel.packages = ["bindings/steppe"]
 build-dir = "build/{wheel_tag}"
+
+# DYNAMIC VERSION (the [project] dynamic = ["version"] above): read the wheel version straight
+# out of the top-level CMakeLists.txt project(VERSION x.y.z ...) at build time, so CMake is the
+# SINGLE version source and the wheel can never drift from the C++/CMake project version (D2).
+# The regex is project-anchored + 3-part so it captures `0.1.0`, NOT the 2-part
+# cmake_minimum_required(VERSION 3.28); the `value` named group is the scikit-build-core contract.
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\([^)]*?VERSION\s+(?P<value>\d+\.\d+\.\d+)'

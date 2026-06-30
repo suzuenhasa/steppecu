@@ -1103,8 +1103,9 @@ NB_MODULE(_core, m) {
           "qpdstat path reports f4 (the AT2 f2-path convention: qpdstat(f2dir,f4mode) is "
           "byte-identical to f4, f4mode being a no-op without per-SNP genotypes). `quartets` "
           "is a list of (p1,p2,p3,p4) name tuples; returns a dict of parallel arrays "
-          "{pop1,pop2,pop3,pop4,est,se,z,p}. The normalized-D magnitude needs a genotype "
-          "prefix (Part B, not yet implemented).");
+          "{pop1,pop2,pop3,pop4,est,se,z,p}. The normalized-D magnitude needs the genotype "
+          "path: call steppe.dstat(prefix, quadruples) (the run_dstat binding below), or the "
+          "CLI qpdstat --prefix PREFIX.{geno,snp,ind}.");
 
     m.def("run_dstat", &run_dstat_py, "prefix"_a, "quadruples"_a, "blgsize"_a = 0.05,
           "device"_a = 0,

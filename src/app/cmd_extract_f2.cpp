@@ -358,9 +358,9 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     // ---- 9. Write the f2_blocks dir (f2.bin REAL vpair + pops.txt + meta.json) -----
     F2DirMeta meta;
 #ifdef STEPPE_VERSION
-    meta.steppe_version = STEPPE_VERSION;
+    meta.steppe_version = STEPPE_VERSION;  // = ${PROJECT_VERSION}, injected by src/extract|app CMake
 #else
-    meta.steppe_version = "0.0.0";
+    meta.steppe_version = "0.0.0+unknown";  // non-release sentinel (standalone-compile only, D2)
 #endif
     meta.precision_tag = precision_label(engaged);
     meta.precision_mantissa_bits = engaged.mantissa_bits;
