@@ -6,7 +6,7 @@
 # so the directory-scoped flags propagate to every first-party target created
 # later (architecture.md §6 presets, §13 testing). NO targets are defined here.
 #
-# Contract (docs/kimiactions/01-open-worth-doing.md §E2):
+# Contract (docs/archive/kimiactions/01-open-worth-doing.md §E2):
 #   ""            no-op. The DEFAULT; the Release/CI parity build is NEVER
 #                 sanitized (the perf/golden lane must stay clean FP64). The
 #                 empty build is byte-for-byte the current build.
@@ -30,7 +30,7 @@
 # objects — is handled structurally by the $<COMPILE_LANGUAGE:CXX> gate.
 #
 # Lane invocations (asan/ubsan host ctest; compute-sanitizer GPU ctest) live in
-# docs/kimiactions/02-ci-plan.md: this module delivers the CMake seam, CI
+# docs/archive/kimiactions/02-ci-plan.md: this module delivers the CMake seam, CI
 # delivers the runner.
 
 include_guard(GLOBAL)
@@ -47,7 +47,7 @@ elseif("compute" IN_LIST STEPPE_SANITIZER)
     message(FATAL_ERROR
       "STEPPE_SANITIZER='compute' is the runtime compute-sanitizer GPU lane and "
       "cannot be combined with asan/ubsan (got '${STEPPE_SANITIZER}'). Use it "
-      "alone (cmake/SteppeSanitizers.cmake; docs/kimiactions/01-open-worth-doing.md §E2).")
+      "alone (cmake/SteppeSanitizers.cmake; docs/archive/kimiactions/01-open-worth-doing.md §E2).")
   endif()
   # Documented marker the CI GPU lane reads. NO codegen flags are added; the lane
   # wraps the normally-built binaries:
@@ -70,7 +70,7 @@ else()
       message(FATAL_ERROR
         "Unknown STEPPE_SANITIZER value '${_steppe_san_tok}' (in "
         "'${STEPPE_SANITIZER}'). Valid: empty | asan;ubsan | compute "
-        "(cmake/SteppeSanitizers.cmake; docs/kimiactions/01-open-worth-doing.md §E2).")
+        "(cmake/SteppeSanitizers.cmake; docs/archive/kimiactions/01-open-worth-doing.md §E2).")
     endif()
   endforeach()
 

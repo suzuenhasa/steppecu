@@ -140,7 +140,7 @@ endif()
 # Placed after the access/app/bindings targets so they exist for the link + the
 # `if(NOT TARGET steppe::access)` probe.
 if(STEPPE_BUILD_EXAMPLES)
-  add_subdirectory(examples)
+  add_subdirectory(docs/examples)
 endif()
 
 if(STEPPE_BUILD_TESTS)

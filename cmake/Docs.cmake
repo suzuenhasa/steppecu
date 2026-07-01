@@ -15,7 +15,7 @@
 # target builds on the LOCAL non-Blackwell box (unlike every other target). The pdoc
 # `docs-python` target DOES import the facade, which imports the compiled `_core`
 # extension, so it needs a built `_core` on PYTHONPATH (run it on the box / post-wheel);
-# see docs/api/README.md.
+# see docs/archive/api/README.md.
 
 include_guard(GLOBAL)
 
@@ -28,7 +28,7 @@ if(DOXYGEN_FOUND)
       "Doxygen OUTPUT_DIRECTORY for the `docs` target (HTML lands in <dir>/html)")
 
   set(_steppe_doxyfile "${CMAKE_BINARY_DIR}/docs/Doxyfile")
-  configure_file("${PROJECT_SOURCE_DIR}/docs/Doxyfile.in" "${_steppe_doxyfile}" @ONLY)
+  configure_file("${PROJECT_SOURCE_DIR}/docs/archive/Doxyfile.in" "${_steppe_doxyfile}" @ONLY)
 
   # Doxygen::doxygen is the FindDoxygen imported executable target (CMake >= 3.9),
   # preferred over the deprecated DOXYGEN_EXECUTABLE variable.
