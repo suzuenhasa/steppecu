@@ -136,6 +136,23 @@ The single architectural truth under all of it: the speed is the whole pitch, an
 
 ---
 
+### Area 7 — The MCP / Agent Surface
+
+**Vision.** A researcher opens Claude (or any MCP client) and asks, in plain English, "is Bronze Age Britain mostly Beaker-derived?" — the model resolves the fuzzy population names against the AADR catalog, runs a **real** qpAdm rotation on the GPU, and answers with the actual weights, p-values, and feasibility, plus a citable provenance manifest. The LLM does what it is good at — plan, disambiguate, interpret, narrate; steppe does what only it can — compute **parity-validated** statistics in sub-seconds. **The LLM plans; the GPU computes; nothing is hallucinated.** And steppe's speed is the enabler: an agentic *fit → read → refine → re-fit* loop runs inside a single conversation, which AT2's minutes-per-fit structurally cannot. This turns steppe into the trustworthy compute backend for AI-driven population genetics.
+
+| Feature | What | Why it delights | Speed? | Effort |
+|---|---|---|---|---|
+| **MCP tool surface over the facade** *(foundation)* | Expose `qpadm`/`qpwave`/`qpgraph`/`dates`/`f4`/`f3`/`f4-ratio`/`qpdstat`/`rotation` as MCP tools, **1:1 over the existing Python facade**; each returns the structured result + a provenance stamp (params, data hash, version). | The model can *drive* real analyses but **cannot fabricate a number** — the compute is steppe's, only the planning is the model's. The single most important property. | **Yes** | M |
+| **Population resource + `pops.search`/`validate` tools** | The AADR catalog (Area 4) exposed as an MCP **resource** the model reads, plus fuzzy search/validate tools so it turns "Beaker" into the right Group IDs *before* computing. | The population-label hunt is exactly what an LLM excels at; grounding it in the real catalog stops it inventing labels and kills the field's #1 papercut conversationally. | No | M |
+| **Grounding / anti-hallucination contract** | Every result carries params + data-hash + version; the **validation record** (parity vs AT2, the reproduced studies) is a readable resource so the model *knows* — and tells the user — the numbers are defensible, not invented. | The killer differentiator: real GPU statistics, never a made-up f-stat. An LLM wired to AT2-in-R has neither the speed to loop nor this grounding contract. | No | **S** |
+| **Agentic recipes as MCP prompts** | The `steppe ask` recipes (is-admixed / reproduce-a-paper / build-a-graph) exposed as MCP **prompts** — templated multi-step chains the model executes and narrates. | Users ask *questions*, not f-stat call sequences; encoding accepted workflows as prompts makes the model run them the right way instead of improvising method. | **Yes** | M |
+| **Daemon-backed resident f2** *(rides on `steppe serve`)* | The MCP server sits on the Area-6 resident-f2 daemon, so every tool call hits the <200 ms compute path. | The fit → refine loop runs at conversational speed inside one chat — the interactive agentic experience is only viable because the fit is sub-second and f2 stays in VRAM. | **Yes** | M |
+| **Safety flow-through** | The "candidate, not answer" framing + the bootstrap-halo **stability** info flow into every tool result. | The p-hacking guardrail applied to the AI loop: the model reports fragility honestly (SNP-resampled confidence) instead of over-claiming a fished model. | No | **S** |
+
+**Grounding:** the MCP server is a **thin Python wrapper** (official `mcp` SDK / FastMCP) over the *existing* facade + the Area-4 pops catalog + the Area-6 daemon — it **reuses, not rebuilds**. It is the concrete home for the "natural-language front door" wild idea, and its anti-hallucination guarantee (real, parity-validated numbers, never invented) is a genuine, timely differentiator. A **read-only surface** (search + a single fit) is near-term and cheap; the full agentic loop rides on the daemon + f2 cache.
+
+---
+
 ## 3. Prioritized Matrix — Impact × Feasibility
 
 ### Instant wins (high impact, low effort) — *do these first*
@@ -160,6 +177,7 @@ These are mostly app-layer, parity-safe, and hit the named pains directly.
 - **Live Admixture-Graph Builder** + **Population Relationship Explorer**.
 - **AADR Atlas** (map + time-scrub → lasso-to-rotation).
 - **`steppe ask` recipes** + the content-addressed f2/project cache (the cache is the enabler under all live features).
+- **MCP / agent surface** (Area 7) — the "LLM plans, GPU computes real numbers, nothing hallucinated" backend. A **read-only tool surface (search + a single fit) is near-term and cheap** (thin wrapper over the facade); the full agentic loop rides on the daemon + cache.
 
 ### Steady value (medium impact, low–medium effort) — *fill in around the wins*
 Progress bars, terminal sparklines, shell completion, `--explain`, plain `steppe pops show` cards, the journal-export presets, the provenance manifest + `replay`, `cite`, figure provenance, the rotation/leaderboard plots, the terminal-tier plots.
