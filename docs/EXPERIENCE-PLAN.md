@@ -244,6 +244,8 @@ The ambitious bets that, even if parked, define where steppe is going. Flagged a
 
 - **steppe-studio as a local web app** (FastAPI + JS, the fast answer to AT2's Shiny) tying Studio + the explorer + the f2 MDS cloud + the rotation leaderboard into one real-time "explore demographic history" loop.
 
+- **The individual-level frontier** — personal-genome projection (bring your own DNA, get a real qpAdm model of yourself), best-proxy / closest-population search, per-individual outlier QC, and unsupervised custom-population discovery that re-validates its own clusters with f-statistics. The same engine pointed one rung down, from populations to a single genome. See [`INDIVIDUAL-LEVEL-FRONTIER.md`](INDIVIDUAL-LEVEL-FRONTIER.md).
+
 ---
 
 ## 6. Architecture
