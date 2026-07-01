@@ -196,6 +196,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     std::vector<double> Qk, Vk, Nk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
+    std::vector<double> physpos_kept;  // the AT2 bp block-fallback axis (all-zero-map case).
     long M_kept = 0;
 
     if (on_device) {
@@ -206,6 +207,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             std::span<const char>(snptab.alt.data(), Mu),
             std::span<const int>(snptab.chrom.data(), Mu),
             std::span<const double>(snptab.genpos_morgans.data(), Mu),
+            std::span<const double>(snptab.physpos.data(), Mu),
             filter, std::span<const std::size_t>(pop_individuals.data(),
                                                  pop_individuals.size()),
             kPloidyDiploid, maxmiss);
@@ -220,6 +222,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
         ddr.to_host_qvn(Qk, Vk, Nk);
         chrom_kept = std::move(ddr.chrom_kept);
         genpos_kept = std::move(ddr.genpos_kept);
+        physpos_kept = std::move(ddr.physpos_kept);
     } else {
         // CPU PARITY ORACLE: the verbatim host regime-B path (UNCHANGED).
         const DecodeResult dec = backend.decode_af(view);
@@ -271,6 +274,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
         Nk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
         chrom_kept.reserve(n_kept);
         genpos_kept.reserve(n_kept);
+        physpos_kept.reserve(n_kept);
         std::size_t d = 0;
         for (std::size_t s = 0; s < keep.size(); ++s) {
             if (!keep[s]) continue;
@@ -285,14 +289,18 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             }
             chrom_kept.push_back(snptab.chrom[s]);
             genpos_kept.push_back(snptab.genpos_morgans[s]);
+            physpos_kept.push_back(snptab.physpos[s]);
             ++d;
         }
     }
 
     // ---- 3. assign_blocks over the KEPT SNP axis --------------------------------------
+    // physpos_kept drives the AT2 bp block-fallback ONLY when genpos_kept is all zero
+    // (a dataset with no genetic map — e.g. VCF/PLINK-derived); a real map (the AADR)
+    // ignores it, so the partition — and every golden — is bit-identical (the pass gate).
     const steppe::core::BlockPartition partition = steppe::core::assign_blocks(
         std::span<const int>(chrom_kept), std::span<const double>(genpos_kept),
-        blgsize_morgans);
+        blgsize_morgans, std::span<const double>(physpos_kept));
     if (partition.n_block <= 0) {
         throw std::invalid_argument(
             "extract_f2: assign_blocks produced 0 blocks (check blgsize and the .snp "

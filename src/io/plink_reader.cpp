@@ -105,11 +105,24 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
     return value;
 }
 
+// Parse the .bim physical-position token (col4, base pairs) into a double — the
+// AT2 bp block-fallback axis (block_partition_rule.hpp). PLINK's col3 (cM) is
+// frequently all zero while col4 (bp) is populated, so .bim is a first-class
+// fallback case. LENIENT (snp_reader's parse_physpos twin): a garbage/non-finite
+// token degrades to 0.0 rather than throwing — physpos is optional metadata that
+// must not add a new fail-fast on .bim files that parse today.
+[[nodiscard]] double parse_physpos(const std::string& tok) {
+    double value = 0.0;
+    if (!parse_full(tok, value) || !std::isfinite(value)) return 0.0;
+    return value;
+}
+
 // Column layout of a PLINK .bim record (6 cols): chrom id genpos physpos A1 A2.
 constexpr std::size_t kBimFields = 6;
 constexpr std::size_t kBimChromCol = 0;
 constexpr std::size_t kBimIdCol = 1;
 constexpr std::size_t kBimGenposCol = 2;
+constexpr std::size_t kBimPhysposCol = 3;  // physical bp -> the AT2 bp block-fallback axis
 constexpr std::size_t kBimA1Col = 4;  // A1 -> canonical ref (the .bed counts A1 copies)
 constexpr std::size_t kBimA2Col = 5;  // A2 -> canonical alt
 // The PLINK "missing/unknown base" the .bim writes for an absent allele ('0'); mapped to
@@ -191,6 +204,7 @@ SnpTable read_bim(const std::string& path, std::size_t max_snps) {
         const std::string& chrom_tok = fields[kBimChromCol];
         const std::string& id = fields[kBimIdCol];
         const double genpos = parse_genpos(fields[kBimGenposCol], line_no);  // throws on non-finite/garbage
+        const double physpos = parse_physpos(fields[kBimPhysposCol]);  // col4 bp -> bp block-fallback axis
 
         // CANONICAL POLARITY (format-readers.md §3.2): ref := A1, alt := A2. The .bed
         // 2-bit code counts A1 copies, so defining canonical ref as A1 makes the decode's
@@ -202,6 +216,7 @@ SnpTable read_bim(const std::string& path, std::size_t max_snps) {
         table.id.push_back(id);
         table.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
         table.genpos_morgans.push_back(genpos);
+        table.physpos.push_back(physpos);
         table.ref.push_back(ref);
         table.alt.push_back(alt);
         ++table.count;

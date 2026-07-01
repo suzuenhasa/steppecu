@@ -32,13 +32,16 @@ namespace steppe::io {
 /// the key the M2 include/exclude + prune.in membership resolves against. `chrom`
 /// is the chromosome code (only equality between adjacent SNPs matters to the
 /// block rule); `genpos_morgans` is column 3 as-read (Morgans), fed to the shared
-/// block_partition_rule. `ref`/`alt` are the single-character allele codes (col 5
-/// = reference fixing Q's polarity, col 6 = alternate). All vectors have the same
-/// length `count` (== number of SNPs read).
+/// block_partition_rule. `physpos` is column 4 as-read (physical base-pair
+/// position, 0 when absent) — the AT2 bp block-fallback axis used only when the
+/// genetic map is all zero (block_partition_rule.hpp). `ref`/`alt` are the
+/// single-character allele codes (col 5 = reference fixing Q's polarity, col 6 =
+/// alternate). All vectors have the same length `count` (== number of SNPs read).
 struct SnpTable {
     std::vector<std::string> id;            ///< SNP id (col 1) — M2 membership key
     std::vector<int> chrom;                 ///< chromosome code per SNP (file order)
     std::vector<double> genpos_morgans;     ///< genetic position, Morgans, as-read
+    std::vector<double> physpos;            ///< physical position, base pairs (0 if absent)
     std::vector<char> ref;                  ///< reference allele (Q polarity)
     std::vector<char> alt;                  ///< alternate allele
     std::size_t count = 0;                  ///< number of SNPs read (== M)

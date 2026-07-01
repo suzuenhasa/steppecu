@@ -239,6 +239,18 @@ inline constexpr double kDefaultBlockSizeCm = 5.0;
 /// cM-facing config accessor and the Morgan-based block rule.
 inline constexpr double kCentimorgansPerMorgan = 100.0;
 
+/// AT2 base-pair block-fallback window (bp). When a dataset ships NO genetic
+/// linkage map — the .snp/.bim genetic-position column is ALL zero (common in
+/// VCF/PLINK-derived modern data) — ADMIXTOOLS 2's `get_block_lengths` prints
+/// "No genetic linkage map found! Defining blocks by base pair distance of
+/// 2e+06" and partitions by a HARDCODED 2 Mb PHYSICAL-position window instead
+/// of the (zero) Morgans column (admixtools 2.0.10 R/resampling.R; the value is
+/// independent of `blgsize`'s Morgans default). `block_partition_rule`'s
+/// `assign_blocks` reproduces this exactly: on an all-zero genetic map it walks
+/// the physical bp position with THIS window. NOT the 0.05-Morgans (5 cM)
+/// default — the bp fallback is a distinct, physical-distance rule.
+inline constexpr double kBpFallbackWindow = 2.0e6;
+
 /// Inclusive autosome chromosome-code range for the `autosomes_only` filter
 /// ADMIXTOOLS 2's `extract_f2` default is `auto_only = TRUE` ("keep only
 /// SNPs on chromosomes 1 to 22"), so AT2 parity = chromosomes 1..22 — the sex

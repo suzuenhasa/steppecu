@@ -144,6 +144,26 @@ struct BlockPartition {
 /// match views.hpp `MatView::M`; `block_id` stays `std::vector<int>` (the counts
 /// are small). No allocation beyond the result vector.
 ///
+/// THE bp BLOCK-FALLBACK (AT2 parity, the all-zero-genetic-map case). A dataset
+/// with NO genetic linkage map ships an ALL-ZERO genetic-position column (common
+/// in VCF/PLINK-derived modern data: .snp col3 / .bim col3 = 0 everywhere). Then
+/// `(genpos - anchor)` is always 0, the only cuts are chromosome boundaries, and
+/// the walk collapses to ONE block per chromosome — the block-jackknife SE breaks
+/// (a single-chrom subset → 1 block → NA SE / non-SPD covariance). ADMIXTOOLS 2
+/// handles this in `get_block_lengths`: it prints "No genetic linkage map found!
+/// Defining blocks by base pair distance of 2e+06" and partitions by a 2 Mb
+/// PHYSICAL-position window (admixtools 2.0.10 R/resampling.R; the 2e6 is
+/// HARDCODED, independent of `blgsize`). `assign_blocks` reproduces this EXACTLY:
+/// when `genpos_morgans` is all zero AND a NON-DEGENERATE physical axis `physpos`
+/// (length >= M, not all zero) is supplied, it runs the IDENTICAL SNP-anchored
+/// walk over `physpos` with window `bp_window` (default kBpFallbackWindow = 2e6),
+/// and warns on stderr like AT2. The walk over raw bp with a 2e6 window gives the
+/// same cuts as feeding bp·1e-8 pseudo-Morgans with a 0.02-Morgans window (1
+/// cM/Mb), but stays in exact integer-valued bp (bp < 2^53), so the partition is
+/// robust and matches AT2's ~357-block HGDP result. The fallback fires ONLY on an
+/// all-zero map: a dataset WITH a real map (e.g. the AADR) takes the genetic-map
+/// walk unchanged — bit-identical to the pre-fallback behavior (the pass gate).
+///
 /// @param chrom           per-SNP chromosome code (any integer scheme; only
 ///                        equality between adjacent SNPs matters). Length M.
 /// @param genpos_morgans  per-SNP genetic position in Morgans. Length M (== chrom
@@ -152,6 +172,14 @@ struct BlockPartition {
 ///                        `block_size_cm_to_morgans(RunConfig::block_size_cm)`).
 ///                        Must be > 0; a non-positive or NaN width is rejected
 ///                        fail-fast (see the empty-partition note below).
+/// @param physpos         per-SNP physical position in base pairs (from the .snp
+///                        col4 / .bim col4 reader), parallel to `chrom`. Used ONLY
+///                        for the bp fallback when `genpos_morgans` is all zero;
+///                        ignored entirely on a real genetic map. Empty (the
+///                        default) disables the fallback (the walk stays on
+///                        `genpos_morgans`, i.e. 1 block/chrom on an all-zero map).
+/// @param bp_window       the bp fallback window (default kBpFallbackWindow = 2e6,
+///                        the AT2 hardcoded 2 Mb). Only consulted in the fallback.
 /// @return  a BlockPartition with `block_id` of length M (dense 0..n_block-1,
 ///          non-decreasing) and `n_block` set. Empty input → empty `block_id`,
 ///          `n_block == 0`. An ILLEGAL `block_size_morgans` (0, negative, or NaN)
@@ -161,7 +189,9 @@ struct BlockPartition {
 ///          enforceable site today, as `ConfigBuilder::build()` does not exist.
 [[nodiscard]] BlockPartition assign_blocks(std::span<const int> chrom,
                                            std::span<const double> genpos_morgans,
-                                           double block_size_morgans);
+                                           double block_size_morgans,
+                                           std::span<const double> physpos = {},
+                                           double bp_window = kBpFallbackWindow);
 
 /// The half-open SNP column range `[begin, end)` of one jackknife block in the
 /// per-SNP arrays (file order). `begin` is the block's first column (the CUDA

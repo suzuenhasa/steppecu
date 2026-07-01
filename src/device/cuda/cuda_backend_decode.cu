@@ -189,7 +189,8 @@ CanonicalTile CudaBackend::transpose_to_canonical(
 
 steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     const DecodeTileView& tile, std::span<const int> chrom,
-    std::span<const double> genpos, int chrom_min, int chrom_max) {
+    std::span<const double> genpos, std::span<const double> physpos,
+    int chrom_min, int chrom_max) {
     guard_device();
     steppe::device::DeviceDecodeResult out;
     out.device_id = device_id_;
@@ -201,6 +202,11 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     const std::size_t pm =
         static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     const std::size_t Mz = static_cast<std::size_t>(M);
+    // The AT2 bp block-fallback axis (physical position), compacted in lockstep
+    // with chrom/genpos ONLY when the caller supplies a full-length physpos span;
+    // an empty span leaves out.physpos_kept empty (the fallback off). Same value
+    // type (double) as genpos, so it needs no extra temp-size query below.
+    const bool has_physpos = physpos.size() >= Mz;
 
     // ---- 1. Decode → dQ/dV/dN RESIDENT (dN is decoded but the regime-(A) Q/V
     // consumers ignore it; it is NOT compacted/kept). NO host D2H. ----------
@@ -210,11 +216,17 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     // ---- 2. The per-SNP autosome keep-mask (INTEGER-EXACT) → d_flags. -------
     DeviceBuffer<int> dChrom(Mz);
     DeviceBuffer<double> dGenpos(Mz);
+    DeviceBuffer<double> dPhyspos(has_physpos ? Mz : 0u);
     DeviceBuffer<std::uint8_t> dFlags(Mz);
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dChrom.data(), chrom.data(), Mz * sizeof(int),
                                       cudaMemcpyHostToDevice, stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
                                       cudaMemcpyHostToDevice, stream_.get()));
+    if (has_physpos) {
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPhyspos.data(), physpos.data(),
+                                          Mz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+    }
     launch_autosome_keep_mask(dChrom.data(), M, chrom_min, chrom_max, dFlags.data(),
                               stream_.get());
 
@@ -242,12 +254,15 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     // num_selected_out is M_kept — read it back small. ----------------------
     DeviceBuffer<int> dChromKept(Mz);
     DeviceBuffer<double> dGenposKept(Mz);
+    DeviceBuffer<double> dPhysposKept(has_physpos ? Mz : 0u);
     {
         // CUB DeviceSelect::Flagged temp size depends on the VALUE TYPE (the
         // internal tile-state carries the data type), so query BOTH the int
         // (chrom) and double (genpos) calls and size dSelTemp to the MAX — the
         // double query is the larger; reusing an int-sized temp for the double
         // Flagged silently undersizes it (the observed all-zero genpos bug).
+        // physpos is ALSO a double, so the double query already covers it (no
+        // separate query needed); the same dSelTemp serves the third Flagged.
         std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
         STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
             nullptr, sel_bytes_i, dChrom.data(), dFlags.data(),
@@ -269,6 +284,13 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
             dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
             dGenposKept.data(), dNumSel.data(),
             static_cast<std::int64_t>(M), stream_.get()));
+        if (has_physpos) {
+            sb = sel_bytes;
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dPhyspos.data(), dFlags.data(),
+                dPhysposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
+        }
     }
 
     // Read M_kept back (one int) — needed to size the resident Q/V buffers.
@@ -291,7 +313,8 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     launch_compact_columns_gather(dV.data(), P, M, dFlags.data(), dKeepIdx.data(),
                                   out.impl->v.data(), stream_.get());
 
-    // ---- 6. The small kept chrom/genpos D2H (for the CUDA-free assign_blocks). --
+    // ---- 6. The small kept chrom/genpos/physpos D2H (for the CUDA-free assign_blocks;
+    // physpos only when supplied — it feeds the AT2 bp fallback). ----------------
     out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
     out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
@@ -300,6 +323,12 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
                                       static_cast<std::size_t>(m_kept) * sizeof(double),
                                       cudaMemcpyDeviceToHost, stream_.get()));
+    if (has_physpos) {
+        out.physpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.physpos_kept.data(), dPhysposKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+    }
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -307,8 +336,8 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
 steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
     std::span<const int> chrom, std::span<const double> genpos,
-    const FilterConfig& cfg, std::span<const std::size_t> pop_individuals,
-    int ploidy, double maxmiss) {
+    std::span<const double> physpos, const FilterConfig& cfg,
+    std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) {
     guard_device();
     steppe::device::DeviceDecodeResult out;
     out.device_id = device_id_;
@@ -320,6 +349,9 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     const std::size_t pm =
         static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     const std::size_t Mz = static_cast<std::size_t>(M);
+    // The AT2 bp block-fallback axis, compacted in lockstep ONLY when the caller
+    // supplies a full-length physpos span (empty ⇒ out.physpos_kept left empty).
+    const bool has_physpos = physpos.size() >= Mz;
 
     // ---- 1. Decode → dQ/dV/dN RESIDENT (the SHARED front-end; NO host D2H). The
     // regime-B keep-mask reads the UNCOMPACTED dQ/dN; the gather then compacts
@@ -356,6 +388,7 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     DeviceBuffer<char> dRef(Mz), dAlt(Mz);
     DeviceBuffer<int> dChrom(Mz);
     DeviceBuffer<double> dGenpos(Mz);
+    DeviceBuffer<double> dPhyspos(has_physpos ? Mz : 0u);
     DeviceBuffer<std::uint8_t> dFlags(Mz);
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRef.data(), ref.data(), Mz * sizeof(char),
                                       cudaMemcpyHostToDevice, stream_.get()));
@@ -365,6 +398,11 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
                                       cudaMemcpyHostToDevice, stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
                                       cudaMemcpyHostToDevice, stream_.get()));
+    if (has_physpos) {
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPhyspos.data(), physpos.data(),
+                                          Mz * sizeof(double),
+                                          cudaMemcpyHostToDevice, stream_.get()));
+    }
     launch_regimeb_keep_mask(dQ.data(), dN.data(), P, M, dRef.data(), dAlt.data(),
                              dChrom.data(), kernel_cfg,
                              static_cast<double>(ploidy), total_indiv_d, maxmiss,
@@ -387,9 +425,11 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     }
 
     // ---- 4. Compact the 1-D chrom/genpos with CUB DeviceSelect::Flagged (the
-    // IDENTICAL idiom + the int/double MAX-temp-size guard). -------------------
+    // IDENTICAL idiom + the int/double MAX-temp-size guard). physpos (also double)
+    // rides the same dSelTemp — a third Flagged when supplied. -------------------
     DeviceBuffer<int> dChromKept(Mz);
     DeviceBuffer<double> dGenposKept(Mz);
+    DeviceBuffer<double> dPhysposKept(has_physpos ? Mz : 0u);
     {
         std::size_t sel_bytes_i = 0, sel_bytes_d = 0;
         STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
@@ -412,6 +452,13 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
             dSelTemp.data(), sb, dGenpos.data(), dFlags.data(),
             dGenposKept.data(), dNumSel.data(),
             static_cast<std::int64_t>(M), stream_.get()));
+        if (has_physpos) {
+            sb = sel_bytes;
+            STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+                dSelTemp.data(), sb, dPhyspos.data(), dFlags.data(),
+                dPhysposKept.data(), dNumSel.data(),
+                static_cast<std::int64_t>(M), stream_.get()));
+        }
     }
 
     int m_kept = 0;
@@ -438,7 +485,8 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     launch_compact_columns_gather(dN.data(), P, M, dFlags.data(), dKeepIdx.data(),
                                   out.impl->n.data(), stream_.get());
 
-    // ---- 6. The small kept chrom/genpos D2H (for the CUDA-free assign_blocks). --
+    // ---- 6. The small kept chrom/genpos/physpos D2H (for the CUDA-free assign_blocks;
+    // physpos only when supplied — it feeds the AT2 bp fallback). ----------------
     out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
     out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
@@ -447,6 +495,12 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
                                       static_cast<std::size_t>(m_kept) * sizeof(double),
                                       cudaMemcpyDeviceToHost, stream_.get()));
+    if (has_physpos) {
+        out.physpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
+        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.physpos_kept.data(), dPhysposKept.data(),
+                                          static_cast<std::size_t>(m_kept) * sizeof(double),
+                                          cudaMemcpyDeviceToHost, stream_.get()));
+    }
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }

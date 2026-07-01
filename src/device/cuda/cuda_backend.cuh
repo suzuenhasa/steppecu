@@ -249,7 +249,8 @@ public:
     /// compacted Q/V ESCAPE in the returned DeviceDecodeResult.
     [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
-        std::span<const double> genpos, int chrom_min, int chrom_max) override;
+        std::span<const double> genpos, std::span<const double> physpos,
+        int chrom_min, int chrom_max) override;
 
     /// DEVICE-RESIDENT decode + REGIME-B (extract_f2 FULL filter) compaction (the
     /// host-compute audit regime (B) cure). SIBLING of decode_af_compact_autosome:
@@ -262,8 +263,8 @@ public:
     [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_filter(
         const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
         std::span<const int> chrom, std::span<const double> genpos,
-        const FilterConfig& cfg, std::span<const std::size_t> pop_individuals,
-        int ploidy, double maxmiss) override;
+        std::span<const double> physpos, const FilterConfig& cfg,
+        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) override;
 
     /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction on the GPU (the
     /// S2 divergence; backend.hpp dstat_block_reduce / include/steppe/dstat.hpp). Uploads

@@ -132,6 +132,10 @@ inline constexpr int kChromCodeMt = 90;
 inline constexpr std::size_t kMinSnpFields = 3;
 /// Full .snp record field count (the 6-column form carrying explicit ref/alt).
 inline constexpr std::size_t kFullSnpFields = 6;
+/// 0-based column index of the PHYSICAL position (base pairs) in a .snp record.
+/// Present when the record carries >= 4 fields; feeds the AT2 bp block-fallback
+/// (block_partition_rule.hpp) when the genetic-position column is all zero.
+inline constexpr std::size_t kPhysposCol = 3;
 /// 0-based column index of the reference allele in a full 6-column .snp record.
 inline constexpr std::size_t kRefAlleleCol = 4;
 /// 0-based column index of the alternate allele in a full 6-column .snp record.

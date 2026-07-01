@@ -246,6 +246,7 @@ int main(int argc, char** argv) {
                 std::span<const char>(snptab.alt.data(), Mu),
                 std::span<const int>(snptab.chrom.data(), Mu),
                 std::span<const double>(snptab.genpos_morgans.data(), Mu),
+                std::span<const double>(snptab.physpos.data(), Mu),
                 tc.cfg, std::span<const std::size_t>(pop_individuals.data(), pop_individuals.size()),
                 kPloidyDiploid, tc.maxmiss);
         } catch (const std::exception& e) {

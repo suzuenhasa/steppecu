@@ -132,6 +132,21 @@ int chrom_code(const std::string& tok, std::map<std::string, int>& other_codes,
     return value;
 }
 
+// Parse the physical-position token (base pairs) into a double — the AT2 bp
+// block-fallback axis (block_partition_rule.hpp), used only when the genetic map
+// is all zero. double holds any bp exactly (bp < 2^53) and rides the SAME
+// double-compaction path genpos already uses. LENIENT by design: physpos is
+// OPTIONAL metadata (not every consumer needs it, and a real map makes it
+// unused), so a garbage / non-finite col-4 token degrades to 0.0 rather than
+// throwing — it must NOT introduce a new fail-fast on .snp files that parse
+// today. A 0.0 physpos simply cannot anchor a bp block (the fallback only fires
+// on a non-degenerate physical axis).
+[[nodiscard]] double parse_physpos(const std::string& tok) {
+    double value = 0.0;
+    if (!parse_full(tok, value) || !std::isfinite(value)) return 0.0;
+    return value;
+}
+
 }  // namespace
 
 SnpTable read_snp(const std::string& path, std::size_t max_snps) {
@@ -180,6 +195,12 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         const std::string& id = fields[0];
         const std::string& chrom_tok = fields[1];
         const double genpos = parse_genpos(fields[2], line_no);  // throws if non-finite/garbage
+        // Physical position (col 4, 0-based kPhysposCol) is present when the record
+        // carries >= 4 fields (the >=3 minimal form omits it → 0.0). It feeds ONLY
+        // the AT2 bp block-fallback (used when the genetic map is all zero); a real
+        // map leaves it unused, so parsing it is a no-op for the golden path.
+        const double physpos =
+            fields.size() > kPhysposCol ? parse_physpos(fields[kPhysposCol]) : 0.0;
         // Alleles present only when the full 6-column record is given (cols 5,6);
         // otherwise default to the EIGENSTRAT "missing/unknown base" 'N'. Fold the
         // identical ref/alt extraction (differs only by column) into one lambda so
@@ -194,6 +215,7 @@ SnpTable read_snp(const std::string& path, std::size_t max_snps) {
         table.id.push_back(id);
         table.chrom.push_back(chrom_code(chrom_tok, other_codes, next_other));
         table.genpos_morgans.push_back(genpos);
+        table.physpos.push_back(physpos);
         table.ref.push_back(ref);
         table.alt.push_back(alt);
         ++table.count;

@@ -54,6 +54,12 @@ public:
     // autosome loop's chrom_kept/genpos_kept.
     std::vector<int> chrom_kept;            ///< length M_kept.
     std::vector<double> genpos_kept;        ///< length M_kept (Morgans).
+    // The kept SNPs' PHYSICAL position (base pairs), in the same FILE ORDER,
+    // compacted in lockstep with chrom/genpos by the SAME CUB DeviceSelect::Flagged.
+    // Feeds the AT2 bp block-fallback in the CUDA-free assign_blocks (used only when
+    // the genetic map is all zero). Empty when the producer was passed no physpos
+    // axis; length M_kept otherwise.
+    std::vector<double> physpos_kept;       ///< length M_kept (base pairs) or empty.
 
     /// Borrowed device pointers to the resident compacted Q / V (column-major
     /// [P × M_kept], element (pop i, SNP s) at i + P·s). null when impl is null.

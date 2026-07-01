@@ -235,7 +235,8 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         const steppe::core::BlockPartition dry_partition = steppe::core::assign_blocks(
             std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
             std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
-            bs_morgans_dry);
+            bs_morgans_dry,
+            std::span<const double>(snptab.physpos.data(), static_cast<std::size_t>(M)));
         const int n_block_dry = dry_partition.n_block;
 
         std::printf("steppe extract-f2 --dry-run:\n");

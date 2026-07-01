@@ -172,19 +172,23 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     std::vector<double> Qk, Vk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
+    std::vector<double> physpos_kept;  // the AT2 bp block-fallback axis (all-zero-map case).
     if (resident) {
         ddr = be.decode_af_compact_autosome(
             view, std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
             std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
+            std::span<const double>(snptab.physpos.data(), static_cast<std::size_t>(M)),
             kAutosomeChromMin, kAutosomeChromMax);
         chrom_kept = ddr.chrom_kept;
         genpos_kept = ddr.genpos_kept;
+        physpos_kept = ddr.physpos_kept;
     } else {
         const DecodeResult dec = be.decode_af(view);
         Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
         Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
         chrom_kept.reserve(static_cast<std::size_t>(M));
         genpos_kept.reserve(static_cast<std::size_t>(M));
+        physpos_kept.reserve(static_cast<std::size_t>(M));
         for (long s = 0; s < M; ++s) {
             const int chr = snptab.chrom[static_cast<std::size_t>(s)];
             if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;  // AT2 auto_only: autosomes 1..22.
@@ -195,6 +199,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
             }
             chrom_kept.push_back(chr);
             genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
+            physpos_kept.push_back(snptab.physpos[static_cast<std::size_t>(s)]);
         }
     }
     const long M_kept = static_cast<long>(chrom_kept.size());
@@ -204,9 +209,11 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     }
 
     // ---- 2. assign_blocks over the KEPT (autosome) SNP axis (PARITY PIN (2)) ---------
+    // physpos_kept drives the AT2 bp block-fallback ONLY when genpos_kept is all zero
+    // (a dataset with no genetic map); on a real map it is ignored (no-op parity).
     const core::BlockPartition partition = core::assign_blocks(
         std::span<const int>(chrom_kept), std::span<const double>(genpos_kept),
-        blgsize_morgans);
+        blgsize_morgans, std::span<const double>(physpos_kept));
     const int n_block = partition.n_block;
     if (n_block <= 0) {
         fill_nan(res, N);

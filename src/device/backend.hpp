@@ -1004,16 +1004,22 @@ public:
     /// @param tile         the packed tile + population partition + ploidy.
     /// @param chrom        per-SNP chromosome (length tile.n_snp, from snptab.chrom).
     /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
+    /// @param physpos      per-SNP physical position in base pairs (length
+    ///                     tile.n_snp), compacted in lockstep for the AT2 bp
+    ///                     block-fallback; pass an EMPTY span to skip it (then
+    ///                     ddr.physpos_kept is left empty — the fallback is off).
     /// @param chrom_min    autosome lower bound (kAutosomeChromMin = 1).
     /// @param chrom_max    autosome upper bound (kAutosomeChromMax = 22).
     /// @return DeviceDecodeResult: the resident compacted Q/V [P × M_kept] + the
-    ///         small file-ordered kept chrom/genpos for assign_blocks.
+    ///         small file-ordered kept chrom/genpos/physpos for assign_blocks.
     /// NON-PURE: the base throws (the established backend.hpp pattern; the CPU oracle
     /// uses decode_af + the host autosome loop directly, never this resident entry).
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
-        std::span<const double> genpos, int chrom_min, int chrom_max) {
-        (void)tile; (void)chrom; (void)genpos; (void)chrom_min; (void)chrom_max;
+        std::span<const double> genpos, std::span<const double> physpos,
+        int chrom_min, int chrom_max) {
+        (void)tile; (void)chrom; (void)genpos; (void)physpos;
+        (void)chrom_min; (void)chrom_max;
         throw std::runtime_error(
             "ComputeBackend::decode_af_compact_autosome: not implemented by this backend "
             "(the device-resident decode seam requires a CUDA backend)");
@@ -1042,6 +1048,10 @@ public:
     /// @param ref / alt    per-SNP .snp allele chars (length tile.n_snp).
     /// @param chrom        per-SNP chromosome (length tile.n_snp).
     /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
+    /// @param physpos      per-SNP physical position in base pairs (length
+    ///                     tile.n_snp), compacted in lockstep for the AT2 bp
+    ///                     block-fallback; pass an EMPTY span to skip it (then
+    ///                     ddr.physpos_kept is left empty — the fallback is off).
     /// @param cfg          the FilterConfig (maf_min / drop_monomorphic /
     ///                     transversions_only / autosomes_only; geno_max_missing is
     ///                     FORCED to 1.0 internally — the pop-axis maxmiss is separate).
@@ -1055,10 +1065,10 @@ public:
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_filter(
         const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
         std::span<const int> chrom, std::span<const double> genpos,
-        const FilterConfig& cfg, std::span<const std::size_t> pop_individuals,
-        int ploidy, double maxmiss) {
-        (void)tile; (void)ref; (void)alt; (void)chrom; (void)genpos; (void)cfg;
-        (void)pop_individuals; (void)ploidy; (void)maxmiss;
+        std::span<const double> physpos, const FilterConfig& cfg,
+        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) {
+        (void)tile; (void)ref; (void)alt; (void)chrom; (void)genpos; (void)physpos;
+        (void)cfg; (void)pop_individuals; (void)ploidy; (void)maxmiss;
         throw std::runtime_error(
             "ComputeBackend::decode_af_compact_filter: not implemented by this backend "
             "(the regime-B device-resident decode seam requires a CUDA backend)");
