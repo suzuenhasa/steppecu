@@ -729,6 +729,17 @@ int run_cli(int argc, char** argv) {
                                [&](std::int64_t v) { extract_args.drop_monomorphic = (v >= 0); },
                                "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
         sub->add_flag_function("--transversions", [&](std::int64_t) { extract_args.transversions_only = true; }, "Keep only transversions");
+        // --strand-mode drop|keep|flip: the strand-ambiguous (palindromic A/T, C/G)
+        // SNP policy. drop (DEFAULT) drops them (merge-safety default, the frozen
+        // behavior, bit-identical parity); keep retains them (reproduces AT2's default,
+        // which keeps ambiguous SNPs); flip is a documented not-yet-implemented token
+        // (currently == keep, no freq-based reorientation). The raw token is carried;
+        // ConfigBuilder maps it to FilterConfig::strand_mode (unknown token =
+        // InvalidConfig). Mirrors the --ploidy / --tier enum-token pattern.
+        sub->add_option_function<std::string>(
+            "--strand-mode", [&](const std::string& v) { extract_args.strand_mode = v; },
+            "Strand-ambiguous (A/T, C/G) SNP policy: drop (default; merge-safe) | keep "
+            "(retain, AT2 default) | flip (not-yet-implemented, == keep)");
         // --ploidy auto|1|2: AT2 adjust_pseudohaploid policy (default auto = per-sample
         // detection; the f2 pseudo-haploid fix). 1 = force pseudo-haploid, 2 = force
         // diploid (the legacy hardcoded behavior). An unknown token is InvalidConfig.

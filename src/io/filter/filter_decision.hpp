@@ -16,9 +16,13 @@
 // ===========================================================================
 // FILTER SCOPE (architecture.md §1) — the non-negotiable invariants
 // ===========================================================================
-//   * DROP-NOT-FLIP. Strand-ambiguous (A/T, C/G) and multiallelic SNPs are
-//     DROPPED, never strand-flipped by frequency guesswork. No Q value is ever
-//     altered by a filter. We do NOT infer strand.
+//   * DROP-BY-DEFAULT, FLAG-GATED. Multiallelic SNPs are ALWAYS dropped.
+//     Strand-ambiguous (A/T, C/G) SNPs are dropped BY DEFAULT (StrandMode::Drop,
+//     the merge-safety default) but retained under --strand-mode keep/flip (the
+//     AT2-reproduction path). No Q value is ever altered by a filter; even under
+//     Keep we do NOT infer strand (Flip's freq-based reorientation is a documented
+//     not-yet-implemented token). The gate lives once in keep_decision_pooled
+//     (snp_summary_reduce.hpp); the predicates here are pure classifiers.
 //   * NO LD computation. An external prune.in is READ, never computed.
 //   * NO on-disk rewrite. The filters produce a PLAN (a keep-mask / kept-sample
 //     set), consumed per tile during the stream.

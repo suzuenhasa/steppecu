@@ -112,16 +112,25 @@ struct PooledSnpSummary {
 /// The SINGLE per-SNP keep/drop decision over a PooledSnpSummary — the __host__
 /// __device__ body that BOTH snp_filter.hpp::snp_keep_decision (host) and the
 /// regime-B device keep-mask kernel call, so the host mask-builder and the GPU path
-/// cannot diverge. Byte-for-byte the same DROP-NOT-FLIP order as snp_filter.hpp
-/// (filter_decision.hpp predicates): (1) unconditional class drop (multiallelic /
-/// strand-ambiguous); (2) MAF >= maf_min; (3) geno <= geno_max_missing; (4)
-/// flag-gated drop_monomorphic (UNFOLDED pooled_ref_af, exact ==0.0) /
-/// transversions_only / autosomes_only; (5) the precomputed membership bit.
+/// cannot diverge. Byte-for-byte the same order as snp_filter.hpp
+/// (filter_decision.hpp predicates): (1) unconditional multiallelic drop, then the
+/// FLAG-GATED strand-ambiguous drop (only under strand_mode == Drop; Keep/Flip retain
+/// palindromes); (2) MAF >= maf_min; (3) geno <= geno_max_missing; (4) flag-gated
+/// drop_monomorphic (UNFOLDED pooled_ref_af, exact ==0.0) / transversions_only /
+/// autosomes_only; (5) the precomputed membership bit.
+///
+/// STRAND GATE BIT-EXACTNESS: multiallelic stays unconditional (Keep/Flip must still
+/// yield a clean biallelic ACGT set); only the palindrome half is gated. Because the
+/// original `||` short-circuited multiallelic FIRST, at strand_mode == Drop the two
+/// statements below are the EXACT same boolean as the original
+/// `is_multiallelic(ref,alt) || is_strand_ambiguous(ref,alt)` — so the default-drop
+/// decision is bit-identical for any dataset (the parity-safe additive-flag pin).
 [[nodiscard]] STEPPE_HD inline bool keep_decision_pooled(const PooledSnpSummary& sm,
                                                          char ref, char alt, int chrom,
                                                          const FilterConfig& cfg,
                                                          bool membership_ok) noexcept {
-    if (is_multiallelic(ref, alt) || is_strand_ambiguous(ref, alt)) return false;
+    if (is_multiallelic(ref, alt)) return false;
+    if (cfg.strand_mode == StrandMode::Drop && is_strand_ambiguous(ref, alt)) return false;
     if (!snp_passes_maf(sm.pooled_minor_af, cfg.maf_min)) return false;
     if (!snp_passes_geno(sm.missing_frac, cfg.geno_max_missing)) return false;
     if (cfg.drop_monomorphic && is_monomorphic(sm.pooled_ref_af)) return false;

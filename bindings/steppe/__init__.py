@@ -423,6 +423,7 @@ def extract_f2(
     drop_monomorphic: bool = False,
     transversions_only: bool = False,
     ploidy: str = "auto",
+    strand_mode: str = "drop",
     precision: Optional[str] = None,
 ):
     """Build an f2_blocks tensor from a genotype prefix on the GPU (M(py-2) extract-f2).
@@ -435,6 +436,14 @@ def extract_f2(
     ``auto_only`` default), ``maxmiss=0`` (the AT2 POPULATION-axis coverage = the global
     intersection, NOT the sample-axis predicate), per-sample ``ploidy="auto"`` (AT2
     ``adjust_pseudohaploid``), ``blgsize=0.05`` Morgans.
+
+    ``strand_mode`` sets the strand-ambiguous (palindromic A/T, C/G) SNP policy:
+    ``"drop"`` (default) drops them (merge-safety default; reproduces the frozen
+    behavior bit-identically), ``"keep"`` retains them (reproduces ADMIXTOOLS 2's
+    default, which keeps ambiguous SNPs — use this for exact-AT2 reproduction on a
+    panel that still carries palindromes), ``"flip"`` is a documented
+    not-yet-implemented token (currently behaves like ``"keep"``; no frequency-based
+    strand reorientation is performed). Multiallelic SNPs are dropped regardless.
 
     TWO RETURN MODES (capsule/path idiom, NOT a giant disk round-trip):
       * ``out`` is None (default): returns an :class:`F2Blocks` handle wrapping the host f2
@@ -461,6 +470,7 @@ def extract_f2(
         drop_monomorphic,
         transversions_only,
         ploidy,
+        strand_mode,
         precision,
     )
     # out= None -> a raw _core.F2Handle (wrap it); out= path -> the path string (return it).

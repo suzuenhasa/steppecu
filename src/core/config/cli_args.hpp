@@ -198,6 +198,13 @@ struct CliArgs {
     std::optional<bool>   autosomes_only;   ///< --auto-only / --no-auto-only (extract-f2 default ON, AT2 parity)
     std::optional<bool>   drop_monomorphic; ///< --drop-mono / --no-drop-mono (extract-f2 default ON, AT2 poly_only parity)
     std::optional<bool>   transversions_only; ///< --transversions
+    /// --strand-mode drop|keep|flip (raw, UNPARSED token; ConfigBuilder maps it to
+    /// FilterConfig::strand_mode at the single merge site, an unknown token =
+    /// InvalidConfig). Default (unset) ⇒ Drop == the frozen behavior (palindromic
+    /// A/T, C/G SNPs dropped, merge-safety default, bit-identical parity). `keep`
+    /// retains ambiguous SNPs (reproduces AT2's default); `flip` is a documented
+    /// not-yet-implemented token (currently == keep, no freq-based reorientation).
+    std::optional<std::string> strand_mode;
 
     // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
     /// --tier auto|resident|host|disk (the M5 f2_blocks OUTPUT-tier override). Raw,

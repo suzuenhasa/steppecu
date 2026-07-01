@@ -534,6 +534,25 @@ struct DeviceConfig {
 };
 
 // ---------------------------------------------------------------------------
+// StrandMode — the strand-ambiguous (palindromic A/T, C/G) SNP policy (the
+// --strand-mode flag; the merge-safety-vs-AT2-reproduction knob).
+//   * Drop  (DEFAULT == the frozen behavior): DROP strand-ambiguous SNPs. This is
+//     the merge-safety default (palindromic SNPs are a classic strand-flip
+//     corruption source when merging sources) and reproduces the pre-flag path
+//     BIT-IDENTICALLY (the drop is the exact original unconditional rule).
+//   * Keep: do NOT drop strand-ambiguous SNPs — keep every clean biallelic ACGT
+//     SNP. This reproduces ADMIXTOOLS 2's default (AT2 keeps ambiguous SNPs), so
+//     an exact-AT2 run uses this on a panel that still carries palindromes.
+//   * Flip: resolve strand by allele-frequency guesswork (NOT YET IMPLEMENTED —
+//     accepted as a documented token; currently treated as Keep, i.e. it does not
+//     drop palindromes but performs no frequency-based reorientation). A future
+//     freq-based reorientation pass lands here.
+// A trivial scalar enum, so FilterConfig stays device-safe when passed by value
+// into the __global__ keep-mask kernel. Multiallelic SNPs are DROPPED regardless
+// of this mode (Keep/Flip still require clean biallelic ACGT pairs).
+enum class StrandMode { Drop, Keep, Flip };
+
+// ---------------------------------------------------------------------------
 // FilterConfig — on-the-fly QC thresholds (architecture.md §1, §5 S0').
 // Promotes the absent-but-implied filter knobs. Defaults are
 // no-ops (keep everything) so the parity / pairwise-complete path is unaffected
@@ -584,9 +603,18 @@ struct FilterConfig {
     /// Keep only transversion SNPs (ref/alt is a transversion: a purine↔pyrimidine
     /// change, NOT a transition A↔G or C↔T). false ⇒ keep transitions too
     /// (no-op). An explicit add-on beyond bare filter (architecture.md §1, the
-    /// ts/tv option). NB: strand-AMBIGUOUS (A/T, C/G) and multiallelic SNPs are
-    /// DROPPED regardless of this flag (drop-not-flip; architecture.md §1).
+    /// ts/tv option). NB: multiallelic SNPs are DROPPED regardless of this flag;
+    /// strand-AMBIGUOUS (A/T, C/G) SNPs are dropped only under strand_mode == Drop.
     bool transversions_only = false;
+
+    /// Strand-ambiguous (palindromic A/T, C/G) SNP policy — the --strand-mode flag.
+    /// Drop (DEFAULT) reproduces the frozen behavior BIT-IDENTICALLY: palindromes are
+    /// dropped (merge-safety default). Keep retains them (reproduces AT2's default,
+    /// which keeps ambiguous SNPs). Flip is a documented not-yet-implemented token
+    /// (currently == Keep; no frequency-based reorientation is performed). Gated in
+    /// the single shared keep decision (snp_summary_reduce.hpp keep_decision_pooled),
+    /// so the host mask-builder and the device keep-mask kernel cannot diverge.
+    StrandMode strand_mode = StrandMode::Drop;
 
     // ----- Include / exclude SNP membership (resolved against the .snp ids by
     // include_exclude.{hpp,cpp}). Empty ⇒ no constraint (no-op). An external

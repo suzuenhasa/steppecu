@@ -171,7 +171,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
                              const std::string& out, int device, double blgsize,
                              double maf, double maxmiss, bool autosomes_only,
                              bool drop_monomorphic, bool transversions_only,
-                             const std::string& ploidy,
+                             const std::string& ploidy, const std::string& strand_mode,
                              std::optional<std::string> precision) {
     if (pops.empty()) raise_value("extract_f2: pops needs at least one population name");
     const std::string geno = prefix + ".geno";
@@ -191,6 +191,21 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     filter.autosomes_only = autosomes_only; // AT2 extract_f2 default auto_only=TRUE.
     filter.drop_monomorphic = drop_monomorphic;
     filter.transversions_only = transversions_only;
+
+    // --strand-mode drop|keep|flip: the strand-ambiguous (palindromic A/T, C/G) SNP
+    // policy. "drop" (DEFAULT) reproduces the frozen behavior bit-identically (merge-safe);
+    // "keep" retains ambiguous SNPs (reproduces AT2's default); "flip" is a documented
+    // not-yet-implemented token (currently == keep, no freq-based reorientation).
+    if (strand_mode == "drop") {
+        filter.strand_mode = steppe::StrandMode::Drop;
+    } else if (strand_mode == "keep") {
+        filter.strand_mode = steppe::StrandMode::Keep;
+    } else if (strand_mode == "flip") {
+        filter.strand_mode = steppe::StrandMode::Flip;
+    } else {
+        raise_value("extract_f2: strand_mode must be one of 'drop', 'keep', 'flip' "
+                    "(got '" + strand_mode + "')");
+    }
 
     // The precision policy (default EmulatedFp64 40-bit, the f2-GEMM default = the CLI).
     const steppe::Precision prec = parse_precision(precision, "extract_f2");
@@ -405,7 +420,7 @@ void register_fstats(nb::module_& m) {
           "device"_a = 0, "blgsize"_a = 0.05, "maf"_a = 0.0, "maxmiss"_a = 0.0,
           "autosomes_only"_a = true, "drop_monomorphic"_a = false,
           "transversions_only"_a = false, "ploidy"_a = "auto",
-          "precision"_a = nb::none(),
+          "strand_mode"_a = "drop", "precision"_a = nb::none(),
           "Build an f2_blocks tensor from a genotype prefix (GPU; M(py-2) extract-f2). "
           "Reads <prefix>.{geno,snp,ind} directly and runs decode->filter->assign_blocks->"
           "tiered f2 compute->to_host (the SAME chain as the CLI extract-f2). `pops` is the "

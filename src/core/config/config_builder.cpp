@@ -184,6 +184,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.autosomes_only, args.autosomes_only);
     take_b(merged_.drop_monomorphic, args.drop_monomorphic);
     take_b(merged_.transversions_only, args.transversions_only);
+    take(merged_.strand_mode, args.strand_mode);
     take_b(merged_.dry_run, args.dry_run);
     take_b(merged_.hash_source, args.hash_source);
     take_i(merged_.numstart, args.numstart);
@@ -395,6 +396,25 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.autosomes_only.has_value())    flt.autosomes_only = *merged_.autosomes_only;
     if (merged_.drop_monomorphic.has_value())  flt.drop_monomorphic = *merged_.drop_monomorphic;
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
+    // --strand-mode drop|keep|flip -> FilterConfig::strand_mode. UNSET ⇒ Drop (the
+    // struct default == the frozen behavior; palindromic A/T,C/G SNPs dropped, so the
+    // parity path is bit-identical when the flag is absent). keep retains them (AT2's
+    // default); flip is accepted as a documented not-yet-implemented token (stored as
+    // Flip; the keep-gate treats any non-Drop mode as retain, so flip currently behaves
+    // like keep — it does not drop palindromes but performs no freq-based reorientation).
+    if (merged_.strand_mode.has_value()) {
+        const std::string s = to_lower(trim(*merged_.strand_mode));
+        if (s == "drop") {
+            flt.strand_mode = StrandMode::Drop;
+        } else if (s == "keep") {
+            flt.strand_mode = StrandMode::Keep;
+        } else if (s == "flip") {
+            flt.strand_mode = StrandMode::Flip;
+        } else {
+            return fail("--strand-mode '" + *merged_.strand_mode +
+                        "' is unknown (use drop | keep | flip)");
+        }
+    }
 
     // ---- PopSelection (extract-f2; M(cli-4)) — the three modes are mutually
     // exclusive. Default stays AutoTopK{k=0} (the "no selection requested" state the
