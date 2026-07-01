@@ -246,4 +246,13 @@ The ambitious bets that, even if parked, define where steppe is going. Flagged a
 
 ---
 
+## 6. Architecture
+
+*This document is the **product** plan (what/why). The **engineering** architecture (how — folder scaffolding, tech/stack decisions, interfaces to the existing compute, packaging extras) lives alongside it:*
+
+- **[docs/ux/UX-ARCHITECTURE.md](ux/UX-ARCHITECTURE.md)** — the **master** engineering architecture: the full target scaffolding (`bindings/steppe/{plot,pops,explore,workflow,serve,mcp}/` + the `src/app` CLI additions + a separate `web/` front-end), the shared infrastructure and who owns each piece (the CLI output seam, the pops catalog, the f2 cache, the daemon, the provenance manifest, the result classes), the cross-area dependency DAG + build order, and the packaging plan (`steppe[viz]`/`[notebook]`/`[app]`/`[mcp]`/`[all]`).
+- Per-area engineering docs: [Area 1 — CLI](ux/area1-cli-architecture.md) · [Area 2 — Viz](ux/area2-viz-architecture.md) · [Area 3 — Notebooks](ux/area3-notebooks-architecture.md) · [Area 4 — Pops catalog](ux/area4-pops-architecture.md) · [Area 5 — Workflow](ux/area5-workflow-architecture.md) · [Area 6 — Daemon/STUDIO](ux/area6-daemon-architecture.md) · [Area 7 — MCP](ux/area7-mcp-architecture.md).
+
+---
+
 *The compute is done. This is the one last sprint that decides whether anyone gets to enjoy it. The speed is the product — the experience layer is how the world finally feels it.*
