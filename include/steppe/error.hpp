@@ -1,51 +1,27 @@
 // include/steppe/error.hpp
 //
-// Minimal public error/status taxonomy for steppe — the trimmed §10 set.
+// The public outcome codes steppe returns from its early layers — a single
+// strongly-typed Status enum. CUDA-free and standard-library-free, and the
+// stand-in for the full C ABI that is still deferred.
 //
-// This is the foundational status enum the M0 contract files build against. The
-// full cross-toolchain C ABI (architecture.md §10, §16) -- a richer C enum
-// `steppe_status_t` plus an internal `Error` view -- is DEFERRED to M(abi-1); as
-// built this header IS the public status type: the small strongly-typed C++ subset
-// the early layers return outcomes through, without dragging in the whole ABI.
-// CUDA-free; standard-library-free.
-//
-// The three DOMAIN-OUTCOME values (RankDeficient, NonSpdCovariance,
-// ChisqUndefined) are *expected* results of fitting some models in a large
-// search — surfaced as ordinary statuses, never exceptions or aborts
-// (architecture.md §10). Faults (e.g. InvalidConfig at build time) are
-// fail-fast.
+// Reference: docs/reference/include_steppe_error.hpp.md
 #ifndef STEPPE_ERROR_HPP
 #define STEPPE_ERROR_HPP
 
 namespace steppe {
 
-/// Trimmed status taxonomy (architecture.md §10).
+// Status taxonomy — reference §3
 enum class Status {
-    /// Success.
     Ok,
 
-    /// Device allocation or VRAM-budget check failed (resource; maybe
-    /// recoverable with a smaller chunk/budget). architecture.md §11.2.
     DeviceOom,
 
-    /// Domain outcome (recoverable): the rank test / GLS hit a rank-deficient
-    /// design matrix `X`; the model is unidentifiable. A statistical result of
-    /// fitting a degenerate model, not a bug.
     RankDeficient,
 
-    /// Domain outcome (recoverable): the covariance `Q` is not SPD; Cholesky
-    /// failed. A degenerate/collinear model, not a bug.
     NonSpdCovariance,
 
-    /// Domain outcome (recoverable): dof ≤ 0 (or χ² not computable) for this
-    /// model — the chi-squared tail-p is undefined, so `p` is left at its NaN
-    /// sentinel rather than reported as a real value (architecture.md §10,
-    /// STEPPE_ERR_CHISQ_UNDEFINED). A statistical result of an over-parameterized
-    /// model (e.g. nl-1 sources span all nr columns ⇒ dof=0), not a bug.
     ChisqUndefined,
 
-    /// Configuration failed `ConfigBuilder::build()` validation (bad arch list,
-    /// conflicting flags, over-budget VRAM, unhonorable precision). Fail-fast.
     InvalidConfig
 };
 
