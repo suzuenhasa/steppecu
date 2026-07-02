@@ -69,6 +69,13 @@ cuda = [
     "nvidia-cufft-cu13>=13,<14",
 ]
 
+[project.scripts]
+# `steppe-rds` — the GPU-free f2 `.rds` converter CLI (bindings/steppe/_rds.py::main). A DISTINCT
+# name from the compiled `steppe` C++ binary (a `steppe` console-script would collide with it on
+# PATH). Export needs no dependency; import needs the [rds] extra (pyreadr). scikit-build-core
+# emits this as a standard console entry point in the wheel's metadata.
+steppe-rds = "steppe._rds:main"
+
 [tool.scikit-build]
 # Build ONLY the bindings (no CLI); the importable package is bindings/steppe.
 cmake.version = ">=3.28"

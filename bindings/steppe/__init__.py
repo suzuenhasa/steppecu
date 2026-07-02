@@ -21,7 +21,34 @@ import enum
 import math
 from typing import Any, Optional
 
-from . import _core  # the compiled nanobind extension (steppe/_core*.so)
+try:
+    from . import _core  # the compiled nanobind extension (steppe/_core*.so)
+
+    _CORE_AVAILABLE = True  # the real extension loaded — GPU compute is usable
+except ImportError as _exc:
+    # `import steppe` must still succeed when the CUDA-13 extension can't load AT ALL (no CUDA
+    # runtime on the box) so the GPU-FREE surface keeps working: the f2 .rds converter
+    # (export_f2_rds / import_f2_rds / the `steppe-rds` CLI) and `__version__`. Any COMPUTE call
+    # then raises a clear error instead of an opaque AttributeError on a missing module. (When
+    # the runtime IS present but no GPU device is, `_core` loads fine and the device fault
+    # surfaces at call time — this path is unchanged.)
+    _core_load_error = _exc  # keep it: the `except ... as _exc` name is cleared at block end
+
+    class _CoreUnavailable:
+        """Stand-in for a `_core` that failed to import: every attribute access re-raises the
+        original ImportError with guidance, so GPU calls fail loudly while the pure-Python
+        converter (which never touches `_core`) still works."""
+
+        def __getattr__(self, _name):
+            raise ImportError(
+                "steppe._core (the compiled CUDA-13 extension) could not be loaded, so GPU "
+                f"compute is unavailable: {_core_load_error}. steppe needs a CUDA-13 runtime "
+                "(and a GPU to run). The f2 .rds converter (steppe-rds / export_f2_rds / "
+                "import_f2_rds) is GPU-free and does NOT require this."
+            ) from _core_load_error
+
+    _core = _CoreUnavailable()  # type: ignore[assignment]
+    _CORE_AVAILABLE = False  # only the GPU-free surface (the .rds converter) is usable
 
 try:
     from importlib.metadata import version as _pkg_version

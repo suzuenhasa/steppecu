@@ -89,6 +89,18 @@ steppe qpfstats --prefix aadr/v66.p1_1240K.aadr.patch.PUB \
 steppe qpdstat --prefix aadr/v66.p1_1240K.aadr.patch.PUB --pops Mbuti,Han,Czechia_EBA_CordedWare,Turkey_N
 ```
 
+## 10. Verify in ADMIXTOOLS 2 — the f2 `.rds` converter (`steppe-rds`, GPU-free)
+```bash
+# steppe f2 dir  ->  an ADMIXTOOLS 2 read_f2() .rds dir (open it in R to re-run the fit)
+steppe-rds export f2_dir at2_rds_dir
+# AT2 read_f2() .rds dir  ->  a steppe f2 dir     (reading .rds needs: pip install steppe[rds])
+steppe-rds import at2_rds_dir f2_dir
+# not pip-installed (e.g. on the box)? same tool as a module:
+#   python -m steppe._rds export f2_dir at2_rds_dir
+```
+Then in R: `library(admixtools); f2 <- read_f2("at2_rds_dir"); qpadm(f2, target=…, left=…, right=…)`
+— off-diagonal f2 is bit-identical to steppe and qpAdm point estimates match to ~1e-11.
+
 ---
 
 ## Common flags (most subcommands)

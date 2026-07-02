@@ -84,6 +84,20 @@ On-disk format translation only — steppe's f2 values already equal AT2's on th
 EXPORT needs no extra dependency (a stdlib RDS serializer); IMPORT reads with pyreadr:
 `pip install steppe[rds]`.
 
+Easiest is the `steppe-rds` command (GPU-free — no Python snippet). On the box the wheel isn't
+pip-installed, so invoke it as a module (`python3 -m steppe._rds`); an installed wheel puts
+`steppe-rds` on your PATH (`steppe-rds export … / steppe-rds import …`):
+
+```
+# EXPORT: a steppe f2 dir -> an AT2 read_f2() .rds dir you can open in R
+ssh box5090 'PYTHONPATH=/workspace/steppe/build-rel/bindings python3 -m steppe._rds export /workspace/data/qpgraph_9pop_stpf2bk1 /tmp/exported_rds'
+
+# IMPORT: an AT2 read_f2() .rds dir -> a steppe STPF2BK1 cache (needs pyreadr)
+ssh box5090 'PYTHONPATH=/workspace/steppe/build-rel/bindings python3 -m steppe._rds import /workspace/data/aadr/f2_fit0_corrected /tmp/imported_stpf2bk1'
+```
+
+Or from Python:
+
 ```python
 import steppe
 # EXPORT: steppe f2 cache -> an AT2 read_f2() .rds dir you can open in R

@@ -55,6 +55,10 @@ def steppe_mod():
         import steppe  # noqa: WPS433
     except Exception as exc:  # pragma: no cover - build dependent
         pytest.skip(f"steppe bindings not importable (build with -DSTEPPE_BUILD_PYTHON=ON): {exc}")
+    # `import steppe` now succeeds even without the CUDA `_core` (the GPU-free .rds converter
+    # surface stays usable); this fixture promises a BUILT steppe, so skip when _core didn't load.
+    if not getattr(steppe, "_CORE_AVAILABLE", True):
+        pytest.skip("steppe._core (the CUDA-13 extension) not built/loadable")
     return steppe
 
 

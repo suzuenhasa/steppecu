@@ -306,3 +306,67 @@ def test_export_committed_fixture(steppe_mod, stage_f2_dir, tmp_path):
         assert np.array_equal(df["f2"].to_numpy(), arr[i, j, :]), (p1, p2)
     bl = pyreadr.read_r(str(out / "block_lengths_f2.rds"))[None]
     assert [int(v) for v in bl.iloc[:, 0]] == list(f2.block_sizes)
+
+
+# ---- GATE (6): the GPU-free STPF2BK1 reader + the `steppe-rds` CLI (main) --------------
+def _stage_stpf2bk1(rds, h, out_dir):
+    """Write an STPF2BK1 f2-dir on disk from a _FakeF2, so the CLI's disk reader has an input."""
+    rds._write_stpf2bk1(
+        str(out_dir), h.P, h.n_block, h.block_sizes, h.to_numpy(), h.vpair_to_numpy(), h.pops
+    )
+
+
+def test_read_stpf2bk1_inverts_writer(tmp_path):
+    """_read_stpf2bk1 (the GPU-free disk reader the CLI uses) is the exact inverse of
+    _write_stpf2bk1: pops / P / n_block / block_sizes / f2 / vpair all round-trip bit-exact."""
+    rds = _load_rds()
+    h = _FakeF2()
+    src = tmp_path / "src_f2"
+    _stage_stpf2bk1(rds, h, src)
+    hh = rds._read_stpf2bk1(str(src))
+    assert hh.pops == h.pops
+    assert (hh.P, hh.n_block) == (h.P, h.n_block)
+    assert hh.block_sizes == h.block_sizes
+    assert np.array_equal(hh.to_numpy(), h.to_numpy())
+    assert np.array_equal(hh.vpair_to_numpy(), h.vpair_to_numpy())
+
+
+def test_cli_export_then_import(tmp_path):
+    """`steppe-rds export` (GPU-free, via _read_stpf2bk1) writes an AT2 .rds dir, then
+    `steppe-rds import` round-trips it back to STPF2BK1 with the off-diagonal f2 bit-exact."""
+    pytest.importorskip("pyreadr")
+    rds = _load_rds()
+    h = _FakeF2()
+    src = tmp_path / "src_f2"
+    _stage_stpf2bk1(rds, h, src)
+    rds_dir = tmp_path / "exported"
+    back = tmp_path / "reimported"
+
+    assert rds.main(["export", str(src), str(rds_dir)]) == 0
+    assert (rds_dir / "block_lengths_f2.rds").exists()
+    for p in h.pops:  # AT2 read_f2 derives `pops` from list.dirs -> a subdir per pop
+        assert (rds_dir / p).is_dir()
+
+    assert rds.main(["import", str(rds_dir), str(back)]) == 0
+    hh = rds._read_stpf2bk1(str(back))
+    arr = h.to_numpy()
+    name_to_idx = {p: i for i, p in enumerate(h.pops)}
+    f2 = hh.to_numpy()
+    for a in range(h.P):
+        for b in range(h.P):
+            if a == b:
+                assert np.all(f2[a, a, :] == 0.0)  # diagonal zeroed
+            else:
+                i, j = name_to_idx[hh.pops[a]], name_to_idx[hh.pops[b]]
+                assert np.array_equal(f2[a, b, :], arr[i, j, :]), (a, b)
+
+
+def test_cli_bad_args_and_missing_input(tmp_path):
+    """argparse misuse exits nonzero (SystemExit); a missing input dir is a handled error
+    (return 1, no traceback) not a crash."""
+    rds = _load_rds()
+    with pytest.raises(SystemExit):  # no subcommand (required=True)
+        rds.main([])
+    with pytest.raises(SystemExit):  # unknown subcommand
+        rds.main(["frobnicate", "a", "b"])
+    assert rds.main(["export", str(tmp_path / "nope"), str(tmp_path / "out")]) == 1

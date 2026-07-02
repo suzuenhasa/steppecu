@@ -34,6 +34,7 @@ import gzip
 import json
 import os
 import struct
+import sys
 from collections.abc import Sequence
 from typing import Optional
 
@@ -389,3 +390,125 @@ def import_f2_rds(rds_dir, out_dir, *, type="f2"):
 
     _write_stpf2bk1(out_dir, P, n_block, block_sizes, f2, vpair, pops)
     return str(out_dir)
+
+
+# ---------------------------------------------------------------------------------------
+# GPU-free STPF2BK1 reader + the `steppe-rds` console-script entry point. Reading the f2 dir
+# straight off disk HERE (rather than via steppe.read_f2 -> the compiled `_core`) is what keeps
+# the converter CLI GPU-free: a pure on-disk format translation must not require a CUDA device.
+# ---------------------------------------------------------------------------------------
+class _F2DirHandle:
+    """A minimal, GPU-free F2Blocks stand-in — exactly the accessors ``export_f2_rds`` reads
+    (``pops`` / ``P`` / ``n_block`` / ``block_sizes`` / ``to_numpy`` / ``vpair_to_numpy``),
+    populated by :func:`_read_stpf2bk1` straight from ``f2.bin``."""
+
+    def __init__(self, pops, P, n_block, block_sizes, f2, vpair):
+        self.pops = pops
+        self.P = P
+        self.n_block = n_block
+        self.block_sizes = block_sizes
+        self._f2 = f2
+        self._vpair = vpair
+
+    def to_numpy(self):
+        return self._f2
+
+    def vpair_to_numpy(self):
+        return self._vpair
+
+
+def _read_stpf2bk1(f2_dir):
+    """Read an STPF2BK1 f2-dir into a GPU-free handle — the exact inverse of ``_write_stpf2bk1``.
+
+    Parses ``f2.bin``'s 64-byte header, then the f2 / vpair / block_sizes regions at their
+    RECORDED offsets (authoritative, not assumed-contiguous), plus ``pops.txt`` — with numpy +
+    stdlib only, NO compiled ``_core``. So ``steppe-rds export`` converts a cache without a GPU."""
+    import numpy as np
+
+    f2_path = os.path.join(f2_dir, "f2.bin")
+    with open(f2_path, "rb") as fh:
+        header = fh.read(_F2_HEADER_SIZE)
+        if len(header) != _F2_HEADER_SIZE:
+            raise ValueError(
+                f"{f2_path!r}: truncated header ({len(header)} < {_F2_HEADER_SIZE} bytes)"
+            )
+        (magic, _version, dtype, P, n_block,
+         f2_off, vpair_off, bs_off, _reserved) = struct.unpack("<8sIIiiQQQ16s", header)
+        if magic != _F2_MAGIC:
+            raise ValueError(f"{f2_path!r}: bad magic {magic!r} (expected {_F2_MAGIC!r})")
+        if dtype != _F2_DTYPE_FP64:
+            raise ValueError(
+                f"{f2_path!r}: unsupported dtype {dtype} (only FP64={_F2_DTYPE_FP64})"
+            )
+        count = P * P * n_block
+        fh.seek(f2_off)
+        f2 = np.frombuffer(fh.read(count * 8), dtype="<f8").reshape((P, P, n_block), order="F")
+        fh.seek(vpair_off)
+        vpair = np.frombuffer(fh.read(count * 8), dtype="<f8").reshape((P, P, n_block), order="F")
+        fh.seek(bs_off)
+        block_sizes = np.frombuffer(fh.read(n_block * 4), dtype="<i4").astype(int).tolist()
+
+    pops_path = os.path.join(f2_dir, "pops.txt")
+    with open(pops_path) as ph:
+        pops = [ln.strip() for ln in ph if ln.strip()]
+    if len(pops) != P:
+        raise ValueError(f"{pops_path!r}: {len(pops)} pop labels but f2.bin header says P={P}")
+
+    # np.array(...) makes writable, standalone copies (frombuffer views are read-only); the
+    # values/indexing downstream are layout-agnostic, so the F-order read is preserved logically.
+    return _F2DirHandle(pops, P, n_block, block_sizes, np.array(f2), np.array(vpair))
+
+
+def main(argv=None):
+    """``steppe-rds`` — the GPU-free f2 ``.rds`` converter CLI (the ``[project.scripts]`` entry).
+
+        steppe-rds export <f2_dir> <out_rds_dir>   steppe STPF2BK1 -> AT2 read_f2() .rds dir
+        steppe-rds import <rds_dir> <out_f2_dir>    AT2 read_f2() .rds dir -> steppe STPF2BK1
+
+    Export needs no third-party dependency; import reads ``.rds`` via pyreadr
+    (``pip install steppe[rds]``). Returns a process exit code (0 ok, 1 on a handled error)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="steppe-rds",
+        description="Convert an f2 cache between steppe (STPF2BK1) and ADMIXTOOLS 2 read_f2() "
+                    ".rds format. Pure on-disk translation — no GPU.",
+    )
+    sub = parser.add_subparsers(dest="mode", required=True, metavar="{export,import}")
+
+    p_exp = sub.add_parser(
+        "export",
+        help="steppe f2 dir -> AT2 read_f2() .rds dir (to verify steppe in ADMIXTOOLS 2 / R)",
+    )
+    p_exp.add_argument("f2_dir", help="the steppe f2 directory (holds f2.bin + pops.txt)")
+    p_exp.add_argument("out_dir", help="output directory for the AT2 read_f2() .rds cache")
+    p_exp.add_argument(
+        "--counts", choices=("ones", "vpair"), default="ones",
+        help="the .rds 'counts' column: 'ones' (default; reproduces AT2's own f2 family) or "
+             "'vpair' (steppe's per-block valid-pair counts)",
+    )
+
+    p_imp = sub.add_parser(
+        "import",
+        help="AT2 read_f2() .rds dir -> steppe f2 dir (needs: pip install steppe[rds])",
+    )
+    p_imp.add_argument("rds_dir", help="the AT2 read_f2() .rds directory (per-pop subdirs)")
+    p_imp.add_argument("out_dir", help="output directory for the steppe STPF2BK1 f2 cache")
+
+    args = parser.parse_args(argv)
+
+    try:
+        if args.mode == "export":
+            out = export_f2_rds(_read_stpf2bk1(args.f2_dir), args.out_dir, counts=args.counts)
+            print(f"steppe-rds: exported {args.f2_dir} -> {out}")
+        else:
+            out = import_f2_rds(args.rds_dir, args.out_dir)
+            print(f"steppe-rds: imported {args.rds_dir} -> {out}")
+    except (OSError, ValueError, ImportError) as exc:
+        print(f"steppe-rds: error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":  # `python -m steppe._rds ...` (e.g. on a box where the wheel isn't
+    sys.exit(main())        # pip-installed, just on PYTHONPATH) — same entry as `steppe-rds`.
