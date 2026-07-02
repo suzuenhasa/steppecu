@@ -1,10 +1,8 @@
 // src/app/cmd_qpgraph.cpp — the `steppe qpgraph` command (single-graph fit).
 //
-// Mirrors cmd_qpadm.cpp: read the f2_blocks dir -> build_resources(DeviceConfig) ->
-// upload_f2_blocks_to_device -> run_qpgraph(DeviceF2Blocks, edges, leaf_names, opts) ->
-// emit the result. The graph is read from --graph (an admixtools-format 2-column edge
-// list). The leaf_names map is the f2 dir's pops.txt order (the P-axis). PLAIN C++20, no
-// CUDA header (the §4 layering): the GPU is reached only via the CUDA-free seams.
+// Reads the f2_blocks dir and an admixtools-format 2-column edge list (--graph), uploads
+// the f2 blocks to the device, runs the fit, and emits the result. Like cmd_qpadm.cpp,
+// this is plain C++20 with no CUDA header — the GPU is reached only via the CUDA-free seams.
 #include "app/cmd_qpgraph.hpp"
 
 #include <cctype>
@@ -19,7 +17,7 @@
 #include <vector>
 
 #include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (device OOM -> runtime-error exit)
 #include "app/f2_dir_io.hpp"
 #include "app/result_emit.hpp"          // OutputFormat / parse_output_format
 #include "core/config/exit_code.hpp"
@@ -27,7 +25,7 @@
 #include "device/resources.hpp"         // CUDA-FREE
 #include "steppe/error.hpp"
 #include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options
-#include "steppe/qpgraph_search.hpp"    // run_qpgraph_search (the topology SEARCH v1)
+#include "steppe/qpgraph_search.hpp"    // run_qpgraph_search (the topology search)
 
 namespace steppe::app {
 
@@ -138,13 +136,12 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
        << stat(r.status) << "\n";
 }
 
-/// Shared device-fit dispatch for both qpgraph commands (§2.11 cross-ref: factored from the
-/// run_qpgraph_command / run_qpgraph_search_command bodies, which were byte-identical save the
-/// command-name prefix and the run call). Builds the device resources, guards the no-GPU case,
-/// uploads the f2 blocks RESIDENT (device 0), then invokes `run_fit(dev_f2, resources)` inside
-/// the one try/catch. `prefix` is the "steppe <prefix>:" diagnostic tag. On success returns
-/// std::nullopt and writes the fit into `result`; on a no-GPU / device fault returns the
-/// exit code the caller must propagate.
+/// Shared device-fit dispatch for both qpgraph commands (factored from the two command
+/// bodies, which were identical save the command-name prefix and the run call). Builds the
+/// device resources, guards the no-GPU case, uploads the f2 blocks resident, then invokes
+/// `run_fit(dev_f2, resources)` inside one try/catch. `prefix` is the "steppe <prefix>:"
+/// diagnostic tag. On success returns std::nullopt and writes the fit into `result`; on a
+/// no-GPU or device fault returns the exit code the caller must propagate.
 template <typename Result, typename RunFit>
 [[nodiscard]] std::optional<int> dispatch_device_fit(const cfg::RunConfig& config,
                                                      const char* prefix, const F2DirResult& dir,

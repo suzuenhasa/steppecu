@@ -1,17 +1,11 @@
 // src/app/cmd_fstat_sweep.cpp
 //
-// The `steppe f4-sweep` / `steppe f3-sweep` commands (GPU-only all-combinations f-stat sweep).
-// Read the f2_blocks dir -> resolve an OPTIONAL --pops subset to P-axis indices (empty ⇒ the
-// whole dir) -> build_resources -> upload f2 RESIDENT -> run_f4_sweep / run_f3_sweep (the
-// on-device enumerate+compute+filter+compact pipeline) -> emit ONLY the survivors. The full
-// C(P,k) table is NEVER materialized (a multi-TB dump): the device filter + CUB compaction keep
-// only the survivors, and only they cross the seam.
-//
-// FILTER: --min-z Z (keep |z|>=Z; default 3.0) OR --top-k K (keep the K largest |z|). CAP:
-// --sure lifts the maxcomb cap (a sweep over more than kFstatMaxComb items refuses without it).
-//
-// PLAIN C++20, app-only, NO CUDA header (the §4 layering gate). main() owns stdout/stderr. A
-// capped/empty sweep is a clean exit (record-and-continue); only device/IO faults return nonzero.
+// The `steppe f4-sweep` / `steppe f3-sweep` commands: a GPU-only all-combinations f-stat sweep.
+// Read the f2_blocks dir, resolve an optional --pops subset, upload f2 resident, then
+// enumerate+compute+filter+compact entirely on the device. The full C(P,k) table (multi-TB)
+// is NEVER materialized: only the survivors — those passing --min-z or the --top-k reservoir —
+// cross the seam. Plain C++20 with no CUDA header here. A capped or empty sweep is a clean exit;
+// only device/IO faults return nonzero.
 #include "app/cmd_fstat_sweep.hpp"
 
 #include <array>
@@ -25,7 +19,7 @@
 #include <vector>
 
 #include "app/cmd_emit.hpp"      // emit_to_destination / finish_emit (open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/exit_code_for_caught.hpp" // maps a device OOM to the runtime-error exit code
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"  // OutputFormat, parse_output_format
@@ -105,13 +99,13 @@ int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
         subset.push_back(rr.index);
     }
 
-    // Build the sweep request from the frozen config (--min-z / --top-k / --sure).
+    // Build the sweep request from the parsed config (--min-z / --top-k / --sure).
     //
-    // TopK now means a DEVICE-BOUNDED reservoir (the GPU keeps the K most-significant |z| in a
-    // fixed CAP=O(K) buffer with a rising tau threshold), so HOST RAM is O(K) regardless of how
-    // many billions are computed. A bare --all-quartets/--all-triples therefore DEFAULTS to
-    // TopK=kFstatDefaultSweepTopK (1e6) so a full C(P,4) sweep cannot OOM the host. --top-k
-    // overrides K; --min-z stays the tau FLOOR (a device pre-filter) and COEXISTS with the K cap.
+    // TopK is a device-bounded reservoir: the GPU keeps the K most-significant |z| in a fixed
+    // O(K) buffer behind a rising tau threshold, so host RAM stays O(K) no matter how many
+    // billions are enumerated. A bare --all-quartets/--all-triples therefore defaults to
+    // TopK=kFstatDefaultSweepTopK so a full sweep cannot OOM the host; --top-k overrides K, and
+    // --min-z stays the tau floor (a device pre-filter) that coexists with the K cap.
     SweepRequest req;
     req.pop_subset = subset;
     req.sure = config.sweep_sure();
@@ -188,18 +182,17 @@ int run_fstat_sweep(const cfg::RunConfig& config, int k, const char* cmd) {
             return cfg::kExitIoError;
         }
         emit_sweep(out, fmt, result, resolver, k);
-        // open->write->flush->verify (B1): a torn / short shard write returns kExitIoError
-        // instead of silently exiting 0 with a truncated survivors file.
+        // Verify the flush: a torn / short shard write returns kExitIoError rather than
+        // silently exiting 0 with a truncated survivors file.
         if (const auto rc = finish_emit(out, cmd, shard_path.string())) return *rc;
         std::fprintf(stderr, "steppe %s: enumerated %zu, %zu survivors -> %s\n",
                      cmd, result.enumerated, result.survivors, shard_path.string().c_str());
         return cfg::exit_code_for(result.status);
     }
 
-    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
-    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
-    // a truncated file. (The --format token was validated above; the helper re-maps it
-    // harmlessly to the same OutputFormat.)
+    // Write and verify the flush via emit_to_destination: a torn / short write (full disk,
+    // closed pipe) returns kExitIoError instead of silently exiting 0 with a truncated file.
+    // (The --format token was validated above; the helper re-maps it to the same OutputFormat.)
     if (const auto rc = emit_to_destination(
             config, cmd, [&](std::ostream& os, OutputFormat out_fmt) {
                 emit_sweep(os, out_fmt, result, resolver, k);

@@ -1,16 +1,12 @@
 // src/app/cli_parse.cpp
 //
-// The CLI11 wiring + subcommand dispatch. Plain CXX, app-only.
-// CLI11 is named ONLY here (PRIVATE to the app subtree, §4 layering; cli-bindings.md
-// §6.1). NO CUDA header — this is a pure host TU; the arch-grep gate enforces it.
+// CLI11 wiring + subcommand dispatch. Pure host translation unit: CLI11 is confined to
+// this file and no CUDA header is included here.
 //
-// Flow per subcommand (cli-bindings.md §4.5; architecture.md §9):
-//   1. CLI11 binds the flags into a steppe::config::CliArgs.
-//   2. ConfigBuilder().with_defaults().merge_file(--config).merge_env().merge_cli(args)
-//      .build() runs the §9 precedence merge + validation.
-//   3. On InvalidConfig, print the builder's reason to stderr, return kExitInvalidConfig.
-//   4. Dispatch to the subcommand's run_*_command (the real GPU compute). qpadm, qpwave,
-//      qpadm-rotate, and extract-f2 are ALL wired to their GPU compute.
+// Per subcommand: CLI11 binds flags into a CliArgs; ConfigBuilder merges config-file, env,
+// and CLI (in that ascending precedence) and validates; on success we dispatch to the
+// matching run_*_command. Invalid config prints the builder's reason to stderr and exits
+// kExitInvalidConfig.
 #include "app/cli_parse.hpp"
 
 #include <cstdio>
@@ -47,19 +43,16 @@ using steppe::config::ConfigBuilder;
 using steppe::config::RunConfig;
 namespace cfg = steppe::config;
 
-// The version string the user sees with `steppe --version`. STEPPE_VERSION is the SOLE
-// authority: the build injects the real value (= the top-level project(VERSION)) via
-// src/app/CMakeLists.txt (STEPPE_VERSION="${PROJECT_VERSION}"). The fallback below is a
-// non-release SENTINEL used only for a standalone TU compile where the macro is absent —
-// it is deliberately NOT a real version so a stale fallback can never impersonate a
-// release (D2: single-source the version on project(VERSION)).
+// Version string for `steppe --version`. The build injects the real value from the
+// top-level project(VERSION) via src/app/CMakeLists.txt; STEPPE_VERSION is the sole
+// authority. The fallback below is a deliberately-fake sentinel used only when the macro
+// is absent (a standalone TU compile), so a stale fallback can never impersonate a release.
 #ifndef STEPPE_VERSION
 #  define STEPPE_VERSION "0.0.0+unknown"
 #endif
 
-// Build the merged config from the parsed args (the §9 precedence chain). On failure
-// it prints the reason to stderr and returns nullopt; the caller maps that to
-// kExitInvalidConfig.
+// Build the merged config from the parsed args. On failure prints the reason to stderr and
+// returns nullopt; the caller maps that to kExitInvalidConfig.
 [[nodiscard]] std::optional<RunConfig> build_config(const CliArgs& args) {
     ConfigBuilder builder;
     builder.with_defaults();
@@ -78,11 +71,10 @@ namespace cfg = steppe::config;
     return std::move(result.value());
 }
 
-// Attach the GLOBAL resource/precision/output flags shared by every subcommand
-// (cli-bindings.md §4.1). Binds into the per-subcommand CliArgs.
+// Attach the global resource/precision flags shared by every subcommand.
 void add_common_flags(CLI::App* sub, CliArgs& a) {
-    // --device is a GPU-only ordinal selector ("auto" | "0" | "0,1"); the GPU-only
-    // rejection of "cpu" happens in ConfigBuilder::build() (cli-bindings.md §5.4).
+    // --device is a GPU-only ordinal selector ("auto" | "0" | "0,1"); ConfigBuilder::build()
+    // rejects "cpu".
     sub->add_option_function<std::string>(
         "--device", [&a](const std::string& v) { a.device = v; },
         "CUDA device(s): auto | <ordinal> | <ordinal>,<ordinal> (GPU-only; no 'cpu')");
@@ -104,9 +96,8 @@ void add_output_flags(CLI::App* sub, CliArgs& a) {
         "Output format: csv | tsv | json (default csv)");
 }
 
-// Attach the QpAdmOptions overrides shared by qpadm / qpwave / qpadm-rotate. Flag
-// names mirror QpAdmOptions so a bare invocation reproduces the goldens (cli-bindings
-// §4.1).
+// Attach the QpAdmOptions overrides shared by qpadm / qpwave / qpadm-rotate. Flag names
+// mirror QpAdmOptions so a bare invocation reproduces the AT2 reference results.
 void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; },
                                      "AT2 ridge constant (default 1e-4)");
@@ -116,7 +107,7 @@ void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
                                   "f4 rank for the fit (-1 = auto nl-1)");
     sub->add_option_function<double>("--rank-alpha", [&a](double v) { a.rank_alpha = v; },
                                      "Rank-decision significance (default 0.05)");
-    // --allow-neg / --no-allow-neg: a paired bool flag (default true; cli-bindings §4.1).
+    // --allow-neg / --no-allow-neg: paired bool flag (default true).
     sub->add_flag_function("--allow-neg,!--no-allow-neg",
                            [&a](std::int64_t v) { a.allow_negative_weights = (v >= 0); },
                            "Allow negative weights (default on)");
@@ -129,9 +120,9 @@ void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
                            "Feasible-only also requires p >= --p-se-threshold");
 }
 
-// qpgraph-specific flags: --graph (the edge-list file) + --numstart / --diag-f3 /
-// --constrained (the AT2 qpgraph defaults). --fudge (the AT2 `diag` cc ridge) is REUSED
-// from add_qpadm_option_flags' --fudge (QpAdmOptions::fudge) so the same flag drives both.
+// qpgraph-specific flags: --graph (the edge-list file) plus --numstart / --diag-f3 /
+// --constrained (the AT2 qpgraph defaults). --fudge (the AT2 `diag` cc ridge) is bound
+// separately via add_fudge_flag and writes the shared QpAdmOptions::fudge field.
 void add_qpgraph_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::string>("--graph", [&a](const std::string& v) { a.graph = v; },
                                           "The admixture-graph edge-list file (parent child per line)");
@@ -144,72 +135,62 @@ void add_qpgraph_flags(CLI::App* sub, CliArgs& a) {
                            "Drift edges >= 0 (AT2 default on)");
 }
 
-// Bind --fudge (the AT2 cc edge-solve `diag` ridge constant) into `a.fudge`. Shared by
-// qpgraph + qpgraph-search, which each bind ONLY this one QpAdmOptions override (not the
-// whole qpadm option set) so their --help shows just their flags. The help is PARAMETRIZED
-// (mirroring add_f2_dir_flag(..., help)) so each caller passes its CURRENT exact string and
-// --help stays byte-identical. The DISTINCT qpadm/qpwave/rotate --fudge in
-// add_qpadm_option_flags ("AT2 ridge constant ...") is a separate flag and stays inline there.
+// Bind --fudge (the AT2 cc edge-solve `diag` ridge) into a.fudge. Shared by qpgraph +
+// qpgraph-search, which bind only this one QpAdmOptions override (not the full qpadm set)
+// so their --help shows just their own flags. The help text is a parameter so each caller
+// keeps its exact wording. (qpadm/qpwave/rotate bind their own --fudge inline.)
 void add_fudge_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; }, help);
 }
 
-// Bind --f2-dir (the f2_blocks directory) into `a.f2_dir`. Shared by qpadm / qpwave /
-// qpadm-rotate. The help string is PARAMETRIZED because qpadm's help is more verbose
-// ("...f2.bin + pops.txt + meta.json") than qpwave/rotate's ("The f2_blocks directory");
-// each caller passes its CURRENT exact string so `--help` stays byte-identical
-// (behavior-preserving dedup).
+// Bind --f2-dir (the f2_blocks directory) into a.f2_dir. Shared across the fit/stat
+// commands. The help text is a parameter because callers word it differently (qpadm spells
+// out the dir contents); each passes its own string.
 void add_f2_dir_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::string>(
         "--f2-dir", [&a](const std::string& v) { a.f2_dir = v; }, help);
 }
 
-// Bind --target (target population label) into `a.target`. Shared by qpadm + qpadm-rotate
-// (NOT qpwave — qpWave has no target). The help is IDENTICAL across both callers
-// ("Target population label"), so no parametrization is needed.
+// Bind --target into a.target. Shared by qpadm + qpadm-rotate (qpWave has no target). Help
+// is identical for both callers, so it is not parametrized.
 void add_target_flag(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::string>(
         "--target", [&a](const std::string& v) { a.target = v; }, "Target population label");
 }
 
-// Bind --right (comma- or space-separated outgroup labels) into `a.right`. Shared by
-// qpadm / qpwave / qpadm-rotate, with `->delimiter(',')`. The help is PARAMETRIZED because
-// qpadm's help ("...right[0] = R0") differs from qpwave/rotate's ("Right outgroup labels");
-// each caller passes its CURRENT exact string so `--help` stays byte-identical.
+// Bind --right (comma/space-separated outgroup labels) into a.right, with delimiter(',').
+// Shared by qpadm / qpwave / qpadm-rotate. Help is parametrized because qpadm names R0
+// while the others don't.
 void add_right_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::vector<std::string>>(
             "--right", [&a](const std::vector<std::string>& v) { a.right = v; }, help)
         ->delimiter(',');
 }
 
-// Bind --left (comma- or space-separated population labels) into `a.left`. Shared by
-// qpadm + qpwave, with `->delimiter(',')`. The help is PARAMETRIZED because the two help
-// strings are SEMANTICALLY DISTINCT (qpadm "Left source population labels..." vs qpwave
-// "Left population set; left[0] is the reference"); each caller passes its CURRENT exact
-// string so `--help` stays byte-identical.
+// Bind --left (comma/space-separated pop labels) into a.left, with delimiter(','). Shared
+// by qpadm + qpwave. Help is parametrized because the meaning differs (qpadm's sources vs
+// qpwave's set whose left[0] is the reference).
 void add_left_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::vector<std::string>>(
             "--left", [&a](const std::vector<std::string>& v) { a.left = v; }, help)
         ->delimiter(',');
 }
 
-// Bind the bare --pops list (comma- or space-separated population names) into `a.pops`,
-// with `->delimiter(',')`. Shared by qpgraph-search + qpfstats + the standalone-sweep binder
-// (add_sweep_flags). The help is PARAMETRIZED because each command means a different pop-set
-// (a search leaf-set vs a smoother set vs a sweep subset); each caller passes its CURRENT
-// exact string so --help stays byte-identical. The f4/f3/f4-ratio --pops are a DISTINCT
-// groups-of-N quartet/triple/5-tuple variant and stay in their own flag helpers.
+// Bind the bare --pops list (comma/space-separated pop names) into a.pops, with
+// delimiter(','). Shared by qpgraph-search + qpfstats + add_sweep_flags. Help is
+// parametrized since each command means a different pop-set (search leaf-set vs smoother
+// set vs sweep subset). The f4/f3/f4-ratio --pops is a distinct groups-of-N variant with
+// its own helper.
 void add_pops_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::vector<std::string>>(
             "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; }, help)
         ->delimiter(',');
 }
 
-// Bind the `f4` quartet flags: the ROW-ALIGNED --pop1/--pop2/--pop3/--pop4 columns
-// (admixtools::f4 comb=FALSE — quartet k = (pop1[k],pop2[k],pop3[k],pop4[k])) AND the
-// single-/multi-quartet --pops convenience (names in groups of 4). All comma/space
-// delimited. f4 has NO target/left/right (it is a bare quartet stat), so this is the ONE
-// new flag helper the command needs (cli-bindings.md §4.1; the rest is reused).
+// Bind the f4 quartet flags: the row-aligned --pop1..--pop4 columns (admixtools::f4
+// comb=FALSE — quartet k = (pop1[k],pop2[k],pop3[k],pop4[k])) plus the --pops convenience
+// (names in groups of 4). All comma/space delimited. f4 is a bare quartet stat with no
+// target/left/right.
 void add_f4_quartet_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::vector<std::string>>(
             "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
@@ -233,11 +214,10 @@ void add_f4_quartet_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
-// Bind the `f3` triple flags: the THREE-slab clone of add_f4_quartet_flags (drop --pop4).
-// The ROW-ALIGNED --pop1/--pop2/--pop3 columns (triple k = (pop1[k]=C, pop2[k]=A,
-// pop3[k]=B)) AND the single-/multi-triple --pops convenience (names in groups of 3). All
-// comma/space delimited. f3 has NO target/left/right (it is a bare triple stat), so this is
-// the ONE new flag helper the command needs (cli-bindings.md §4.1; the rest is reused).
+// Bind the f3 triple flags (add_f4_quartet_flags without --pop4): the row-aligned
+// --pop1..--pop3 columns (triple k = (pop1[k]=C, pop2[k]=A, pop3[k]=B)) plus the --pops
+// convenience (names in groups of 3). All comma/space delimited. f3 is a bare triple stat
+// with no target/left/right.
 void add_f3_triple_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::vector<std::string>>(
             "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
@@ -257,12 +237,10 @@ void add_f3_triple_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
-// Bind the `f4-ratio` 5-tuple flags: the FIVE-column clone of add_f4_quartet_flags (add
-// --pop5). The ROW-ALIGNED --pop1..--pop5 columns (admixtools::qpf4ratio; tuple k =
-// (pop1[k]..pop5[k]), alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4)) AND the single-/multi-tuple
-// --pops convenience (names in groups of 5). All comma/space delimited. f4-ratio has NO
-// target/left/right (it is a bare ratio stat), so this is the ONE new flag helper the command
-// needs (cli-bindings.md §4.1; the rest is reused).
+// Bind the f4-ratio 5-tuple flags (add_f4_quartet_flags plus --pop5): the row-aligned
+// --pop1..--pop5 columns (admixtools::qpf4ratio; alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4))
+// plus the --pops convenience (names in groups of 5). All comma/space delimited. f4-ratio
+// is a bare ratio stat with no target/left/right.
 void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option_function<std::vector<std::string>>(
             "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
@@ -290,13 +268,10 @@ void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
         ->delimiter(',');
 }
 
-// Bind the shared on-device SWEEP FILTER flags (--min-z / --top-k / --sure) into
-// `a.sweep_min_z` / `a.sweep_top_k` / `a.sweep_sure`. Shared by the sweep-MODE binder
-// (add_sweep_mode_flags, on f4 / f3 / qpdstat) and the standalone-sweep binder
-// (add_sweep_flags, on f4-sweep / f3-sweep). The three help strings are PARAMETRIZED because
-// the mode variant prefixes "Sweep: " while the standalone variant does not; each caller
-// passes its CURRENT exact strings so --help stays byte-identical (the same parametrized-help
-// behavior-preserving dedup as add_f2_dir_flag / add_right_flag).
+// Bind the shared on-device sweep filter flags (--min-z / --top-k / --sure) into a.sweep_*.
+// Shared by add_sweep_mode_flags (f4/f3/qpdstat) and add_sweep_flags (f4-sweep/f3-sweep).
+// Help strings are parametrized because the mode variant prefixes "Sweep: " and the
+// standalone one doesn't.
 void add_sweep_filter_flags(CLI::App* sub, CliArgs& a, const char* min_z_help,
                             const char* top_k_help, const char* sure_help) {
     sub->add_option_function<double>(
@@ -307,14 +282,12 @@ void add_sweep_filter_flags(CLI::App* sub, CliArgs& a, const char* min_z_help,
         "--sure", [&a](std::int64_t) { a.sweep_sure = true; }, sure_help);
 }
 
-// GPU-only f-stat SWEEP MODE flags for the standalone-stat commands (f4 / f3 / qpdstat):
-// the --all-quartets / --all-triples ENABLE flag (route to the GPU sweep over the C(P,k)
-// of the --pops SUBSET — empty ⇒ the whole f2 dir), the shared on-device filter
-// (--min-z | --top-k | --sure, via add_sweep_filter_flags), and the survivor destination
-// (--shard-dir). It does NOT re-bind --pops (the f4/f3 command already binds it as the
-// quartet/triple input; in sweep mode the same --pops is read as the SUBSET).
-// `enable_flag`/`enable_help` parametrize the enable flag (f4/qpdstat: --all-quartets;
-// f3: --all-triples) so each command's --help stays exact.
+// GPU-only f-stat sweep-mode flags for the standalone-stat commands (f4 / f3 / qpdstat):
+// the --all-quartets/--all-triples enable flag (routes to the GPU sweep over C(P,k) of the
+// --pops subset, empty ⇒ the whole f2 dir), the shared filter (via add_sweep_filter_flags),
+// and the survivor destination (--shard-dir). It does not re-bind --pops — the command
+// already binds it as the quartet/triple input, and in sweep mode the same --pops is read
+// as the subset. enable_flag/enable_help parametrize the enable flag per command.
 void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
                           const char* enable_help) {
     sub->add_flag_function(enable_flag, [&a](std::int64_t) { a.sweep_all_combinations = true; },
@@ -329,9 +302,8 @@ void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
         "Sweep: write the survivor table to a CSV under this dir (created if absent; vs stdout/--out).");
 }
 
-// GPU-only f-stat SWEEP flags: an OPTIONAL --pops SUBSET to sweep (empty ⇒ the whole f2 dir,
-// via add_pops_flag), plus the shared on-device filter (--min-z | --top-k | --sure, via
-// add_sweep_filter_flags). Reused by both f4-sweep and f3-sweep.
+// GPU-only f-stat sweep flags: an optional --pops subset (empty ⇒ the whole f2 dir) plus the
+// shared on-device filter. Reused by f4-sweep and f3-sweep.
 void add_sweep_flags(CLI::App* sub, CliArgs& a) {
     add_pops_flag(sub, a,
                   "Population SUBSET to sweep all combinations of (names; empty ⇒ the whole f2 dir)");
@@ -367,7 +339,7 @@ int run_cli(int argc, char** argv) {
     CliArgs qpfstats_args;
     CliArgs dates_args;
 
-    // ---- qpadm (cli-bindings.md §4.1) — M(cli-1) implements the compute ----------
+    // ---- qpadm ------------------------------------------------------------------
     {
         CLI::App* sub = app.add_subcommand("qpadm", "qpAdm fit over an f2_blocks dir");
         qpadm_args.command = Command::QpAdm;
@@ -383,9 +355,7 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpadm_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU qpAdm fit (read dir -> resolve -> upload -> run_qpadm ->
-            // emit CSV/JSON). qpadm-rotate, qpwave, and extract-f2 are likewise wired to
-            // their real GPU compute.
+            // GPU qpAdm fit: read dir -> resolve -> upload -> run_qpadm -> emit CSV/JSON.
             std::exit(run_qpadm_command(*config));
         });
     }
@@ -396,17 +366,16 @@ int run_cli(int argc, char** argv) {
         qpgraph_args.command = Command::QpGraph;
         add_f2_dir_flag(sub, qpgraph_args, "The f2_blocks directory (f2.bin + pops.txt)");
         add_qpgraph_flags(sub, qpgraph_args);
-        // --fudge (the AT2 `diag` cc ridge) is shared with qpadm; bind ONLY that one option
-        // (not the whole qpadm option set) so qpgraph's --help shows only its flags.
+        // --fudge (the AT2 `diag` cc ridge) is shared with qpadm; bind only that one option
+        // (not the whole qpadm set) so qpgraph's --help shows only its flags.
         add_fudge_flag(sub, qpgraph_args, "AT2 cc edge-solve ridge (diag; default 1e-4)");
         add_output_flags(sub, qpgraph_args);
         add_common_flags(sub, qpgraph_args);
         sub->callback([&]() {
             auto config = build_config(qpgraph_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU qpGraph fit (read dir + graph -> resolve leaves -> upload f2
-            // RESIDENT -> run_qpgraph (the IDEA-1 fleet on-device) -> emit the edges +
-            // admix weights + score). Mirrors how `qpadm` dispatches.
+            // GPU qpGraph fit: read dir + graph -> resolve leaves -> upload f2 (resident) ->
+            // run_qpgraph (on-device fleet) -> emit edges + admix weights + score.
             std::exit(run_qpgraph_command(*config));
         });
     }
@@ -437,18 +406,17 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpgraphsearch_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The GPU topology search: enumerate the bounded space -> the heterogeneous fleet
-            // (ONE launch fits ALL candidates) -> the deterministic global-best argmin + the
-            // heuristic recovery. Mirrors how `qpgraph` dispatches.
+            // GPU topology search: enumerate the bounded space -> the heterogeneous fleet
+            // (one launch fits all candidates) -> the deterministic global-best argmin.
             std::exit(run_qpgraph_search_command(*config));
         });
     }
 
-    // ---- dates (admixture DATING via the weighted ancestry-covariance decay) -----------
-    // The DATES tool: --prefix genotypes + --target (admixed) + --left{2} (the two reference
-    // sources) -> the date in generations + the leave-one-chromosome block-jackknife SE, via
-    // the cuFFT autocorrelation LD engine (NEVER the f2 cache, NEVER a host O(M²) SNP-pair
-    // loop). The .snp MUST carry a real genetic map (cM). Mirrors how qpfstats binds --prefix.
+    // ---- dates (admixture dating via weighted ancestry-covariance decay) --------
+    // --prefix genotypes + --target (admixed) + --left{2} (the two reference sources) ->
+    // date in generations + leave-one-chromosome block-jackknife SE, via the cuFFT
+    // autocorrelation LD engine (not the f2 cache, not a host O(M^2) SNP-pair loop). The
+    // .snp must carry a real genetic map (cM).
     {
         CLI::App* sub = app.add_subcommand(
             "dates",
@@ -465,13 +433,13 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(dates_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU DATES run (decode front-end -> the cuFFT autocorrelation LD engine
-            // -> the exp-decay fit + leave-one-chrom jackknife). Mirrors how `qpadm` dispatches.
+            // GPU dates run: decode front-end -> the cuFFT autocorrelation LD engine ->
+            // the exp-decay fit + leave-one-chrom jackknife.
             std::exit(run_dates_command(*config));
         });
     }
 
-    // ---- qpwave (cli-bindings.md §4.1) — M(cli-2) -------------------------------
+    // ---- qpwave -----------------------------------------------------------------
     {
         CLI::App* sub = app.add_subcommand("qpwave", "qpWave rank sweep (no target; left[0]=ref)");
         qpwave_args.command = Command::QpWave;
@@ -484,25 +452,24 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpwave_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU qpWave rank sweep (read dir -> resolve left/right, NO target,
-            // left[0]=reference -> upload -> run_qpwave -> emit the rank-sweep table).
-            // Mirrors how `qpadm` dispatches.
+            // GPU qpWave rank sweep: read dir -> resolve left/right (no target,
+            // left[0]=reference) -> upload -> run_qpwave -> emit the rank-sweep table.
             std::exit(run_qpwave_command(*config));
         });
     }
 
-    // ---- f4 (standalone f4 statistic; fit-engine §6) ----------------------------
+    // ---- f4 (standalone f4 statistic) -------------------------------------------
     {
         CLI::App* sub = app.add_subcommand(
             "f4", "Standalone f4(p1,p2;p3,p4) statistic (est/se/z/p per quartet)");
         f4_args.command = Command::F4;
         add_f2_dir_flag(sub, f4_args, "The f2_blocks directory");
-        // f4 takes QUARTETS, not target/left/right: the row-aligned --pop1..--pop4 columns
-        // OR the --pops 4-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
+        // f4 takes quartets, not target/left/right: the row-aligned --pop1..--pop4 columns
+        // or the --pops 4-tuple convenience.
         add_f4_quartet_flags(sub, f4_args);
-        // SWEEP MODE: --all-quartets routes to the GPU sweep over C(P,4) of the --pops SUBSET
-        // (empty ⇒ the whole f2 dir). The explicit-list path above stays byte-identical when
-        // --all-quartets is absent (the goldens). Reuses the same --pops binding as the subset.
+        // Sweep mode: --all-quartets routes to the GPU sweep over C(P,4) of the --pops subset
+        // (empty ⇒ whole f2 dir). Without it the explicit-list path is unchanged. Reuses the
+        // same --pops binding as the subset.
         add_sweep_mode_flags(sub, f4_args, "--all-quartets",
                              "Sweep ALL quartets C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
         add_output_flags(sub, f4_args);
@@ -510,20 +477,19 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(f4_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU f4 (read dir -> resolve quartets -> upload -> run_f4 -> emit the
-            // pop1,pop2,pop3,pop4,est,se,z,p table). Mirrors how `qpadm`/`qpwave` dispatch.
+            // GPU f4: read dir -> resolve quartets -> upload -> run_f4 -> emit the
+            // pop1,pop2,pop3,pop4,est,se,z,p table.
             std::exit(run_f4_command(*config));
         });
     }
 
-    // ---- qpdstat (D-statistic; qpDstat A+B plan: --f2-dir f4 (A) OR --prefix norm-D (B)) ----
-    // TWO paths: --f2-dir reports f4 (Part A; the AT2 f2-path convention, proven byte-identical
-    // to qpdstat f4mode). --prefix reads the genotype triple PREFIX.{geno,snp,ind} and reports
-    // the genotype-path NORMALIZED-D magnitude (Part B; D = mean num / mean den over per-SNP
-    // allele freqs, block-jackknifed — the AT2 qpdstat_geno allsnps=TRUE convention). REUSES
-    // add_f2_dir_flag + add_f4_quartet_flags (the QUADRUPLE input) + add_output_flags +
-    // add_common_flags verbatim; the ONLY new flag is --prefix (run_qpdstat_command branches on
-    // it to run_dstat).
+    // ---- qpdstat (D-statistic) --------------------------------------------------
+    // Two paths: --f2-dir reports f4 (the AT2 f2-path convention, byte-identical to qpdstat
+    // f4mode). --prefix reads the genotype triple PREFIX.{geno,snp,ind} and reports the
+    // genotype-path normalized-D magnitude (D = mean num / mean den over per-SNP allele
+    // freqs, block-jackknifed — the AT2 qpdstat_geno allsnps=TRUE convention). Reuses the f4
+    // flag helpers verbatim; the only new flag is --prefix, on which run_qpdstat_command
+    // branches to run_dstat.
     {
         CLI::App* sub = app.add_subcommand(
             "qpdstat",
@@ -531,16 +497,16 @@ int run_cli(int argc, char** argv) {
             "PREFIX.{geno,snp,ind} reports the genotype-path normalized-D magnitude");
         qpdstat_args.command = Command::Qpdstat;
         add_f2_dir_flag(sub, qpdstat_args, "The f2_blocks directory");
-        // qpdstat takes QUADRUPLES, not target/left/right: the row-aligned --pop1..--pop4
-        // columns OR the --pops 4-tuple convenience (reused verbatim from f4).
+        // qpdstat takes quadruples, not target/left/right: the row-aligned --pop1..--pop4
+        // columns or the --pops 4-tuple convenience (reused verbatim from f4).
         add_f4_quartet_flags(sub, qpdstat_args);
-        // SWEEP MODE: --all-quartets routes to the GPU f4 sweep over C(P,4) of the --pops
-        // SUBSET (the D-output-convention all-quartets scan). Explicit-list path unchanged.
+        // Sweep mode: --all-quartets routes to the GPU f4 sweep over C(P,4) of the --pops
+        // subset (the D-output-convention all-quartets scan). Explicit-list path unchanged.
         add_sweep_mode_flags(sub, qpdstat_args, "--all-quartets",
                              "Sweep ALL quadruples C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
-        // --prefix: the Part-B genotype prefix for the normalized-D magnitude. Bound to the
-        // DEDICATED qpdstat_prefix field (NOT extract's --prefix) so run_qpdstat_command reads
-        // it WITHOUT ConfigBuilder expanding it into geno/snp/ind, then branches to run_dstat.
+        // --prefix: the genotype prefix for the normalized-D magnitude. Bound to the dedicated
+        // qpdstat_prefix field (not extract's --prefix) so ConfigBuilder does not expand it
+        // into geno/snp/ind; run_qpdstat_command reads it and branches to run_dstat.
         sub->add_option_function<std::string>(
             "--prefix", [&](const std::string& v) { qpdstat_args.qpdstat_prefix = v; },
             "Genotype triple prefix PREFIX.{geno,snp,ind} for the normalized-D magnitude "
@@ -551,26 +517,26 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(qpdstat_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // Part A: the real GPU f4 over the quadruples (read dir -> resolve -> upload ->
-            // run_f4 -> emit the pop1,pop2,pop3,pop4,est,se,z,p table — the D-output
-            // convention). Part B (--prefix) branches to the genotype-path normalized-D
+            // f2-dir path: GPU f4 over the quadruples (read dir -> resolve -> upload ->
+            // run_f4 -> emit the pop1,pop2,pop3,pop4,est,se,z,p table, the D-output
+            // convention). The --prefix path branches to the genotype-path normalized-D
             // (run_dstat) inside run_qpdstat_command.
             std::exit(run_qpdstat_command(*config));
         });
     }
 
-    // ---- f3 (standalone f3 statistic; fit-engine §6) ----------------------------
+    // ---- f3 (standalone f3 statistic) -------------------------------------------
     {
         CLI::App* sub = app.add_subcommand(
             "f3", "Standalone f3(C;A,B) statistic (est/se/z/p per triple)");
         f3_args.command = Command::F3;
         add_f2_dir_flag(sub, f3_args, "The f2_blocks directory");
-        // f3 takes TRIPLES, not target/left/right: the row-aligned --pop1..--pop3 columns
-        // OR the --pops 3-tuple convenience (the ONE new flag helper; cli-bindings.md §4.1).
+        // f3 takes triples, not target/left/right: the row-aligned --pop1..--pop3 columns
+        // or the --pops 3-tuple convenience.
         add_f3_triple_flags(sub, f3_args);
-        // SWEEP MODE: --all-triples routes to the GPU sweep over C(P,3) of the --pops SUBSET
-        // (empty ⇒ the whole f2 dir). The explicit-list path above stays byte-identical when
-        // --all-triples is absent (the goldens). Reuses the same --pops binding as the subset.
+        // Sweep mode: --all-triples routes to the GPU sweep over C(P,3) of the --pops subset
+        // (empty ⇒ whole f2 dir). Without it the explicit-list path is unchanged. Reuses the
+        // same --pops binding as the subset.
         add_sweep_mode_flags(sub, f3_args, "--all-triples",
                              "Sweep ALL triples C(P,3) over the --pops subset (empty ⇒ whole f2 dir)");
         add_output_flags(sub, f3_args);
@@ -578,29 +544,29 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(f3_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU f3 (read dir -> resolve triples -> upload -> run_f3 -> emit the
-            // pop1,pop2,pop3,est,se,z,p table). Mirrors how `qpadm`/`qpwave`/`f4` dispatch.
+            // GPU f3: read dir -> resolve triples -> upload -> run_f3 -> emit the
+            // pop1,pop2,pop3,est,se,z,p table.
             std::exit(run_f3_command(*config));
         });
     }
 
-    // ---- f4-ratio (standalone f4-ratio statistic; fit-engine §6) ----------------
+    // ---- f4-ratio (standalone f4-ratio statistic) -------------------------------
     {
         CLI::App* sub = app.add_subcommand(
             "f4-ratio",
             "Standalone f4-ratio alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) (alpha/se/z per 5-tuple)");
         f4ratio_args.command = Command::F4Ratio;
         add_f2_dir_flag(sub, f4ratio_args, "The f2_blocks directory");
-        // f4-ratio takes 5-TUPLES, not target/left/right: the row-aligned --pop1..--pop5
-        // columns OR the --pops 5-tuple convenience (the ONE new flag helper; cli-bindings §4.1).
+        // f4-ratio takes 5-tuples, not target/left/right: the row-aligned --pop1..--pop5
+        // columns or the --pops 5-tuple convenience.
         add_f4ratio_flags(sub, f4ratio_args);
         add_output_flags(sub, f4ratio_args);
         add_common_flags(sub, f4ratio_args);
         sub->callback([&]() {
             auto config = build_config(f4ratio_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // The real GPU f4-ratio (read dir -> resolve 5-tuples -> upload -> run_f4ratio ->
-            // emit the pop1..pop5,alpha,se,z table). Mirrors how `qpadm`/`f4`/`f3` dispatch.
+            // GPU f4-ratio: read dir -> resolve 5-tuples -> upload -> run_f4ratio -> emit the
+            // pop1..pop5,alpha,se,z table.
             std::exit(run_f4ratio_command(*config));
         });
     }
@@ -639,10 +605,10 @@ int run_cli(int argc, char** argv) {
         });
     }
 
-    // ---- qpfstats (genotype-path joint f2 SMOOTHER) -----------------------------
-    // Reads GENOTYPES (--prefix) + smooths over --pops -> a smoothed f2 DIR (--out-dir)
-    // that qpadm/f4/qpGraph consume. REUSES the qpDstat-B genotype seam + the dstat-
-    // numerator engine over the full f2/f3/f4 popcomb set + the on-device smoothing solve.
+    // ---- qpfstats (genotype-path joint f2 smoother) -----------------------------
+    // Reads genotypes (--prefix) and smooths over --pops -> a smoothed f2 dir (--out-dir)
+    // that qpadm/f4/qpgraph consume. Reuses the genotype seam and dstat-numerator engine
+    // over the full f2/f3/f4 popcomb set plus the on-device smoothing solve.
     {
         CLI::App* sub = app.add_subcommand(
             "qpfstats",
@@ -667,7 +633,7 @@ int run_cli(int argc, char** argv) {
         });
     }
 
-    // ---- qpadm-rotate (cli-bindings.md §4.1) — M(cli-3) -------------------------
+    // ---- qpadm-rotate -----------------------------------------------------------
     {
         CLI::App* sub = app.add_subcommand("qpadm-rotate", "qpAdm rotation over a source pool");
         rotate_args.command = Command::QpAdmRotate;
@@ -687,14 +653,13 @@ int run_cli(int argc, char** argv) {
         sub->callback([&]() {
             auto config = build_config(rotate_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
-            // M(cli-3): the real GPU qpAdm ROTATION (read dir -> resolve target/pool/
-            // right -> enumerate pool subsets [min,max] -> ONE batched run_qpadm_search
-            // -> emit the per-model table). Mirrors how `qpadm` dispatches.
+            // GPU qpAdm rotation: read dir -> resolve target/pool/right -> enumerate pool
+            // subsets [min,max] -> one batched run_qpadm_search -> emit the per-model table.
             std::exit(run_qpadm_rotate_command(*config));
         });
     }
 
-    // ---- extract-f2 (cli-bindings.md §4.1) — M(cli-4) ---------------------------
+    // ---- extract-f2 -------------------------------------------------------------
     {
         CLI::App* sub = app.add_subcommand("extract-f2", "Precompute the f2_blocks dir from genotypes");
         extract_args.command = Command::ExtractF2;
@@ -703,7 +668,7 @@ int run_cli(int argc, char** argv) {
         sub->add_option_function<std::string>("--geno", [&](const std::string& v) { extract_args.geno = v; }, "Genotype file (overrides --prefix)");
         sub->add_option_function<std::string>("--snp",  [&](const std::string& v) { extract_args.snp = v; },  "SNP file (overrides --prefix)");
         sub->add_option_function<std::string>("--ind",  [&](const std::string& v) { extract_args.ind = v; },  "Individual file (overrides --prefix)");
-        // Canonical --out-dir (a DIRECTORY); --out kept as a back-compat alias (both bind out_dir).
+        // Canonical --out-dir (a directory); --out is a back-compat alias (both bind out_dir).
         sub->add_option_function<std::string>("--out-dir,--out",  [&](const std::string& v) { extract_args.out_dir = v; }, "Output f2_blocks DIRECTORY (f2.bin + pops.txt + meta.json)");
         sub->add_option_function<std::vector<std::string>>(
             "--pops", [&](const std::vector<std::string>& v) { extract_args.pops = v; },
@@ -729,20 +694,17 @@ int run_cli(int argc, char** argv) {
                                [&](std::int64_t v) { extract_args.drop_monomorphic = (v >= 0); },
                                "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
         sub->add_flag_function("--transversions", [&](std::int64_t) { extract_args.transversions_only = true; }, "Keep only transversions");
-        // --strand-mode drop|keep|flip: the strand-ambiguous (palindromic A/T, C/G)
-        // SNP policy. drop (DEFAULT) drops them (merge-safety default, the frozen
-        // behavior, bit-identical parity); keep retains them (reproduces AT2's default,
-        // which keeps ambiguous SNPs); flip is a documented not-yet-implemented token
-        // (currently == keep, no freq-based reorientation). The raw token is carried;
-        // ConfigBuilder maps it to FilterConfig::strand_mode (unknown token =
-        // InvalidConfig). Mirrors the --ploidy / --tier enum-token pattern.
+        // --strand-mode drop|keep|flip: the strand-ambiguous (palindromic A/T, C/G) SNP
+        // policy. drop (default) drops them (merge-safe); keep retains them (AT2's default);
+        // flip is a not-yet-implemented token (currently == keep, no freq-based
+        // reorientation). The raw token is carried; ConfigBuilder maps it to
+        // FilterConfig::strand_mode (unknown token = InvalidConfig).
         sub->add_option_function<std::string>(
             "--strand-mode", [&](const std::string& v) { extract_args.strand_mode = v; },
             "Strand-ambiguous (A/T, C/G) SNP policy: drop (default; merge-safe) | keep "
             "(retain, AT2 default) | flip (not-yet-implemented, == keep)");
-        // --ploidy auto|1|2: AT2 adjust_pseudohaploid policy (default auto = per-sample
-        // detection; the f2 pseudo-haploid fix). 1 = force pseudo-haploid, 2 = force
-        // diploid (the legacy hardcoded behavior). An unknown token is InvalidConfig.
+        // --ploidy auto|1|2: the AT2 adjust_pseudohaploid policy. auto (default) = per-sample
+        // detection; 1 = force pseudo-haploid; 2 = force diploid. Unknown token = InvalidConfig.
         sub->add_option_function<std::string>(
             "--ploidy",
             [&](const std::string& v) {
@@ -753,24 +715,22 @@ int run_cli(int argc, char** argv) {
                     "--ploidy", "must be auto, 1 (pseudo-haploid), or 2 (diploid); got '" + v + "'");
             },
             "Ploidy policy: auto (AT2 adjust_pseudohaploid, default) | 1 (pseudo-haploid) | 2 (diploid)");
-        // --tier auto|resident|host|disk: the M5 f2_blocks OUTPUT-tier override. auto
-        // (default) = the runtime select_output_tier policy; resident = the device-
-        // resident path (the small-input path, byte-identical to today); host/disk =
-        // the SNP-tile input-streaming tiers that keep the GPU peak independent of M so
-        // high-P full-autosome runs that OOM the resident feeder complete. The raw token
-        // is carried; ConfigBuilder maps it to DeviceConfig::force_tier (unknown token =
-        // InvalidConfig). STEPPE_FORCE_TIER stays the lower-precedence env fallback.
+        // --tier auto|resident|host|disk: the f2_blocks output-tier override. auto (default)
+        // = the runtime select_output_tier policy; resident = the device-resident path (the
+        // small-input path); host/disk = the SNP-tile input-streaming tiers that keep the GPU
+        // peak independent of M, so high-P full-autosome runs that OOM the resident feeder
+        // complete. The raw token is carried; ConfigBuilder maps it to DeviceConfig::force_tier
+        // (unknown token = InvalidConfig). STEPPE_FORCE_TIER is the lower-precedence env fallback.
         sub->add_option_function<std::string>(
             "--tier", [&](const std::string& v) { extract_args.tier = v; },
             "f2_blocks output tier: auto | resident | host | disk (default auto; "
             "host/disk stream the SNP-tile input so high-P runs that OOM resident complete)");
         sub->add_flag_function("--dry-run", [&](std::int64_t) { extract_args.dry_run = true; }, "Report sizes/tier/precision, no compute");
-        // --hash / --no-hash: source-provenance SHA-256 opt-in. DEFAULT OFF — the whole-
-        // .geno SHA is a ~tens-of-seconds whole-file read+compress that dominated extract-f2
-        // (a provenance value, not correctness), so it is skipped unless requested. When
-        // ON it is overlapped on a background thread with the GPU decode+f2 pipeline.
-        // --no-hash is accepted as the explicit form of the default. meta.json records
-        // source_hash_computed + empty *_sha256 when skipped (the deliberate-absence marker).
+        // --hash / --no-hash: source-provenance SHA-256, default OFF. The whole-.geno SHA is a
+        // tens-of-seconds whole-file read that dominated extract-f2 (provenance, not
+        // correctness), so it is skipped unless requested; when on it overlaps the GPU
+        // decode+f2 pipeline on a background thread. meta.json records source_hash_computed +
+        // empty *_sha256 when skipped (the deliberate-absence marker).
         sub->add_flag_function("--hash,!--no-hash",
                                [&](std::int64_t v) { extract_args.hash_source = (v >= 0); },
                                "Compute source-dataset provenance SHA-256 (default OFF; overlapped on a background thread)");
@@ -784,10 +744,9 @@ int run_cli(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
-    // No subcommand selected (bare `steppe`): CLI11 with require_subcommand(0,1) does
-    // not error; print help and exit 0 so a bare invocation is a clean, documented
-    // no-op (cli-bindings.md §4; the subcommand callbacks std::exit before reaching
-    // here when one is chosen).
+    // No subcommand selected (bare `steppe`): require_subcommand(0,1) does not error, so
+    // print help and exit 0 for a clean no-op. When a subcommand is chosen its callback
+    // std::exit's before reaching here.
     std::printf("%s", app.help().c_str());
     return cfg::kExitOk;
 }

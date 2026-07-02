@@ -1,12 +1,12 @@
 // src/app/cmd_dates.hpp
 //
-// The `steppe dates` command — admixture DATING via the weighted ancestry-covariance decay
-// (the DATES tool; Loh 2013 ALDER / Chintalapati-Patterson-Moorjani 2022). Reads the genotype
-// triple PREFIX.{geno,snp,ind} (--prefix), the admixed --target, and the two reference sources
-// (--left, exactly two), and reports the date in generations + its leave-one-chromosome
-// block-jackknife SE through run_dates (the cuFFT autocorrelation LD engine; NEVER the f2
-// cache, NEVER a host O(M²) SNP-pair loop). PLAIN C++20, app-only, NO CUDA header (the §4
-// layering): the GPU is reached ONLY through the CUDA-free run_dates seam.
+// The `steppe dates` command — admixture dating via the weighted ancestry-covariance decay
+// (the DATES method; Loh 2013 ALDER / Chintalapati-Patterson-Moorjani 2022). Reports the date
+// in generations plus a leave-one-chromosome block-jackknife SE.
+//
+// This is a plain C++20 app-layer header with no CUDA include: it reaches the GPU only through
+// the CUDA-free run_dates seam, which drives the cuFFT autocorrelation LD engine (not the f2
+// cache, not a host O(M^2) SNP-pair loop).
 #ifndef STEPPE_APP_CMD_DATES_HPP
 #define STEPPE_APP_CMD_DATES_HPP
 

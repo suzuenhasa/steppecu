@@ -1,7 +1,6 @@
 // src/app/pop_resolver.cpp
 //
-// The pop-NAME -> P-axis INDEX resolver (cli-bindings.md §1, §4.2). PLAIN C++20,
-// app-only, NO CUDA header.
+// Resolves population names to their P-axis index. Host-only C++, no CUDA.
 #include "app/pop_resolver.hpp"
 
 #include <utility>
