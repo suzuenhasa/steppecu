@@ -33,9 +33,19 @@ bit/tolerance parity against ADMIXTOOLS 2 on real ancient-DNA (AADR) data.
 
 ## Install
 
-Three ways; **(1) is simplest: one binary, no Python, no build.** The prebuilt CLI + wheel are
-attached to the [v0.1.0 release](https://github.com/suzuenhasa/steppecu/releases/tag/v0.1.0)
-and download over plain `curl` — no GitHub auth needed.
+**Fastest — one command.** Downloads the CLI, checks your CUDA 13 runtime (with a clear message
+if it's missing, not the opaque loader error), and installs a launcher that sets
+`LD_LIBRARY_PATH` for you so you never have to:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/suzuenhasa/steppecu/main/install.sh | bash
+#  -> ~/.local/bin/steppe   (override the dir:  ... | bash -s -- --dir /usr/local/bin)
+steppe --help
+```
+
+Or do it by hand — three manual paths below; the prebuilt CLI + wheel are attached to the
+[v0.1.0 release](https://github.com/suzuenhasa/steppecu/releases/tag/v0.1.0) and download over
+plain `curl` (no GitHub auth). **(1) is simplest: one binary, no Python, no build.**
 
 ### 1. Prebuilt CLI — no build
 A single standalone executable (a fatbinary for every supported GPU):
