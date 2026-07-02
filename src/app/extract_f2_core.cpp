@@ -1,16 +1,18 @@
 // src/app/extract_f2_core.cpp
 //
-// Library entry for genotype->f2 extraction (steppe::run_extract_f2, declared in
-// include/steppe/extract.hpp): the decode -> filter -> assign_blocks ->
-// compute_f2_blocks_multigpu_tiered -> to_host chain, returned as a value (F2ExtractResult)
-// and throwing std::runtime_error / std::invalid_argument on failure. The CLI command is a
-// thin wrapper over this, so the chain lives in one place. No CUDA header is included here;
-// the GPU is reached only through Resources and the CUDA-free seams.
+// The LIBRARY genotype->f2 extract entry (steppe::run_extract_f2; include/steppe/extract.hpp)
+// — M(py-2). The decode->filter->assign_blocks->compute_f2_blocks_multigpu_tiered->to_host
+// chain, lifted VERBATIM from cmd_extract_f2.cpp:157-498, with the CLI's std::fprintf(stderr)
+// + kExit* exit codes REPLACED by std::runtime_error / std::invalid_argument throws and a
+// value result (F2ExtractResult). The MATH is byte-identical to the CLI — the goldens are
+// untouched; the CLI command run_extract_f2_command now calls THIS (a thin wrapper) so there
+// is ONE copy of the chain (DRY; the §4 layering / arch-grep gate — NO CUDA header here, the
+// GPU is reached only through resources.hpp build path + the CUDA-free seams).
 //
-// Parity pins vs ADMIXTOOLS 2 extract_f2: (1) the P axis is the selection sorted ascending
-// by label; (2) per-sample ploidy is auto-detected (adjust_pseudohaploid) unless forced;
-// (3) maxmiss is a population-axis coverage test applied separately, with the sample-axis
-// geno_max_missing forced to the no-op 1.0; (4) autosomes_only comes from FilterConfig.
+// THE PARITY PINS (cmd_extract_f2.cpp): (1) the P axis is read_ind(sel) sorted ASC by label;
+// (2) per-SAMPLE ploidy auto-detect (AT2 adjust_pseudohaploid) unless forced; (3) the AT2
+// maxmiss is the POPULATION-axis coverage test, applied separately while the sample-axis
+// geno_max_missing is forced to the no-op (1.0); (4) autosomes_only is the FilterConfig flag.
 #include "steppe/extract.hpp"
 
 #include <algorithm>
@@ -22,10 +24,10 @@
 
 #include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans
 #include "core/fstats/f2_blocks_multigpu.hpp"     // compute_f2_blocks_multigpu_tiered (CUDA-FREE)
-#include "core/stats/genotype_front_end.hpp"      // shared genotype decode front-end
+#include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "core/internal/views.hpp"                // steppe::core::MatView
 #include "device/backend.hpp"                     // DecodeTileView, DecodeResult (CUDA-FREE)
-#include "device/decode_budget.hpp"               // decode_tile_snps (SNP-tile width, CUDA-FREE)
+#include "device/decode_budget.hpp"               // decode_tile_snps (regime-B SNP-tile width, CUDA-FREE)
 #include "device/f2_blocks_out.hpp"               // F2BlocksOut (CUDA-FREE)
 #include "device/resources.hpp"                   // Resources (CUDA-FREE)
 #include "steppe/config.hpp"                      // Precision, FilterConfig
@@ -44,14 +46,15 @@ namespace {
 using steppe::core::MatView;
 namespace flt = steppe::io::filter;
 
-// AT2 ploidy encodings (1 = pseudo-haploid, 2 = diploid), shared with the CLI command.
+// AT2 ploidy values (mirror cmd_extract_f2.cpp's kPloidy{PseudoHaploid,Diploid}).
 constexpr int kPloidyPseudoHaploid = 1;
 constexpr int kPloidyDiploid = 2;
 
-// Validate that every requested Explicit pop label is present in the resolved partition.
-// read_ind silently drops an unknown label (it only throws on a fully empty selection), so
-// the request is checked against the resolved groups here and throws — the library contract,
-// versus the CLI's exit code.
+// Validate that every requested Explicit pop label is present in the resolved partition
+// (cli-bindings.md §4.2). read_ind silently drops an unknown label (only throwing on a
+// FULLY empty selection), so verify the request against the resolved groups here — the
+// SAME validate_explicit_pops cmd_extract_f2.cpp uses, but THROWING (the library contract)
+// instead of returning a CLI exit code.
 void validate_explicit_pops(const io::PopSelection& sel, const io::IndPartition& part) {
     if (sel.mode != io::PopSelection::Mode::Explicit) return;
     for (const std::string& want : sel.labels) {
@@ -87,13 +90,17 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             "required)");
     }
 
-    // ---- 1. Open the genotypes + read the .ind selection and .snp table ----------------
-    // read_genotype_front_end opens the reader (the on-disk format — TGENO/GENO/EIGENSTRAT/
-    // PLINK — is auto-detected and the matching parser dispatched), reads the IndPartition
-    // for `sel` and the SnpTable, and reads the canonical individual-major tile. `backend` is
-    // bound here and reused for the decode below. validate_explicit_pops stays in this caller
-    // because it needs the resolved partition; folding it into the helper would only reorder
-    // which fault fires on a malformed pops list — an error path that never affects a golden.
+    // ---- 1. Open the .geno/.bed + read .ind/.fam (selection) + .snp/.bim ---------------
+    // The GenoReader ctor pins the on-disk format (TGENO/GENO/EIGENSTRAT/PLINK); the
+    // SnpTable + IndPartition reads dispatch the parser on that format (read_snp/read_ind
+    // for the EIGENSTRAT family; read_bim/read_fam for PLINK) — M-FR PLINK. The geno/snp/
+    // ind paths already carry the correct extensions (config resolve_genotype_triple).
+    // The shared genotype DECODE FRONT-END (C1): one core helper opens the GenoReader, reads
+    // the IndPartition for `sel` + the SnpTable, and reads the canonical individual-major tile
+    // (M-FR-2 format dispatch). `backend` is bound here (forwarded to the non-TGENO transpose,
+    // reused below for the decode). validate_explicit_pops stays in THIS caller (the library
+    // contract — it needs the resolved partition); folding both reads into the helper only
+    // reorders which fault fires on a malformed-pops input (an error path, never a golden).
     steppe::ComputeBackend& backend = *resources.gpus.front().backend;
     const steppe::core::GenotypeFrontEnd fe =
         steppe::core::read_genotype_front_end(geno, snp, ind, sel, backend);
@@ -116,18 +123,20 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             " SNPs (the .snp/.geno SNP axes must agree)");
     }
 
-    // The P labels in P-axis index order — the name<->index map.
+    // The P labels in P-axis index order (= pops.txt) — the name<->index map.
     std::vector<std::string> pop_labels;
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
-    // ---- 2. Decode + filter + lockstep Q/V/N compaction -------------------------------
+    // ---- 2. Decode + REGIME-B FILTER + lockstep Q/V/N compaction ----------------------
+    // `backend` was bound above (the tile read dispatch); reused here for the decode.
 
-    // ---- Per-sample ploidy (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) -------
-    // For Auto, ploidy detection runs on-device: setting detect_ploidy_on_device makes the
-    // decode derive each sample's ploidy from the uploaded packed data (the CpuBackend
-    // oracle runs the equivalent host scan), avoiding an eager host pass. The explicit
-    // PseudoHaploid/Diploid modes just fill a uniform vector, with no detection.
+    // ---- PER-SAMPLE PLOIDY (the f2 pseudo-haploid fix; AT2 adjust_pseudohaploid) -------
+    // M-FR-0 (the L2 host-compute fix): for AUTO, the per-sample ploidy detection moves
+    // ON-DEVICE — set DecodeTileView.detect_ploidy_on_device so the decode derives the
+    // ploidy ITSELF from the uploaded d_packed (the GPU prepass; the CpuBackend oracle
+    // runs the host scan), instead of the eager host io::detect_sample_ploidy here. The
+    // explicit PseudoHaploid/Diploid modes still fill a uniform vector (no detection).
     std::vector<int> sample_ploidy;          // explicit modes only; EMPTY for Auto.
     bool detect_on_device = false;
     switch (ploidy) {
@@ -150,22 +159,23 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.empty() ? nullptr : sample_ploidy.data();
-    view.detect_ploidy_on_device = detect_on_device;  // Auto: on-device prepass drives decode.
+    view.detect_ploidy_on_device = detect_on_device;  // M-FR-0: Auto ⇒ on-device prepass.
     view.ploidy = kPloidyDiploid;  // uniform fallback (unused when a vector/flag is set).
 
-    // Pseudo-haploid/diploid counts for the result summary. Explicit modes already have the
-    // vector; for Auto the counts come from the same on-device prepass the decode uses (a
-    // cheap per-individual pass). Kept in a separate local so it never disturbs
-    // view.sample_ploidy, which must stay nullptr for Auto — the detect_ploidy_on_device
-    // flag is what drives detection there.
+    // The pseudo-haploid/diploid REPORT counts (observability). For the explicit modes
+    // the vector is in hand; for AUTO the prepass runs inside the decode, so derive the
+    // counts from the backend's on-device prepass (the SAME launch_detect_ploidy; one
+    // cheap [n_individuals] pass) — the GPU-first source, never the eager host scan.
+    // This is a SEPARATE local so it never disturbs view.sample_ploidy (which stays
+    // nullptr for Auto — the decode's detect_ploidy_on_device flag is what drives it).
     std::size_t n_ph = 0, n_dip = 0;
     const std::vector<int> ploidy_for_counts =
         detect_on_device ? backend.detect_sample_ploidy_device(view) : sample_ploidy;
     for (int pl : ploidy_for_counts) (pl == kPloidyPseudoHaploid ? n_ph : n_dip)++;
 
-    // maxmiss semantics: AT2's extract_f2 maxmiss is a population-axis coverage test, applied
-    // separately. The sample-axis geno_max_missing is forced to the no-op 1.0 so the
-    // sample-axis predicate does not double-filter.
+    // THE maxmiss SEMANTIC (cmd_extract_f2.cpp:358-416): the AT2 extract_f2 maxmiss is the
+    // POPULATION-axis coverage test, applied SEPARATELY; the sample-axis geno_max_missing is
+    // forced to the no-op (1.0) so the sample-axis predicate does not double-filter.
     std::vector<std::size_t> pop_individuals(static_cast<std::size_t>(P));
     for (int p = 0; p < P; ++p) {
         pop_individuals[static_cast<std::size_t>(p)] =
@@ -174,37 +184,42 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     }
     const double maxmiss = filter.geno_max_missing;  // the AT2 pop-coverage maxmiss.
 
-    // The compacted kept tensor and its parallel per-SNP axis. The GPU path computes the
-    // keep-set and the lockstep Q/V/N compaction on-device (a pooled-MAF filter plus the
-    // separate pop-coverage maxmiss), so only the small compacted arrays cross to host. The
-    // CpuBackend parity oracle keeps the equivalent host path (decode_af +
-    // build_snp_keep_mask + the host maxmiss loop + a host lockstep subset). Both must
-    // produce the identical kept set, kept order, chrom/genpos, and compacted Q/V/N — this
-    // parity is bit-exact-gated against the goldens.
+    // The COMPACTED kept tensor + the kept axis. The CUDA path computes the keep-set
+    // + the lockstep Q/V/N compaction ON-DEVICE (the regime-B keep-mask kernel: the
+    // pooled-MAF Σ_pop Q·N [FFMA-immune] + the shared keep_decision_pooled + the
+    // SEPARATE pop-coverage maxmiss) — the host per-SNP filter loop + the full-tile
+    // D2H are GONE; only the small compacted Q/V/N cross to host. The CpuBackend (the
+    // parity oracle) keeps the host path: decode_af + build_snp_keep_mask + the host
+    // maxmiss loop + the host lockstep subset (UNCHANGED). BOTH produce the IDENTICAL
+    // kept SET, kept ORDER, chrom_kept/genpos_kept, and compacted Q/V/N (the keep-set
+    // is bit-exact-gated: same SNPs, same order ⇒ identical assign_blocks/golden).
     const bool on_device = (backend.capabilities().device_count > 0);
     std::vector<double> Qk, Vk, Nk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;
-    std::vector<double> physpos_kept;  // AT2 bp block-fallback axis (used when no genetic map).
+    std::vector<double> physpos_kept;  // the AT2 bp block-fallback axis (all-zero-map case).
     long M_kept = 0;
 
     if (on_device) {
-        // Hoist ploidy to an explicit per-sample vector before the SNP-tile loop. The
-        // whole-tile detection computed above becomes the single vector every tile reuses.
-        // This is required for tiled parity: a per-tile on-device re-detect would scan only
-        // that tile's leading SNPs and could infer a different ploidy on later tiles (or on
-        // a short first tile), corrupting Q/N. For Auto this is bit-identical to the
-        // single-shot detect over the same full-M prefix; for the explicit modes the vector
-        // is already the uniform one held in view.sample_ploidy, so nothing moves.
+        // HOIST PLOIDY TO EXPLICIT before the SNP-tile loop. The full-view detection
+        // (ploidy_for_counts, computed above over the fixed first-min(kPloidyDetectSnps,
+        // M) SNP prefix) becomes the SINGLE explicit per-sample vector EVERY tile uses.
+        // This is REQUIRED for tiled parity: a per-tile on-device re-detect
+        // (detect_ploidy_on_device) would scan only THAT tile's leading SNPs, giving a
+        // DIFFERENT ploidy on tiles past the first (and possibly on a first tile whose
+        // width < kPloidyDetectSnps) — wrong Q/N. For Auto this is bit-identical to the
+        // single-shot on-device detect (the SAME launch_detect_ploidy over the SAME
+        // full-M prefix); for the explicit modes ploidy_for_counts == the uniform vector
+        // that was already in view.sample_ploidy, so nothing moves.
         view.sample_ploidy = ploidy_for_counts.data();
         view.detect_ploidy_on_device = false;
 
-        // SNP-tile the decode so peak VRAM is O(P x tile_M), not O(P x M): the decode
-        // allocates several [P x M] FP64 buffers before the tier runs, which OOMs at large
-        // P x M. tile_M is a multiple of 4 so every tile start stays 2-bit-packing-aligned;
-        // the last tile may be shorter. Byte-identical to the single-shot path because keep
-        // decisions are per-SNP independent and tiles are appended in file order, preserving
-        // the same kept set and the same file order.
+        // SNP-TILE the decode so peak VRAM is O(P × tile_M), not O(P × M): the decode
+        // allocates ~6 [P × M] FP64 buffers (dQ/dV/dN + the compacted q/v/n) BEFORE the
+        // tier runs, an OOM at large P × M. tile_M is a multiple of 4 (every s_lo stays
+        // 2-bit-packing-aligned); the last tile may be shorter. Byte-identical to the
+        // single-shot path: per-SNP keep independence + the monotone per-tile scan +
+        // the in-file-order host append ⇒ the SAME kept SET, the SAME file ORDER.
         const long tile_M = steppe::device::decode_tile_snps(
             backend.capabilities().free_vram_bytes, P, tile.n_individuals, M);
 
@@ -230,11 +245,12 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             const long mk = ddr.M_kept;
             if (mk <= 0) continue;  // no SNP kept in this tile — nothing to append.
 
-            // Copy this tile's compacted Q/V/N to host and free the resident tile buffers
-            // each iteration — never accumulate a resident [P x M_kept] tensor, which would
-            // be O(P x M) again. The host layout is column-major [P x mk] (element (pop i,
-            // kept SNP d) at i + P*d), so appending each tile's arrays in file order
-            // reproduces the single-shot [P x M_kept] layout exactly, bit-for-bit.
+            // D2H this tile's compacted Q/V/N and FREE the resident tile buffers at the
+            // end of the iteration (never accumulate a resident [P × M_kept] tensor —
+            // that would be O(P × M) again). The host layout is column-major [P × mk]
+            // (element (pop i, kept SNP d) at i + P·d), so consecutive kept SNPs are
+            // P-strided; APPENDING each tile's arrays in file (tile) order reproduces
+            // the single-shot [P × M_kept] contiguous layout EXACTLY, bit-for-bit.
             std::vector<double> Qt, Vt, Nt;
             ddr.to_host_qvn(Qt, Vt, Nt);
             Qk.insert(Qk.end(), Qt.begin(), Qt.end());
@@ -255,7 +271,7 @@ F2ExtractResult run_extract_f2(const std::string& geno,
                 " kept) — relax the filters");
         }
     } else {
-        // CPU parity oracle: the host filter path.
+        // CPU PARITY ORACLE: the verbatim host regime-B path (UNCHANGED).
         const DecodeResult dec = backend.decode_af(view);
         flt::DecodedTileSummaryInput fin;
         fin.q = dec.q.data();
@@ -271,9 +287,9 @@ F2ExtractResult run_extract_f2(const std::string& geno,
         flt::SnpMembership mem(class_filter);
         std::vector<bool> keep = flt::build_snp_keep_mask(fin, snptab, class_filter, mem);
 
-        // Pop-coverage maxmiss (AT2 population-axis): drop SNP s when the fraction of
-        // selected pops with N(pop,s)==0 (no data) exceeds maxmiss. maxmiss>=1 keeps every
-        // SNP; maxmiss==0 is the global intersection (a SNP survives only if every pop has data).
+        // Pop-coverage maxmiss (AT2 population-axis): drop SNP s if the fraction of
+        // selected pops with N(pop,s)==0 (no data) exceeds maxmiss. maxmiss>=1 keeps
+        // every SNP; maxmiss==0 is the global intersection (the golden_fit0 SNP set).
         if (maxmiss < 1.0) {
             for (long s = 0; s < M; ++s) {
                 if (!keep[static_cast<std::size_t>(s)]) continue;
@@ -298,8 +314,8 @@ F2ExtractResult run_extract_f2(const std::string& geno,
                 " kept) — relax the filters");
         }
 
-        // Subset Q/V/N and the parallel chrom/genpos in lockstep — the SNP axis must stay
-        // aligned for assign_blocks.
+        // Subset Q/V/N AND the parallel chrom/genpos in LOCKSTEP (the SNP axis must
+        // stay aligned for assign_blocks; cmd_extract_f2.cpp:427-449).
         Qk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
         Vk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
         Nk.assign(static_cast<std::size_t>(P) * n_kept, 0.0);
@@ -325,10 +341,10 @@ F2ExtractResult run_extract_f2(const std::string& geno,
         }
     }
 
-    // ---- 3. assign_blocks over the kept SNP axis --------------------------------------
-    // physpos_kept drives the AT2 bp block-fallback only when genpos_kept is all zero (a
-    // dataset with no genetic map, e.g. PLINK-derived); with a real map it is ignored, so
-    // the partition is bit-identical either way.
+    // ---- 3. assign_blocks over the KEPT SNP axis --------------------------------------
+    // physpos_kept drives the AT2 bp block-fallback ONLY when genpos_kept is all zero
+    // (a dataset with no genetic map — e.g. VCF/PLINK-derived); a real map (the AADR)
+    // ignores it, so the partition — and every golden — is bit-identical (the pass gate).
     const steppe::core::BlockPartition partition = steppe::core::assign_blocks(
         std::span<const int>(chrom_kept), std::span<const double>(genpos_kept),
         blgsize_morgans, std::span<const double>(physpos_kept));
@@ -338,14 +354,14 @@ F2ExtractResult run_extract_f2(const std::string& geno,
             "genetic positions)");
     }
 
-    // ---- 4. compute_f2_blocks_multigpu_tiered (GPU; the adaptive tiered entry) ---------
+    // ---- 4. compute_f2_blocks_multigpu_tiered (GPU; the UNIFIED adaptive entry) -------
     const MatView Q{Qk.data(), P, M_kept};
     const MatView V{Vk.data(), P, M_kept};
     const MatView N{Nk.data(), P, M_kept};
     device::F2BlocksOut dev_f2 = steppe::core::compute_f2_blocks_multigpu_tiered(
         resources, Q, V, N, partition, precision);
 
-    // ---- 5. Materialize the host f2 tensor (tier-agnostic) ----------------------------
+    // ---- 5. Materialize -> host tensor with REAL f2 + vpair (tier-agnostic) -----------
     F2ExtractResult out;
     out.f2 = dev_f2.to_host();
     out.pop_labels = std::move(pop_labels);
@@ -354,8 +370,8 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     out.n_pseudo_haploid = n_ph;
     out.n_diploid = n_dip;
     out.precision_tag = precision.kind;
-    // Map the internal device tier onto the public ExtractTier enum so the CLI summary can
-    // report which tier ran (honoring a --tier / STEPPE_FORCE_TIER override).
+    // Map the internal device tier -> the CUDA-free public ExtractTier mirror (observability;
+    // the CLI summary / meta echo it so a --tier / STEPPE_FORCE_TIER override is visibly honored).
     switch (dev_f2.tier) {
         case device::OutputTier::Resident: out.tier = ExtractTier::Resident; break;
         case device::OutputTier::HostRam:  out.tier = ExtractTier::HostRam;  break;

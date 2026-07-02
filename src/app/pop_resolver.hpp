@@ -1,10 +1,15 @@
 // src/app/pop_resolver.hpp
 //
-// Maps population NAMES to P-axis INDICES. The compute layer is index-only
-// (a model references pops by index into the f2 P axis); names are an app-level
-// concern resolved against <dir>/pops.txt. Single home for that map, with a
-// fail-fast on an unknown label (Status::InvalidConfig naming the offending name).
-// Plain C++20, app-only, no CUDA header.
+// The pop-NAME -> P-axis INDEX resolver (cli-bindings.md §1, §4.2). The compute seam
+// is INDEX-ONLY (QpAdmModel references pops by index into the f2 P axis); names are an
+// app concern resolved against <dir>/pops.txt. This is the single home for that map +
+// the fail-fast on an unknown label (Status::InvalidConfig with the offending name,
+// cli-bindings.md §4.2: "An unknown pop name is Status::InvalidConfig fail-fast with
+// the offending label"). PLAIN C++20, app-only, NO CUDA header.
+//
+// It replaces the hardcoded name->index map the reference fit test carries
+// (tests/reference/test_qpadm_parity.cu) — the gap cli-bindings.md §1 flags as the
+// single biggest design decision the access layer exists to close.
 #ifndef STEPPE_APP_POP_RESOLVER_HPP
 #define STEPPE_APP_POP_RESOLVER_HPP
 
@@ -57,8 +62,8 @@ public:
     /// Status::InvalidConfig, the reason naming the label + the dir hint.
     [[nodiscard]] ResolveResult resolve(const std::string& label) const;
 
-    /// Resolve a LIST of labels in order; the first unknown short-circuits to a
-    /// fault naming it, so the user sees the exact offending name.
+    /// Resolve a LIST of labels in order; the first unknown short-circuits to a fault
+    /// naming it (so the user sees the exact offending name, cli-bindings.md §4.2).
     [[nodiscard]] ResolveListResult resolve_all(const std::vector<std::string>& labels) const;
 
 private:

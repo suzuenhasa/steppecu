@@ -1,12 +1,14 @@
 // src/app/cmd_dates.cpp
 //
-// The `steppe dates` command — admixture dating via the weighted ancestry-covariance
-// decay (the DATES method). Reads PREFIX.{geno,snp,ind} plus an admixed --target and
-// exactly two reference sources (--left); reports the date in generations with a
-// leave-one-chromosome block-jackknife SE. Plain C++20, no CUDA header: the GPU LD-decay
-// engine is reached only through the CUDA-free run_dates seam — never the f2 cache, never
-// a host O(M²) SNP-pair loop. A degenerate run yields a NaN date and exit 0
-// (record-and-continue); only genuine faults return nonzero.
+// The `steppe dates` command — admixture DATING via the weighted ancestry-covariance decay
+// (the DATES tool). Reads PREFIX.{geno,snp,ind} (--prefix), the admixed --target, and the two
+// reference sources (--left, exactly two), and reports the date (generations) + the
+// leave-one-chromosome block-jackknife SE through run_dates (the cuFFT autocorrelation LD
+// engine; NEVER the f2 cache, NEVER a host O(M²) SNP-pair loop). Mirrors cmd_qpdstat.cpp's
+// --prefix Part-B shape: build_resources -> run_dates -> emit. PLAIN C++20, app-only, NO CUDA
+// header (the §4 layering); the GPU is reached ONLY through the CUDA-free run_dates seam.
+// main() owns stdout/stderr (architecture.md §10). A degenerate run is a NaN date + exit 0
+// (record-and-continue); only faults return nonzero.
 #include "app/cmd_dates.hpp"
 
 #include <cmath>
@@ -96,14 +98,14 @@ int run_dates_command(const cfg::RunConfig& config) {
     }
 
     const std::string& prefix = config.qpdstat_prefix();
-    // Format-aware --prefix expansion: EIGENSTRAT family -> P.{geno,snp,ind}, PLINK ->
-    // P.{bed,bim,fam}. run_dates pins the parser via the GenoReader ctor.
+    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
+    // PLINK -> P.{bed,bim,fam}. run_dates pins the parser via the GenoReader ctor.
     const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
     const std::string& geno = triple.geno;
     const std::string& snp = triple.snp;
     const std::string& ind = triple.ind;
 
-    steppe::DatesOptions opts;  // defaults match the reference DATES parameter file.
+    steppe::DatesOptions opts;  // defaults == the reference par.dates the goldens used.
 
     steppe::DatesResult result;
     try {
@@ -121,9 +123,9 @@ int run_dates_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // open->write->flush->verify via the shared emit_to_destination: a torn or short write
-    // returns kExitIoError instead of silently exiting 0 with a truncated file. The helper
-    // parses --format (kExitInvalidConfig on an unknown token).
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write returns kExitIoError instead of silently exiting 0 with a truncated file. The
+    // helper parses --format (kExitInvalidConfig on an unknown token).
     if (const auto rc = emit_to_destination(
             config, "dates", [&](std::ostream& os, OutputFormat fmt) {
                 emit_dates(os, fmt, result, config.target(), sources[0], sources[1]);

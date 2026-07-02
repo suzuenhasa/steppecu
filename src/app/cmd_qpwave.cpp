@@ -1,16 +1,23 @@
 // src/app/cmd_qpwave.cpp
 //
-// The `steppe qpwave` command. qpWave is the rank/cladality test underlying qpAdm: given
-// left + right pops (no target; left[0] is the reference) it sweeps the minimum f4 rank
-// relating them. Structurally this is cmd_qpadm.cpp minus the target — `left` is the full
-// left set, there is no admixture-weight/popdrop output, and the result is the per-rank
-// sufficiency sweep + rankdrop table. The f2-dir load, name->index resolution, resource
-// build/upload chain, and output sink are reused from cmd_qpadm.cpp.
+// The `steppe qpwave` command (M(cli-2); cli-bindings.md §4.1). qpWave = the rank/cladality
+// test underlying qpAdm: given left + right pops (NO target; left[0] is the reference) it
+// sweeps the minimum f4 rank relating them. The GPU path is the deliverable: read the
+// f2_blocks dir -> resolve names->indices via pops.txt -> build_resources(DeviceConfig) ->
+// upload_f2_blocks_to_device -> run_qpwave(DeviceF2Blocks, ...) -> emit the rank-sweep table.
 //
-// Plain C++20, app-only, no CUDA header: the GPU is reached only through the CUDA-free
-// seams (resources.hpp / device_f2_blocks.hpp / qpadm.hpp). main() owns stdout/stderr; the
-// library never prints. A domain outcome is a row + exit 0 (record-and-continue); only
-// faults return nonzero.
+// Structurally this is cmd_qpadm.cpp with the single difference that qpWave has NO target:
+// `left` IS the full left set (left[0] is the reference row), there is no admixture weight
+// / popdrop output, and the result is the per-rank rank-sufficiency sweep + rankdrop table.
+// The f2-dir load, name->index resolution, build_resources/upload chain, and the output
+// sink are REUSED verbatim from cmd_qpadm.cpp; the result_emit format primitives are reused
+// through emit_qpwave_result (NO compute or format duplicated).
+//
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
+// reached ONLY through the CUDA-FREE seams (resources.hpp / device_f2_blocks.hpp /
+// qpadm.hpp). main() owns stdout/stderr (architecture.md §10 — the library never prints).
+// A DOMAIN outcome is a row + exit 0 (record-and-continue); only faults return nonzero
+// (cli-bindings.md §1.3, §4.4).
 #include "app/cmd_qpwave.hpp"
 
 #include <cstdio>
@@ -23,7 +30,7 @@
 #include <vector>
 
 #include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (maps caught faults, e.g. device OOM)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -43,7 +50,7 @@ namespace cfg = steppe::config;
 }  // namespace
 
 int run_qpwave_command(const cfg::RunConfig& config) {
-    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt), same as cmd_qpadm.cpp -----
+    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE cmd_qpadm path -----
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe qpwave: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -54,10 +61,10 @@ int run_qpwave_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // ---- 2. Name -> index resolution against pops.txt (no target, left[0]=ref) ----
-    // qpWave has no target argument: `left` is the full left set and left[0] is the
-    // reference row. We only enforce non-empty here; the engine gates degenerate cases
-    // (e.g. nl<2) as a domain status.
+    // ---- 2. Name -> index resolution against pops.txt (NO target, left[0]=ref) ----
+    // qpWave has no target argument: `left` IS the full left set and left[0] is the
+    // reference row. We only enforce non-empty (mirroring how cmd_qpadm.cpp checks
+    // non-empty); the engine gates degenerate cases (e.g. nl<2) as a domain `status`.
     const PopResolver resolver(dir.dir.pop_labels);
     if (!resolver.valid()) {
         std::fprintf(stderr, "steppe qpwave: %s\n", resolver.error().c_str());
@@ -81,9 +88,10 @@ int run_qpwave_command(const cfg::RunConfig& config) {
     const std::vector<int>& right_idx = r.indices;  // right[0] is R0
 
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_qpwave (GPU path) -----
-    // All three calls are CUDA-free seams; a machine with no GPU surfaces a clear fault
-    // from build_resources. The DeviceF2Blocks overload is the production GPU path
-    // exercised by tests/reference/test_qpwave_parity.cu.
+    // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
+    // seams; a no-GPU box surfaces a clear fault from build_resources. The DeviceF2Blocks
+    // overload is the production GPU path the parity test's "CudaBackend DELIVERABLE" block
+    // exercises (tests/reference/test_qpwave_parity.cu).
     const QpAdmOptions opts = config.qpadm_options();  // fudge / rank_alpha drive qpWave
     QpWaveResult result;
     try {
@@ -102,9 +110,9 @@ int run_qpwave_command(const cfg::RunConfig& config) {
                             std::span<const int>(right_idx),
                             opts, resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) are faults:
-        // nonzero exit. A domain outcome never throws; it arrives as result.status below
-        // (record-and-continue, exit 0).
+        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,
+        // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives
+        // as result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpwave: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
@@ -114,16 +122,17 @@ int run_qpwave_command(const cfg::RunConfig& config) {
     std::vector<std::string> left_labels;
     left_labels.reserve(left_idx.size());
     for (int idx : left_idx) left_labels.push_back(resolver.label_at(idx));
-    // right[0] is R0, so right_n = right.size()-1. The subtraction would underflow to
-    // negative iff right_idx were empty; the earlier config.right() non-empty check
-    // guarantees it isn't. Assert it here so the invariant is locally self-evident.
+    // nr convention: right[0] == R0, so right_n == right.size()-1 (== metadata.nr).
+    // The subtraction underflows to negative iff right_idx is empty; the R0
+    // convention guarantees non-empty here (validated at the config.right() check
+    // ~50 lines above, :75). Make that invariant locally self-evident (debug-only).
     STEPPE_ASSERT(!right_idx.empty(),
                   "right_idx non-empty: R0 convention (validated at config.right() check)");
     const int right_n = static_cast<int>(right_idx.size()) - 1;
 
-    // open->write->flush->verify via the shared emit_to_destination: a torn / short write
-    // (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with a
-    // truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
+    // a truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
     if (const auto rc = emit_to_destination(
             config, "qpwave", [&](std::ostream& os, OutputFormat fmt) {
                 emit_qpwave_result(os, fmt, result, left_labels, right_n);
@@ -131,9 +140,9 @@ int run_qpwave_command(const cfg::RunConfig& config) {
         return *rc;
     }
 
-    // A domain outcome (RankDeficient/NonSpd/ChisqUndefined) is a row + exit 0
-    // (record-and-continue); exit_code_for maps those to kExitOk and only the fault
-    // categories to nonzero.
+    // A DOMAIN outcome (RankDeficient/NonSpd/ChisqUndefined) is a row + exit 0
+    // (record-and-continue, cli-bindings.md §1.3); exit_code_for maps those to kExitOk and
+    // only the fault categories to nonzero.
     return cfg::exit_code_for(result.status);
 }
 

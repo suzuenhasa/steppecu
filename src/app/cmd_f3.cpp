@@ -1,13 +1,22 @@
 // src/app/cmd_f3.cpp
 //
-// The `steppe f3` command: standalone f3 statistic per population triple. f3 is the sibling
-// of f4, not a fork of qpAdm — no target, no ALS, no rank test — computing the AT2 weighted
-// block-jackknife point estimate per triple plus the jackknife-diagonal SE on the GPU.
+// The `steppe f3` command (standalone f3 statistic; fit-engine §6). f3 is the SIBLING of
+// f4, NOT a fork of qpAdm: NO target, NO ALS, NO rank — it computes the AT2 weighted
+// block-jackknife f3 POINT ESTIMATE per triple + the jackknife-DIAGONAL SE. The GPU path
+// is the deliverable: read the f2_blocks dir -> resolve names->indices via pops.txt ->
+// build_resources -> upload_f2_blocks_to_device -> run_f3(DeviceF2Blocks, triples) -> emit
+// the table (pop1,pop2,pop3,est,se,z,p — the golden_fit0_f3_readf2.csv schema).
 //
-// Triples come either from row-aligned --pop1/--pop2/--pop3 columns or from --pops C,A,B
-// (names in groups of 3). App-only C++20 with no CUDA header: the GPU is reached only through
-// the CUDA-free seams in resources.hpp / device_f2_blocks.hpp / f3.hpp. A domain outcome is a
-// table row with exit 0 (record-and-continue); only faults return nonzero.
+// TRIPLES: EITHER the row-aligned --pop1/--pop2/--pop3 columns (admixtools::f3 comb=FALSE)
+// OR the single-triple --pops C,A,B convenience (3 names = one triple, or any multiple of 3
+// = several triples). The f2-dir load, name->index resolution, build_resources/upload chain,
+// and the output sink are REUSED verbatim from cmd_qpwave.cpp/cmd_f4.cpp; the result_emit
+// format primitives are reused through emit_f3_result (NO compute/format dup).
+//
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
+// reached ONLY through the CUDA-FREE seams (resources.hpp / device_f2_blocks.hpp / f3.hpp).
+// main() owns stdout/stderr (architecture.md §10). A DOMAIN outcome is a row + exit 0
+// (record-and-continue); only faults return nonzero (cli-bindings.md §1.3, §4.4).
 #include "app/cmd_f3.hpp"
 
 #include <array>
@@ -21,7 +30,7 @@
 
 #include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
 #include "app/cmd_fstat_sweep.hpp"      // run_fstat_sweep (the GPU sweep, --all-triples mode)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (maps a device OOM to exit 3)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -37,10 +46,11 @@ namespace {
 
 namespace cfg = steppe::config;
 
-/// Build the triple name table (one row per triple, three names each) from config. Prefers
-/// the row-aligned --pop1/--pop2/--pop3 columns; falls back to --pops taken in groups of 3.
-/// Returns false with a reason in `err` on no input or a malformed shape (mismatched columns
-/// / non-multiple-of-3 --pops). On success triples[k] = {pop1=C, pop2=A, pop3=B}.
+/// Build the triple NAME table (one row per triple, three names each) from the frozen
+/// config. Prefers the row-aligned --pop1/--pop2/--pop3 columns; falls back to the --pops
+/// 3-tuple convenience (the names are taken in groups of 3). Returns false (with a reason in
+/// `err`) on no input or a malformed shape (mismatched columns / non-multiple-of-3 --pops).
+/// On success `triples[k]` = {pop1=C, pop2=A, pop3=B} of triple k.
 [[nodiscard]] bool build_triple_names(const cfg::RunConfig& config,
                                       std::vector<std::array<std::string, 3>>& triples,
                                       std::string& err) {
@@ -86,14 +96,15 @@ namespace cfg = steppe::config;
 }  // namespace
 
 int run_f3_command(const cfg::RunConfig& config) {
-    // Sweep mode (--all-triples): route to the GPU sweep over C(P,3) of the --pops subset
-    // (empty ⇒ the whole f2 dir). Separate from the explicit-list path below; the sweep body
-    // lives in cmd_fstat_sweep.cpp (run_fstat_sweep / run_f3_sweep).
+    // ---- SWEEP MODE (--all-triples): route to the GPU sweep over C(P,3) of the --pops
+    // SUBSET (empty ⇒ the whole f2 dir). SEPARATE from the explicit-list path below (the
+    // goldens gate it byte-identical). The sweep body lives in cmd_fstat_sweep.cpp
+    // (run_fstat_sweep / run_f3_sweep).
     if (config.sweep_all_combinations()) {
         return run_fstat_sweep(config, /*k=*/3, "f3");
     }
 
-    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) -------------------------------
+    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE cmd_qpwave path -----
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe f3: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -141,10 +152,10 @@ int run_f3_command(const cfg::RunConfig& config) {
         l3.push_back(resolver.label_at(idx[2]));
     }
 
-    // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f3 -----------------------
-    // All three calls are CUDA-free seams; a machine with no GPU surfaces a clear fault from
-    // build_resources. run_f3 defaults fudge to 0 for a bare f3 SE (not qpAdm's 1e-4); opts
-    // here is the struct default.
+    // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f3 (GPU path) ----------
+    // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
+    // seams; a no-GPU box surfaces a clear fault from build_resources. fudge defaults to 0
+    // for a bare f3 SE inside run_f3 (NOT qpadm's 1e-4) — opts here is the struct default.
     const QpAdmOptions opts = config.qpadm_options();
     F3Result result;
     try {
@@ -161,17 +172,16 @@ int run_f3_command(const cfg::RunConfig& config) {
         result = run_f3(dev_f2, std::span<const std::array<int, 3>>(triples), opts,
                         resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) are faults:
-        // nonzero exit. A domain outcome never throws; it arrives as result.status below
-        // (record-and-continue, exit 0).
+        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,
+        // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives as
+        // result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe f3: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
 
-    // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout ------------------------
-    // open->write->flush->verify via the shared emit_to_destination: a torn / short write
-    // (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with a
-    // truncated file.
+    // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout — open->write->flush->verify
+    // via the shared emit_to_destination (B1): a torn / short write (full disk, closed pipe)
+    // returns kExitIoError instead of silently exiting 0 with a truncated file.
     if (const auto rc = emit_to_destination(
             config, "f3", [&](std::ostream& os, OutputFormat fmt) {
                 emit_f3_result(os, fmt, result, l1, l2, l3);
@@ -179,8 +189,8 @@ int run_f3_command(const cfg::RunConfig& config) {
         return *rc;
     }
 
-    // A domain outcome (e.g. NonSpd over the m-batch) is a table + exit 0 (record-and-
-    // continue); exit_code_for maps those to kExitOk, only faults to nonzero.
+    // A DOMAIN outcome (NonSpd over the m-batch) is a table + exit 0 (record-and-continue,
+    // cli-bindings.md §1.3); exit_code_for maps those to kExitOk, only faults to nonzero.
     return cfg::exit_code_for(result.status);
 }
 

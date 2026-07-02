@@ -1,11 +1,15 @@
 // src/app/cmd_qpadm.cpp
 //
-// The `steppe qpadm` command: read an f2_blocks dir, resolve population names to
-// P-axis indices via pops.txt, upload f2 to the GPU, run the fit, emit tidy CSV/JSON.
-// Plain C++20 with no CUDA header — the GPU is reached only through the CUDA-free
-// seams (resources.hpp / device_f2_blocks.hpp / qpadm.hpp). main() owns stdout/stderr;
-// the library never prints. A per-model domain outcome is a row + exit 0
-// (record-and-continue); only faults exit nonzero.
+// The `steppe qpadm` command (M(cli-1); cli-bindings.md §4.1). The GPU path is the
+// deliverable: read the f2_blocks dir -> resolve names->indices via pops.txt ->
+// build_resources(DeviceConfig) -> upload_f2_blocks_to_device -> run_qpadm(
+// DeviceF2Blocks, ...) -> emit tidy CSV/JSON.
+//
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
+// reached ONLY through the CUDA-FREE seams (resources.hpp / device_f2_blocks.hpp /
+// qpadm.hpp). main() owns stdout/stderr (architecture.md §10 — the library never
+// prints). A model-level domain outcome is a row + exit 0 (record-and-continue); only
+// faults return nonzero (cli-bindings.md §1.3, §4.4).
 #include "app/cmd_qpadm.hpp"
 
 #include <cstdio>
@@ -17,7 +21,7 @@
 #include <vector>
 
 #include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (device OOM -> OOM exit code)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
@@ -33,9 +37,9 @@ namespace {
 
 namespace cfg = steppe::config;
 
-// Resolve the target + left + right NAMES to P-axis INDICES. On any unknown name the
-// resolver fail-fasts naming the offending label; print the reason to stderr and
-// signal the caller to return kExitInvalidConfig.
+// Resolve the target + left + right NAMES to P-axis INDICES (cli-bindings.md §4.2).
+// On any unknown name the resolver fail-fasts naming the offending label; this prints
+// the reason to stderr and signals the caller to return kExitInvalidConfig.
 [[nodiscard]] bool resolve_model(const PopResolver& resolver,
                                  const std::string& target,
                                  const std::vector<std::string>& left,
@@ -94,10 +98,11 @@ int run_qpadm_command(const cfg::RunConfig& config) {
     }
 
     // ---- 3/4. build_resources -> upload f2 to the GPU -> run_qpadm (GPU path) -----
-    // All three calls are CUDA-free seams; a machine with no GPU surfaces a clear fault
-    // from build_resources, which enumerates and binds a CUDA device and throws when
-    // none is visible. The device ordinal comes from the resolved DeviceConfig (empty ⇒
-    // auto-enumerate); the upload targets the first configured ordinal.
+    // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
+    // seams; a no-GPU box surfaces a clear fault from build_resources (it enumerates /
+    // binds a CUDA device and throws when none is visible). The device ordinal comes
+    // from the resolved DeviceConfig (empty ⇒ auto-enumerate; the upload targets the
+    // first configured ordinal, the same single-GPU fit path the reference test uses).
     const QpAdmOptions opts = config.qpadm_options();
     QpAdmResult result;
     try {
@@ -113,9 +118,9 @@ int run_qpadm_command(const cfg::RunConfig& config) {
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
         result = run_qpadm(dev_f2, model, opts, resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) are
-        // FAULTS: nonzero exit. A domain outcome never throws — it arrives as
-        // result.status below (record-and-continue, exit 0).
+        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a
+        // FAULT, nonzero exit (cli-bindings.md §1.3). A domain outcome never throws;
+        // it arrives as result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpadm: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
@@ -127,10 +132,9 @@ int run_qpadm_command(const cfg::RunConfig& config) {
     for (int idx : model.left) left_labels.push_back(resolver.label_at(idx));
     const std::string target_label = resolver.label_at(model.target);
 
-    // open->write->flush->verify via the shared emit_to_destination: a torn / short
-    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0
-    // with a truncated file. The helper parses --format (kExitInvalidConfig on an
-    // unknown token).
+    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
+    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
+    // a truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
     if (const auto rc = emit_to_destination(
             config, "qpadm", [&](std::ostream& os, OutputFormat fmt) {
                 emit_qpadm_result(os, fmt, result, target_label, left_labels);
@@ -139,8 +143,8 @@ int run_qpadm_command(const cfg::RunConfig& config) {
     }
 
     // A per-model DOMAIN outcome (RankDeficient/NonSpd/ChisqUndefined) is a row +
-    // exit 0 (record-and-continue); exit_code_for maps those to kExitOk and only the
-    // fault categories to nonzero.
+    // exit 0 (record-and-continue, cli-bindings.md §1.3); exit_code_for maps those to
+    // kExitOk and only the fault categories to nonzero.
     return cfg::exit_code_for(result.status);
 }
 

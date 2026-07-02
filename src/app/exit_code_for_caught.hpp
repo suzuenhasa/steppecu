@@ -1,16 +1,26 @@
 // src/app/exit_code_for_caught.hpp
 //
-// Thin, CUDA-free bridge from a caught std::exception to the process exit code.
-// Lets each command's top-level `catch (const std::exception&)` return the device-OOM
-// code on a genuine device out-of-memory, rather than the catch-all runtime-error
-// code — an honest fault taxonomy a calling script can branch on.
+// exit_code_for_caught — the app's thin, CUDA-FREE bridge from a caught
+// std::exception to the §4.4 process exit code (cli-bindings.md §4.4; architecture.md
+// §10 fault taxonomy). It exists so each command's top-level
+// `catch (const std::exception& e)` returns kExitDeviceOom (3) on a GENUINE device
+// out-of-memory instead of the catch-all kExitRuntimeError (5) — an honest fault
+// taxonomy a calling script can branch on — WITHOUT the CUDA-free app ever naming a
+// CUDA type.
 //
-// The OOM classification can't live here: the typed device exceptions and their CUDA
-// status codes are private to the device layer, and src/app stays CUDA-free. So it is
-// delegated to device::device_fault_status, declared CUDA-free in device/resources.hpp
-// and defined in the device backend TU. A host std::bad_alloc, or any non-allocation
-// CUDA/cuBLAS/cuSOLVER fault, yields nullopt and keeps the catch-all runtime-error
-// code; only a real device allocation failure is reclassified to device-OOM.
+// THE LAYERING POINT (architecture.md §4): the typed device exceptions (CudaError /
+// CublasError / CusolverError) and their cudaError_t / cublasStatus_t /
+// cusolverStatus_t status codes are PRIVATE to steppe_device (cuda/check.cuh is a
+// .cuh — the app never sees it; the arch-grep gate enforces it). So the OOM
+// classification CANNOT live here: it is delegated to device::device_fault_status,
+// declared CUDA-FREE in device/resources.hpp and defined in the steppe_device TU
+// cuda/cuda_backend.cu. steppe_app already links steppe::device, so the symbol
+// resolves while src/app stays CUDA-free.
+//
+// A host std::bad_alloc (host RAM, not device VRAM) — and every non-allocation
+// CUDA/cuBLAS/cuSOLVER fault — yields std::nullopt from device_fault_status, so it
+// keeps the catch-all kExitRuntimeError (5), which is correct. Only a real device
+// allocation failure is reclassified 5 -> 3.
 #ifndef STEPPE_APP_EXIT_CODE_FOR_CAUGHT_HPP
 #define STEPPE_APP_EXIT_CODE_FOR_CAUGHT_HPP
 
@@ -23,9 +33,10 @@
 
 namespace steppe::app {
 
-/// Map a caught std::exception to a process exit code: kExitDeviceOom on a genuine
-/// device allocation fault (as classified by device::device_fault_status), else the
-/// catch-all kExitRuntimeError. Pure dispatch — noexcept, no allocation. Used by every
+/// Map a caught std::exception to the process exit code (cli-bindings.md §4.4):
+/// kExitDeviceOom (3) when it is a genuine device allocation fault
+/// (device::device_fault_status -> Status::DeviceOom), else the catch-all
+/// kExitRuntimeError (5). Pure dispatch — `noexcept`, no allocation. Used by every
 /// command's top-level `catch (const std::exception& e)` (and main.cpp's) in place of
 /// a hard `return kExitRuntimeError;`.
 [[nodiscard]] inline int exit_code_for_caught(const std::exception& e) noexcept {

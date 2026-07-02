@@ -1,8 +1,10 @@
 // src/app/cmd_qpfstats.cpp — the `steppe qpfstats` command (genotype-path joint f2 smoother).
 //
-// Wires build_resources -> run_qpfstats -> write_f2_dir. The output is an AT2-shaped f2 dir
-// (f2.bin + pops.txt + meta.json) that read_f2 can consume, so qpadm/f4 treat the smoothed
-// f2 exactly like an extract-f2 cache. main() owns stdout/stderr.
+// Composes the CUDA-FREE seam: build_resources -> run_qpfstats (the genotype front-end +
+// the dstat-numerator engine + the on-device smoothing solve + scatter/recenter) ->
+// write_f2_dir (the smoothed F2BlockTensor as an AT2-shaped f2 dir: f2.bin + pops.txt +
+// meta.json). The output is read_f2-able, so qpadm/f4 consume the smoothed f2 like any
+// extract-f2 cache. main() owns stdout/stderr (architecture.md §10).
 #include "app/cmd_qpfstats.hpp"
 
 #include <cstdio>
@@ -11,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "app/exit_code_for_caught.hpp"   // exit_code_for_caught (device OOM -> the OOM exit code)
+#include "app/exit_code_for_caught.hpp"   // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_writer.hpp"          // write_f2_dir, F2DirMeta
 #include "app/precision_label.hpp"        // precision_label (shared host-app helper)
 #include "core/config/exit_code.hpp"
@@ -47,7 +49,7 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // Format-aware --prefix expansion: EIGENSTRAT family -> P.{geno,snp,ind};
+    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
     // PLINK -> P.{bed,bim,fam}. run_qpfstats pins the parser via the GenoReader ctor.
     const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
     const std::string& geno = triple.geno;
@@ -87,7 +89,7 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
     meta.blgsize_cm = config.blgsize_cm();
     meta.n_block = result.f2.n_block;
     meta.P = result.f2.P;
-    meta.autosomes_only = true;  // qpfstats is autosomes-only (matches AT2 auto_only)
+    meta.autosomes_only = true;  // qpfstats is autosomes-only (AT2 auto_only; the qpDstat-B pin)
     meta.geno_path = geno;
     meta.snp_path = snp;
     meta.ind_path = ind;

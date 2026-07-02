@@ -1,9 +1,11 @@
 // src/app/f2_dir_writer.cpp
 //
-// Writer for the f2_blocks directory format (STPF2BK1) — the inverse of read_f2_dir.
-// Plain C++20, no CUDA: it pulls in the CUDA-free f2_disk_format.hpp only for the shared
-// on-disk header struct and magic/version/dtype stamps, so writer and reader cannot drift.
-// A self-contained SHA-256 (below) content-addresses the output without a crypto dependency.
+// The f2_blocks DIRECTORY writer (cli-bindings.md §4.3) — the inverse of read_f2_dir.
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate); it reaches
+// the CUDA-FREE f2_disk_format.hpp only for the on-disk F2DiskHeader struct + the
+// magic/version/dtype stamps (the single home so the writer cannot drift from the
+// reader). A self-contained SHA-256 (below) computes the f2_cache_id and the dataset
+// content shas without pulling a crypto dependency into the app subtree.
 #include "app/f2_dir_writer.hpp"
 
 #include <array>
@@ -15,12 +17,12 @@
 #include <string>
 #include <vector>
 
-// x86 SHA-NI: hardware SHA-256 rounds via the x86 SHA-extension intrinsics (a compiler
-// intrinsic header, not a new dependency). Runtime-dispatched against
-// __builtin_cpu_supports("sha") with the portable scalar transform as the fallback, so
-// this compiles and runs correctly on any CPU. Only the SHA-NI function is built for the
-// sha/sse4.1 ISA (via a target attribute); the rest of the file stays at the default ISA.
-// Non-x86 arches use the scalar path only.
+// x86 SHA-NI (the fast --hash path): a HARDWARE SHA-256 round via the x86 SHA extension
+// intrinsics — NOT a new dependency (a compiler intrinsic header, like <immintrin.h> for
+// AVX). It is runtime-dispatched (__builtin_cpu_supports("sha")) with the portable scalar
+// transform as the fallback, so the TU compiles + runs correctly on any CPU; the SHA-NI
+// function alone is built for the sha/sse4.1 ISA via a target attribute (the rest of the
+// TU stays at the default ISA). Only compiled on x86; other arches use the scalar path.
 #if defined(__x86_64__) || defined(__i386__)
 #  define STEPPE_SHA_HAS_X86 1
 #  include <immintrin.h>
@@ -35,22 +37,30 @@ namespace steppe::app {
 namespace {
 
 // ---------------------------------------------------------------------------
-// A small, self-contained SHA-256 (FIPS 180-4) — no external crypto dependency.
-// Computes the f2_cache_id (sha256 of f2.bin) and the dataset content shas recorded in
-// meta.json, so the output is content-addressed and its shas match the source metadata.
-// `update` streams, so a multi-GB .geno is hashed in chunks without a full-file buffer.
+// A small, self-contained SHA-256 (FIPS 180-4) — no external crypto dependency
+// in the app subtree. Used for the f2_cache_id (sha256 of f2.bin) and the dataset
+// content shas recorded in meta.json (so a steppe run is content-addressed and the
+// shas match the golden metadata's geno/snp/ind sha256). Streaming `update` so the
+// 6.7 GB .geno is hashed in chunks without a full-file buffer.
 //
-// The streaming update compresses whole 64-byte blocks directly from the caller's buffer,
-// staging only the unaligned head/tail remainder — a per-byte copy into a staging buffer
-// was the hashing bottleneck. The digest is standard (FIPS 180-4 / sha256sum-compatible).
+// BULK/BLOCK update (the extract-f2 hash-bottleneck fix): the prior `update` copied
+// EVERY input byte one-at-a-time into a 64-byte staging buffer (a per-byte branch +
+// store), which compresses to ~190 MB/s scalar and burned ~37s of a ~41s extract on
+// the 6.7 GB 1240K .geno. This version compresses input blocks DIRECTLY from the
+// caller's buffer (no per-byte copy), staging only the unaligned head/tail remainder —
+// the standard fast streaming shape. The digest is unchanged (FIPS 180-4 / sha256sum-
+// compatible); only the I/O path into transform() changed.
 //
-// On a CPU with the SHA extension the per-block round is a hardware instruction, several
-// times faster than the scalar loop; sha256_blocks() dispatches to it, else the scalar path.
+// FAST PATH (x86 SHA-NI): on a CPU with the SHA extension (the build/run box has it;
+// `sha256sum` ran at ~1.3 GB/s), the per-block round is a hardware instruction
+// (`_mm_sha256rnds2`), ~6-7x the scalar loop. compress() runtime-dispatches once via
+// __builtin_cpu_supports("sha"); a non-SHA CPU uses the scalar fallback. This is what
+// makes the --hash 6.7 GB whole-.geno SHA fast enough to (overlapped) cost ~nothing.
 // ---------------------------------------------------------------------------
 
-// The SHA-256 round constants (FIPS 180-4) — shared by the scalar and SHA-NI block
-// functions (SHA-NI loads them into vector lanes, the scalar path indexes them directly).
-// Single home so the two implementations cannot drift.
+// The SHA-256 round constants (FIPS 180-4 §4.2.2) — shared by the scalar and SHA-NI
+// block functions (the SHA-NI path loads them into vector lanes; the scalar path indexes
+// them directly). Single home so the two implementations cannot drift.
 alignas(64) inline constexpr std::uint32_t kSha256K[64] = {
     0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
     0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
@@ -66,7 +76,7 @@ inline std::uint32_t sha_rotr(std::uint32_t x, std::uint32_t n) {
 }
 
 // Scalar SHA-256 compression of `n` consecutive 64-byte blocks into state[8] (the
-// portable fallback). state is updated in place (Davies-Meyer feed-forward).
+// portable fallback; FIPS 180-4 §6.2). state is updated in place (Davies-Meyer add).
 inline void sha256_blocks_scalar(std::uint32_t state[8], const std::uint8_t* p, std::size_t n) {
     for (std::size_t blk = 0; blk < n; ++blk, p += 64) {
         std::uint32_t w[64];
@@ -98,10 +108,12 @@ inline void sha256_blocks_scalar(std::uint32_t state[8], const std::uint8_t* p, 
 }
 
 #if STEPPE_SHA_HAS_X86
-// Hardware SHA-256 compression via the x86 SHA-extension intrinsics (the fast path).
-// The target attribute scopes the SHA-NI instructions to this function alone; call it
-// ONLY after __builtin_cpu_supports("sha") confirms the CPU has them. state is the same
-// big-endian-loaded {a..h} the scalar path maintains, so the two are bit-identical.
+// Hardware SHA-256 compression via the x86 SHA extension intrinsics (the fast path).
+// Built for the sha/sse4.1/ssse3 ISA via the target attribute so ONLY this function uses
+// the SHA-NI instructions (the rest of the TU stays at the default ISA); it is called
+// ONLY after __builtin_cpu_supports("sha") confirms the CPU has them. Standard
+// Intel-reference flow (rounds2 + msg schedule); state is the same big-endian-loaded
+// {a..h} the scalar path maintains, so the two are bit-identical.
 __attribute__((target("sha,sse4.1,ssse3")))
 inline void sha256_blocks_shani(std::uint32_t state[8], const std::uint8_t* data, std::size_t n) {
     const __m128i shuf = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
@@ -149,9 +161,9 @@ inline void sha256_blocks_shani(std::uint32_t state[8], const std::uint8_t* data
         abef = _mm_sha256rnds2_epu32(abef, cdgh, msg);
         m2   = _mm_sha256msg1_epu32(m2, m3);
 
-        // Rounds 16-59: 11 schedule+round groups (m0..m3 rotate). A local macro, NOT a
-        // lambda — a lambda's call operator does not inherit this function's target("sha")
-        // attribute, so the SHA intrinsics inside it would fail to compile/inline.
+        // Rounds 16-59: 11 schedule+round groups (m0..m3 rotate). Inlined via a local
+        // macro (NOT a lambda — a lambda's call operator does not inherit this function's
+        // target("sha,...") attribute, so the SHA intrinsics inside it fail to inline).
 #define STEPPE_SHA_RND_GROUP(ma, mb, md, kidx)                                              \
         do {                                                                                \
             msg = _mm_add_epi32((ma), _mm_loadu_si128(reinterpret_cast<const __m128i*>(&kSha256K[kidx]))); \
@@ -209,8 +221,8 @@ inline void sha256_blocks_shani(std::uint32_t state[8], const std::uint8_t* data
 }
 #endif  // STEPPE_SHA_HAS_X86
 
-// Dispatch block compression to SHA-NI when the CPU supports it, else scalar. The
-// capability check is a cheap cpuid, cached across calls.
+// Dispatch the block compression to SHA-NI when the CPU supports it, else scalar. The
+// capability check is a cheap cpuid cached by libgcc; called from the bulk update path.
 inline void sha256_blocks(std::uint32_t state[8], const std::uint8_t* p, std::size_t n) {
 #if STEPPE_SHA_HAS_X86
     static const bool has_sha = (__builtin_cpu_supports("sha") != 0);
@@ -235,9 +247,9 @@ public:
             len -= take;
             if (buf_len_ == 64) { sha256_blocks(h_.data(), buf_.data(), 1); buf_len_ = 0; }
         }
-        // 2. Compress all whole 64-byte blocks straight from the caller's buffer in one
-        //    call — no per-byte copy into buf_, and the block loop keeps its state in
-        //    registers across the whole run.
+        // 2. Compress ALL whole 64-byte blocks STRAIGHT from the caller's buffer in one
+        //    call (the bulk path — no per-byte copy into buf_, and the SHA-NI block loop
+        //    keeps its state in registers across the whole run, the prior bottleneck).
         const std::size_t nblk = len / 64;
         if (nblk != 0) {
             sha256_blocks(h_.data(), data, nblk);
@@ -282,11 +294,12 @@ private:
     }
 
     void final_digest(std::uint8_t* out) {
-        // bit_len_ already holds the total message bit length; capture it before staging the
-        // padding, which is fed through sha256_blocks() directly and so does not update it.
+        // bit_len_ already holds the TOTAL message bit length (update() accumulates it),
+        // so capture it BEFORE the padding bytes (the padding is fed via sha256_blocks()
+        // below, bypassing update(), so the captured length stays the true message length).
         const std::uint64_t total_bits = bit_len_;
-        // SHA-256 padding staged in buf_: append 0x80, zero-pad to 56 mod 64, then the
-        // 64-bit big-endian length, flushing a full block whenever buf_ fills.
+        // Stage the padding directly in buf_: append 0x80, zero-pad to 56 mod 64, then
+        // the 64-bit big-endian length, flushing a full block via sha256_blocks() as needed.
         buf_[buf_len_++] = 0x80;
         if (buf_len_ > 56) {
             while (buf_len_ < 64) buf_[buf_len_++] = 0x00;
@@ -416,8 +429,8 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         if (!o) return fail(Status::InvalidConfig, "write_f2_dir: cannot open f2.bin for write: " + bin_path.string());
         o.write(reinterpret_cast<const char*>(&hdr), static_cast<std::streamsize>(sizeof(hdr)));
         o.write(reinterpret_cast<const char*>(f2.f2.data()), static_cast<std::streamsize>(slab_bytes));
-        // Real vpair: the per-block pairwise-valid SNP counts, which the downstream NA path
-        // reads as `vpair == 0` to detect a dropped pair block — must be true counts, not zeros.
+        // REAL vpair (cli-bindings.md §4.3): the per-block pairwise-valid SNP counts the
+        // F1 NA path reads as `vpair == 0` to detect a dropped pair block — NOT zeros.
         o.write(reinterpret_cast<const char*>(f2.vpair.data()), static_cast<std::streamsize>(slab_bytes));
         // block_sizes int32 trailer.
         std::vector<std::int32_t> sizes32(f2.block_sizes.begin(), f2.block_sizes.end());
@@ -426,18 +439,23 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         if (!o) return fail(Status::InvalidConfig, "write_f2_dir: f2.bin write failed (disk full?): " + bin_path.string());
     }
 
-    // f2_cache_id = sha256 of the complete f2.bin (content-addressed). Always computed:
-    // f2.bin is small (P*P*nb*16 bytes), not the multi-GiB source .geno, so its hash is cheap.
+    // f2_cache_id = sha256 of the COMPLETE f2.bin (content-addressed; cli-bindings §4.3).
+    // This is ALWAYS computed: f2.bin is small (P*P*nb*16 bytes, KiB-MiB), not the
+    // multi-GiB source .geno, so it is not part of the provenance-hash bottleneck.
     const std::string cache_hex = sha256_file(bin_path);
     const std::string cache_id = cache_hex.empty() ? std::string{} : ("sha256:" + cache_hex);
 
-    // Dataset content shas, so the directory is reproducible and its shas match the source
-    // metadata. A source file is hashed only when requested (hash_source_files) and the
-    // caller did not pre-fill the sha. The default skips the source-.geno sha: it is a
-    // multi-second whole-file read+compress that produces only a provenance value. When
-    // requested, the large geno sha is normally pre-filled by the caller on a background
-    // thread (overlapping the GPU pipeline), leaving only the small snp/ind shas here.
-    // meta is const, so hold the three shas as locals seeded from any pre-filled value.
+    // Dataset content shas (so the dir is reproducible + the shas match the golden
+    // metadata's geno/snp/ind sha256). The writer is the single SHA home; it hashes a
+    // source file ONLY when source hashing is REQUESTED (meta.hash_source_files, the
+    // extract-f2 --hash opt-in) and the caller did not pre-fill the sha. The default
+    // (hash_source_files = false) SKIPS the source-.geno SHA entirely — it is a ~tens-
+    // of-seconds whole-file read+compress whose cost dominated extract-f2 yet only
+    // produces a provenance value. When requested, the (large) geno sha is normally
+    // PRE-filled by the caller from a background thread (overlapping the GPU pipeline),
+    // so this only fills the small snp/ind shas here.
+    // meta is const + read-only; keep just the three dataset shas as locals (seeded from
+    // any caller-pre-filled value), filling the missing ones only when hashing is requested.
     std::string geno_sha = meta.geno_sha256;
     std::string snp_sha  = meta.snp_sha256;
     std::string ind_sha  = meta.ind_sha256;
@@ -455,29 +473,31 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         if (!pf) return fail(Status::InvalidConfig, "write_f2_dir: pops.txt write failed");
     }
 
-    // pops_sha256 = sha256 of the exact pops.txt bytes just written (the name<->index map).
-    // A swapped or corrupted pops.txt silently reassigns every name to a different P-axis
-    // index and changes every downstream result undetectably; stamping its hash lets a
-    // reader re-hash the file to catch that. pops.txt is tiny, so this hash is cheap.
+    // pops_sha256 = sha256 of the EXACT pops.txt bytes JUST written (the name<->index
+    // map). A swapped/corrupted pops.txt silently reassigns every name->P-axis index and
+    // changes every downstream result undetectably; stamping its hash lets external
+    // tooling / any future reader re-hash the file to catch that. Reuses the single SHA
+    // home (sha256_file) — pops.txt is tiny, so this is not part of any hash bottleneck.
     const std::string pops_hex = sha256_file(dir / "pops.txt");
     const std::string pops_sha = pops_hex.empty() ? std::string{} : ("sha256:" + pops_hex);
 
-    // ---- meta.json: provenance / reproducibility sidecar --------------------------
+    // ---- meta.json: provenance (architecture.md §12 reproducibility block) --------
     {
         std::ostringstream js;
         js << "{\n";
         js << "  \"format\": \"STPF2BK1\",\n";
-        // meta_schema_version = the meta.json sidecar schema version, distinct from f2.bin's
-        // binary version (kF2DiskVersion in F2DiskHeader): a consumer keys off this for the
-        // provenance field set, not the numeric payload bytes.
+        // meta_schema_version = the meta.json SIDECAR schema version (kF2MetaSchemaVersion),
+        // DISTINCT from f2.bin's binary version (kF2DiskVersion stamped in F2DiskHeader) — a
+        // consumer keys off this for the provenance field set, not the numeric payload bytes.
         js << "  \"meta_schema_version\": " << kF2MetaSchemaVersion << ",\n";
         js << "  \"steppe_version\": " << json_str(meta.steppe_version) << ",\n";
         js << "  \"P\": " << f2.P << ",\n";
         js << "  \"n_block\": " << f2.n_block << ",\n";
         js << "  \"precision_tag\": " << json_str(meta.precision_tag) << ",\n";
         js << "  \"precision_mantissa_bits\": " << meta.precision_mantissa_bits << ",\n";
-        // blgsize_cm serializes at the default ostringstream precision (~6 sig-figs). It is
-        // a coarse binning knob, not a parity-load-bearing value, so no setprecision is applied.
+        // blgsize_cm serializes at the default ostringstream precision (~6 sig-figs);
+        // this provenance field is intentionally coarse (block size in cM is a coarse
+        // binning knob, not a parity-load-bearing value), so no setprecision is applied.
         js << "  \"blgsize_cm\": " << meta.blgsize_cm << ",\n";
         js << "  \"n_snp_total\": " << meta.n_snp_total << ",\n";
         js << "  \"n_snp_kept\": " << meta.n_snp_kept << ",\n";
@@ -494,17 +514,19 @@ F2DirWriteResult write_f2_dir(const std::filesystem::path& dir,
         js << "    \"geno\": " << json_str(meta.geno_path) << ",\n";
         js << "    \"snp\": " << json_str(meta.snp_path) << ",\n";
         js << "    \"ind\": " << json_str(meta.ind_path) << ",\n";
-        // source_hash_computed marks whether the source-dataset shas were computed or
-        // deliberately skipped (the default). When false the *_sha256 fields are "" by
-        // design, so a consumer knows the absence is intentional, not a failed hash.
+        // source_hash_computed marks whether the source-dataset SHAs were computed (the
+        // extract-f2 --hash opt-in) or DELIBERATELY skipped (the default). When false the
+        // *_sha256 fields are "" by design — a consumer reads this marker to know the
+        // absence is intentional, NOT a failed/missing hash (cli-bindings.md §4.3).
         js << "    \"source_hash_computed\": " << bool_str(meta.hash_source_files) << ",\n";
         js << "    \"geno_sha256\": " << json_str(geno_sha) << ",\n";
         js << "    \"snp_sha256\": " << json_str(snp_sha) << ",\n";
         js << "    \"ind_sha256\": " << json_str(ind_sha) << "\n";
         js << "  },\n";
-        // pops_sha256: sha256 of pops.txt, "sha256:<hex>" or "" if the just-written file
-        // could not be re-read. Adjacent to f2_cache_id — both content-address a sidecar
-        // the writer controls, letting a reader detect a swap/corruption by re-hashing.
+        // pops_sha256: sha256 of pops.txt (the name<->index map), "sha256:<hex>" or "" if
+        // the just-written file could not be re-read. Adjacent to f2_cache_id — both are
+        // content-addresses of a sidecar the writer controls. Lets a reader detect a
+        // pops.txt swap/corruption (which would silently change every result) by re-hashing.
         js << "  \"pops_sha256\": " << json_str(pops_sha) << ",\n";
         js << "  \"f2_cache_id\": " << json_str(cache_id) << "\n";
         js << "}\n";

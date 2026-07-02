@@ -1,14 +1,23 @@
 // src/app/cmd_f4ratio.cpp
 //
-// The `steppe f4-ratio` command: the standalone f4-ratio statistic, matching ADMIXTOOLS 2's
-// qpf4ratio. A sibling of f4/f3, not qpAdm — no target, no ALS, no rank. Per 5-tuple it
-// computes the admixture proportion alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) plus the
-// jackknife-of-the-RATIO SE, then emits (pop1..pop5,alpha,se,z). Tuples come from either the
-// row-aligned --pop1..--pop5 columns or the --pops convenience (names in groups of 5).
+// The `steppe f4-ratio` command (standalone f4-ratio statistic; fit-engine §6). f4-ratio is
+// the SIBLING of f4/f3, NOT a fork of qpAdm: NO target, NO ALS, NO rank — it computes the AT2
+// qpf4ratio admixture proportion alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) per 5-tuple + the
+// jackknife-of-the-RATIO SE. The GPU path is the deliverable: read the f2_blocks dir ->
+// resolve names->indices via pops.txt -> build_resources -> upload_f2_blocks_to_device ->
+// run_f4ratio(DeviceF2Blocks, tuples) -> emit the table (pop1,pop2,pop3,pop4,pop5,alpha,se,z
+// — the golden_fit0_f4ratio_readf2.csv schema; NO p column).
 //
-// App-only C++20 with no CUDA header: the GPU is reached only through the CUDA-free seams
-// (resources / DeviceF2Blocks / run_f4ratio). main() owns stdout/stderr. A domain outcome is a
-// row and exit 0 (record-and-continue); only faults return nonzero.
+// TUPLES: EITHER the row-aligned --pop1..--pop5 columns (admixtools::qpf4ratio) OR the
+// single-tuple --pops p1,p2,p3,p4,p5 convenience (5 names = one tuple, or any multiple of 5 =
+// several tuples). The f2-dir load, name->index resolution, build_resources/upload chain, and
+// the output sink are REUSED verbatim from cmd_f3.cpp/cmd_f4.cpp; the result_emit format
+// primitives are reused through emit_f4ratio_result (NO compute/format dup).
+//
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
+// reached ONLY through the CUDA-FREE seams (resources.hpp / device_f2_blocks.hpp / f4ratio.hpp).
+// main() owns stdout/stderr (architecture.md §10). A DOMAIN outcome is a row + exit 0
+// (record-and-continue); only faults return nonzero (cli-bindings.md §1.3, §4.4).
 #include "app/cmd_f4ratio.hpp"
 
 #include <array>
@@ -22,13 +31,13 @@
 #include <vector>
 
 #include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (device OOM -> exit code)
+#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
-#include "device/device_f2_blocks.hpp"  // CUDA-free: DeviceF2Blocks, upload_f2_blocks_to_device
-#include "device/resources.hpp"         // CUDA-free: Resources, build_resources
+#include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
+#include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
 #include "steppe/error.hpp"             // steppe::Status
 #include "steppe/f4ratio.hpp"           // steppe::run_f4ratio + F4RatioResult/options
 
@@ -40,14 +49,15 @@ namespace cfg = steppe::config;
 
 /// The f4-ratio tuple arity: alpha = f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4) is computed per
 /// 5-tuple (p1,p2,p3,p4,p5). Single-sources the `5` across the column count, the --pops
-/// group size / modulus, the index stride, the per-tuple loop bound, and the std::array
-/// arities below. Frozen at 5 to match ADMIXTOOLS 2's qpf4ratio tuple shape.
+/// group size / modulus, the 5*k index stride, the per-tuple loop bound, and the
+/// std::array arities below. Value 5, parity-frozen (the AT2 qpf4ratio tuple shape); TU-local
+/// because the arity is private domain knowledge of this command (§2.5 / §4 unnamed literal).
 constexpr std::size_t kTupleArity = 5;
 
-/// Build the 5-tuple NAME table (one row per tuple, five names each) from the config.
-/// Prefers the row-aligned --pop1..--pop5 columns; falls back to the --pops convenience
-/// (names in groups of 5). Returns false (reason in `err`) on no input or a malformed shape
-/// (mismatched columns / non-multiple-of-5 --pops). On success `tuples[k]` =
+/// Build the 5-tuple NAME table (one row per tuple, five names each) from the frozen config.
+/// Prefers the row-aligned --pop1..--pop5 columns; falls back to the --pops 5-tuple
+/// convenience (names in groups of 5). Returns false (with a reason in `err`) on no input or a
+/// malformed shape (mismatched columns / non-multiple-of-5 --pops). On success `tuples[k]` =
 /// {pop1,pop2,pop3,pop4,pop5} of tuple k.
 [[nodiscard]] bool build_tuple_names(const cfg::RunConfig& config,
                                      std::vector<std::array<std::string, kTupleArity>>& tuples,
@@ -100,7 +110,7 @@ constexpr std::size_t kTupleArity = 5;
 }  // namespace
 
 int run_f4ratio_command(const cfg::RunConfig& config) {
-    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — shared with cmd_f4/cmd_f3 -----
+    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE cmd_f4/cmd_f3 path -----
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe f4-ratio: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -125,8 +135,8 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // Resolve each name 5-tuple to an index 5-tuple, carrying the resolved labels back for
-    // the emitter (label_at gives the canonical pops.txt spelling).
+    // Resolve each (p1..p5) name 5-tuple to a P-axis index 5-tuple. Carry the resolved names
+    // back for the emitter (label_at — canonical pops.txt spelling).
     std::vector<std::array<int, kTupleArity>> tuples;
     tuples.reserve(tuple_names.size());
     std::vector<std::string> p1_labels, p2_labels, p3_labels, p4_labels, p5_labels;
@@ -151,10 +161,10 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         p5_labels.push_back(resolver.label_at(idx[4]));
     }
 
-    // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f4ratio ------------------
-    // All three calls are CUDA-free seams; a machine with no GPU surfaces a clear fault from
-    // build_resources. fudge defaults to 0 here for a bare ratio SE inside run_f4ratio (not
-    // qpAdm's 1e-4).
+    // ---- 3/4. build_resources -> upload f2 to the GPU -> run_f4ratio (GPU path) -------
+    // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
+    // seams; a no-GPU box surfaces a clear fault from build_resources. fudge defaults to 0
+    // for a bare ratio SE inside run_f4ratio (NOT qpadm's 1e-4) — opts here is the default.
     const QpAdmOptions opts = config.qpadm_options();
     F4RatioResult result;
     try {
@@ -171,15 +181,15 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         result = run_f4ratio(dev_f2, std::span<const std::array<int, kTupleArity>>(tuples), opts,
                              resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) are faults:
-        // nonzero exit. A domain outcome never throws; it arrives as result.status below
-        // (record-and-continue, exit 0).
+        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,
+        // nonzero exit (cli-bindings.md §1.3). A domain outcome never throws; it arrives as
+        // result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe f4-ratio: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
 
     // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout — open->write->flush->verify
-    // via the shared emit_to_destination: a torn / short write (full disk, closed pipe)
+    // via the shared emit_to_destination (B1): a torn / short write (full disk, closed pipe)
     // returns kExitIoError instead of silently exiting 0 with a truncated file.
     if (const auto rc = emit_to_destination(
             config, "f4-ratio", [&](std::ostream& os, OutputFormat fmt) {
@@ -189,8 +199,8 @@ int run_f4ratio_command(const cfg::RunConfig& config) {
         return *rc;
     }
 
-    // A domain outcome is a table + exit 0 (record-and-continue); exit_code_for maps those
-    // to kExitOk, only faults to nonzero.
+    // A DOMAIN outcome is a table + exit 0 (record-and-continue, cli-bindings.md §1.3);
+    // exit_code_for maps those to kExitOk, only faults to nonzero.
     return cfg::exit_code_for(result.status);
 }
 

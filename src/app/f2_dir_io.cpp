@@ -1,9 +1,9 @@
 // src/app/f2_dir_io.cpp
 //
-// Reader for an on-disk f2_blocks directory (f2.bin + pops.txt). Plain C++20,
-// no CUDA header. The on-disk layout (F2DiskHeader, magic/version constants)
-// lives in f2_disk_format.hpp, the single source shared with the writer, so this
-// reader cannot drift from the stamps it validates.
+// The f2_blocks DIRECTORY reader (cli-bindings.md §4.3). PLAIN C++20, app-only, NO
+// CUDA header (the §4 layering / arch-grep gate); it reaches the CUDA-FREE
+// f2_disk_format.hpp only for the on-disk F2DiskHeader struct + the magic/version
+// constants (the single home so the reader cannot drift from the writer's stamps).
 #include "app/f2_dir_io.hpp"
 
 #include <cerrno>
@@ -15,15 +15,16 @@
 #include <system_error>
 #include <vector>
 
-#include "device/f2_disk_format.hpp"  // F2DiskHeader + magic/version/dtype constants
+#include "device/f2_disk_format.hpp"  // F2DiskHeader, kF2DiskMagic/Version/DtypeFp64 (CUDA-FREE)
 
 namespace steppe::app {
 
 namespace {
 
-// Build the error arm of an F2DirResult. A malformed cache directory is a
-// config-level problem the user must fix — the engine never runs on it — so
-// callers surface these as InvalidConfig.
+// Build the F2DirResult error arm with a fault Status + reason. A malformed cache
+// dir is a fault the user must fix (architecture.md §10 fault taxonomy); the app
+// maps the carried Status through exit_code_for, but a file/format problem is
+// surfaced as InvalidConfig here (the engine never saw it — it is config-level).
 [[nodiscard]] F2DirResult fail(Status status, std::string reason) {
     F2DirResult r;
     r.ok = false;
@@ -32,18 +33,19 @@ namespace {
     return r;
 }
 
-// Read <dir>/pops.txt: one label per non-empty line, in file order (which is the
-// P-axis index order). Blank lines are skipped and a trailing CR is stripped so
-// CRLF-authored files read cleanly; labels are otherwise kept verbatim (no
-// whitespace trimming) to keep the name<->index map byte-exact.
+// Read <dir>/pops.txt: one label per non-empty line, trailing CR stripped (so a
+// CRLF-authored sidecar reads cleanly), in file order (== P-axis index order). Blank
+// lines are skipped (a trailing newline is not a phantom pop); each label is kept
+// verbatim minus the line terminator (no whitespace trimming) so the name<->index
+// map is byte-exact.
 [[nodiscard]] bool read_pops_txt(const std::filesystem::path& path,
                                  std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path);
     if (!f) {
-        // Capture errno immediately, before any other libc call can clobber it
-        // (basic_filebuf::open forwards the OS open() errno). Decoding it lets the
-        // message distinguish EACCES ("Permission denied") from ENOENT ("No such
-        // file or directory").
+        // Capture errno on the line right after the failing open, before any other
+        // libc call can clobber it (libstdc++'s basic_filebuf::open forwards the OS
+        // open() errno). Forward the decoded OS reason so a sysadmin can tell
+        // "Permission denied" (EACCES) from "No such file or directory" (ENOENT).
         const int open_errno = errno;
         err = "cannot open pops.txt (" + std::generic_category().message(open_errno) +
               "): " + path.string();
@@ -63,9 +65,10 @@ namespace {
 F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
 
-    // The path must exist and be a directory. Forward the decoded error_code when
-    // the probe itself fails at the OS layer (e.g. a permission-denied parent
-    // traversal) so the message distinguishes that from a plain wrong-type path.
+    // The dir itself must exist and be a directory (a clear fault, not a crash).
+    // ec is populated by fs::exists/is_directory; when the probe itself failed at the
+    // OS layer (e.g. a permission-denied parent traversal) forward the decoded reason
+    // so the fault arm distinguishes a real OS error from a plain wrong-type path.
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
         std::string reason = "--f2-dir is not a directory: " + dir.string();
@@ -124,9 +127,9 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     t.P = hdr.P;
     t.n_block = hdr.n_block;
 
-    // f2 region. Seek to the offset recorded in the header rather than assuming it
-    // follows the header, so future header growth (reserved bytes) can't break the
-    // read — the recorded offset is authoritative.
+    // f2 region (at hdr.f2_offset). Seek to the recorded offset rather than assuming
+    // it follows the header, so a future header growth (reserved bytes) cannot break
+    // the read — the offset is authoritative (f2_disk_format.hpp).
     t.f2.resize(slab_elems);
     bin.seekg(static_cast<std::streamoff>(hdr.f2_offset), std::ios::beg);
     bin.read(reinterpret_cast<char*>(t.f2.data()),
@@ -137,8 +140,8 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
                         std::to_string(slab_elems) + " doubles): " + bin_path.string());
     }
 
-    // vpair region. The fit itself only needs block_sizes, but the device upload
-    // copies both slabs, so carry vpair through for a faithful round-trip.
+    // vpair region (at hdr.vpair_offset). The fit reads block_sizes, not vpair (OQ-3),
+    // but the device upload copies both slabs, so carry vpair for a faithful round-trip.
     t.vpair.resize(slab_elems);
     bin.seekg(static_cast<std::streamoff>(hdr.vpair_offset), std::ios::beg);
     bin.read(reinterpret_cast<char*>(t.vpair.data()),

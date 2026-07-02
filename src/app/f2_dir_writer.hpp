@@ -1,25 +1,34 @@
 // src/app/f2_dir_writer.hpp
 //
-// Writer for an f2_blocks directory — the on-disk cache that lets f2 stats be computed
-// once and read back for many fits. Inverse of read_f2_dir (f2_dir_io.hpp); matches
-// ADMIXTOOLS 2's f2_blocks cache shape.
+// The f2_blocks DIRECTORY writer (cli-bindings.md §4.3, §3, §8) — the WRITE side of
+// the AT2-shaped interchange the precompute-once / fit-many seam consumes (ADR-0005).
+// This is the inverse of read_f2_dir (f2_dir_io.hpp); M(cli-1) shipped ONLY the
+// reader (the M(cli-1) test wrote a dir by hand), so this is the missing "M7" piece
+// the cli-bindings.md §3 "Honest cache gap" calls out, built in M(cli-4).
 //
-// A <dir> holds three files:
-//   f2.bin     STPF2BK1 numeric payload (layout in src/device/f2_disk_format.hpp):
-//              header(64B) | f2[P*P*nb] | vpair[P*P*nb] | block_sizes[nb int32]. The
-//              byte order is identical to F2BlockTensor's i + P*j + P*P*b layout, so
-//              read_f2_dir round-trips it by construction.
-//   pops.txt   the P population labels, one per line, in P-axis index order.
-//   meta.json  provenance sidecar (schema kF2MetaSchemaVersion, distinct from f2.bin's
-//              binary kF2DiskVersion).
+// A <dir> is (cli-bindings.md §4.3):
+//   <dir>/f2.bin     the STPF2BK1 numeric payload (src/device/f2_disk_format.hpp):
+//                    header(64B) | f2[P*P*nb] | vpair[P*P*nb] | block_sizes[nb int32],
+//                    block-major outer, column-major i+P*j within — BYTE-IDENTICAL to
+//                    F2BlockTensor's i + P*j + P*P*b layout, so read_f2_dir round-trips
+//                    it by construction.
+//   <dir>/pops.txt   the P population labels, ONE PER LINE, in P-axis index order —
+//                    the name<->index map (IndPartition.groups[].label order).
+//   <dir>/meta.json  provenance: meta_schema_version (the SIDECAR schema, kF2MetaSchemaVersion
+//                    — NOT the f2.bin binary version kF2DiskVersion), steppe version+SHA,
+//                    ENGAGED precision tag, blgsize cM, n_block, filter flags, source dataset
+//                    sha256s, pop selection, pops_sha256 (sha256 of pops.txt — the name<->index
+//                    map, so a swapped/corrupted pops.txt is detectable), f2_cache_id (sha256 of f2.bin).
 //
-// Real-vpair invariant: the vpair region carries the REAL per-block pairwise-valid SNP
-// counts from the precompute, not zeros — the missing-block/NA path detects a dropped
-// pair block by vpair == 0, so real vpair is what drives the maxmiss>0 drop.
+// THE REAL-vpair RULE (cli-bindings.md §4.3, the M(cli-4) load-bearing decision): the
+// vpair region carries the REAL per-block pairwise-valid SNP counts from the precompute
+// (F2BlockTensor.vpair), NOT zeros. The M(cli-1) test helper wrote zeros because the
+// FIT reads block_sizes, not vpair — but the F1 missing-block / NA path detects a
+// dropped pair block by `vpair == 0`, so REAL vpair is what drives the maxmiss>0 drop.
 //
-// Plain C++20, app-only, no CUDA header: it reaches only the CUDA-free f2_disk_format.hpp
-// for the on-disk header struct and magic/version stamps (the single home so writer and
-// reader cannot drift).
+// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): it reaches
+// the CUDA-FREE f2_disk_format.hpp for the on-disk header struct + magic/version
+// stamps (the single home so the writer and reader cannot drift), nothing more.
 #ifndef STEPPE_APP_F2_DIR_WRITER_HPP
 #define STEPPE_APP_F2_DIR_WRITER_HPP
 
@@ -32,13 +41,17 @@
 
 namespace steppe::app {
 
-/// Schema version for the meta.json provenance sidecar — versions the JSON field set,
-/// stamped as meta.json's "meta_schema_version". Distinct from device::kF2DiskVersion
-/// (src/device/f2_disk_format.hpp), which versions the f2.bin binary payload: the two
-/// evolve independently. The reader gates on kF2DiskVersion; meta.json stays advisory.
+/// The meta.json SIDECAR schema version (cli-bindings.md §4.3). This versions the JSON
+/// provenance SHAPE (the field set the writer emits / a reader expects), and is the
+/// value stamped as meta.json's `"meta_schema_version"`. It is DISTINCT from
+/// `device::kF2DiskVersion` (src/device/f2_disk_format.hpp), which versions the f2.bin
+/// BINARY payload bytes — the two evolve independently and must NOT be conflated: a
+/// provenance-field change bumps this, an on-disk-layout change bumps that. The reader
+/// gates on kF2DiskVersion (f2.bin); meta.json stays advisory / non-load-bearing.
 inline constexpr int kF2MetaSchemaVersion = 1;
 
-/// Provenance recorded in <dir>/meta.json. All fields are app-resolved values, so the
+/// The provenance recorded in <dir>/meta.json (cli-bindings.md §4.3; architecture.md
+/// §12 reproducibility block). All fields are app-resolved strings/values so the
 /// writer is a pure serializer with no compute dependency.
 struct F2DirMeta {
     std::string steppe_version;     ///< STEPPE_VERSION (project VERSION).
@@ -61,14 +74,14 @@ struct F2DirMeta {
     std::string snp_sha256;
     std::string ind_sha256;
     std::string geno_path, snp_path, ind_path;
-    // Whole-file source-hash policy (the extract-f2 --hash opt-in; default OFF). The
-    // whole-.geno SHA is the bottleneck (tens of seconds on a multi-GB .geno — a
-    // provenance value, not correctness), so it is skipped by default. When false the
-    // writer leaves any still-empty source sha as "" and records
-    // "source_hash_computed": false, so a consumer knows the absence is DELIBERATE, not
-    // a failed hash. When true the writer fills any empty sha from its path; the caller
-    // may PRE-fill geno_sha256 from a background thread to overlap the big hash with the
-    // GPU pipeline.
+    // Source-provenance hash policy (the extract-f2 --hash opt-in; default OFF). The
+    // whole-.geno SHA is the bottleneck (~37s of ~41s on the 6.7 GB 1240K .geno — a
+    // provenance value, NOT correctness), so it is SKIPPED by default. When false the
+    // writer does NOT hash any source file whose sha is still empty; meta.json records
+    // geno/snp/ind_sha256 = "" + "source_hash_computed": false so a consumer knows the
+    // absence is DELIBERATE (not a failed/forgotten hash). When true the writer fills
+    // any empty source sha from its path (the caller may PRE-fill geno_sha256 from a
+    // background thread to overlap the big hash with the GPU pipeline).
     bool hash_source_files = false;
     // Pop selection echo (mode + the resolved labels are in pops.txt; this records the request).
     std::string pop_selection;      ///< human string, e.g. "explicit:England_BellBeaker,..." | "auto-top:9" | "min-n:30".
@@ -76,9 +89,9 @@ struct F2DirMeta {
 
 /// Result of write_f2_dir: ok + the f2_cache_id (sha256 of f2.bin) on success, or a
 /// fault Status + a human-readable reason on failure (the app prints the reason; the
-/// library never prints). A write/IO failure is carried as InvalidConfig rather than
-/// IoError — an unwritable --out is a config-level fault the user must fix, matching
-/// the reader's fault taxonomy.
+/// library never prints — architecture.md §10). A write/IO failure is Status::IoError-
+/// shaped but carried as InvalidConfig here (an unwritable --out is a config-level
+/// fault the user must fix, matching the reader's fault taxonomy).
 struct F2DirWriteResult {
     bool ok = false;
     Status status = Status::Ok;
