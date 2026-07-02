@@ -79,3 +79,8 @@ handoff-*.md
 
 # --- Claude Code local project config (not shipped; kept on disk, never wiped as untracked) ---
 .claude/
+
+# --- Comment dump: generated per-file comment extracts (regenerable; not shipped). Keep the
+# extractor script tracked; ignore its large, regenerable output tree so `git clean -fd` skips it.
+docs/commentdump/*
+!docs/commentdump/extract_comments.py
