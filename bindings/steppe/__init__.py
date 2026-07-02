@@ -60,6 +60,8 @@ __all__ = [
     "dates",
     "DatesResult",
     "qpadm_search",
+    "export_f2_rds",
+    "import_f2_rds",
 ]
 
 
@@ -1091,3 +1093,67 @@ def _search_dataframe(results: list[QpAdmResult], *, target: str, right: list[st
             }
         )
     return pd.DataFrame(rows)
+
+
+# =======================================================================================
+# ADMIXTOOLS 2 <-> steppe f2-cache converter (optional; pure-Python, NO GPU / NO CUDA).
+#
+# EXPORT a steppe STPF2BK1 f2 cache to an AT2 read_f2() `.rds` directory so a user can
+# verify steppe's fits inside ADMIXTOOLS 2 / R; IMPORT the reverse. This is on-disk FORMAT
+# TRANSLATION only — steppe's f2 values + jackknife-block partition are already identical to
+# AT2's on the same blgsize/setblocks partition (see docs/featuredesign/rds-converter.md).
+# WRITING AT2's numeric-matrix-with-dimnames `.rds` is unsupported by librdata/pyreadr, so
+# export uses the hand-rolled stdlib serializer in `_rds`; import reads via pyreadr (the
+# optional `[rds]` extra — `pip install steppe[rds]`). These are THIN wrappers: the whole
+# implementation lives in `_rds` (which has ZERO `_core` dependency), so the converter is
+# importable + testable without a CUDA build.
+# =======================================================================================
+
+
+def export_f2_rds(f2, out_dir, *, counts="ones", write_ap=False):
+    """Export a steppe f2 cache to an ADMIXTOOLS 2 ``read_f2()`` ``.rds`` directory.
+
+    The stated goal of the converter: after this call, ``admixtools::read_f2(out_dir)`` in R
+    loads a ``[P, P, n_block]`` array whose off-diagonal equals steppe's f2, so a user can
+    re-run ``qpadm`` / ``qpgraph`` / ``f4`` inside ADMIXTOOLS 2 and compare to steppe's native
+    fit. Pure on-disk translation — NO GPU, NO CUDA, and no third-party dependency (the
+    hand-rolled RDS serializer is stdlib-only).
+
+    ``f2`` is an :class:`F2Blocks` handle (from :func:`read_f2` / :func:`extract_f2`). The
+    output layout AT2 expects: one subdir **per pop**; each unordered pair
+    ``<p1>/<p2>_f2.rds`` (keyed under the C-locale-smaller ``p1``) is a gzip'd R numeric
+    matrix ``[n_block, 2]`` with ``colnames c("f2","counts")`` (col 1 = f2); the diagonal
+    self-pairs are all ``0.0`` (AT2's convention — f2 is off-diagonal-only for f4/qpAdm); plus
+    a top-level ``block_lengths_f2.rds`` integer vector of the per-block SNP counts.
+
+    ``counts`` selects the second matrix column: ``"ones"`` (default) writes ``1.0`` — AT2's
+    own f2 family stores ``1.0`` there, so this reproduces a native AT2 cache; ``"vpair"``
+    writes steppe's per-block pairwise-valid counts instead (only meaningful if the handle
+    carries real ``vpair`` — a ``.bin``-staged cache carries zeros). ``write_ap`` (emit the
+    parallel ``_ap`` allele-pair family so true ``vpair`` survives a round-trip) is not yet
+    implemented; the ``f2`` family alone is sufficient for qpAdm / qpGraph / f4. Returns the
+    output directory path."""
+    from . import _rds  # lazy: keeps `import steppe` free of the converter machinery
+
+    return _rds.export_f2_rds(f2, out_dir, counts=counts, write_ap=write_ap)
+
+
+def import_f2_rds(rds_dir, out_dir, *, type="f2"):
+    """Import an ADMIXTOOLS 2 ``read_f2()`` ``.rds`` directory to a steppe STPF2BK1 f2 cache.
+
+    Reads AT2's per-pair matrices with ``pyreadr`` (the optional ``[rds]`` extra —
+    ``pip install steppe[rds]``) and writes ``<out_dir>/{f2.bin,pops.txt,meta.json}`` that
+    :func:`read_f2` reloads. Pops are the immediate subdirs, sorted with Python ``sorted()``
+    (byte order == the C-locale AT2 dimnames order) as the P-axis; each unordered pair is read
+    from ``<p1>/<p2>_f2.rds`` (col 1 = f2) and mirrored into ``f2[i,j]`` == ``f2[j,i]``; the
+    diagonal is zeroed (AT2's self-pair convention).
+
+    IMPORT is ``vpair``-lossy by design: AT2's f2 ``counts`` column is ``1.0``, not real
+    pairwise-valid counts, so ``vpair`` cannot be recovered from an f2-only ``.rds``. The
+    writer fills ``vpair`` with a NONZERO sentinel (the ``block_lengths`` broadcast), never
+    zeros — zeros would trip steppe/AT2's ``vpair==0`` missing-block detector and break
+    ``maxmiss>0``. Off-diagonal f2 (all qpAdm/qpGraph/f4 need) is exact. ``type`` must be
+    ``"f2"`` (the ``_ap``/``_fst`` families are not imported). Returns the output path."""
+    from . import _rds  # lazy: pulls pyreadr only on the import path
+
+    return _rds.import_f2_rds(rds_dir, out_dir, type=type)

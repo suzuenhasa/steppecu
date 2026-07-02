@@ -76,6 +76,39 @@ ssh box5090 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64; /workspace/steppe/bui
 
 ---
 
+## Verify steppe in ADMIXTOOLS 2 — the f2 `.rds` converter (pure-Python, no GPU)
+
+Move an f2 cache between steppe's `STPF2BK1` dir (`f2.bin`+`pops.txt`+`meta.json`) and
+ADMIXTOOLS 2's `read_f2()` `.rds` directory, so you can re-run a fit in R and compare.
+On-disk format translation only — steppe's f2 values already equal AT2's on the same blocks.
+EXPORT needs no extra dependency (a stdlib RDS serializer); IMPORT reads with pyreadr:
+`pip install steppe[rds]`.
+
+```python
+import steppe
+# EXPORT: steppe f2 cache -> an AT2 read_f2() .rds dir you can open in R
+f2 = steppe.read_f2("/workspace/data/qpgraph_9pop_stpf2bk1")   # or extract_f2(...)
+steppe.export_f2_rds(f2, "/tmp/exported_rds")                  # per-pop subdirs + block_lengths_f2.rds
+
+# IMPORT: an AT2 read_f2() .rds dir -> a steppe STPF2BK1 cache (needs pyreadr)
+steppe.import_f2_rds("/workspace/data/aadr/f2_fit0_corrected", "/tmp/imported_stpf2bk1")
+steppe.read_f2("/tmp/imported_stpf2bk1")                       # reload + fit in steppe
+```
+
+Then in R (box5090 has R 4.3.3 + admixtools 2.0.10) — `read_f2` loads it as `[P,P,n_block]`;
+off-diagonal f2 is bit-identical to steppe and `f4`/`qpadm` match steppe's native fit:
+
+```
+ssh box5090 'Rscript /workspace/steppe/tests/r/verify_export_rds.R /tmp/exported_rds'
+# optional parity: pass a steppe-native f4 CSV as arg 2 to assert AT2 f4 == steppe f4
+```
+
+Notes: files are keyed under the C-locale-smaller pop (`<p1>/<p2>_f2.rds`, col1=f2, col2=1.0);
+diagonal self-pairs are 0.0. IMPORT is `vpair`-lossy (AT2's `counts` is 1.0, not real counts —
+`vpair` is filled with a nonzero `block_lengths` sentinel), harmless for f4/qpAdm/qpGraph.
+
+---
+
 ## AADR data — download from Harvard Dataverse (doi:10.7910/DVN/FFIDCW)
 
 Robust script (resolves fileIds from the dataset API at runtime → survives new AADR versions; resumable; MD5-verified):

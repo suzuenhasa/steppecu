@@ -45,6 +45,10 @@ dependencies = [
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]   # the DataFrame accessors; soft/lazy (import steppe works without).
+# The optional AT2 <-> steppe f2 `.rds` converter READ path (steppe.import_f2_rds) — pyreadr
+# reads AT2's per-pair matrices. IMPORT-ONLY: steppe.export_f2_rds writes AT2 `.rds` with the
+# hand-rolled stdlib serializer (bindings/steppe/_rds.py) and needs NO extra dependency.
+rds = ["pyreadr>=0.5"]
 # pytest-timeout backs the [tool.pytest.ini_options] per-test timeout below; when it is absent
 # pytest just ignores the `timeout` key (a benign config warning), so the gate is unaffected.
 test = ["pytest>=7", "pytest-timeout>=2", "pandas>=1.5", "numpy>=1.22"]
