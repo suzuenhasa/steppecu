@@ -26,7 +26,7 @@ bit/tolerance parity against ADMIXTOOLS 2 on real ancient-DNA (AADR) data.
 | **CUDA** | **CUDA 13.x runtime** + a matching driver (verified on 13.0 and 13.1). This is a **hard requirement** — the binaries link `libcudart.so.13` / `libcublas.so.13` / `libcusolver.so.12`, so a **CUDA 12 box will not run them**. The runtime is resolved at load from your CUDA install (`/usr/local/cuda/lib64` or `LD_LIBRARY_PATH`); it is **not** bundled. |
 | **OS** | Linux x86_64. |
 | **GPUs used** | single-GPU (`--device 0`). |
-| **Python** (wheel only) | **3.12** for the prebuilt wheel (`cp312`); 3.9+ if you build from source. `numpy` is the only hard dep; `pandas` is optional/lazy (the DataFrame accessors). |
+| **Python** (wheel only) | **3.12+** for the prebuilt wheel — a `cp312-abi3` **stable-ABI** wheel, so one file runs on 3.12, 3.13, 3.14+; 3.9+ if you build from source. `numpy` is the only hard dep; `pandas` is optional/lazy (the DataFrame accessors). |
 | **Input formats** | EIGENSTRAT, PACKEDANCESTRYMAP/GENO, TGENO, ANCESTRYMAP, PLINK (`.bed`/`.bim`/`.fam`) — auto-detected from the `--prefix` triple; all decode bit-identically. f2 dirs (STPF2BK1) are cacheable and reusable (not AT2 `.rds`-compatible). |
 
 ---
@@ -62,11 +62,12 @@ CUDA 13. Point the loader at it if needed: `export LD_LIBRARY_PATH=/usr/local/cu
 
 ### 2. Prebuilt wheel — the Python API
 ```bash
-curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe-0.1.0-cp312-cp312-linux_x86_64.whl
-pip install ./steppe-0.1.0-cp312-cp312-linux_x86_64.whl
+curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe-0.1.0-cp312-abi3-linux_x86_64.whl
+pip install ./steppe-0.1.0-cp312-abi3-linux_x86_64.whl
 python -c "import steppe; print(steppe.__version__)"
 ```
-Needs Python 3.12 + the CUDA 13 runtime; `numpy` is the only hard dependency.
+Needs Python 3.12+ and the CUDA 13 runtime; `numpy` is the only hard dependency. (It's a
+`cp312-abi3` stable-ABI wheel — the *same* file installs on 3.12, 3.13, 3.14+.)
 
 ### 3. Build from source — any CUDA-13 arch / Python
 Needs the full **CUDA 13 toolkit** (nvcc) + CMake ≥ 3.28 + Ninja.

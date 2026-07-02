@@ -18,10 +18,14 @@
 # machinery to THIS subdir keeps the dependency PRIVATE to the bindings subtree and out of
 # the core/device build entirely (the §4 layering rule).
 
-# nanobind needs the Python development headers (the Module component is enough for an
-# extension module; we do not embed the interpreter). FindPython is the CMake-blessed
-# locator nanobind itself documents.
-find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+# nanobind needs the Python development headers (Development.Module — an extension module, not
+# an embedded interpreter). Development.SABIModule (CMake >= 3.26) is what lets
+# nanobind_add_module(STABLE_ABI) actually build the limited-API `_core.abi3.so` (one wheel for
+# 3.12+); it's OPTIONAL so builds on Python < 3.12 (no stable-ABI lib) still succeed — nanobind
+# then falls back to a version-specific module, exactly its documented STABLE_ABI behavior.
+# FindPython is the CMake-blessed locator nanobind itself documents.
+find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
+             OPTIONAL_COMPONENTS Development.SABIModule)
 
 find_package(nanobind CONFIG QUIET)
 if(NOT nanobind_FOUND)
@@ -51,11 +55,13 @@ endif()
 
 # The compiled extension is `steppe._core` (the user imports the pure-Python `steppe`
 # package over it). NB_STATIC links nanobind's runtime statically into the module so the
-# wheel ships one self-contained _core*.so. module.cpp is the thin NB_MODULE assembler;
-# the per-tool binding code lives in the bind_<tool>.cpp TUs (each a void
-# register_<tool>(nb::module_&)), with the shared marshalling helpers in
-# internal/bind_common.hpp (cli-bindings.md §5; the C8 TU split).
-nanobind_add_module(_core NB_STATIC
+# wheel ships one self-contained _core*.so. STABLE_ABI builds against CPython's limited API
+# (Py_LIMITED_API) so ONE wheel (tagged cp312-abi3) runs on Python 3.12, 3.13, 3.14+; it needs
+# Python >= 3.12 and is silently ignored on older interpreters (nanobind falls back to a
+# version-specific build there). module.cpp is the thin NB_MODULE assembler; the per-tool
+# binding code lives in the bind_<tool>.cpp TUs (each a void register_<tool>(nb::module_&)),
+# with the shared marshalling helpers in internal/bind_common.hpp (cli-bindings.md §5).
+nanobind_add_module(_core NB_STATIC STABLE_ABI
     module.cpp
     bind_f2handle.cpp
     bind_qpadm.cpp

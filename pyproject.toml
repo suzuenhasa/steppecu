@@ -94,6 +94,10 @@ cmake.args = [
 ]
 build.targets = ["_core"]
 wheel.packages = ["bindings/steppe"]
+# STABLE ABI: pair with nanobind_add_module(STABLE_ABI) so the extension links the limited API
+# and ONE wheel is tagged `cp312-abi3` — installable on Python 3.12, 3.13, 3.14+ (forward-compat,
+# no per-version rebuild). Built with cp312; the tag floor is 3.12 (nanobind's stable-ABI floor).
+wheel.py-api = "cp312"
 build-dir = "build/{wheel_tag}"
 
 # DYNAMIC VERSION (the [project] dynamic = ["version"] above): read the wheel version straight
