@@ -74,4 +74,36 @@ ssh box5090 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64; /workspace/steppe/bui
 # f3-sweep over the 2M 700-pop dir — C(700,3) = 56,921,900 triples
 ssh box5090 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64; /workspace/steppe/build-rel/bin/steppe f3 --all-triples --f2-dir /workspace/data/2m_f2_700 --top-k 100000 --sure --shard-dir /tmp/f3sweep_2m_700 --device 0'
 
+---
+
+## AADR data — download from Harvard Dataverse (doi:10.7910/DVN/FFIDCW)
+
+Robust script (resolves fileIds from the dataset API at runtime → survives new AADR versions; resumable; MD5-verified):
+```
+bash docs/download-aadr.sh 1240K ./aadr_1240K      # or:  HO   |   2M
+```
+
+Or raw curl one-liners (v66 version-14.0 fileIds; `-C -` resumes a partial download; the .geno is the big one):
+```
+# --- 1240K panel (~7.1 GB) ---
+curl -L -C - -o v66.p1_1240K.aadr.patch.PUB.geno https://dataverse.harvard.edu/api/access/datafile/13994829
+curl -L -C - -o v66.p1_1240K.aadr.patch.PUB.snp  https://dataverse.harvard.edu/api/access/datafile/13994514
+curl -L -C - -o v66.p1_1240K.aadr.patch.PUB.ind  https://dataverse.harvard.edu/api/access/datafile/13994513
+curl -L -C - -o v66.p1_1240K.aadr.PUB.anno       https://dataverse.harvard.edu/api/access/datafile/13994515
+# --- HO panel (~4.0 GB) ---
+curl -L -C - -o v66.p1_HO.aadr.patch.PUB.geno https://dataverse.harvard.edu/api/access/datafile/13994808
+curl -L -C - -o v66.p1_HO.aadr.patch.PUB.snp  https://dataverse.harvard.edu/api/access/datafile/13994527
+curl -L -C - -o v66.p1_HO.aadr.patch.PUB.ind  https://dataverse.harvard.edu/api/access/datafile/13994526
+curl -L -C - -o v66.p1_HO.aadr.PUB.anno       https://dataverse.harvard.edu/api/access/datafile/13994528
+# --- 2M panel (~12 GB) ---
+curl -L -C - -o v66.p1_2M.aadr.patch.PUB.geno https://dataverse.harvard.edu/api/access/datafile/13994830
+curl -L -C - -o v66.p1_2M.aadr.patch.PUB.snp  https://dataverse.harvard.edu/api/access/datafile/13994517
+curl -L -C - -o v66.p1_2M.aadr.patch.PUB.ind  https://dataverse.harvard.edu/api/access/datafile/13994516
+curl -L -C - -o v66.p1_2M.aadr.PUB.anno       https://dataverse.harvard.edu/api/access/datafile/13994518
+# then feed a prefix to steppe:
+#   steppe extract-f2 --prefix v66.p1_1240K.aadr.patch.PUB --auto-top-k 200 --maxmiss 0.5 --device 0 --out-dir f2_dir
+```
+
+---
+
 Note: keep this file (docs/commands.md) LIVE — excluded from the docs/archive sweep; it's the working cheatsheet.
