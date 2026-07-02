@@ -20,6 +20,7 @@
 #include <cstdint>  // std::uint8_t — the packed-genotype record byte type
 #include <vector>   // std::vector — DecodeResult Q/V/N + the per-sample ploidy host vector
 
+#include "core/internal/host_device.hpp"               // STEPPE_ASSERT (the s_lo % 4 == 0 tile-slice precondition)
 #include "core/internal/nvtx.hpp"                      // STEPPE_NVTX_RANGE (coarse phase-boundary marker; used by decode_af)
 #include "device/cuda/cuda_backend.cuh"                // the CudaBackend class declaration (split T0)
 #include "device/cuda/check.cuh"                       // STEPPE_CUDA_CHECK
@@ -33,11 +34,25 @@ namespace steppe::device {
 
 void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
                         DeviceBuffer<double>& dQ, DeviceBuffer<double>& dV,
-                        DeviceBuffer<double>& dN) {
-    // Only tile-sized and [P×M] buffers — never a [SNP×ind] decode-all
-    // (architecture.md §11.1; tile-shaped for the M5 loop).
-    const std::size_t packed_bytes =
-        tile.n_individuals * tile.bytes_per_record;
+                        DeviceBuffer<double>& dN, long s_lo) {
+    // SNP-TILE SLICE. This tile spans SNPs [s_lo, s_lo + M) of each individual's
+    // FULL-row packed record (M == tile.n_snp columns; tile.bytes_per_record is the
+    // full on-disk row stride). `tile_width` = ceil(M/4) is the COMPACTED tile-local
+    // record stride — the 2-bit slice actually uploaded — so the resident set is
+    // O(P × M) in the TILE M, never O(P × M_total). s_lo % 4 == 0 is REQUIRED (the
+    // caller SNP-tiles in multiple-of-4 steps) so SNP local_s maps to byte local_s/4,
+    // position local_s%4 — the SAME codes the full-M decode reads, hence the decode /
+    // keep-mask / scan / gather kernels are UNCHANGED (they address the tile-local
+    // stride). The untiled callers (s_lo=0, M=tile.n_snp) stay bit-identical: the
+    // slice reads bytes [0, ceil(M/4)) per record — exactly the codes the flat upload
+    // fed the kernel (record PADDING beyond ceil(M/4) was never decoded).
+    STEPPE_ASSERT(s_lo % core::kCodesPerByte == 0,
+                  "decode_af_resident: s_lo must be a multiple of kCodesPerByte (4) "
+                  "so the packed 2-bit tile slice stays byte-aligned");
+    const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
+    const std::size_t tile_width =
+        (static_cast<std::size_t>(M) + cpb - 1u) / cpb;  // ceil(M/4): the slice stride
+    const std::size_t packed_bytes = tile.n_individuals * tile_width;
     const std::size_t n_off = static_cast<std::size_t>(P) + 1u;
     DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
     DeviceBuffer<std::size_t> dOffsets(n_off);
@@ -57,9 +72,15 @@ void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
     const bool have_sample_ploidy = explicit_sample_ploidy || device_detect;
     DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
-                                      packed_bytes * sizeof(std::uint8_t),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    // STRIDED SLICE H2D: source row g starts at packed + g*bytes_per_record + s_lo/4;
+    // copy `tile_width` bytes into dPacked's g-th `tile_width`-strided row. spitch is
+    // the FULL on-disk row stride (bytes_per_record); dpitch is the compacted tile-local
+    // stride (tile_width). (packed_bytes == n_individuals*tile_width sizes dPacked.)
+    STEPPE_CUDA_CHECK(cudaMemcpy2DAsync(
+        dPacked.data(), tile_width,
+        tile.packed + static_cast<std::size_t>(s_lo) / cpb, tile.bytes_per_record,
+        tile_width, tile.n_individuals,
+        cudaMemcpyHostToDevice, stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
                                       n_off * sizeof(std::size_t),
                                       cudaMemcpyHostToDevice, stream_.get()));
@@ -71,13 +92,13 @@ void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
         // The L2 on-device prepass: scan dPacked (already in-flight on stream_; the
         // kernel is enqueued AFTER the upload, so the ordering is correct) and write
         // dSamplePloidy. Feeds launch_decode_af below in the SAME stream — no D2H.
-        launch_detect_ploidy(dPacked.data(), tile.bytes_per_record,
+        launch_detect_ploidy(dPacked.data(), tile_width,
                              tile.n_individuals, tile.n_snp, dSamplePloidy.data(),
                              stream_.get());
     }
 
     // S0 unpack + S1 segmented reduction → Q/V/N (RESIDENT).
-    launch_decode_af(dPacked.data(), tile.bytes_per_record, dOffsets.data(),
+    launch_decode_af(dPacked.data(), tile_width, dOffsets.data(),
                      P, M, tile.ploidy,
                      have_sample_ploidy ? dSamplePloidy.data() : nullptr,
                      dQ.data(), dV.data(), dN.data(), stream_.get());
@@ -337,7 +358,8 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
     std::span<const int> chrom, std::span<const double> genpos,
     std::span<const double> physpos, const FilterConfig& cfg,
-    std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) {
+    std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss,
+    long s_lo) {
     guard_device();
     steppe::device::DeviceDecodeResult out;
     out.device_id = device_id_;
@@ -355,9 +377,11 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
 
     // ---- 1. Decode → dQ/dV/dN RESIDENT (the SHARED front-end; NO host D2H). The
     // regime-B keep-mask reads the UNCOMPACTED dQ/dN; the gather then compacts
-    // Q/V/N from the SAME resident dQ/dV/dN — no second decode. ----------------
+    // Q/V/N from the SAME resident dQ/dV/dN — no second decode. `s_lo` slices the
+    // packed upload to SNPs [s_lo, s_lo+M) so the resident set is O(P × M) in the
+    // TILE M (the SNP-tile loop's peak-VRAM cure). ----------------------------
     DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
-    decode_af_resident(tile, P, M, dQ, dV, dN);
+    decode_af_resident(tile, P, M, dQ, dV, dN, s_lo);
 
     // ---- 2. The regime-B per-SNP keep-mask (the SHARED reduction + decision +
     // the SEPARATE maxmiss) → d_flags. The sample-axis geno predicate is the

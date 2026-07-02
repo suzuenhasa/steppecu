@@ -1060,15 +1060,25 @@ public:
     /// @param ploidy       the ploidy (2 diploid / 1 pseudo-haploid) for N/ploidy.
     /// @param maxmiss      the AT2 pop-coverage maxmiss (drop if frac of pops with
     ///                     N<=0 > maxmiss; >=1.0 ⇒ no-op).
+    /// @param s_lo         SNP-TILE START: the tile's first SNP index into the FULL
+    ///                     genotype record (tile.n_snp is the tile WIDTH; the ref/alt/
+    ///                     chrom/genpos/physpos spans are the tile subspans). The
+    ///                     backend uploads only the [s_lo, s_lo+tile.n_snp) 2-bit slice
+    ///                     so peak VRAM is O(P × tile.n_snp), not O(P × M). The caller
+    ///                     SNP-tiles [0,M) in multiple-of-4 steps and appends each
+    ///                     tile's compacted Q/V/N + kept axis in file order — the
+    ///                     result is byte-identical to a single full-M call. s_lo % 4
+    ///                     == 0 is REQUIRED (the 2-bit packing alignment).
     /// NON-PURE: the base throws (the established pattern; the CpuBackend uses
     /// decode_af + the host filter loop directly, never this resident entry).
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_filter(
         const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
         std::span<const int> chrom, std::span<const double> genpos,
         std::span<const double> physpos, const FilterConfig& cfg,
-        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) {
+        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss,
+        long s_lo) {
         (void)tile; (void)ref; (void)alt; (void)chrom; (void)genpos; (void)physpos;
-        (void)cfg; (void)pop_individuals; (void)ploidy; (void)maxmiss;
+        (void)cfg; (void)pop_individuals; (void)ploidy; (void)maxmiss; (void)s_lo;
         throw std::runtime_error(
             "ComputeBackend::decode_af_compact_filter: not implemented by this backend "
             "(the regime-B device-resident decode seam requires a CUDA backend)");

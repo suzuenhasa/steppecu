@@ -27,6 +27,7 @@
 #include "core/stats/genotype_front_end.hpp"      // C1 shared genotype decode front-end
 #include "core/internal/views.hpp"                // steppe::core::MatView
 #include "device/backend.hpp"                     // DecodeTileView, DecodeResult (CUDA-FREE)
+#include "device/decode_budget.hpp"               // decode_tile_snps (regime-B SNP-tile width, CUDA-FREE)
 #include "device/f2_blocks_out.hpp"               // F2BlocksOut (CUDA-FREE)
 #include "device/resources.hpp"                   // Resources (CUDA-FREE)
 #include "steppe/config.hpp"                      // Precision, FilterConfig
@@ -200,29 +201,75 @@ F2ExtractResult run_extract_f2(const std::string& geno,
     long M_kept = 0;
 
     if (on_device) {
-        const std::size_t Mu = static_cast<std::size_t>(M);
-        steppe::device::DeviceDecodeResult ddr = backend.decode_af_compact_filter(
-            view,
-            std::span<const char>(snptab.ref.data(), Mu),
-            std::span<const char>(snptab.alt.data(), Mu),
-            std::span<const int>(snptab.chrom.data(), Mu),
-            std::span<const double>(snptab.genpos_morgans.data(), Mu),
-            std::span<const double>(snptab.physpos.data(), Mu),
-            filter, std::span<const std::size_t>(pop_individuals.data(),
-                                                 pop_individuals.size()),
-            kPloidyDiploid, maxmiss);
-        M_kept = ddr.M_kept;
+        // HOIST PLOIDY TO EXPLICIT before the SNP-tile loop. The full-view detection
+        // (ploidy_for_counts, computed above over the fixed first-min(kPloidyDetectSnps,
+        // M) SNP prefix) becomes the SINGLE explicit per-sample vector EVERY tile uses.
+        // This is REQUIRED for tiled parity: a per-tile on-device re-detect
+        // (detect_ploidy_on_device) would scan only THAT tile's leading SNPs, giving a
+        // DIFFERENT ploidy on tiles past the first (and possibly on a first tile whose
+        // width < kPloidyDetectSnps) — wrong Q/N. For Auto this is bit-identical to the
+        // single-shot on-device detect (the SAME launch_detect_ploidy over the SAME
+        // full-M prefix); for the explicit modes ploidy_for_counts == the uniform vector
+        // that was already in view.sample_ploidy, so nothing moves.
+        view.sample_ploidy = ploidy_for_counts.data();
+        view.detect_ploidy_on_device = false;
+
+        // SNP-TILE the decode so peak VRAM is O(P × tile_M), not O(P × M): the decode
+        // allocates ~6 [P × M] FP64 buffers (dQ/dV/dN + the compacted q/v/n) BEFORE the
+        // tier runs, an OOM at large P × M. tile_M is a multiple of 4 (every s_lo stays
+        // 2-bit-packing-aligned); the last tile may be shorter. Byte-identical to the
+        // single-shot path: per-SNP keep independence + the monotone per-tile scan +
+        // the in-file-order host append ⇒ the SAME kept SET, the SAME file ORDER.
+        const long tile_M = steppe::device::decode_tile_snps(
+            backend.capabilities().free_vram_bytes, P, tile.n_individuals, M);
+
+        for (long s_lo = 0; s_lo < M; s_lo += tile_M) {
+            const long tw = std::min(tile_M, M - s_lo);
+            const std::size_t tws = static_cast<std::size_t>(tw);
+            const std::size_t so = static_cast<std::size_t>(s_lo);
+
+            DecodeTileView tview = view;   // full packed/bytes_per_record/ploidy…
+            tview.n_snp = tws;             // …only the SNP-column count is the tile width.
+
+            steppe::device::DeviceDecodeResult ddr = backend.decode_af_compact_filter(
+                tview,
+                std::span<const char>(snptab.ref.data() + so, tws),
+                std::span<const char>(snptab.alt.data() + so, tws),
+                std::span<const int>(snptab.chrom.data() + so, tws),
+                std::span<const double>(snptab.genpos_morgans.data() + so, tws),
+                std::span<const double>(snptab.physpos.data() + so, tws),
+                filter, std::span<const std::size_t>(pop_individuals.data(),
+                                                     pop_individuals.size()),
+                kPloidyDiploid, maxmiss, s_lo);
+
+            const long mk = ddr.M_kept;
+            if (mk <= 0) continue;  // no SNP kept in this tile — nothing to append.
+
+            // D2H this tile's compacted Q/V/N and FREE the resident tile buffers at the
+            // end of the iteration (never accumulate a resident [P × M_kept] tensor —
+            // that would be O(P × M) again). The host layout is column-major [P × mk]
+            // (element (pop i, kept SNP d) at i + P·d), so consecutive kept SNPs are
+            // P-strided; APPENDING each tile's arrays in file (tile) order reproduces
+            // the single-shot [P × M_kept] contiguous layout EXACTLY, bit-for-bit.
+            std::vector<double> Qt, Vt, Nt;
+            ddr.to_host_qvn(Qt, Vt, Nt);
+            Qk.insert(Qk.end(), Qt.begin(), Qt.end());
+            Vk.insert(Vk.end(), Vt.begin(), Vt.end());
+            Nk.insert(Nk.end(), Nt.begin(), Nt.end());
+            chrom_kept.insert(chrom_kept.end(), ddr.chrom_kept.begin(),
+                              ddr.chrom_kept.end());
+            genpos_kept.insert(genpos_kept.end(), ddr.genpos_kept.begin(),
+                               ddr.genpos_kept.end());
+            physpos_kept.insert(physpos_kept.end(), ddr.physpos_kept.begin(),
+                                ddr.physpos_kept.end());
+            M_kept += mk;
+        }
+
         if (M_kept <= 0) {
             throw std::invalid_argument(
                 "extract_f2: every SNP was filtered out (0 of " + std::to_string(M) +
                 " kept) — relax the filters");
         }
-        // The small compacted Q/V/N D2H (the regime-B read-back; the only host copy,
-        // analogous to the regime-A chrom/genpos D2H — just the compacted arrays).
-        ddr.to_host_qvn(Qk, Vk, Nk);
-        chrom_kept = std::move(ddr.chrom_kept);
-        genpos_kept = std::move(ddr.genpos_kept);
-        physpos_kept = std::move(ddr.physpos_kept);
     } else {
         // CPU PARITY ORACLE: the verbatim host regime-B path (UNCHANGED).
         const DecodeResult dec = backend.decode_af(view);

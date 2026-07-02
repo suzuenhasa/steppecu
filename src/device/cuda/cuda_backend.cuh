@@ -208,9 +208,16 @@ public:
     /// CUDA-free seam (decode_af: full D2H, host/oracle path) or STAYS resident
     /// (decode_af_compact_autosome: the device-resident seam). The packed/offsets/
     /// ploidy uploads are local RAII (freed on return); dQ/dV/dN are caller-owned.
+    ///
+    /// SNP-TILE SLICE: `s_lo` is the tile-start SNP index into each individual's
+    /// full-row packed record; the upload is a STRIDED cudaMemcpy2D that slices
+    /// SNPs [s_lo, s_lo + M) (M == tile.n_snp) into a compacted ceil(M/4)-stride
+    /// device buffer. s_lo % 4 == 0 is REQUIRED (the 2-bit packing alignment). The
+    /// untiled callers pass the default s_lo=0 (M == the full tile) and stay
+    /// bit-identical: the decode reads the SAME 2-bit codes it always did.
     void decode_af_resident(const DecodeTileView& tile, int P, long M,
                             DeviceBuffer<double>& dQ, DeviceBuffer<double>& dV,
-                            DeviceBuffer<double>& dN);
+                            DeviceBuffer<double>& dN, long s_lo = 0);
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override;
 
@@ -260,11 +267,20 @@ public:
     /// the IDENTICAL CUB ExclusiveSum + Flagged + scan-gather idiom, and adds the THIRD
     /// lockstep gather of N. The resident compacted Q/V/N escape (n_device() non-null);
     /// only the small kept chrom/genpos cross to host (for assign_blocks).
+    ///
+    /// SNP-TILING: `s_lo` is the tile-start SNP index (into the FULL genotype
+    /// record); `tile.n_snp` carries the tile width. The ref/alt/chrom/genpos/physpos
+    /// spans are the tile's subspans (length tile.n_snp). The caller SNP-tiles the
+    /// decode so peak VRAM is O(P × tile.n_snp), NOT O(P × M): it appends each tile's
+    /// compacted Q/V/N + kept axis in file order (s_lo ascending) — byte-identical to
+    /// the single-shot full-M path (per-SNP keep independence + the monotone per-tile
+    /// scan). s_lo % 4 == 0 is REQUIRED (the 2-bit tile-slice alignment).
     [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_filter(
         const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
         std::span<const int> chrom, std::span<const double> genpos,
         std::span<const double> physpos, const FilterConfig& cfg,
-        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss) override;
+        std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss,
+        long s_lo) override;
 
     /// qpDstat Part B — the genotype-path NORMALIZED-D per-SNP reduction on the GPU (the
     /// S2 divergence; backend.hpp dstat_block_reduce / include/steppe/dstat.hpp). Uploads

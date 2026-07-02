@@ -31,6 +31,7 @@
 // Self-checking main() (mirrors test_decode_equivalence.cu / test_filter_oracle.cu);
 // CTest gates on the exit code. SKIPs (exit 0) if no CUDA device or the raw AADR
 // triple is absent — the device-resident path cannot be exercised then.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -248,7 +249,7 @@ int main(int argc, char** argv) {
                 std::span<const double>(snptab.genpos_morgans.data(), Mu),
                 std::span<const double>(snptab.physpos.data(), Mu),
                 tc.cfg, std::span<const std::size_t>(pop_individuals.data(), pop_individuals.size()),
-                kPloidyDiploid, tc.maxmiss);
+                kPloidyDiploid, tc.maxmiss, /*s_lo=*/0L);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[%s] CUDA decode_af_compact_filter threw: %s — FAIL\n",
                          tc.name, e.what());
@@ -258,6 +259,73 @@ int main(int argc, char** argv) {
         const long mk_dev = ddr.M_kept;
         std::vector<double> Qd, Vd, Nd;
         ddr.to_host_qvn(Qd, Vd, Nd);
+
+        // ---- CUDA device-resident TILED regime-B path (the SNP-tile OOM cure) ----
+        // Decode over several SMALL SNP tiles (a multiple-of-4 step so every s_lo stays
+        // 2-bit-aligned) and CONCATENATE each tile's compacted Q/V/N + kept axis in file
+        // order. This MUST be byte-identical to the single-shot device path above:
+        // per-SNP keep independence + the monotone per-tile scan + the in-order append.
+        std::vector<double> Qt, Vt, Nt;
+        std::vector<int> chr_t;
+        std::vector<double> gp_t, pp_t;
+        long mk_tile = 0;
+        bool tiled_threw = false;
+        const long tile_M = std::max<long>(4L, (M / 5) & ~3L);  // ~5 tiles, step ≡ 0 (mod 4)
+        for (long s_lo = 0; s_lo < M; s_lo += tile_M) {
+            const long tw = std::min(tile_M, M - s_lo);
+            const std::size_t tws = static_cast<std::size_t>(tw);
+            const std::size_t so = static_cast<std::size_t>(s_lo);
+            DecodeTileView tview = view;
+            tview.n_snp = tws;
+            steppe::device::DeviceDecodeResult dt;
+            try {
+                dt = gpu->decode_af_compact_filter(
+                    tview,
+                    std::span<const char>(snptab.ref.data() + so, tws),
+                    std::span<const char>(snptab.alt.data() + so, tws),
+                    std::span<const int>(snptab.chrom.data() + so, tws),
+                    std::span<const double>(snptab.genpos_morgans.data() + so, tws),
+                    std::span<const double>(snptab.physpos.data() + so, tws),
+                    tc.cfg,
+                    std::span<const std::size_t>(pop_individuals.data(), pop_individuals.size()),
+                    kPloidyDiploid, tc.maxmiss, s_lo);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[%s] TILED decode threw at s_lo=%ld: %s\n",
+                             tc.name, s_lo, e.what());
+                tiled_threw = true;
+                break;
+            }
+            if (dt.M_kept <= 0) continue;
+            std::vector<double> qs, vs, ns;
+            dt.to_host_qvn(qs, vs, ns);
+            Qt.insert(Qt.end(), qs.begin(), qs.end());
+            Vt.insert(Vt.end(), vs.begin(), vs.end());
+            Nt.insert(Nt.end(), ns.begin(), ns.end());
+            chr_t.insert(chr_t.end(), dt.chrom_kept.begin(), dt.chrom_kept.end());
+            gp_t.insert(gp_t.end(), dt.genpos_kept.begin(), dt.genpos_kept.end());
+            pp_t.insert(pp_t.end(), dt.physpos_kept.begin(), dt.physpos_kept.end());
+            mk_tile += dt.M_kept;
+        }
+        // TILED == single-shot device (byte-identical): count, Q/V/N, and the kept axis.
+        bool tiled_ok = !tiled_threw && (mk_tile == mk_dev) &&
+                        (Qt.size() == Qd.size()) && (Vt.size() == Vd.size()) &&
+                        (Nt.size() == Nd.size()) &&
+                        (chr_t.size() == ddr.chrom_kept.size()) &&
+                        (gp_t.size() == ddr.genpos_kept.size()) &&
+                        (pp_t.size() == ddr.physpos_kept.size());
+        if (tiled_ok && mk_dev > 0) {
+            tiled_ok =
+                (std::memcmp(Qt.data(), Qd.data(), Qd.size() * sizeof(double)) == 0) &&
+                (std::memcmp(Vt.data(), Vd.data(), Vd.size() * sizeof(double)) == 0) &&
+                (std::memcmp(Nt.data(), Nd.data(), Nd.size() * sizeof(double)) == 0) &&
+                (std::memcmp(chr_t.data(), ddr.chrom_kept.data(),
+                             ddr.chrom_kept.size() * sizeof(int)) == 0) &&
+                (std::memcmp(gp_t.data(), ddr.genpos_kept.data(),
+                             ddr.genpos_kept.size() * sizeof(double)) == 0) &&
+                (ddr.physpos_kept.empty() ||
+                 std::memcmp(pp_t.data(), ddr.physpos_kept.data(),
+                             ddr.physpos_kept.size() * sizeof(double)) == 0);
+        }
 
         // (1) M_kept EXACT.
         const bool count_ok = (mk_dev == mk_host);
@@ -279,12 +347,14 @@ int main(int argc, char** argv) {
                      (std::memcmp(Nd.data(), Nh.data(), Nh.size() * sizeof(double)) == 0);
         }
 
-        const bool ok = count_ok && axis_ok && qvn_ok;
+        const bool ok = count_ok && axis_ok && qvn_ok && tiled_ok;
         if (!ok) ++failures;
         std::fprintf(stderr,
-            "[%-40s] M_kept host=%ld dev=%ld (%s)  axis=%s  Q/V/N bit-identical=%s  %s\n",
+            "[%-40s] M_kept host=%ld dev=%ld (%s)  axis=%s  Q/V/N bit-identical=%s  "
+            "tiled(mk=%ld)==single=%s  %s\n",
             tc.name, mk_host, mk_dev, count_ok ? "==" : "DIFF",
-            axis_ok ? "y" : "N", qvn_ok ? "y" : "N", ok ? "PASS" : "FAIL");
+            axis_ok ? "y" : "N", qvn_ok ? "y" : "N", mk_tile,
+            tiled_ok ? "y" : "N", ok ? "PASS" : "FAIL");
     }
 
     std::fprintf(stderr, "\nRESULT: %s\n", failures == 0 ? "PASS" : "FAIL");
