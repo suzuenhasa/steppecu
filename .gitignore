@@ -76,3 +76,6 @@ agentscripts/
 *~
 .DS_Store
 handoff-*.md
+
+# --- Claude Code local project config (not shipped; kept on disk, never wiped as untracked) ---
+.claude/
