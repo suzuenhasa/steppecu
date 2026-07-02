@@ -1,7 +1,10 @@
 // src/io/filter/include_exclude.cpp
 //
-// Include/exclude + external prune.in resolution (architecture.md §1, §5 S-1;
-// ROADMAP M2). The prune.in is READ, never computed. Host-pure `io`-leaf TU.
+// Resolves the user's include/exclude SNP-id lists and an optional external
+// prune.in file into one per-SNP keep/drop test. Host-pure; the prune.in is
+// read, never computed.
+//
+// Reference: docs/reference/src_io_filter_include_exclude.cpp.md
 #include "io/filter/include_exclude.hpp"
 
 #include <fstream>
@@ -11,6 +14,7 @@
 
 namespace steppe::io::filter {
 
+// Read a prune.in SNP-id list — reference §2
 void read_snp_id_list(const std::string& path, std::vector<std::string>& out) {
     std::ifstream in(path);
     if (!in) {
@@ -21,20 +25,10 @@ void read_snp_id_list(const std::string& path, std::vector<std::string>& out) {
     while (std::getline(in, line)) {
         std::istringstream ls(line);
         std::string id;
-        if (ls >> id) {  // first whitespace token is the id; skip blank lines
+        if (ls >> id) {
             out.push_back(id);
         }
     }
-    // Fail-fast on an openable-but-unreadable node (architecture.md §2). On
-    // libstdc++/POSIX, constructing an ifstream on a DIRECTORY (or a FIFO/socket
-    // the process can open() but not read()) succeeds — `if (!in)` above passes —
-    // and the failure only surfaces on the first read, which sets badbit. A normal
-    // end-of-input instead sets eofbit|failbit (std::getline extracts no characters
-    // at EOF) but NOT badbit, so the post-loop guard must distinguish them: badbit
-    // is a hard stream error, and (fail && !eof) is a read that failed for a reason
-    // other than reaching EOF. Without this guard a directory path silently yields
-    // an EMPTY keep-set, violating the "cannot be opened ⇒ throws" contract and
-    // dropping the user's prune.in constraint on a parity run (cleanup B19 / 1.1).
     if (in.bad() || (in.fail() && !in.eof())) {
         throw std::runtime_error(
             "io::filter::read_snp_id_list: read failed on SNP-id list "
@@ -42,35 +36,29 @@ void read_snp_id_list(const std::string& path, std::vector<std::string>& out) {
     }
 }
 
+// Resolve the keep-set and drop-set — reference §3
 SnpMembership::SnpMembership(const FilterConfig& cfg) {
-    // Keep-set = include_snp_ids ∪ prune.in ids. The prune.in is READ here (never
-    // computed); both sources union into one keep-set so snp_filter sees a single
-    // "this SNP is wanted" test, not two.
     for (const std::string& id : cfg.include_snp_ids) {
         keep_set_.insert(id);
     }
     if (!cfg.prune_in_path.empty()) {
         std::vector<std::string> ids;
-        read_snp_id_list(cfg.prune_in_path, ids);  // throws on open failure
+        read_snp_id_list(cfg.prune_in_path, ids);
         for (std::string& id : ids) {
             keep_set_.insert(std::move(id));
         }
     }
 
-    // Drop-set = exclude_snp_ids (overrides the keep-set per the `--exclude`
-    // / .missnp convention).
     for (const std::string& id : cfg.exclude_snp_ids) {
         drop_set_.insert(id);
     }
 }
 
+// Membership test — reference §4
 bool SnpMembership::passes(const std::string& snp_id) const noexcept {
-    // Exclude wins: any id in the drop-set fails regardless of the keep-set.
     if (!drop_set_.empty() && drop_set_.find(snp_id) != drop_set_.end()) {
         return false;
     }
-    // Include constraint only when the keep-set is non-empty: then the id must be
-    // present. An empty keep-set imposes no include constraint (no-op).
     if (!keep_set_.empty() && keep_set_.find(snp_id) == keep_set_.end()) {
         return false;
     }

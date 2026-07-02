@@ -1,17 +1,13 @@
 // src/io/genotype_source.cpp
 //
-// Implementation of the format-aware genotype-triple resolver + the SnpTable /
-// IndPartition front-door (genotype_source.hpp; M-FR PLINK). EXTENSION resolution is a
-// filesystem probe (.geno present wins, else .bed -> PLINK); the per-file parser is
-// dispatched on the GenoReader's detected format.
-//
-// LAYERING: `io`-leaf TU (architecture.md §4) — pure host C++20, no CUDA, no
-// core/device dependency.
+// Format-aware genotype-triple resolver plus the SnpTable / IndPartition
+// front-door: .geno present wins, else .bed selects the PLINK path, and the
+// per-file parser is dispatched on the reader's detected format.
 #include "io/genotype_source.hpp"
 
 #include <filesystem>
 
-#include "io/plink_reader.hpp"  // read_bim, read_fam (the PLINK parsers)
+#include "io/plink_reader.hpp"
 
 namespace steppe::io {
 
@@ -20,8 +16,6 @@ GenotypeTriple resolve_genotype_triple(const std::string& prefix) {
     std::error_code ec;
     const bool has_geno = std::filesystem::exists(prefix + ".geno", ec);
     const bool has_bed = std::filesystem::exists(prefix + ".bed", ec);
-    // .geno present ALWAYS wins (keeps every TGENO/GENO/EIGENSTRAT prefix resolving
-    // exactly as before); PLINK is chosen ONLY when there is a .bed and no .geno.
     if (!has_geno && has_bed) {
         t.geno = prefix + ".bed";
         t.snp = prefix + ".bim";
