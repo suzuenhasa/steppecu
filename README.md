@@ -83,8 +83,25 @@ Build the **Python wheel**: `pip wheel . --no-deps` (add `--config-settings=cmak
 
 ## Quick start
 
-steppe works over an **f2-blocks directory** — a precomputed cache of pairwise f2 per
-genome block. Build it once, then run any number of stats/fits over it.
+**First result in seconds.** The installer stages a tiny **real** 9-population AADR f2 cache, so
+you can fit a qpAdm model immediately — no data download, no build:
+
+```bash
+steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
+  --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \
+  --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
+#  -> weights (Czechia_EBA_CordedWare ~0.56, Turkey_N ~0.44) + tail p ~0.33 — a real fit.
+```
+
+Built from source, or want it by hand? Grab the same example directly:
+```bash
+mkdir example_9pop && curl -fsSL \
+  https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/example_9pop_f2.tar.gz \
+  | tar xz -C example_9pop
+```
+
+**Your own data.** steppe works over an **f2-blocks directory** — a precomputed cache of pairwise
+f2 per genome block. Build it once from a genotype prefix, then run any number of stats/fits:
 
 ```bash
 S=./steppe        # or just `steppe` if it's on your PATH

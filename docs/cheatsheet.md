@@ -11,10 +11,20 @@ Real AADR population labels are used below — swap in ones present in **your** 
 
 ## 0. Setup (once per shell)
 ```bash
-# CUDA 13 must be on the loader path (only if `steppe` can't find libcudart.so.13):
+# Installed via install.sh? its `steppe` launcher sets LD_LIBRARY_PATH for you — skip this line.
+# Otherwise put the CUDA 13 runtime on the loader path (if `steppe` can't find libcudart.so.13):
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64
 steppe --version          # 0.1.0
 steppe --help             # list all subcommands
+```
+
+## Try it now — the bundled example (no data needed)
+`install.sh` stages a tiny **real** 9-pop AADR f2 cache; fit a qpAdm model right away:
+```bash
+steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
+  --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \
+  --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
+#  -> weights (Czechia ~0.56, Turkey_N ~0.44), p ~0.33 — a real fit, in seconds.
 ```
 
 ## 1. Get data — the AADR

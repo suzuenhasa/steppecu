@@ -1,0 +1,6 @@
+{
+  "format": "STPF2BK1",
+  "P": 9,
+  "n_block": 708,
+  "provenance": "steppe quickstart example: a real-AADR 9-population f2 cache (the qpGraph 9-pop golden). Tiny by design so `steppe qpadm --f2-dir` yields a real result seconds after install."
+}

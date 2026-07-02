@@ -10,6 +10,21 @@ steppe is a **GPU product**: both examples run on a CUDA box (sm_120 / CUDA 13) 
 GPU the fit raises a clear *"no CUDA device"* message. **The local RTX 2070 / CUDA 11.8 is
 the wrong arch and cannot build or run the C++ example** — build/run it on the box.
 
+## Just want to run something? `f2_9pop/`
+
+`f2_9pop/` here is a **ready-to-run** STPF2BK1 f2-dir (a tiny real-AADR 9-pop cache) — no build,
+no staging. With the CLI installed, point `--f2-dir` straight at it:
+
+```bash
+steppe qpadm --f2-dir docs/examples/f2_9pop \
+  --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \
+  --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
+```
+
+(The one-liner installer stages the same cache to `~/.local/share/steppe/example_9pop`, and it's
+also a release asset: `example_9pop_f2.tar.gz`.) The two scripts below are instead **living API
+canaries** for the *built bindings* — read on for those.
+
 ## The model — real-AADR `golden_fit0`
 
 Both examples fit the committed real-AADR golden (`tests/reference/goldens/at2`):
