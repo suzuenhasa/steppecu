@@ -2,6 +2,11 @@
 
 **A GPU/CUDA-13 reimplementation of [ADMIXTOOLS 2](https://github.com/uqrmaie1/admixtools) + qpAdm / DATES.**
 
+> 🚧 **Work in progress — research preview.** steppe is under active development. The compute
+> paths that are done are validated to bit/tolerance parity with ADMIXTOOLS 2 on real AADR
+> data, but install/onboarding, docs, and some APIs are still rough and may change. **Not a
+> stable release yet** — expect sharp edges, and please don't rely on it for production work.
+
 steppe computes f-statistics (the pairwise-f2 block tensor) and fits admixture models —
 qpAdm / qpWave / qpGraph / DATES, plus the standalone f3 / f4 / f4-ratio / D-statistic
 family — entirely **on the GPU**. The f2 tensor stays resident in VRAM and the fits run
@@ -28,15 +33,15 @@ bit/tolerance parity against ADMIXTOOLS 2 on real ancient-DNA (AADR) data.
 
 ## Install
 
-The repo (and its release assets) is **private**, so the prebuilt downloads require GitHub
-access — authenticate first with `gh auth login` (or a personal-access token). Three ways;
-**(1) is simplest: one binary, no Python, no build.**
+Three ways; **(1) is simplest: one binary, no Python, no build.** The prebuilt CLI + wheel are
+attached to the [v0.1.0 release](https://github.com/suzuenhasa/steppecu/releases/tag/v0.1.0)
+and download over plain `curl` — no GitHub auth needed.
 
 ### 1. Prebuilt CLI — no build
 A single standalone executable (a fatbinary for every supported GPU):
 
 ```bash
-gh release download v0.1.0 --repo suzuenhasa/steppecu --pattern steppe   # needs repo access
+curl -L -o steppe https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe
 chmod +x steppe
 ./steppe --version
 ```
@@ -47,7 +52,7 @@ CUDA 13. Point the loader at it if needed: `export LD_LIBRARY_PATH=/usr/local/cu
 
 ### 2. Prebuilt wheel — the Python API
 ```bash
-gh release download v0.1.0 --repo suzuenhasa/steppecu --pattern '*.whl'   # needs repo access
+curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe-0.1.0-cp312-cp312-linux_x86_64.whl
 pip install ./steppe-0.1.0-cp312-cp312-linux_x86_64.whl
 python -c "import steppe; print(steppe.__version__)"
 ```
