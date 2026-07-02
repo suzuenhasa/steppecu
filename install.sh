@@ -116,9 +116,28 @@ if "$DIR/steppe" --version >/dev/null 2>&1; then
 else
   say "• installed to $DIR/steppe (couldn't run --version yet — see the CUDA note above)"
 fi
+# put $DIR on PATH persistently (opt out with STEPPE_NO_MODIFY_PATH=1)
 case ":$PATH:" in
-  *":$DIR:"*) : ;;
-  *) say "• add $DIR to your PATH:  export PATH=\"$DIR:\$PATH\"" ;;
+  *":$DIR:"*) ;;  # already on PATH — nothing to do
+  *)
+    added=""
+    if [ "${STEPPE_NO_MODIFY_PATH:-}" != "1" ]; then
+      case "${SHELL:-}" in
+        */zsh)  rc="$HOME/.zshrc" ;;
+        */bash) rc="$HOME/.bashrc" ;;
+        *)      rc="$HOME/.profile" ;;
+      esac
+      if [ ! -f "$rc" ] || ! grep -qF "added by steppe install.sh" "$rc" 2>/dev/null; then
+        printf '\n%s\n' "export PATH=\"$DIR:\$PATH\"  # added by steppe install.sh" >> "$rc" \
+          && added="$rc"
+      fi
+    fi
+    if [ -n "$added" ]; then
+      say "• added $DIR to PATH in $added — open a new shell or: source $added"
+    else
+      say "• add $DIR to your PATH:  export PATH=\"$DIR:\$PATH\""
+    fi
+    ;;
 esac
 say ""
 if [ -n "$EXAMPLE_DIR" ] && [ -f "$EXAMPLE_DIR/f2.bin" ]; then

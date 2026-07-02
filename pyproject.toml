@@ -148,6 +148,8 @@ ignore = ["UP045"]
 # the conftest %-format meta.json writer (literal JSON braces make an f-string a brace-doubling
 # churn). The inline `# noqa: BLE001` / `# noqa: WPS433` markers stay authoritative.
 "tests/python/**" = ["S101", "I001", "F841", "UP031"]
+# The quickstart mirrors conftest's meta.json %-writer (literal JSON braces = f-string churn).
+"docs/examples/python/**" = ["UP031"]
 
 [tool.mypy]
 python_version = "3.9"

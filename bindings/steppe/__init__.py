@@ -21,6 +21,54 @@ import enum
 import math
 from typing import Any, Optional
 
+
+def _preload_cuda_runtime() -> None:
+    """Best-effort: make the CUDA 13 runtime loadable WITHOUT the user setting LD_LIBRARY_PATH.
+
+    The compiled ``_core`` has DT_NEEDED on libcudart.so.13 / libcublas.so.13 /
+    libcusolver.so.12 / libcufft.so.12; if those aren't on the loader path, ``import _core``
+    fails opaquely. Preloading them (RTLD_GLOBAL) from the usual CUDA install dirs — the wheel
+    equivalent of the CLI launcher — lets ``_core``'s dlopen resolve against the already-loaded
+    libraries (CUDA's own libs carry a ``$ORIGIN`` RUNPATH, so their siblings resolve too). A
+    silent no-op when they're already loadable or genuinely absent (the import guard reports)."""
+    import ctypes
+    import glob
+    import os
+
+    needed = ("libcudart.so.13", "libcublas.so.13", "libcusolver.so.12", "libcufft.so.12")
+    dirs = []
+    env = os.environ.get("STEPPE_CUDA_LIB")
+    if env:
+        dirs.append(env)
+    dirs.append("/usr/local/cuda/lib64")
+    dirs += sorted(glob.glob("/usr/local/cuda-13*/lib64"), reverse=True)
+    try:  # the pip `nvidia-*-cu13` redistributable wheels, if installed alongside
+        import site
+
+        roots = list(getattr(site, "getsitepackages", list)()) + [site.getusersitepackages()]
+        for root in roots:
+            dirs += glob.glob(os.path.join(root, "nvidia", "*", "lib"))
+    except Exception:  # noqa: BLE001 - site probing is best-effort
+        pass
+
+    for name in needed:
+        try:
+            ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)  # already on the loader path? done.
+            continue
+        except OSError:
+            pass
+        for d in dirs:
+            cand = os.path.join(d, name)
+            if os.path.exists(cand):
+                try:
+                    ctypes.CDLL(cand, mode=ctypes.RTLD_GLOBAL)
+                    break
+                except OSError:
+                    continue
+
+
+_preload_cuda_runtime()
+
 try:
     from . import _core  # the compiled nanobind extension (steppe/_core*.so)
 

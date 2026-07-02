@@ -143,9 +143,10 @@ def run_fit(f2_dir: str) -> int:
     _put_bindings_on_path()
     try:
         import steppe
-    except Exception as exc:  # build-dependent
+    except Exception as exc:  # bindings absent
         print(
-            f"steppe bindings not importable (build with -DSTEPPE_BUILD_PYTHON=ON): {exc}",
+            "steppe not importable — install the wheel (`pip install steppe`) or build from "
+            f"source with -DSTEPPE_BUILD_PYTHON=ON: {exc}",
             file=sys.stderr,
         )
         return 1
