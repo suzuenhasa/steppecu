@@ -62,8 +62,16 @@ inline constexpr const char* kForceTierTokenDisk     = "disk";
     const std::size_t result_bytes = resident_tensor_bytes(P, n_block);
     const std::size_t resident_need = result_bytes + resident_working_set_bytes(P, M);
     const std::size_t vram_budget = budget_bytes(kResidentTierVramFraction, free_vram);
-    if (resident_need <= vram_budget) return OutputTier::Resident;
     const std::size_t host_budget = budget_bytes(kHostTierRamFraction, free_host_ram);
+    // The Resident output engine reads the whole dense P×M_kept Q/V/N from ONE host
+    // buffer; only pick Resident if that host input fits too, else fall through to the
+    // bounded (block-source) streamed path. This is the extract-f2 host-RAM-wall clamp.
+    const std::size_t resident_host_input =
+        (M > 0) ? kResidentHostInputStacks * static_cast<std::size_t>(P) *
+                      static_cast<std::size_t>(M) * sizeof(double)
+                : 0u;
+    if (resident_need <= vram_budget && resident_host_input <= host_budget)
+        return OutputTier::Resident;
     if (result_bytes <= host_budget) return OutputTier::HostRam;
     return OutputTier::Disk;
 }

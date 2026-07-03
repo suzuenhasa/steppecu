@@ -31,6 +31,10 @@ inline constexpr std::size_t kFitBudgetHeadroomBytes = static_cast<std::size_t>(
 inline constexpr unsigned kFeederRawBufsPerPop = 3u;
 inline constexpr unsigned kFeederOutBufsPerPop = 4u;
 inline constexpr std::size_t kResidentTensorCount = 2;
+// Dense host Q/V/N stacks the Resident tier materializes (extract-f2). The Resident
+// output engine reads the whole P×M_kept input from one host buffer of this many
+// double stacks; the tier-select host-input clamp keeps it off the host-RAM wall.
+inline constexpr std::size_t kResidentHostInputStacks = 3;
 inline constexpr std::size_t kChunkInputStacks = 4;
 inline constexpr std::size_t kChunkOutputStacks = 4;
 inline constexpr int kInvalidDeviceId = -1;

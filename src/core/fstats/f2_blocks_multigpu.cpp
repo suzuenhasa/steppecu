@@ -97,9 +97,10 @@ void finish_streamed_tier(steppe::device::Resources& resources,
                           const Precision& precision,
                           steppe::device::StreamTarget& target,
                           steppe::device::F2BlocksOut& out,
-                          const TierHandle& tier_handle) {
+                          const TierHandle& tier_handle,
+                          const steppe::device::RedecodeSource* redecode) {
     resources.gpus[0].backend->compute_f2_blocks_streamed(
-        Q, V, N, partition.block_id.data(), n_block, precision, target);
+        Q, V, N, partition.block_id.data(), n_block, precision, target, redecode);
     out.P = tier_handle.P;
     if (!tier_handle.block_sizes.empty()) out.block_sizes = tier_handle.block_sizes;
 }
@@ -200,12 +201,17 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
     const BlockPartition& partition,
-    const Precision& precision) {
+    const Precision& precision,
+    const steppe::device::RedecodeSource* redecode) {
     const int  P = Q.P;
     const long M = Q.M;
     const int  n_block = partition.n_block;
 
-    validate_multigpu_inputs(Q, V, N, partition, M, "compute_f2_blocks_multigpu_tiered");
+    // In re-decode mode Q/V/N.data is null (only P and M_kept are carried in the
+    // MatView shape); skip validate's Q/V/N data-shape cross-checks. P + M come from
+    // the MatView shape either way, and Resident is excluded by the caller's tier clamp.
+    if (redecode == nullptr)
+        validate_multigpu_inputs(Q, V, N, partition, M, "compute_f2_blocks_multigpu_tiered");
     (void)require_at_least_one_device(resources, "compute_f2_blocks_multigpu_tiered");
 
     const std::size_t free_vram_bytes = resources.gpus[0].caps.free_vram_bytes;
@@ -244,7 +250,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             target.tier = steppe::device::OutputTier::HostRam;
             target.host_dst = &out.host;
             finish_streamed_tier(resources, Q, V, N, partition, n_block, precision,
-                                 target, out, out.host);
+                                 target, out, out.host, redecode);
             if (out.host.n_block >= 0) out.n_block = out.host.n_block;
             break;
         }
@@ -261,7 +267,7 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
             target.disk_path = path;
             target.disk_dst = &out.disk;
             finish_streamed_tier(resources, Q, V, N, partition, n_block, precision,
-                                 target, out, out.disk);
+                                 target, out, out.disk, redecode);
             out.n_block = clamp_nonneg(out.disk.n_block);
             break;
         }

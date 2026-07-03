@@ -361,8 +361,10 @@ public:
     virtual void compute_f2_blocks_streamed(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, const Precision& precision,
-        steppe::device::StreamTarget& target) {
+        steppe::device::StreamTarget& target,
+        const steppe::device::RedecodeSource* redecode = nullptr) {
         (void)Q; (void)V; (void)N; (void)block_id; (void)n_block; (void)precision; (void)target;
+        (void)redecode;
         throw std::runtime_error(
             "ComputeBackend::compute_f2_blocks_streamed: not supported by this backend "
             "(out-of-core block streaming requires a CUDA backend)");

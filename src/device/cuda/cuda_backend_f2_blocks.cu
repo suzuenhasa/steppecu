@@ -220,19 +220,19 @@ void CudaBackend::compute_f2_blocks_into(
 void CudaBackend::compute_f2_blocks_streamed(
     const core::MatView& Q, const core::MatView& V, const core::MatView& N,
     const int* block_id, int n_block, const Precision& precision,
-    StreamTarget& target) {
+    StreamTarget& target, const RedecodeSource* redecode) {
     if (target.tier == OutputTier::HostRam) {
         if (!target.host_dst)
             throw std::runtime_error("compute_f2_blocks_streamed: HostRam tier needs a "
                                      "host_dst destination");
         HostRamSink sink(*target.host_dst);
-        stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink);
+        stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink, redecode);
     } else if (target.tier == OutputTier::Disk) {
         if (!target.disk_dst)
             throw std::runtime_error("compute_f2_blocks_streamed: Disk tier needs a "
                                      "disk_dst descriptor");
         DiskSink sink(target.disk_path);
-        stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink);
+        stream_f2_blocks_impl(Q, V, N, block_id, n_block, precision, sink, redecode);
         sink.take_descriptor(*target.disk_dst);
     } else {
         throw std::runtime_error("compute_f2_blocks_streamed: Resident tier must not "
@@ -354,7 +354,8 @@ CudaBackend::ResidentBlocks CudaBackend::run_f2_blocks_resident(const core::MatV
 // stream_f2_blocks_impl — the spill-to-RAM-or-disk engine — reference §6
 void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatView& V,
                            const core::MatView& N, const int* block_id, int n_block,
-                           const Precision& precision, BlockSink& sink) {
+                           const Precision& precision, BlockSink& sink,
+                           const RedecodeSource* redecode) {
     guard_device();
     const int P = Q.P;
     const long M = Q.M;
@@ -381,10 +382,14 @@ void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatV
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), block_sizes.data(),
                                       static_cast<std::size_t>(n_block) * sizeof(int),
                                       cudaMemcpyHostToDevice, stream_.get()));
-    const std::size_t raw_bytes = pm * sizeof(double);
-    pinned_in_.ensure(Q.data, raw_bytes);
-    pinned_in_.ensure(V.data, raw_bytes);
-    pinned_in_.ensure(N.data, raw_bytes);
+    // In re-decode mode Q/V/N.data is null (the dense host tensor is never built), so
+    // there is nothing to pin — the per-chunk tile is produced on-device instead.
+    if (redecode == nullptr) {
+        const std::size_t raw_bytes = pm * sizeof(double);
+        pinned_in_.ensure(Q.data, raw_bytes);
+        pinned_in_.ensure(V.data, raw_bytes);
+        pinned_in_.ensure(N.data, raw_bytes);
+    }
     engage_f2_precision(blas_.get(), precision);
 
     const std::size_t net_free_b =
@@ -504,14 +509,68 @@ void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatV
             const std::size_t tile_elems =
                 static_cast<std::size_t>(P) * static_cast<std::size_t>(tile);
             const std::size_t tile_bytes = tile_elems * sizeof(double);
-            const std::size_t src_off = static_cast<std::size_t>(P) *
-                                        static_cast<std::size_t>(s_lo);
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data + src_off, tile_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data + src_off, tile_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data + src_off, tile_bytes,
-                                              cudaMemcpyHostToDevice, stream_.get()));
+            if (redecode == nullptr) {
+                // Default path: copy the tile [s_lo, s_hi) straight out of the dense
+                // host Q/V/N (identical to every non-extract streamed caller).
+                const std::size_t src_off = static_cast<std::size_t>(P) *
+                                            static_cast<std::size_t>(s_lo);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), Q.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), V.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), N.data + src_off, tile_bytes,
+                                                  cudaMemcpyHostToDevice, stream_.get()));
+            } else {
+                // Re-decode path (extract-f2 host-RAM-wall fix): fill the SAME dQ_raw/
+                // dV_raw/dN_raw tile [s_lo, s_hi) by re-decoding those kept columns from
+                // the packed genotypes instead of reading a dense host tensor that was
+                // never materialized. The decode is deterministic, so these bytes are
+                // identical to the H2D branch and the f2 result is bit-identical.
+                // decode_af_compact_filter requires a 4-aligned raw start, so we decode a
+                // slightly wider window [aligned_lo, aligned_lo+n_snp) and skip the 0..3
+                // kept columns that land ahead of s_lo. Reference §6a.
+                const long raw_lo = redecode->kept_to_raw[static_cast<std::size_t>(s_lo)];
+                const long raw_hi =
+                    redecode->kept_to_raw[static_cast<std::size_t>(s_hi - 1)] + 1;
+                const long aligned_lo = raw_lo & ~3L;
+                const long first_kept = static_cast<long>(
+                    std::lower_bound(redecode->kept_to_raw,
+                                     redecode->kept_to_raw + redecode->M_kept, aligned_lo) -
+                    redecode->kept_to_raw);
+                const long head = s_lo - first_kept;  // 0..3 kept cols decoded before s_lo
+                const long n_snp = raw_hi - aligned_lo;
+                const std::size_t alo = static_cast<std::size_t>(aligned_lo);
+                const std::size_t ns = static_cast<std::size_t>(n_snp);
+                DecodeTileView tview = *redecode->base_view;
+                tview.n_snp = ns;
+                DeviceDecodeResult ddr = decode_af_compact_filter(
+                    tview,
+                    std::span<const char>(redecode->ref + alo, ns),
+                    std::span<const char>(redecode->alt + alo, ns),
+                    std::span<const int>(redecode->chrom + alo, ns),
+                    std::span<const double>(redecode->genpos + alo, ns),
+                    std::span<const double>(redecode->physpos + alo, ns),
+                    *redecode->filter,
+                    std::span<const std::size_t>(redecode->pop_individuals, redecode->n_pop),
+                    core::kPloidyDiploid, redecode->maxmiss, aligned_lo);
+                STEPPE_ASSERT(ddr.M_kept == s_hi - first_kept,
+                              "stream_f2_blocks_impl: re-decoded kept-set does not match "
+                              "Phase A (extract-f2 decode desync across passes)");
+                const std::size_t head_off =
+                    static_cast<std::size_t>(head) * static_cast<std::size_t>(P);
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ_raw.data(), ddr.q_device() + head_off,
+                                                  tile_bytes, cudaMemcpyDeviceToDevice,
+                                                  stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV_raw.data(), ddr.v_device() + head_off,
+                                                  tile_bytes, cudaMemcpyDeviceToDevice,
+                                                  stream_.get()));
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(dN_raw.data(), ddr.n_device() + head_off,
+                                                  tile_bytes, cudaMemcpyDeviceToDevice,
+                                                  stream_.get()));
+                // ddr's device buffers free at scope end — the async D2D must complete
+                // before that (avoid use-after-free of ddr's Q/V/N).
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+            }
             launch_f2_feeder(dQ_raw.data(), dV_raw.data(), dN_raw.data(),
                              dQt.data(), dVt.data(), dSt.data(), P, tile, stream_.get());
 

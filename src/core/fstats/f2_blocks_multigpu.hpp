@@ -16,15 +16,20 @@
 #include "device/resources.hpp"
 #include "device/device_f2_blocks.hpp"
 #include "device/f2_blocks_out.hpp"
+#include "device/stream_f2_blocks.hpp"
 
 namespace steppe::core {
 
-// Adaptive tiered precompute — reference §6
+// Adaptive tiered precompute — reference §6. When redecode != nullptr the streamed
+// tiers re-decode each chunk from the packed genotypes instead of a dense host
+// Q/V/N (which the caller passes as null-data MatViews carrying only P and M_kept);
+// this is the extract-f2 host-RAM-wall path. Redecode never resolves to Resident.
 [[nodiscard]] steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
     const BlockPartition& partition,
-    const Precision& precision);
+    const Precision& precision,
+    const steppe::device::RedecodeSource* redecode = nullptr);
 
 // Device-resident multi-GPU precompute — reference §5
 [[nodiscard]] steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(

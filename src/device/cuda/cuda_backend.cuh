@@ -78,7 +78,7 @@ public:
     void compute_f2_blocks_streamed(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, const Precision& precision,
-        StreamTarget& target) override;
+        StreamTarget& target, const RedecodeSource* redecode = nullptr) override;
 
     [[nodiscard]] ResidentBlocks run_f2_blocks_resident(const core::MatView& Q,
                                                         const core::MatView& V,
@@ -89,7 +89,8 @@ public:
 
     void stream_f2_blocks_impl(const core::MatView& Q, const core::MatView& V,
                                const core::MatView& N, const int* block_id, int n_block,
-                               const Precision& precision, BlockSink& sink);
+                               const Precision& precision, BlockSink& sink,
+                               const RedecodeSource* redecode = nullptr);
 
     // Genotype decode and the format-reader front-end — reference §5
     void decode_af_resident(const DecodeTileView& tile, int P, long M,
