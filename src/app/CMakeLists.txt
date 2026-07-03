@@ -1,72 +1,53 @@
-# src/app/CMakeLists.txt — the steppe CLI app (M(cli-0) scaffold).
+# src/app/CMakeLists.txt — build recipe for the steppe command-line executable.
 #
-# A PLAIN C++20 CXX target (architecture.md §4, §6.1; cli-bindings.md §6.1) — NOT a
-# CUDA target. NO `LANGUAGES CUDA`, NO `.cu` sources, NO CUDA_SEPARABLE_COMPILATION,
-# and it MUST NOT include any CUDA toolkit header. It reaches the GPU ONLY through the
-# CUDA-free seams (build_resources / run_qpadm / upload_f2_blocks_to_device /
-# f2_disk_format) — the arch-grep gate enforces this for free because a leaked CUDA
-# runtime header would hard-fail this host compile (cli-bindings.md §6.2).
+# The one structural fact: this is a plain C++20 HOST target, NOT a CUDA target
+# (no CUDA language, no .cu sources). It reaches the GPU only through CUDA-free
+# seams, so a leaked CUDA header would hard-fail this compile (reference §2).
 #
-# CLI11 (architecture.md §15 line 94: "CLI11 2.4.x"; line 392 pin "gh:CLIUtils/
-# CLI11@2.4.2"; cli-bindings.md §6.1 line 462) is obtained the SAME no-network-first
-# way the rest of the repo gets GoogleTest: find_package first, CPM fetch as the
-# fallback (cmake/CPM.cmake — the architecture-named home, §6 / line 384). Confining
-# CLI11 + the CPM machinery to THIS subdir keeps the dependency PRIVATE to the app
-# subtree and out of the core/device build entirely (the §4 layering rule).
+# Reference: docs/reference/src_app_CMakeLists.txt.md
+
+# The CLI11 dependency — find_package first, CPM fetch fallback — reference §3
 
 find_package(CLI11 2.4 CONFIG QUIET)
 if(NOT CLI11_FOUND)
   message(STATUS "steppe CLI: CLI11 not found via find_package — fetching v2.4.2 via CPM")
   include(CPM)
-  # Pin to the IMMUTABLE commit behind the CLI11 v2.4.2 tag (a movable tag could be
-  # re-pointed); VERSION keeps CPM's find_package/version bookkeeping aligned with the
-  # 2.4.x pin above (architecture.md §15 line 392 `gh:CLIUtils/CLI11@2.4.2`).
   CPMAddPackage(
       NAME CLI11
       GITHUB_REPOSITORY CLIUtils/CLI11
       VERSION 2.4.2
-      GIT_TAG 6c7b07a878ad834957b98d0f9ce1dbe0cb204fc9)  # == tag v2.4.2
+      GIT_TAG 6c7b07a878ad834957b98d0f9ce1dbe0cb204fc9)
 else()
   message(STATUS "steppe CLI: using CLI11 ${CLI11_VERSION} via find_package")
 endif()
 
-# f2_dir_io.cpp (the f2-dir READER) + pop_resolver.cpp (name -> P-axis index) moved to
-# the shared steppe::access lib (src/access) so the Python bindings reuse them too — the
-# cli-bindings.md M(py-1) §0 DRY move. The .cpp files still live here in src/app/ (next to
-# the CLI command flows that grew them); steppe::access compiles them and steppe_app links
-# it (below) rather than compiling them a second time.
+# The executable and its sources — reference §4
 add_executable(steppe_app
     main.cpp
     cli_parse.cpp
-    cmd_qpadm.cpp      # M(cli-1): the qpAdm GPU fit command
-    cmd_qpgraph.cpp    # qpGraph single-graph fit (--f2-dir + --graph edge-list -> the fit)
-    cmd_qpwave.cpp     # M(cli-2): the qpWave rank-sweep command (no target; left[0]=ref)
-    cmd_f4.cpp         # Standalone f4 statistic (run_f4): est/se/z/p per quartet
-    cmd_f3.cpp         # Standalone f3 statistic (run_f3): est/se/z/p per triple
-    cmd_f4ratio.cpp    # Standalone f4-ratio (run_f4ratio): alpha/se/z per 5-tuple
-    cmd_fstat_sweep.cpp # GPU-only f4-sweep / f3-sweep: all C(P,k) on-device + |z|/top-k filter
-    cmd_qpdstat.cpp    # qpDstat Part A: D-stat/f4 over an f2-dir (--f2-dir reports f4; reuses run_f4)
-    cmd_qpfstats.cpp   # qpfstats: genotype-path joint f2 smoother (--prefix + --pops -> a smoothed f2 dir)
-    cmd_dates.cpp      # dates: admixture dating (--prefix + --target + --left{2} -> date + SE; cuFFT LD engine)
-    cmd_rotate.cpp     # M(cli-3): the qpAdm ROTATION (pool-subset enumeration; batched)
-    cmd_extract_f2.cpp # M(cli-4): the genotype -> f2_blocks-dir precompute command (thin wrapper over steppe::extract)
-    result_emit.cpp)   # M(cli-1): QpAdmResult -> tidy CSV / TSV / JSON
+    cmd_qpadm.cpp
+    cmd_qpgraph.cpp
+    cmd_qpwave.cpp
+    cmd_f4.cpp
+    cmd_f3.cpp
+    cmd_f4ratio.cpp
+    cmd_fstat_sweep.cpp
+    cmd_qpdstat.cpp
+    cmd_qpfstats.cpp
+    cmd_dates.cpp
+    cmd_rotate.cpp
+    cmd_extract_f2.cpp
+    result_emit.cpp)
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)
 
-# Links the CUDA-free library seams (core/io/api/device) + CLI11 + warnings. It links
-# steppe::device only to resolve the CUDA-free factory / build_resources / handle
-# symbols (the same path steppe_core uses); steppe_core sets CUDA_RESOLVE_DEVICE_SYMBOLS
-# OFF, so an executable linking BOTH steppe_core and steppe_device lets steppe_device
-# device-link its RDC kernels (the exact path the CUDA reference tests use). steppe_app
-# itself device-links nothing — it is a pure host target (cli-bindings.md §6.1).
+# Library links (the device-link arrangement + two shared helpers) — reference §5
 target_link_libraries(steppe_app
     PRIVATE steppe::core steppe::io steppe::api steppe::device
-            steppe::access            # the shared f2-dir reader + pop->index resolver (DRY, §0)
-            steppe::extract           # the shared genotype->f2 extract chain + the dir WRITER (DRY, M(py-2) §0)
+            steppe::access
+            steppe::extract
             CLI11::CLI11 steppe::warnings)
+# Compile features and the version string — reference §6
 target_compile_features(steppe_app PRIVATE cxx_std_20)
 
-# The version string surfaced by `steppe --version` — the project VERSION, single-homed
-# in the top-level project() declaration (no second literal in the app source).
 target_compile_definitions(steppe_app PRIVATE STEPPE_VERSION="${PROJECT_VERSION}")

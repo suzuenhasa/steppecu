@@ -1,11 +1,14 @@
 // src/app/result_emit.cpp
 //
-// QpAdmResult -> CSV / TSV / JSON serialization (cli-bindings.md §4.4). PLAIN C++20,
-// app-only, NO CUDA header.
+// Serializes every steppe command result (qpAdm fit, rotation, qpWave, f4/f3/
+// f4-ratio) to CSV/TSV/JSON for stdout. App-only and CUDA-free; every emitter is
+// total — a domain-failed result still serializes via sentinels, never throws.
+//
+// Reference: docs/reference/src_app_result_emit.cpp.md
 #include "app/result_emit.hpp"
 
-#include <climits>   // INT_MIN (the rankdrop dofdiff NA sentinel)
-#include <cmath>     // std::isnan
+#include <climits>
+#include <cmath>
 #include <cstddef>
 #include <ostream>
 #include <span>
@@ -13,25 +16,21 @@
 #include <string>
 #include <vector>
 
-#include "steppe/error.hpp"  // steppe::Status
+#include "steppe/error.hpp"
 
 namespace steppe::app {
 
 namespace {
 
-// 17 significant digits round-trips an IEEE-754 double exactly (max precision), so the
-// emitted CSV/JSON re-parses to bit-identical values — required for the test's TIGHT
-// tier (weights/chisq rtol 1e-6, but the round-trip itself must lose nothing).
+// Number formatters (17-digit exact round-trip) — reference §2
 [[nodiscard]] std::string fmt_double(double v) {
-    if (std::isnan(v)) return "NA";  // §4.4: NaN sentinel (e.g. ChisqUndefined p) -> NA
+    if (std::isnan(v)) return "NA";
     std::ostringstream o;
     o.precision(17);
     o << v;
     return o.str();
 }
 
-// JSON variant: NaN is not valid JSON, so a NaN double becomes the JSON null literal
-// (the diff-able "not computed / undefined" marker; §4.4 filter-on-status contract).
 [[nodiscard]] std::string json_double(double v) {
     if (std::isnan(v)) return "null";
     std::ostringstream o;
@@ -40,8 +39,7 @@ namespace {
     return o.str();
 }
 
-// The status -> human string the `status` column / field carries (cli-bindings.md
-// §4.4). A per-model domain outcome is a VALUE here, never an error.
+// Status and precision labels — reference §4
 [[nodiscard]] const char* status_str(Status s) {
     switch (s) {
         case Status::Ok:               return "ok";
@@ -54,10 +52,6 @@ namespace {
     return "unknown";
 }
 
-// The precision-tag -> human string the `precision` column / field carries
-// (cli-bindings.md §4.4). A SWITCH (not a ternary) so a new Precision::Kind is a
-// compile-visible add here; the `return "fp64"` default keeps native FP64 the
-// fallback label. Precision::Kind is defined in include/steppe/config.hpp.
 [[nodiscard]] const char* precision_str(Precision::Kind k) {
     switch (k) {
         case Precision::Kind::EmulatedFp64: return "emu";
@@ -67,9 +61,7 @@ namespace {
     return "fp64";
 }
 
-// AT2 res$ "feasible" for the WHOLE model = both weights in [0,1] (the canonical qpAdm
-// feasibility screen; cli-bindings.md §4.4 summary `feasible`). Empty weights (a
-// domain-failed model) ⇒ not feasible.
+// Whole-model feasibility (weights in [0,1]) — reference §5
 [[nodiscard]] bool model_feasible(const QpAdmResult& r) {
     if (r.weight.empty()) return false;
     for (double w : r.weight) {
@@ -78,14 +70,12 @@ namespace {
     return true;
 }
 
-// A rankdrop dofdiff NA sentinel is INT_MIN (matches the test's
-// res.rankdrop_dofdiff == INT_MIN NA check, test_qpadm_parity.cu).
+// "Not computed" sentinels: INT_MIN dofdiff -> NA — reference §3
 [[nodiscard]] std::string fmt_dofdiff(int v) {
     return (v == INT_MIN) ? std::string("NA") : std::to_string(v);
 }
 
-// CSV cell quoting for a label (mirrors the committed golden CSVs, which quote string
-// columns). A label has no embedded quote in practice; we still escape defensively.
+// Always-quote CSV cell — reference §6
 [[nodiscard]] std::string csv_quote(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
@@ -96,17 +86,8 @@ namespace {
     return out;
 }
 
-// json_quote / csv_field are PUBLIC reusable primitives (declared in result_emit.hpp,
-// defined at namespace scope below) so the JSON/CSV emitters here AND the bypassing
-// dates/qpgraph/fstat-sweep emitters share one escaping seam (C2). The anon-namespace
-// emitters below call json_quote via the header declaration (visible before this point).
-// csv_quote (above) stays file-local + ALWAYS-quote: the qpadm/f4 golden CSVs require
-// every string column wrapped, whereas csv_field is RFC-4180 CONDITIONAL.
 
-// ---- JSON parallel-array primitives -------------------------------------------
-// The three rankdrop/popdrop/per_rank array emitters, shared by emit_json and
-// emit_qpwave_json (they were copy-pasted lambdas inside each). One definition,
-// reusing json_double (NaN->null) and the INT_MIN dofdiff->null sentinel.
+// Shared JSON parallel-array primitives — reference §9
 void emit_int_arr(std::ostream& os, const char* name, const std::vector<int>& v, bool last) {
     os << "    " << json_quote(name) << ": [";
     for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
@@ -124,11 +105,7 @@ void emit_dofdiff_arr(std::ostream& os, const char* name, const std::vector<int>
     os << "]" << (last ? "\n" : ",\n");
 }
 
-// ---- rankdrop CSV body --------------------------------------------------------
-// The 7-column rankdrop table loop body (f4rank/dof/chisq/p/dofdiff/chisqdiff/
-// p_nested), shared by emit_csv and emit_qpwave_csv (it was byte-identical in
-// both). Reuses fmt_double (NaN->NA) and fmt_dofdiff (INT_MIN->NA). The header row
-// is emitted by the caller (the two callers share identical headers).
+// Shared rankdrop CSV body — reference §9
 template <class Rankdrop>
 void emit_rankdrop_csv(std::ostream& os, const Rankdrop& r, char sep) {
     for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
@@ -140,12 +117,11 @@ void emit_rankdrop_csv(std::ostream& os, const Rankdrop& r, char sep) {
     }
 }
 
-// ---- CSV / TSV ----------------------------------------------------------------
+// Output schemas per command: single qpAdm fit — reference §7
 void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
               const std::vector<std::string>& left, char sep) {
     const bool have_se = !r.se.empty();
 
-    // weights section (target,left,weight,se,z) — golden_fit0_weights.csv columns.
     os << "# section: weights\n";
     os << "\"target\"" << sep << "\"left\"" << sep << "\"weight\"" << sep
        << "\"se\"" << sep << "\"z\"\n";
@@ -157,7 +133,6 @@ void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
            << (have_se && i < r.z.size()  ? fmt_double(r.z[i])  : std::string("NA")) << "\n";
     }
 
-    // summary section (scalars).
     os << "# section: summary\n";
     os << "\"p\"" << sep << "\"chisq\"" << sep << "\"dof\"" << sep << "\"f4rank\""
        << sep << "\"est_rank\"" << sep << "\"feasible\"" << sep << "\"status\""
@@ -169,13 +144,11 @@ void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
        << csv_quote(precision_str(r.precision_tag))
        << "\n";
 
-    // rankdrop section (AT2 res$rankdrop order) — golden_fit0_rankdrop.csv columns.
     os << "# section: rankdrop\n";
     os << "\"f4rank\"" << sep << "\"dof\"" << sep << "\"chisq\"" << sep << "\"p\""
        << sep << "\"dofdiff\"" << sep << "\"chisqdiff\"" << sep << "\"p_nested\"\n";
     emit_rankdrop_csv(os, r, sep);
 
-    // popdrop section (AT2 res$popdrop) — golden_fit0_popdrop.csv core columns.
     os << "# section: popdrop\n";
     os << "\"pat\"" << sep << "\"wt\"" << sep << "\"dof\"" << sep << "\"chisq\""
        << sep << "\"p\"" << sep << "\"f4rank\"" << sep << "\"feasible\"\n";
@@ -187,14 +160,12 @@ void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
     }
 }
 
-// ---- JSON (mirrors golden_fit0.json's weights/rankdrop/popdrop block shape) ----
 void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target,
                const std::vector<std::string>& left) {
     const bool have_se = !r.se.empty();
 
     os << "{\n";
 
-    // weights block: parallel arrays (target,left,weight,se,z), golden_fit0 shape.
     os << "  \"weights\": {\n";
     os << "    \"target\": [";
     for (std::size_t i = 0; i < r.weight.size(); ++i)
@@ -220,7 +191,6 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "]\n";
     os << "  },\n";
 
-    // summary block: scalars.
     os << "  \"summary\": {\n";
     os << "    \"p\": " << json_double(r.p) << ",\n";
     os << "    \"chisq\": " << json_double(r.chisq) << ",\n";
@@ -232,8 +202,6 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "    \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
     os << "  },\n";
 
-    // rankdrop block: parallel arrays (golden_fit0 res$rankdrop shape). Uses the
-    // file-static emit_*_arr primitives, shared with emit_qpwave_json.
     os << "  \"rankdrop\": {\n";
     emit_int_arr(os, "f4rank", r.rankdrop_f4rank, false);
     emit_int_arr(os, "dof", r.rankdrop_dof, false);
@@ -244,7 +212,6 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     emit_dbl_arr(os, "p_nested", r.rankdrop_p_nested, true);
     os << "  },\n";
 
-    // popdrop block: parallel arrays (golden_fit0 res$popdrop shape).
     os << "  \"popdrop\": {\n";
     os << "    \"pat\": [";
     for (std::size_t k = 0; k < r.popdrop_pat.size(); ++k)
@@ -264,38 +231,25 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "}\n";
 }
 
-// ---- ROTATION (M(cli-3)): per-model table -------------------------------------
-// The per-model feasibility decision the rotation row carries. The engine's own
-// decision lives on the popdrop FULL-model row (index 0); prefer it (byte-faithful to
-// what run_qpadm_search recorded, matching the engine gate test_qpadm_rotation.cu:474),
-// falling back to the canonical model_feasible (weights in [0,1]) when popdrop is empty
-// (a domain-failed model that produced no popdrop). Both sources agree for these models
-// (the same canonical screen), so either matches the golden.
+// Rotation feasibility (prefer engine's recorded flag) — reference §5
 [[nodiscard]] bool rotation_feasible(const QpAdmResult& r) {
     if (!r.popdrop_feasible.empty()) return r.popdrop_feasible[0] != 0;
     return model_feasible(r);
 }
 
-// Join the model's left labels into one field (semicolon-separated; §4.4 `left` as one
-// field). Quoting is applied by the caller (csv_quote / json_quote).
+// join_left shared helper — reference §9
 [[nodiscard]] std::string join_left(const std::vector<std::string>& labels) {
     std::string s;
     for (std::size_t i = 0; i < labels.size(); ++i) { if (i) s += ";"; s += labels[i]; }
     return s;
 }
 
+// Rotation table emitters: the deliberately-mislabeled f4rank column — reference §8
 void emit_rotation_csv(std::ostream& os, std::span<const QpAdmResult> results,
                        const std::string& target,
                        const std::vector<std::vector<std::string>>& left_labels, int right_n,
                        char sep) {
-    // One section, one row per model (cli-bindings.md §4.4 qpadm-rotate row schema).
     os << "# section: rotation\n";
-    // NOTE: the "f4rank" column is deliberately named to mirror AT2/golden_rot.json,
-    // but it carries the per-model FITTED rank (r.est_rank, written at the row below),
-    // NOT the rank-DECISION (r.f4rank). AT2's rotation res$f4rank is NULL and its
-    // per-model f4rank == the popdrop FULL-row fitted rank; the rank-decision r.f4rank
-    // is meaningless for the rotation path and is not emitted here. Keeping the column
-    // name "f4rank" preserves the byte-faithful diff against golden_rot.json.
     os << "\"model_index\"" << sep << "\"target\"" << sep << "\"left\"" << sep
        << "\"right_n\"" << sep << "\"p\"" << sep << "\"chisq\"" << sep << "\"dof\""
        << sep << "\"f4rank\"" << sep << "\"feasible\"" << sep << "\"status\"" << sep
@@ -304,14 +258,13 @@ void emit_rotation_csv(std::ostream& os, std::span<const QpAdmResult> results,
         const QpAdmResult& r = results[i];
         const std::string left =
             (i < left_labels.size()) ? join_left(left_labels[i]) : std::string();
-        // weights / se as semicolon-joined per-row sub-fields (se = "NA" when absent).
         std::string wjoin, sjoin;
         for (std::size_t k = 0; k < r.weight.size(); ++k) {
             if (k) { wjoin += ";"; sjoin += ";"; }
             wjoin += fmt_double(r.weight[k]);
             sjoin += (k < r.se.size() ? fmt_double(r.se[k]) : std::string("NA"));
         }
-        if (r.se.empty()) sjoin = "NA";  // policy sentinel: SE not computed for this model
+        if (r.se.empty()) sjoin = "NA";
         os << r.model_index << sep << csv_quote(target) << sep << csv_quote(left) << sep
            << right_n << sep << fmt_double(r.p) << sep << fmt_double(r.chisq) << sep
            << r.dof << sep << r.est_rank << sep
@@ -325,7 +278,6 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
                         const std::string& target,
                         const std::vector<std::vector<std::string>>& left_labels,
                         int right_n) {
-    // Mirror golden_rot.json's models[] shape so a run diffs directly against the golden.
     os << "{\n";
     os << "  \"target\": " << json_quote(target) << ",\n";
     os << "  \"right_n\": " << right_n << ",\n";
@@ -355,10 +307,6 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
         os << "      \"p\": " << json_double(r.p) << ",\n";
         os << "      \"chisq\": " << json_double(r.chisq) << ",\n";
         os << "      \"dof\": " << r.dof << ",\n";
-        // Key deliberately named "f4rank" to mirror AT2/golden_rot.json, but it carries
-        // the per-model FITTED rank (r.est_rank), NOT the rank-DECISION (r.f4rank). AT2's
-        // rotation res$f4rank is NULL and its per-model f4rank == the fitted rank; the
-        // rank-decision r.f4rank is meaningless for rotation and is not emitted here.
         os << "      \"f4rank\": " << r.est_rank << ",\n";
         os << "      \"feasible\": " << (rotation_feasible(r) ? "true" : "false") << ",\n";
         os << "      \"status\": " << json_quote(status_str(r.status)) << "\n";
@@ -368,26 +316,15 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
     os << "}\n";
 }
 
-// ---- qpWave (M(cli-2)): the rank-sweep result ---------------------------------
-// qpWave has NO target -> no admixture weights / popdrop. The result is the per-rank
-// rank-sufficiency sweep (rank_chisq/rank_dof/rank_p, ASCENDING r) + the AT2-shaped
-// rankdrop table (f4rank-DESCENDING) + the f4rank/est_rank/status summary. Both emitters
-// REUSE the file-static format primitives verbatim (fmt_double/json_double/fmt_dofdiff/
-// csv_quote/json_quote/status_str/precision_str + the shared rankdrop helpers
-// emit_rankdrop_csv (CSV) and emit_int_arr/emit_dbl_arr/emit_dofdiff_arr (JSON), the same
-// definitions the qpadm emitters call), so the rankdrop output is byte-shaped exactly like
-// the qpadm rankdrop section / golden_qpwave.
+// Output schemas per command: qpWave rank sweep — reference §7
 
 void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
                      const std::vector<std::string>& left, int right_n, char sep) {
-    // rankdrop section (AT2 res$rankdrop order, f4rank DESCENDING) — the SAME columns and
-    // loop body as the qpadm rankdrop section (emit_csv above).
     os << "# section: rankdrop\n";
     os << "\"f4rank\"" << sep << "\"dof\"" << sep << "\"chisq\"" << sep << "\"p\""
        << sep << "\"dofdiff\"" << sep << "\"chisqdiff\"" << sep << "\"p_nested\"\n";
     emit_rankdrop_csv(os, r, sep);
 
-    // per_rank section (the ASCENDING-r sweep; `rank` column == the index r, 0-based).
     os << "# section: per_rank\n";
     os << "\"rank\"" << sep << "\"chisq\"" << sep << "\"dof\"" << sep << "\"p\"\n";
     for (std::size_t rr = 0; rr < r.rank_chisq.size(); ++rr) {
@@ -397,8 +334,6 @@ void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
            << (rr < r.rank_p.size() ? fmt_double(r.rank_p[rr]) : std::string("NA")) << "\n";
     }
 
-    // summary section (scalars). Echo the reference label + right_n for readability; the
-    // minimal schema-gated columns are f4rank/est_rank/status/precision (cli-bindings.md §4.4).
     os << "# section: summary\n";
     os << "\"f4rank\"" << sep << "\"est_rank\"" << sep << "\"status\"" << sep
        << "\"precision\"" << sep << "\"reference\"" << sep << "\"right_n\"\n";
@@ -413,16 +348,12 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
                       const std::vector<std::string>& left, int right_n) {
     os << "{\n";
 
-    // left[] (left[0] is the reference) + right_n for human readability / round-trip.
     os << "  \"left\": [";
     for (std::size_t i = 0; i < left.size(); ++i)
         os << (i ? ", " : "") << json_quote(left[i]);
     os << "],\n";
     os << "  \"right_n\": " << right_n << ",\n";
 
-    // rankdrop block: parallel arrays (golden_qpwave.json res$rankdrop shape) — the SAME
-    // file-static emit_*_arr primitives as the qpadm rankdrop block (NaN->null via
-    // json_double; dofdiff INT_MIN->null).
     os << "  \"rankdrop\": {\n";
     emit_int_arr(os, "f4rank", r.rankdrop_f4rank, false);
     emit_int_arr(os, "dof", r.rankdrop_dof, false);
@@ -433,7 +364,6 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     emit_dbl_arr(os, "p_nested", r.rankdrop_p_nested, true);
     os << "  },\n";
 
-    // per_rank block: the ASCENDING-r sweep (rank == the 0-based index r).
     os << "  \"per_rank\": {\n";
     os << "    \"rank\": [";
     for (std::size_t rr = 0; rr < r.rank_chisq.size(); ++rr) os << (rr ? ", " : "") << rr;
@@ -443,7 +373,6 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     emit_dbl_arr(os, "p", r.rank_p, true);
     os << "  },\n";
 
-    // summary block: scalars.
     os << "  \"summary\": {\n";
     os << "    \"f4rank\": " << r.f4rank << ",\n";
     os << "    \"est_rank\": " << r.est_rank << ",\n";
@@ -454,21 +383,12 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "}\n";
 }
 
-// Index-guarded label accessor for the standalone-stat parallel label arrays
-// (p1..p5): the k-th label, or "" when the array is shorter than the value array.
-// Shared by the f4/f3/f4ratio CSV+JSON emitters (each re-defined it as a local
-// `at` lambda); one definition keeps the out-of-range fallback uniform.
+// label_at shared helper — reference §9
 [[nodiscard]] std::string label_at(const std::vector<std::string>& v, std::size_t k) {
     return k < v.size() ? v[k] : std::string();
 }
 
-// ---- STANDALONE f4 (the `steppe f4` command) ----------------------------------
-// ONE ROW PER QUARTET in input order, exactly the regenerated golden schema
-// (golden_fit0_f4_readf2.csv): pop1,pop2,pop3,pop4,est,se,z,p. REUSES the file-static
-// format primitives verbatim (fmt_double/json_double/csv_quote/json_quote), so a NaN est/
-// se/z/p (a degenerate quartet) emits the SAME NA/null sentinel the qpadm/qpwave emitters
-// use. No `# section:` prefix — the f4 output is a single flat table (the golden has the
-// bare header + data rows), so a row-for-row CSV diff against the golden is direct.
+// Output schemas per command: standalone f4 — reference §7
 void emit_f4_csv(std::ostream& os, const F4Result& r,
                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                  const std::vector<std::string>& p3, const std::vector<std::string>& p4,
@@ -505,12 +425,7 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     os << "}\n";
 }
 
-// STANDALONE f3 table emitter — the THREE-column clone of emit_f4_csv (drop pop4). The
-// fixture-matched golden schema (golden_fit0_f3_readf2.csv): pop1,pop2,pop3,est,se,z,p.
-// REUSES the file-static format primitives verbatim (fmt_double/json_double/csv_quote/
-// json_quote), so a NaN est/se/z/p (a degenerate triple) emits the SAME NA/null sentinel.
-// No `# section:` prefix — a single flat table (bare header + data rows), so a row-for-row
-// CSV diff against the golden is direct.
+// Output schemas per command: standalone f3 — reference §7
 void emit_f3_csv(std::ostream& os, const F3Result& r,
                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                  const std::vector<std::string>& p3, char sep) {
@@ -545,13 +460,7 @@ void emit_f3_json(std::ostream& os, const F3Result& r,
     os << "}\n";
 }
 
-// STANDALONE f4-ratio table emitter — the FIVE-column clone of emit_f4_csv (add pop5; the
-// value columns are alpha/se/z, NO est/p). The fixture-matched golden schema
-// (golden_fit0_f4ratio_readf2.csv): pop1,pop2,pop3,pop4,pop5,alpha,se,z. REUSES the file-
-// static format primitives verbatim (fmt_double/json_double/csv_quote/json_quote), so a NaN
-// alpha/se/z (a degenerate tuple) emits the SAME NA/null sentinel. No `# section:` prefix — a
-// single flat table (bare header + data rows), so a row-for-row CSV diff against the golden is
-// direct.
+// Output schemas per command: standalone f4-ratio — reference §7
 void emit_f4ratio_csv(std::ostream& os, const F4RatioResult& r,
                       const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                       const std::vector<std::string>& p3, const std::vector<std::string>& p4,
@@ -592,10 +501,7 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
 
 }  // namespace
 
-// RFC-4180 CONDITIONAL CSV field (see result_emit.hpp): bare unless `s` contains the
-// active separator, a double quote, or a CR/LF; then wrap + double embedded quotes. For
-// every real population name (no special char) this returns `s` UNCHANGED, so the
-// dates/qpgraph/fstat-sweep CSV stays byte-identical while a pathological name escapes.
+// Conditional RFC-4180 CSV field (public) — reference §6
 std::string csv_field(const std::string& s, char sep) {
     bool needs_quote = false;
     for (char c : s) {
@@ -611,8 +517,7 @@ std::string csv_field(const std::string& s, char sep) {
     return out;
 }
 
-// Minimal JSON string escaping (see result_emit.hpp). Promoted out of the anonymous
-// namespace (C2) so the bypassing JSON emitters reuse it; behaviour is unchanged.
+// JSON string escaping (public) — reference §6
 std::string json_quote(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
@@ -629,6 +534,7 @@ std::string json_quote(const std::string& s) {
     return out;
 }
 
+// Public entry points: format selector + per-command dispatchers — reference §9
 bool parse_output_format(const std::string& token, OutputFormat& out) {
     if (token == "csv")  { out = OutputFormat::Csv;  return true; }
     if (token == "tsv")  { out = OutputFormat::Tsv;  return true; }

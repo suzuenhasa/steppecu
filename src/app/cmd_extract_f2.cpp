@@ -1,37 +1,17 @@
 // src/app/cmd_extract_f2.cpp
 //
-// The `steppe extract-f2` command (M(cli-4); cli-bindings.md §4.1, §2.6 chain, §4.3
-// dir). PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the
-// GPU is reached ONLY through the CUDA-FREE seams. main() owns stdout/stderr
-// (architecture.md §10 — the library never prints).
+// The `steppe extract-f2` command: turns a genotype triple into an on-disk
+// f2_blocks directory. Plain C++20 with no CUDA header; it owns stdout/stderr and
+// does only the cheap up-front sizing/validation and the final directory write,
+// delegating the heavy genotype->f2 GPU chain to steppe::run_extract_f2.
 //
-// THE CHAIN: this command does the up-front sizing/validation reads (1-3) and the dir
-// write (9); the GPU extract chain (4-8) lives in the library entry steppe::run_extract_f2
-// (extract_f2_core.cpp), which the command delegates to. The numbered list documents that
-// library chain (all CUDA-free seams; mirrors tests/reference/test_decode_equivalence.cu +
-// test_filter_oracle.cu + test_f2_blocks_equivalence.cu):
-//   1. GenoReader(geno)              -> records_present()
-//   2. read_ind(ind, PopSelection, n_present) -> IndPartition (groups sorted ASC by
-//      label = the P-axis order = pops.txt order). Explicit names validated here.
-//   3. read_snp(snp, SIZE_MAX)       -> SnpTable (chrom, genpos_morgans, ref, alt)
-//   4. read_canonical_tile(reader, part, 0, M) -> GenotypeTile (packed, pop-contiguous) —
-//      inside run_extract_f2 (the up-front read in THIS command is sizing/validation only)
-//   5. backend->decode_af(view)      -> DecodeResult Q/V/N [P x M] (the GPU decodes)
-//   6. filters (when non-default)    -> per-SNP keep mask, subset Q/V/N + snptab axis
-//   7. assign_blocks(chrom,genpos,blgsize) -> BlockPartition
-//   8. compute_f2_blocks_multigpu_tiered(resources, Q,V,N, partition, precision)
-//      -> F2BlocksOut (the UNIFIED adaptive entry: Resident is the device-resident path
-//      UNCHANGED — byte-identical to the small goldens — while HostRam/Disk stream the
-//      SNP-tile input so high-P full-autosome runs that OOMd the resident feeder
-//      complete; the tier is auto-selected from runtime free VRAM/RAM, or pinned by
-//      --tier / config.force_tier / STEPPE_FORCE_TIER) -> to_host() -> F2BlockTensor
-//   9. write_f2_dir(out, tensor, labels, meta)  -> f2.bin (REAL vpair) + pops.txt + meta.json
+// Reference: docs/reference/src_app_cmd_extract_f2.cpp.md
 #include "app/cmd_extract_f2.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>   // std::getenv (STEPPE_FORCE_TIER, the --dry-run tier estimate)
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <span>
@@ -39,20 +19,20 @@
 #include <thread>
 #include <vector>
 
-#include "app/exit_code_for_caught.hpp"           // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_writer.hpp"
-#include "app/precision_label.hpp"                // precision_label (shared host-app helper)
+#include "app/precision_label.hpp"
 #include "core/config/exit_code.hpp"
-#include "core/domain/block_partition_rule.hpp"  // assign_blocks, block_size_cm_to_morgans (--dry-run sizing)
-#include "device/resources.hpp"                   // Resources, build_resources (CUDA-FREE)
-#include "device/tier_select.hpp"                 // resolve_output_tier, OutputTier, free_host_ram_bytes (CUDA-FREE, --dry-run)
-#include "steppe/config.hpp"                      // Precision, FilterConfig, kCentimorgansPerMorgan
-#include "steppe/error.hpp"                       // steppe::Status
-#include "steppe/extract.hpp"                     // run_extract_f2 + F2ExtractResult (the library entry; CUDA-FREE)
+#include "core/domain/block_partition_rule.hpp"
+#include "device/resources.hpp"
+#include "device/tier_select.hpp"
+#include "steppe/config.hpp"
+#include "steppe/error.hpp"
+#include "steppe/extract.hpp"
 
 #include "io/eigenstrat_format.hpp"
 #include "io/geno_reader.hpp"
-#include "io/genotype_source.hpp"  // read_snp_table / read_ind_partition (format-aware .snp|.bim, .ind|.fam)
+#include "io/genotype_source.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
 
@@ -62,10 +42,7 @@ namespace {
 
 namespace cfg = steppe::config;
 
-// A human label for an OutputTier (echoed in the --dry-run plan and the post-run
-// summary so the operator sees WHICH tier was selected — Resident is the existing
-// device-resident path; HostRam/Disk are the M5 SNP-tile input-streaming tiers that
-// keep the GPU peak independent of M; cli-bindings.md §4.3, §4.5).
+// Local helper functions — reference §3
 [[nodiscard]] const char* tier_label(device::OutputTier t) {
     switch (t) {
         case device::OutputTier::Resident: return "resident";
@@ -75,8 +52,6 @@ namespace cfg = steppe::config;
     return "resident";
 }
 
-// The same label over the CUDA-free ExtractTier mirror the library entry returns (the
-// post-run summary echoes the tier the tiered compute actually used).
 [[nodiscard]] const char* tier_label(steppe::ExtractTier t) {
     switch (t) {
         case steppe::ExtractTier::Resident: return "resident";
@@ -86,8 +61,6 @@ namespace cfg = steppe::config;
     return "resident";
 }
 
-// A human echo of the pop selection request (the resolved labels live in pops.txt;
-// this records which MODE/threshold produced them — cli-bindings §4.3).
 [[nodiscard]] std::string pop_selection_str(const io::PopSelection& sel) {
     switch (sel.mode) {
         case io::PopSelection::Mode::Explicit: {
@@ -104,12 +77,6 @@ namespace cfg = steppe::config;
     return "unknown";
 }
 
-// Validate that every requested Explicit pop label is present in the resolved
-// partition (cli-bindings.md §4.2: an unknown pop name is InvalidConfig fail-fast
-// naming the offending label). read_ind already drops unknown labels silently (and
-// only throws on a FULLY empty selection), so we resolve against the groups labels
-// here — the prompt's contract, mirroring pop_resolver's unknown-name pattern. Sets
-// `offending` and returns false on the first missing label.
 [[nodiscard]] bool validate_explicit_pops(const io::PopSelection& sel,
                                           const io::IndPartition& part,
                                           std::string& offending) {
@@ -125,8 +92,8 @@ namespace cfg = steppe::config;
 
 }  // namespace
 
+// run_extract_f2_command — reference §4
 int run_extract_f2_command(const cfg::RunConfig& config) {
-    // ---- 0. Required inputs -------------------------------------------------------
     if (config.geno().empty() || config.snp().empty() || config.ind().empty()) {
         std::fprintf(stderr,
                      "steppe extract-f2: the genotype triple is required "
@@ -147,19 +114,16 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 1. Open the .geno + read .ind (selection) + .snp -------------------------
     io::IndPartition part;
     io::SnpTable snptab;
     std::size_t n_present = 0;
     long M = 0;
     try {
         io::GenoReader reader(config.geno());
-        const io::GenoFormat fmt = reader.header().format;  // pins .snp|.bim, .ind|.fam parser (M-FR PLINK)
+        const io::GenoFormat fmt = reader.header().format;
         n_present = reader.records_present();
         part = io::read_ind_partition(fmt, config.ind(), sel, n_present);
 
-        // Explicit-name validation (cli-bindings.md §4.2). read_ind silently drops an
-        // unknown label, so verify the request against the resolved groups here.
         std::string offending;
         if (!validate_explicit_pops(sel, part, offending)) {
             std::fprintf(stderr,
@@ -170,13 +134,6 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         }
 
         snptab = io::read_snp_table(fmt, config.snp(), SIZE_MAX);
-        // SIZING + VALIDATION ONLY (the dry-run + .snp/.geno-axis checks). The P/M the
-        // tile would report are derivable from the partition + header WITHOUT reading
-        // (and, for GENO, WITHOUT transposing) a tile: P == #selected pops, M == the
-        // common SNP prefix. The REAL canonical-tile read (TGENO direct or GENO gather
-        // + on-device transpose, M-FR-2) happens inside steppe::run_extract_f2 below.
-        // Deriving P/M here keeps this format-agnostic — a GENO prefix no longer throws
-        // at an up-front individual-major read_tile (which targets TGENO only).
         M = static_cast<long>(std::min(reader.header().n_snp, snptab.count));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe extract-f2: input error: %s\n", e.what());
@@ -196,40 +153,16 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // The P labels in P-axis index order (= pops.txt) — the name<->index map the
-    // engine lacks (cli-bindings.md §1).
     std::vector<std::string> pop_labels;
     pop_labels.reserve(static_cast<std::size_t>(P));
     for (const io::PopGroup& g : part.groups) pop_labels.push_back(g.label);
 
-    // PER-SAMPLE PLOIDY (AT2 adjust_pseudohaploid) is detected INSIDE the library entry
-    // (steppe::run_extract_f2) now — the per-sample n_ph/n_dip observability counts come
-    // back on the F2ExtractResult for the post-run echo. The CLI no longer re-detects here
-    // (the up-front read is sizing/validation only, deriving P/M from the partition +
-    // header — no tile is read here, so a GENO prefix does not throw before the real run).
     std::size_t n_ph = 0, n_dip = 0;
 
-    // The REQUESTED precision (DeviceConfig.precision). This is what is PASSED to the
-    // library entry; the tag recorded in meta.json is taken back from the library result
-    // (extracted.precision_tag — the kind the resident path honored or downgraded to),
-    // see the `engaged` construction after run_extract_f2 below.
     const Precision precision = config.device().precision;
     const FilterConfig& filter = config.filter();
 
-    // ---- DRY RUN: report sizes / tier / precision, NO GPU compute -----------------
-    // The tier estimate routes through the SAME resolve_output_tier the real run uses
-    // (f2_blocks_multigpu_tiered), with the SAME precedence (config.force_tier from
-    // --tier > STEPPE_FORCE_TIER env > auto select_output_tier), so a --tier X verdict
-    // here is EXACT and the auto verdict uses the identical policy. The block count
-    // n_block is computed from assign_blocks over the FULL .snp axis (CUDA-free, cheap),
-    // and the SNP count uses the FULL M — both UPPER BOUNDS (filtering only drops SNPs,
-    // so M_kept <= M and the real-run n_block <= this), which keeps the auto verdict
-    // CONSERVATIVE toward Resident: if it says streaming here it will stream for real,
-    // and a Resident verdict at full M still fits at the (smaller) kept M. The free-VRAM
-    // probe routes through build_resources' BackendCapabilities (no direct CUDA call);
-    // on a no-GPU box the tier estimate is skipped (the §4.5 dry-run is a planning aid).
     if (config.dry_run()) {
-        // n_block over the full .snp axis (the same assign_blocks rule the real run uses).
         const double bs_morgans_dry =
             steppe::core::block_size_cm_to_morgans(config.blgsize_cm());
         const steppe::core::BlockPartition dry_partition = steppe::core::assign_blocks(
@@ -256,8 +189,6 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
             if (!resources.gpus.empty()) {
                 const auto& caps = resources.gpus.front().caps;
                 const std::size_t free_host_bytes = device::free_host_ram_bytes();
-                // The SAME resolver the tiered entry calls — same precedence, same shape
-                // inputs (full-M upper bound). --tier X is exact here; auto matches the run.
                 const device::OutputTier dry_tier = device::resolve_output_tier(
                     config.device().force_tier, std::getenv("STEPPE_FORCE_TIER"),
                     P, M, n_block_dry, caps.free_vram_bytes, free_host_bytes);
@@ -281,27 +212,13 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
         return cfg::kExitOk;
     }
 
-    // ---- SOURCE-PROVENANCE HASH (overlapped, --hash opt-in; default OFF) ----------
-    // The whole-source-.geno SHA-256 is a ~tens-of-seconds whole-file read+compress that
-    // historically dominated extract-f2 (~37s of ~41s on the 6.7 GB 1240K .geno) yet
-    // only produces a provenance value (it once caught a corrupt golden via a sha
-    // mismatch), so it is SKIPPED by default. With --hash we compute it, and since it
-    // depends ONLY on the .geno path (independent of the decode/f2 GPU pipeline) we run
-    // it on a BACKGROUND THREAD started HERE, before the GPU work, and JOIN it just
-    // before meta.json is written — the hash overlaps the decode+filter+f2+D2H wall time
-    // instead of adding to it. The small .snp/.ind shas are left to the writer (cheap).
     const bool hash_source = config.hash_source();
-    std::string geno_sha;                 // filled by the worker iff hash_source
-    std::exception_ptr geno_hash_err;     // captured iff the worker throws (B3, degrade at join)
-    std::thread geno_hash_thread;         // joined before write_f2_dir (never detached)
+    std::string geno_sha;
+    std::exception_ptr geno_hash_err;
+    std::thread geno_hash_thread;
     if (hash_source) {
         const std::string geno_path = config.geno();
         geno_hash_thread = std::thread([geno_path, &geno_sha, &geno_hash_err]() {
-            // TOTAL try/catch (B3): an exception escaping a std::thread's top-level callable
-            // calls std::terminate (hard crash, no diagnostic). sha256_file uses an
-            // exception-disabled ifstream and returns "" on open-failure, so the only
-            // realistic throw is bad_alloc on its 8 MiB read chunk; capture it and degrade
-            // at the join site (the provenance hash is non-essential UX) instead.
             try {
                 geno_sha = sha256_file(std::filesystem::path(geno_path));
             } catch (...) {
@@ -309,25 +226,11 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
             }
         });
     }
-    // RAII safety: if any early return / exception fires before the explicit join below,
-    // make sure the worker is joined so the thread is never destroyed un-joined. The
-    // worker lambda catches all (B3 above), so this join — like the explicit one — can
-    // never observe an escaping exception; std::terminate is impossible on either path.
     struct ThreadJoiner {
         std::thread& t;
         ~ThreadJoiner() { if (t.joinable()) t.join(); }
     } geno_hash_joiner{geno_hash_thread};
 
-    // ---- 5-8b. THE GPU EXTRACT CHAIN -> host tensor (the LIBRARY entry; DRY) -------
-    // The decode -> filter (pop-axis maxmiss) -> assign_blocks ->
-    // compute_f2_blocks_multigpu_tiered -> to_host chain now lives ONCE in
-    // steppe::run_extract_f2 (include/steppe/extract.hpp / extract_f2_core.cpp); the CLI
-    // calls it so there is no duplicated math (the goldens are byte-identical — the lib
-    // body was lifted VERBATIM from this command). The CLI keeps stdout/stderr ownership:
-    // it MAPS the library's exceptions back to the CLI exit codes here (architecture.md
-    // §10 — the library throws, main() prints + returns a code). The decode/compute reads
-    // the SAME .geno/.snp/.ind triple again inside the lib (the io reads are tiny vs. the
-    // GPU work); the dry-run above used its own up-front read.
     const ExtractPloidy lib_ploidy =
         (config.ploidy() == cfg::PloidyMode::PseudoHaploid) ? ExtractPloidy::PseudoHaploid
       : (config.ploidy() == cfg::PloidyMode::Diploid)       ? ExtractPloidy::Diploid
@@ -346,7 +249,6 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
             steppe::core::block_size_cm_to_morgans(config.blgsize_cm()), lib_ploidy,
             resources);
     } catch (const std::invalid_argument& e) {
-        // A config-level fault (unknown pop, empty selection, every SNP filtered).
         std::fprintf(stderr, "steppe extract-f2: %s\n", e.what());
         return cfg::kExitInvalidConfig;
     } catch (const std::exception& e) {
@@ -356,24 +258,17 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
 
     const F2BlockTensor& host_f2 = extracted.f2;
     const long M_kept = extracted.n_snp_kept;
-    pop_labels = extracted.pop_labels;       // the lib's P-axis labels (= the up-front read's).
-    n_ph = extracted.n_pseudo_haploid;       // observability echo (the lib detected these).
+    pop_labels = extracted.pop_labels;
+    n_ph = extracted.n_pseudo_haploid;
     n_dip = extracted.n_diploid;
-    // The ENGAGED precision: take the KIND from the library result (extracted.precision_tag
-    // is the F2ExtractResult's single source of truth for the precision the lib honored /
-    // downgraded to internally), and keep mantissa_bits from the requested config — the
-    // result carries only Precision::Kind, not the mantissa cap, which is meaningful only
-    // for EmulatedFp64 and unchanged by a downgrade. At HEAD the lib sets precision_tag from
-    // this same requested kind, so this is behavior-preserving (golden gate covers parity).
     Precision engaged = precision;
     engaged.kind = extracted.precision_tag;
 
-    // ---- 9. Write the f2_blocks dir (f2.bin REAL vpair + pops.txt + meta.json) -----
     F2DirMeta meta;
 #ifdef STEPPE_VERSION
-    meta.steppe_version = STEPPE_VERSION;  // = ${PROJECT_VERSION}, injected by src/extract|app CMake
+    meta.steppe_version = STEPPE_VERSION;
 #else
-    meta.steppe_version = "0.0.0+unknown";  // non-release sentinel (standalone-compile only, D2)
+    meta.steppe_version = "0.0.0+unknown";
 #endif
     meta.precision_tag = precision_label(engaged);
     meta.precision_mantissa_bits = engaged.mantissa_bits;
@@ -392,30 +287,17 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     meta.snp_path = config.snp();
     meta.ind_path = config.ind();
     meta.pop_selection = pop_selection_str(sel);
-    // Source-provenance shas (the --hash opt-in; default OFF). When requested, JOIN the
-    // background geno-hash worker HERE (its wall time overlapped the GPU pipeline above)
-    // and PRE-fill meta.geno_sha256 so the writer skips re-hashing the big .geno; the
-    // writer fills the small .snp/.ind shas. When OFF, hash_source_files stays false and
-    // every *_sha256 stays empty — meta.json records source_hash_computed:false so the
-    // absence is recognizably DELIBERATE (see f2_dir_writer.cpp / cli-bindings.md §4.3).
     meta.hash_source_files = hash_source;
     if (hash_source) {
         if (geno_hash_thread.joinable()) geno_hash_thread.join();
         if (geno_hash_err) {
-            // DEGRADE (B3): a throw escaped the background hash worker (realistically a
-            // bad_alloc on sha256_file's 8 MiB read chunk). The source-provenance hash is
-            // non-essential UX, so degrade to the empty-sha + source_hash_computed:false
-            // state (the writer's "not computed" semantics) rather than aborting the whole
-            // extract. Clearing hash_source_files ALSO stops the writer re-hashing on the
-            // main thread (geno_sha256 is empty here) — that would redo the very work we
-            // backgrounded and could re-throw the same bad_alloc inside write_f2_dir.
             std::fprintf(stderr,
                          "steppe extract-f2: warning: source .geno hash failed; writing "
                          "meta.json with source_hash_computed:false\n");
             meta.hash_source_files = false;
             meta.geno_sha256.clear();
         } else {
-            meta.geno_sha256 = geno_sha;  // "" if the .geno could not be opened
+            meta.geno_sha256 = geno_sha;
         }
     }
 

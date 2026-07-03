@@ -1,16 +1,10 @@
 // src/app/cmd_rotate.cpp
 //
-// The `steppe qpadm-rotate` command (M(cli-3); cli-bindings.md §4.1). Structurally this
-// is cmd_qpadm.cpp with the single-model resolve/run swapped for a pool-subset
-// enumerator + the BATCHED run_qpadm_search. The f2-dir load, name->index resolution,
-// build_resources/upload chain, and the output sink are REUSED verbatim from the qpadm
-// command pattern; the result_emit format primitives (fmt_double/quote/status/feasible)
-// are reused through emit_rotation_table. The ONLY new logic is the subset enumerator.
+// The `steppe qpadm-rotate` command: enumerate every source-subset of a pool and fit
+// the whole model list in one batched GPU call. Plain C++20, app-only — the GPU is
+// reached only through the CUDA-free device seams; main() owns stdout/stderr.
 //
-// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
-// reached ONLY through the CUDA-FREE seams. main() owns stdout/stderr. The rotation is
-// RECORD-AND-CONTINUE: per-model domain outcomes are rows + exit 0; only build/upload/run
-// FAULTS return nonzero (cli-bindings.md §1.3, §4.4).
+// Reference: docs/reference/src_app_cmd_rotate.cpp.md
 #include "app/cmd_rotate.hpp"
 
 #include <cstddef>
@@ -23,15 +17,15 @@
 #include <string>
 #include <vector>
 
-#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/cmd_emit.hpp"
+#include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
-#include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
-#include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
-#include "steppe/qpadm.hpp"             // steppe::run_qpadm_search + model/result/options
+#include "device/device_f2_blocks.hpp"
+#include "device/resources.hpp"
+#include "steppe/qpadm.hpp"
 
 namespace steppe::app {
 
@@ -39,14 +33,7 @@ namespace {
 
 namespace cfg = steppe::config;
 
-// Enumerate every k-combination of `pool` (k = lo..hi) in LEXICOGRAPHIC order over the
-// pool's index order, building one QpAdmModel per subset with a dense 0-based
-// model_index running counter. This reproduces golden_rot_generate.R's
-// `c(combn(pool,2), combn(pool,3))` order EXACTLY (all 2-subsets then all 3-subsets,
-// each lexicographic over the pool order), so model_index aligns with the golden rows.
-// `target` is prepended-conceptually-as-L0 by the engine; here target/right are the
-// fixed parts shared by every model. The classic combn index walk (the same the
-// throughput section of test_qpadm_rotation.cu uses).
+// Pool-subset enumerator — reference §3
 [[nodiscard]] std::vector<QpAdmModel> enumerate_pool_subsets(
     int target_idx, const std::vector<int>& pool_idx, const std::vector<int>& right_idx,
     int lo, int hi) {
@@ -55,7 +42,6 @@ namespace cfg = steppe::config;
     int counter = 0;
     for (int k = lo; k <= hi; ++k) {
         if (k < 1 || k > n) continue;
-        // c[0..k-1] is the current combination's positions into pool_idx, ascending.
         std::vector<int> c(static_cast<std::size_t>(k));
         for (int i = 0; i < k; ++i) c[static_cast<std::size_t>(i)] = i;
         while (true) {
@@ -68,7 +54,6 @@ namespace cfg = steppe::config;
             m.model_index = counter++;
             models.push_back(std::move(m));
 
-            // Advance to the next lexicographic combination (standard algorithm).
             int i = k - 1;
             while (i >= 0 && c[static_cast<std::size_t>(i)] == n - k + i) --i;
             if (i < 0) break;
@@ -82,8 +67,8 @@ namespace cfg = steppe::config;
 
 }  // namespace
 
+// The qpadm-rotate command pipeline — reference §4
 int run_qpadm_rotate_command(const cfg::RunConfig& config) {
-    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) — REUSE cmd_qpadm path -----
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe qpadm-rotate: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -94,14 +79,12 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // ---- 2. Name -> index resolution against pops.txt -----------------------------
     const PopResolver resolver(dir.dir.pop_labels);
     if (!resolver.valid()) {
         std::fprintf(stderr, "steppe qpadm-rotate: %s\n", resolver.error().c_str());
         return cfg::kExitIoError;
     }
 
-    // Required fields: target, right, pool (the rotation's fixed parts + the pool).
     if (config.target().empty()) {
         std::fprintf(stderr, "steppe qpadm-rotate: --target is required\n");
         return cfg::kExitInvalidConfig;
@@ -126,10 +109,6 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
     const std::vector<int>& right_idx = rt.indices;
     const std::vector<int>& pool_idx = pl.indices;
 
-    // ---- 3. Enumerate the pool subsets [lo, hi] -> the model list -----------------
-    // lo = min_sources (validated >= 1). hi = max_sources (-1 ⇒ whole pool), clamped to
-    // the pool size. This is the generic subset-of-pool enumerator, which IS exactly
-    // what golden_rot_generate.R does (combn) — no AT2-semantics divergence (OQ-6).
     const int pool_n = static_cast<int>(pool_idx.size());
     const int lo = config.min_sources();
     int hi = (config.max_sources() == -1) ? pool_n : config.max_sources();
@@ -150,12 +129,7 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 4. Multi-GPU warning (cli-bindings.md §4.5) ------------------------------
-    // The engine's G>=2 path is correct but host-bounce throughput-capped; single-GPU is
-    // the supported/recommended default. A warning, NOT a fault.
     if (config.device().devices.size() >= 2) {
-        // TODO(multigpu-host-bounce): the rotation is host-bounce-capped on no-P2P consumer
-        // cards; single-GPU stays the supported path until the device-resident combine lands.
         std::fprintf(stderr,
                      "steppe qpadm-rotate: WARNING: %zu devices requested; the rotation "
                      "runs single-GPU-preferred (it is host-bounce-capped on no-P2P "
@@ -163,7 +137,6 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
                      config.device().devices.size());
     }
 
-    // ---- 5. build_resources -> upload f2 -> run_qpadm_search (the BATCHED engine) --
     const QpAdmOptions opts = config.qpadm_options();
     std::vector<QpAdmResult> results;
     try {
@@ -180,13 +153,10 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         results = run_qpadm_search(
             dev_f2, std::span<const QpAdmModel>(models), opts, resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a FAULT,
-        // nonzero exit. Per-model domain outcomes never throw; they arrive as row status.
         std::fprintf(stderr, "steppe qpadm-rotate: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
 
-    // ---- 6. Resolve labels back onto every row + emit the per-model table ----------
     const std::string target_label = resolver.label_at(target_idx);
     std::vector<std::vector<std::string>> left_labels_per_model(models.size());
     for (std::size_t i = 0; i < models.size(); ++i) {
@@ -194,13 +164,8 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         for (int idx : models[i].left)
             left_labels_per_model[i].push_back(resolver.label_at(idx));
     }
-    // nr convention: right[0] == R0, so right_n == right.size()-1 (== metadata.nr).
     const int right_n = static_cast<int>(right_idx.size()) - 1;
 
-    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
-    // write returns kExitIoError instead of silently exiting 0 with a truncated file. The
-    // helper parses --format (kExitInvalidConfig on an unknown token — defensive; ConfigBuilder
-    // already validated it).
     if (const auto rc = emit_to_destination(
             config, "qpadm-rotate", [&](std::ostream& os, OutputFormat fmt) {
                 emit_rotation_table(os, fmt, std::span<const QpAdmResult>(results),
@@ -209,8 +174,6 @@ int run_qpadm_rotate_command(const cfg::RunConfig& config) {
         return *rc;
     }
 
-    // RECORD-AND-CONTINUE: a completed rotation emit is exit 0 even when individual rows
-    // carry a domain status. Only build/upload/run faults (handled above) are nonzero.
     return cfg::kExitOk;
 }
 

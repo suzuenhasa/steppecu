@@ -1,10 +1,10 @@
-// src/app/cmd_qpgraph.cpp — the `steppe qpgraph` command (single-graph fit).
+// src/app/cmd_qpgraph.cpp
 //
-// Mirrors cmd_qpadm.cpp: read the f2_blocks dir -> build_resources(DeviceConfig) ->
-// upload_f2_blocks_to_device -> run_qpgraph(DeviceF2Blocks, edges, leaf_names, opts) ->
-// emit the result. The graph is read from --graph (an admixtools-format 2-column edge
-// list). The leaf_names map is the f2 dir's pops.txt order (the P-axis). PLAIN C++20, no
-// CUDA header (the §4 layering): the GPU is reached only via the CUDA-free seams.
+// The `steppe qpgraph` (single-graph fit) and `steppe qpgraph-search` (topology
+// search) commands. Plain C++20 with no CUDA header: the GPU is reached only
+// through the CUDA-free seams.
+//
+// Reference: docs/reference/src_app_cmd_qpgraph.cpp.md
 #include "app/cmd_qpgraph.hpp"
 
 #include <cctype>
@@ -18,16 +18,16 @@
 #include <string>
 #include <vector>
 
-#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/cmd_emit.hpp"
+#include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_io.hpp"
-#include "app/result_emit.hpp"          // OutputFormat / parse_output_format
+#include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
-#include "device/device_f2_blocks.hpp"  // CUDA-FREE
-#include "device/resources.hpp"         // CUDA-FREE
+#include "device/device_f2_blocks.hpp"
+#include "device/resources.hpp"
 #include "steppe/error.hpp"
-#include "steppe/qpgraph.hpp"           // run_qpgraph + QpGraphEdge/Result/Options
-#include "steppe/qpgraph_search.hpp"    // run_qpgraph_search (the topology SEARCH v1)
+#include "steppe/qpgraph.hpp"
+#include "steppe/qpgraph_search.hpp"
 
 namespace steppe::app {
 
@@ -35,19 +35,14 @@ namespace {
 
 namespace cfg = steppe::config;
 
-/// Parse an admixtools-format edge-list file: each non-blank, non-comment line has TWO
-/// whitespace- OR comma-separated tokens (parent child). A leading header row "from,to"
-/// (case-insensitive) and #-comments are skipped. Surrounding quotes are stripped (the R
-/// write.csv format quotes the labels). Returns false (with `err`) on a malformed line.
+// Edge-list file parser — reference §2
 [[nodiscard]] bool read_edge_list(const std::string& path,
                                   std::vector<steppe::QpGraphEdge>& edges, std::string& err) {
     std::ifstream f(path);
     if (!f) { err = "cannot open --graph file: " + path; return false; }
     const auto strip = [](std::string s) {
-        // trim whitespace
         while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) s.erase(s.begin());
         while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
-        // strip surrounding double quotes (R write.csv)
         if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
         return s;
     };
@@ -56,16 +51,13 @@ namespace cfg = steppe::config;
     bool first_data = true;
     while (std::getline(f, line)) {
         ++lineno;
-        // admixtools' R write.csv emits comma-separated edge lists; normalize commas to
-        // whitespace so the istringstream split below handles CSV and space/tab edges alike.
         for (char& c : line) if (c == ',') c = ' ';
         std::istringstream ss(line);
         std::string a, b, extra;
-        if (!(ss >> a)) continue;       // blank line
-        if (a.size() && a[0] == '#') continue;  // comment
+        if (!(ss >> a)) continue;
+        if (a.size() && a[0] == '#') continue;
         if (!(ss >> b)) { err = "malformed edge at line " + std::to_string(lineno) + " (need 2 columns)"; return false; }
         a = strip(a); b = strip(b);
-        // skip a header row.
         if (first_data) {
             std::string al = a, bl = b;
             for (char& c : al) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -79,10 +71,7 @@ namespace cfg = steppe::config;
     return true;
 }
 
-/// Emit the qpGraph fit result (CSV/TSV or JSON). CSV/TSV: an `edges` section
-/// (from,to,type,weight) for every edge (admix rows carry the mixture weight; drift rows
-/// the fitted length) + a `summary` section (score,restart_spread,worst_z,status). JSON: a
-/// single object. Self-contained (no shared format primitive needed).
+// Single-graph result emitter — reference §6
 void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
     const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
     const auto stat = [&](steppe::Status s) -> const char* {
@@ -121,7 +110,6 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
         os << "  ]\n}\n";
         return;
     }
-    // CSV/TSV.
     os << "# section: edges\n";
     os << "from" << sep << "to" << sep << "type" << sep << "weight\n";
     for (std::size_t j = 0; j < r.weight.size(); ++j)
@@ -138,13 +126,7 @@ void emit(std::ostream& os, OutputFormat fmt, const steppe::QpGraphResult& r) {
        << stat(r.status) << "\n";
 }
 
-/// Shared device-fit dispatch for both qpgraph commands (§2.11 cross-ref: factored from the
-/// run_qpgraph_command / run_qpgraph_search_command bodies, which were byte-identical save the
-/// command-name prefix and the run call). Builds the device resources, guards the no-GPU case,
-/// uploads the f2 blocks RESIDENT (device 0), then invokes `run_fit(dev_f2, resources)` inside
-/// the one try/catch. `prefix` is the "steppe <prefix>:" diagnostic tag. On success returns
-/// std::nullopt and writes the fit into `result`; on a no-GPU / device fault returns the
-/// exit code the caller must propagate.
+// Shared device-fit dispatch — reference §5
 template <typename Result, typename RunFit>
 [[nodiscard]] std::optional<int> dispatch_device_fit(const cfg::RunConfig& config,
                                                      const char* prefix, const F2DirResult& dir,
@@ -171,8 +153,8 @@ template <typename Result, typename RunFit>
 
 }  // namespace
 
+// Single-graph command flow — reference §3
 int run_qpgraph_command(const cfg::RunConfig& config) {
-    // ---- 1. f2_blocks dir + the graph file --------------------------------------
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe qpgraph: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -193,14 +175,12 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 2. options (defaults == the AT2 golden's) ------------------------------
     steppe::QpGraphOptions opts;
-    opts.fudge = config.qpadm_options().fudge;      // --fudge (shared QpAdmOptions::fudge == AT2 diag)
+    opts.fudge = config.qpadm_options().fudge;
     opts.diag_f3 = config.qpgraph_diag_f3();
     opts.numstart = config.qpgraph_numstart();
     opts.constrained = config.qpgraph_constrained();
 
-    // ---- 3. build_resources -> upload f2 RESIDENT -> run_qpgraph (GPU path) ------
     steppe::QpGraphResult result;
     if (const auto rc = dispatch_device_fit(
             config, "qpgraph", dir, result,
@@ -211,15 +191,12 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
     }
 
     if (result.status == steppe::Status::InvalidConfig) {
-        // A graph parse / structural domain outcome (e.g. a leaf not in the f2 set, an
-        // unrooted / cyclic graph). Surface as InvalidConfig (a clear fault, not a silent row).
         std::fprintf(stderr,
                      "steppe qpgraph: the graph could not be fit (a leaf is not an f2 "
                      "population, or the topology is unrooted/cyclic/invalid)\n");
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 4. Emit ---------------------------------------------------------------
     if (const auto rc = emit_to_destination(
             config, "qpgraph",
             [&](std::ostream& os, OutputFormat fmt) { emit(os, fmt, result); })) {
@@ -230,9 +207,7 @@ int run_qpgraph_command(const cfg::RunConfig& config) {
 
 namespace {
 
-/// Emit the topology-search result (CSV/TSV or JSON): the exhaustive-coverage count, the
-/// global-best (nadmix / score / edges), the second-best gap, the heuristic recovery, the
-/// wall-clock + topologies/s, and the best graph's fitted edges/weights.
+// Topology-search result emitter — reference §7
 void emit_search(std::ostream& os, OutputFormat fmt, const steppe::QpGraphSearchResult& r) {
     const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
     const auto edges_str = [&](const std::vector<steppe::QpGraphEdge>& e) {
@@ -270,6 +245,7 @@ void emit_search(std::ostream& os, OutputFormat fmt, const steppe::QpGraphSearch
 
 }  // namespace
 
+// Topology-search command flow — reference §3
 int run_qpgraph_search_command(const cfg::RunConfig& config) {
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe qpgraph-search: --f2-dir is required\n");

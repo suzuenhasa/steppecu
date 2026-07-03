@@ -1,9 +1,9 @@
 // src/app/f2_dir_io.cpp
 //
-// The f2_blocks DIRECTORY reader (cli-bindings.md §4.3). PLAIN C++20, app-only, NO
-// CUDA header (the §4 layering / arch-grep gate); it reaches the CUDA-FREE
-// f2_disk_format.hpp only for the on-disk F2DiskHeader struct + the magic/version
-// constants (the single home so the reader cannot drift from the writer's stamps).
+// The f2_blocks directory reader (f2.bin + pops.txt) -> F2Dir. Plain C++20,
+// app-only, no CUDA header: it reaches the CUDA-free f2_disk_format.hpp only for
+// the on-disk header struct and magic/version constants, the single home so the
+// reader cannot drift from the writer's stamps.
 #include "app/f2_dir_io.hpp"
 
 #include <cerrno>
@@ -15,16 +15,12 @@
 #include <system_error>
 #include <vector>
 
-#include "device/f2_disk_format.hpp"  // F2DiskHeader, kF2DiskMagic/Version/DtypeFp64 (CUDA-FREE)
+#include "device/f2_disk_format.hpp"
 
 namespace steppe::app {
 
 namespace {
 
-// Build the F2DirResult error arm with a fault Status + reason. A malformed cache
-// dir is a fault the user must fix (architecture.md §10 fault taxonomy); the app
-// maps the carried Status through exit_code_for, but a file/format problem is
-// surfaced as InvalidConfig here (the engine never saw it — it is config-level).
 [[nodiscard]] F2DirResult fail(Status status, std::string reason) {
     F2DirResult r;
     r.ok = false;
@@ -33,19 +29,10 @@ namespace {
     return r;
 }
 
-// Read <dir>/pops.txt: one label per non-empty line, trailing CR stripped (so a
-// CRLF-authored sidecar reads cleanly), in file order (== P-axis index order). Blank
-// lines are skipped (a trailing newline is not a phantom pop); each label is kept
-// verbatim minus the line terminator (no whitespace trimming) so the name<->index
-// map is byte-exact.
 [[nodiscard]] bool read_pops_txt(const std::filesystem::path& path,
                                  std::vector<std::string>& out, std::string& err) {
     std::ifstream f(path);
     if (!f) {
-        // Capture errno on the line right after the failing open, before any other
-        // libc call can clobber it (libstdc++'s basic_filebuf::open forwards the OS
-        // open() errno). Forward the decoded OS reason so a sysadmin can tell
-        // "Permission denied" (EACCES) from "No such file or directory" (ENOENT).
         const int open_errno = errno;
         err = "cannot open pops.txt (" + std::generic_category().message(open_errno) +
               "): " + path.string();
@@ -53,8 +40,8 @@ namespace {
     }
     std::string line;
     while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF tolerance
-        if (line.empty()) continue;                                 // skip blank lines
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
         out.push_back(line);
     }
     return true;
@@ -65,10 +52,6 @@ namespace {
 F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
 
-    // The dir itself must exist and be a directory (a clear fault, not a crash).
-    // ec is populated by fs::exists/is_directory; when the probe itself failed at the
-    // OS layer (e.g. a permission-denied parent traversal) forward the decoded reason
-    // so the fault arm distinguishes a real OS error from a plain wrong-type path.
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
         std::string reason = "--f2-dir is not a directory: " + dir.string();
@@ -79,11 +62,8 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     const fs::path bin_path = dir / "f2.bin";
     const fs::path pops_path = dir / "pops.txt";
 
-    // ---- f2.bin (STPF2BK1) -> F2BlockTensor --------------------------------------
     std::ifstream bin(bin_path, std::ios::binary);
     if (!bin) {
-        // errno captured immediately (see read_pops_txt) so EACCES vs ENOENT is
-        // surfaced in the human-readable reason; Status stays InvalidConfig.
         const int open_errno = errno;
         return fail(Status::InvalidConfig,
                     "cannot open f2.bin (" + std::generic_category().message(open_errno) +
@@ -120,16 +100,13 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
 
     const std::size_t P = static_cast<std::size_t>(hdr.P);
     const std::size_t nb = static_cast<std::size_t>(hdr.n_block);
-    const std::size_t slab_elems = P * P * nb;  // f2 / vpair element counts
+    const std::size_t slab_elems = P * P * nb;
 
     F2Dir result;
     F2BlockTensor& t = result.f2;
     t.P = hdr.P;
     t.n_block = hdr.n_block;
 
-    // f2 region (at hdr.f2_offset). Seek to the recorded offset rather than assuming
-    // it follows the header, so a future header growth (reserved bytes) cannot break
-    // the read — the offset is authoritative (f2_disk_format.hpp).
     t.f2.resize(slab_elems);
     bin.seekg(static_cast<std::streamoff>(hdr.f2_offset), std::ios::beg);
     bin.read(reinterpret_cast<char*>(t.f2.data()),
@@ -140,8 +117,6 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
                         std::to_string(slab_elems) + " doubles): " + bin_path.string());
     }
 
-    // vpair region (at hdr.vpair_offset). The fit reads block_sizes, not vpair (OQ-3),
-    // but the device upload copies both slabs, so carry vpair for a faithful round-trip.
     t.vpair.resize(slab_elems);
     bin.seekg(static_cast<std::streamoff>(hdr.vpair_offset), std::ios::beg);
     bin.read(reinterpret_cast<char*>(t.vpair.data()),
@@ -151,7 +126,6 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
                     "f2.bin truncated reading the vpair region: " + bin_path.string());
     }
 
-    // block_sizes trailer (at hdr.block_sizes_offset; n_block int32).
     std::vector<std::int32_t> sizes32(nb);
     bin.seekg(static_cast<std::streamoff>(hdr.block_sizes_offset), std::ios::beg);
     bin.read(reinterpret_cast<char*>(sizes32.data()),
@@ -163,7 +137,6 @@ F2DirResult read_f2_dir(const std::filesystem::path& dir) {
     }
     t.block_sizes.assign(sizes32.begin(), sizes32.end());
 
-    // ---- pops.txt -> the P labels (the name<->index map) -------------------------
     std::string perr;
     if (!read_pops_txt(pops_path, result.pop_labels, perr)) {
         return fail(Status::InvalidConfig, std::move(perr));

@@ -1,10 +1,7 @@
 // src/app/cmd_qpfstats.cpp — the `steppe qpfstats` command (genotype-path joint f2 smoother).
 //
-// Composes the CUDA-FREE seam: build_resources -> run_qpfstats (the genotype front-end +
-// the dstat-numerator engine + the on-device smoothing solve + scatter/recenter) ->
-// write_f2_dir (the smoothed F2BlockTensor as an AT2-shaped f2 dir: f2.bin + pops.txt +
-// meta.json). The output is read_f2-able, so qpadm/f4 consume the smoothed f2 like any
-// extract-f2 cache. main() owns stdout/stderr (architecture.md §10).
+// Validates inputs, runs the CUDA-free build_resources -> run_qpfstats seam, and writes the
+// smoothed f2 as a read_f2-able AT2-shaped f2 dir (f2.bin + pops.txt + meta.json).
 #include "app/cmd_qpfstats.hpp"
 
 #include <cstdio>
@@ -13,14 +10,14 @@
 #include <string>
 #include <vector>
 
-#include "app/exit_code_for_caught.hpp"   // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
-#include "app/f2_dir_writer.hpp"          // write_f2_dir, F2DirMeta
-#include "app/precision_label.hpp"        // precision_label (shared host-app helper)
+#include "app/exit_code_for_caught.hpp"
+#include "app/f2_dir_writer.hpp"
+#include "app/precision_label.hpp"
 #include "core/config/exit_code.hpp"
-#include "steppe/config.hpp"              // kCentimorgansPerMorgan, Precision
-#include "device/resources.hpp"          // CUDA-FREE: Resources, build_resources
-#include "io/genotype_source.hpp"        // io::resolve_genotype_triple (EIGENSTRAT-family vs PLINK --prefix)
-#include "steppe/qpfstats.hpp"           // run_qpfstats + QpfstatsResult
+#include "steppe/config.hpp"
+#include "device/resources.hpp"
+#include "io/genotype_source.hpp"
+#include "steppe/qpfstats.hpp"
 
 namespace steppe::app {
 
@@ -31,8 +28,7 @@ namespace cfg = steppe::config;
 }  // namespace
 
 int run_qpfstats_command(const cfg::RunConfig& config) {
-    // ---- 1. Validate inputs --------------------------------------------------------
-    const std::string& prefix = config.qpdstat_prefix();  // qpfstats reuses the --prefix field
+    const std::string& prefix = config.qpdstat_prefix();
     if (prefix.empty()) {
         std::fprintf(stderr, "steppe qpfstats: --prefix (the genotype triple prefix) is required\n");
         return cfg::kExitInvalidConfig;
@@ -49,14 +45,11 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // Format-aware --prefix expansion (M-FR PLINK): EIGENSTRAT family -> P.{geno,snp,ind};
-    // PLINK -> P.{bed,bim,fam}. run_qpfstats pins the parser via the GenoReader ctor.
     const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
     const std::string& geno = triple.geno;
     const std::string& snp = triple.snp;
     const std::string& ind = triple.ind;
 
-    // ---- 2. build_resources -> run_qpfstats (genotype-path, GPU device-resident) ----
     const double blgsize_morgans = config.blgsize_cm() / kCentimorgansPerMorgan;
     const Precision precision = config.device().precision;
     QpfstatsResult result;
@@ -82,14 +75,13 @@ int run_qpfstats_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 3. Write the smoothed f2 dir (f2.bin + pops.txt + meta.json) ---------------
     F2DirMeta meta;
     meta.precision_tag = precision_label(precision);
     meta.precision_mantissa_bits = precision.mantissa_bits;
     meta.blgsize_cm = config.blgsize_cm();
     meta.n_block = result.f2.n_block;
     meta.P = result.f2.P;
-    meta.autosomes_only = true;  // qpfstats is autosomes-only (AT2 auto_only; the qpDstat-B pin)
+    meta.autosomes_only = true;
     meta.geno_path = geno;
     meta.snp_path = snp;
     meta.ind_path = ind;

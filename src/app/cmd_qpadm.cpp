@@ -1,15 +1,10 @@
 // src/app/cmd_qpadm.cpp
 //
-// The `steppe qpadm` command (M(cli-1); cli-bindings.md §4.1). The GPU path is the
-// deliverable: read the f2_blocks dir -> resolve names->indices via pops.txt ->
-// build_resources(DeviceConfig) -> upload_f2_blocks_to_device -> run_qpadm(
-// DeviceF2Blocks, ...) -> emit tidy CSV/JSON.
+// The `steppe qpadm` command: read an f2_blocks dir, run the qpAdm fit on the GPU,
+// and emit one tidy CSV/TSV/JSON result. Plain C++20 app code that reaches the GPU
+// only through CUDA-free seams, so it builds without the CUDA toolchain.
 //
-// PLAIN C++20, app-only, NO CUDA header (the §4 layering / arch-grep gate): the GPU is
-// reached ONLY through the CUDA-FREE seams (resources.hpp / device_f2_blocks.hpp /
-// qpadm.hpp). main() owns stdout/stderr (architecture.md §10 — the library never
-// prints). A model-level domain outcome is a row + exit 0 (record-and-continue); only
-// faults return nonzero (cli-bindings.md §1.3, §4.4).
+// Reference: docs/reference/src_app_cmd_qpadm.cpp.md
 #include "app/cmd_qpadm.hpp"
 
 #include <cstdio>
@@ -20,16 +15,16 @@
 #include <string>
 #include <vector>
 
-#include "app/cmd_emit.hpp"             // emit_to_destination (shared open->write->flush->verify)
-#include "app/exit_code_for_caught.hpp" // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/cmd_emit.hpp"
+#include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_io.hpp"
 #include "app/pop_resolver.hpp"
 #include "app/result_emit.hpp"
 #include "core/config/exit_code.hpp"
-#include "device/device_f2_blocks.hpp"  // CUDA-FREE: DeviceF2Blocks, upload_f2_blocks_to_device
-#include "device/resources.hpp"         // CUDA-FREE: Resources, build_resources
-#include "steppe/error.hpp"             // steppe::Status
-#include "steppe/qpadm.hpp"             // steppe::run_qpadm + model/result/options
+#include "device/device_f2_blocks.hpp"
+#include "device/resources.hpp"
+#include "steppe/error.hpp"
+#include "steppe/qpadm.hpp"
 
 namespace steppe::app {
 
@@ -37,9 +32,7 @@ namespace {
 
 namespace cfg = steppe::config;
 
-// Resolve the target + left + right NAMES to P-axis INDICES (cli-bindings.md §4.2).
-// On any unknown name the resolver fail-fasts naming the offending label; this prints
-// the reason to stderr and signals the caller to return kExitInvalidConfig.
+// Name resolution and building the model — reference §3
 [[nodiscard]] bool resolve_model(const PopResolver& resolver,
                                  const std::string& target,
                                  const std::vector<std::string>& left,
@@ -74,8 +67,8 @@ namespace cfg = steppe::config;
 
 }  // namespace
 
+// The qpadm command pipeline — reference §2
 int run_qpadm_command(const cfg::RunConfig& config) {
-    // ---- 1. Read the f2_blocks dir (f2.bin + pops.txt) ---------------------------
     if (config.f2_dir().empty()) {
         std::fprintf(stderr, "steppe qpadm: --f2-dir is required\n");
         return cfg::kExitInvalidConfig;
@@ -86,7 +79,6 @@ int run_qpadm_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
-    // ---- 2. Name -> index resolution against pops.txt ----------------------------
     const PopResolver resolver(dir.dir.pop_labels);
     if (!resolver.valid()) {
         std::fprintf(stderr, "steppe qpadm: %s\n", resolver.error().c_str());
@@ -97,12 +89,6 @@ int run_qpadm_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    // ---- 3/4. build_resources -> upload f2 to the GPU -> run_qpadm (GPU path) -----
-    // The GPU is the deliverable (cli-bindings.md §5.4). All three calls are CUDA-FREE
-    // seams; a no-GPU box surfaces a clear fault from build_resources (it enumerates /
-    // binds a CUDA device and throws when none is visible). The device ordinal comes
-    // from the resolved DeviceConfig (empty ⇒ auto-enumerate; the upload targets the
-    // first configured ordinal, the same single-GPU fit path the reference test uses).
     const QpAdmOptions opts = config.qpadm_options();
     QpAdmResult result;
     try {
@@ -118,23 +104,15 @@ int run_qpadm_command(const cfg::RunConfig& config) {
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
         result = run_qpadm(dev_f2, model, opts, resources);
     } catch (const std::exception& e) {
-        // build_resources / upload / run faults (no device, OOM, CUDA runtime) — a
-        // FAULT, nonzero exit (cli-bindings.md §1.3). A domain outcome never throws;
-        // it arrives as result.status below (record-and-continue, exit 0).
         std::fprintf(stderr, "steppe qpadm: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
 
-    // ---- 5. Emit (CSV default / TSV / JSON) to --out or stdout -------------------
-    // Resolve the labels back onto the rows so the output is name-readable.
     std::vector<std::string> left_labels;
     left_labels.reserve(model.left.size());
     for (int idx : model.left) left_labels.push_back(resolver.label_at(idx));
     const std::string target_label = resolver.label_at(model.target);
 
-    // open->write->flush->verify via the shared emit_to_destination (B1): a torn / short
-    // write (full disk, closed pipe) returns kExitIoError instead of silently exiting 0 with
-    // a truncated file. The helper parses --format (kExitInvalidConfig on an unknown token).
     if (const auto rc = emit_to_destination(
             config, "qpadm", [&](std::ostream& os, OutputFormat fmt) {
                 emit_qpadm_result(os, fmt, result, target_label, left_labels);
@@ -142,9 +120,6 @@ int run_qpadm_command(const cfg::RunConfig& config) {
         return *rc;
     }
 
-    // A per-model DOMAIN outcome (RankDeficient/NonSpd/ChisqUndefined) is a row +
-    // exit 0 (record-and-continue, cli-bindings.md §1.3); exit_code_for maps those to
-    // kExitOk and only the fault categories to nonzero.
     return cfg::exit_code_for(result.status);
 }
 

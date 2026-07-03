@@ -1,17 +1,13 @@
-// src/app/main.cpp — the steppe CLI entry point (M(cli-0) scaffold).
+// src/app/main.cpp — the steppe CLI entry point.
 //
-// PLAIN C++20 host target (architecture.md §4, §6.1; cli-bindings.md §6.1). NO CUDA
-// toolkit header here or anywhere in src/app — the arch-grep gate enforces it and a
-// leaked CUDA runtime header would hard-fail this host compile. main() owns process +
-// stdout/stderr (the library never prints — architecture.md §10); all parsing,
-// dispatch, and the Status->exit-code mapping live in app::run_cli / the core config
-// layer. A top-level catch turns any unexpected fault into a clean nonzero exit so a
-// thrown io/CUDA-runtime error never aborts the process uncaught.
+// Plain C++20 host target (no CUDA): main() owns the process and stdout/stderr,
+// delegates all work to app::run_cli, and maps any escaped exception to a clean
+// nonzero exit code.
 #include <cstdio>
 #include <exception>
 
 #include "app/cli_parse.hpp"
-#include "app/exit_code_for_caught.hpp"  // exit_code_for_caught (5 -> 3 on a real device OOM, B2)
+#include "app/exit_code_for_caught.hpp"
 #include "core/config/exit_code.hpp"
 
 int main(int argc, char** argv) {
