@@ -84,3 +84,9 @@ handoff-*.md
 # extractor script tracked; ignore its large, regenerable output tree so `git clean -fd` skips it.
 docs/commentdump/*
 !docs/commentdump/extract_comments.py
+
+# docs: publish ONLY docs/reference/ + docs/examples/ to the remote; everything else under
+# docs/ is LOCAL-ONLY (untracked here, kept on disk).
+docs/*
+!docs/reference/
+!docs/examples/
