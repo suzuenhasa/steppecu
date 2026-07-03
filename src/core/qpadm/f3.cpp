@@ -1,20 +1,8 @@
-// src/core/qpadm/f3.cpp — the standalone f3-statistic entry (run_f3).
+// src/core/qpadm/f3.cpp — the standalone f3-statistic entry (run_f3): per-triple point
+// estimate, jackknife-diagonal standard error, z, and p. A near-exact sibling of f4.cpp
+// that reuses the assemble + block-jackknife seams and adds no new infrastructure.
 //
-// run_f3 is the SIBLING of run_f4 (f4.cpp), line-for-line: it REUSES the same two seams —
-// assemble_f3_triples (the per-triple THREE-slab AT2 identity, the ONE new math seam vs f4)
-// and jackknife_cov (the block-jackknife covariance, REUSED verbatim) — with NO new
-// infrastructure. NO ALS / NO rank test: f3 is just the AT2 weighted-jackknife POINT
-// ESTIMATE per triple + the jackknife-DIAGONAL SE.
-//
-// PIPELINE (fit-engine §6, mirroring run_f4): assemble ONE batched X (an F4Blocks reused as
-// the generic per-block carrier) whose m axis is the N triples (nl=N, nr=1 ⇒ m=N), run ONE
-// jackknife_diag over the whole m-batch with fudge=0 (a bare f3 SE has no GLS matrix to
-// ridge-regularize — the qpAdm 1e-4 fudge is a Q-INVERT concern only, and f3 never inverts
-// Q), then read est[k] = X.x_total[k] and se[k] = sqrt(diag.var[k]) (the UNFUDGED diagonal).
-// z = est/se; p = f4_two_sided_p(z) (REUSED — AT2 ztop == erfc(|z|/sqrt2) == f4_two_sided_p,
-// the SAME two-sided normal). assemble_f3_triples stays native FP64 by the cancellation
-// carve-out (OQ-5), exactly like assemble_f4_quartets. Domain outcomes (non-SPD covariance /
-// empty batch) are a per-call status VALUE, never an exception (architecture.md §10).
+// Reference: docs/reference/src_core_qpadm_f3.cpp.md
 
 #include "steppe/f3.hpp"
 
@@ -24,72 +12,51 @@
 #include <span>
 #include <vector>
 
-#include "core/qpadm/f3_triples.hpp"   // run_f3 S3 driver (assemble_f3_triples)
-#include "core/qpadm/jackknife.hpp"    // S4 driver (jackknife_diag) — the diagonal-only SE
-#include "core/qpadm/qpadm_fit.hpp"    // default_fit_precision(), honored_tag()
-#include "device/backend.hpp"          // ComputeBackend, F4Blocks, JackknifeDiag
-#include "device/device_f2_blocks.hpp" // device::DeviceF2Blocks (S3 device-resident input)
-#include "device/resources.hpp"        // device::Resources (the injected backend bundle)
-#include "steppe/config.hpp"           // Precision
-#include "steppe/error.hpp"            // Status
-#include "steppe/f4.hpp"               // f4_two_sided_p (REUSED — the SAME z->p convention)
+#include "core/qpadm/f3_triples.hpp"
+#include "core/qpadm/jackknife.hpp"
+#include "core/qpadm/qpadm_fit.hpp"
+#include "device/backend.hpp"
+#include "device/device_f2_blocks.hpp"
+#include "device/resources.hpp"
+#include "steppe/config.hpp"
+#include "steppe/error.hpp"
+#include "steppe/f4.hpp"
 
 namespace steppe {
 
 namespace {
 
-/// The single-entry primary GPU index (the multi-GPU fan-out lives ABOVE this seam; the
-/// model-batched rotation drives the others). Mirrors f4.cpp's kPrimaryGpu — a TU-private
-/// convention constant, homed here rather than in config.hpp.
+// Primary-GPU seam (kPrimaryGpu, primary_backend) — reference §8
 inline constexpr std::size_t kPrimaryGpu = 0;
 
 [[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
     return *resources.gpus.at(kPrimaryGpu).backend;
 }
 
-/// Shared run_f3 body: assemble the N-triple batched X (one assemble), run ONE
-/// jackknife_cov over the whole m-batch (fudge=0), read est/se/z/p per triple. Templated
-/// on the f2 SOURCE so the two public overloads (DeviceF2Blocks vs F2BlockTensor) are thin
-/// forwarders — mirroring run_f4_impl ([7.1] dedup). assemble_f3_triples is the
-/// cancellation-sensitive three-slab combine and stays native ALWAYS by carve-out (OQ-5);
-/// passing the emulated default here is the one-policy consistency, not a behavior change.
+// Shared run_f3 body — the pipeline: flatten, assemble once, jackknife once, read out — reference §2
 template <class F2Src>
 F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
                      std::span<const std::array<int, 3>> triples,
                      const QpAdmOptions& opts) {
-    // opts is accepted for API symmetry with run_qpadm/run_qpwave/run_f4, but a STANDALONE
-    // f3 SE uses fudge=0 ALWAYS (the qpAdm 1e-4 ridge is a GLS Q-invert concern only; an f3
-    // SE is the bare UNFUDGED jackknife-diagonal variance), so opts.fudge is deliberately
-    // not consulted here. Acknowledge it so -Werror is satisfied.
     (void)opts;
     const Precision prec = core::qpadm::default_fit_precision();
 
     F3Result res;
     res.precision_tag = core::qpadm::honored_tag(prec, be);
 
-    // Fail-fast BEFORE narrowing std::size_t -> int: at an all-triples sweep scale
-    // (P~2500 ⇒ C(2500,3) ~= 2.6e9 > INT_MAX) the static_cast below would silently wrap
-    // negative/truncate, defeating the `N <= 0` empty-batch guard and corrupting every
-    // downstream int-indexed size (res.p1/p2/p3 reserves, the 3*N flat reserve, the m=nl*nr
-    // seam compare). Surface an over-cap batch as a status VALUE, never an exception
-    // (architecture.md §10). The real-AADR goldens have tiny triple counts and never
-    // approach INT_MAX, so this is behavior-preserving (no parity impact).
     if (triples.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         res.status = Status::InvalidConfig;
         return res;
     }
     const int N = static_cast<int>(triples.size());
     if (N <= 0) {
-        // An empty batch is a clean, empty Ok result (no rows) — never a fault.
         res.status = Status::Ok;
         return res;
     }
 
-    // Echo the triple P-axis indices onto the result (the emitter/binding label rows).
     res.p1.reserve(static_cast<std::size_t>(N));
     res.p2.reserve(static_cast<std::size_t>(N));
     res.p3.reserve(static_cast<std::size_t>(N));
-    // Flatten the (p1,p2,p3) triples into the 3*N index array the seam consumes.
     std::vector<int> flat;
     flat.reserve(static_cast<std::size_t>(N) * 3);
     for (const std::array<int, 3>& t : triples) {
@@ -101,13 +68,9 @@ F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
         flat.push_back(t[2]);
     }
 
-    // S3 — assemble the batched per-triple f3 X (one call; nl=N, nr=1 ⇒ m=N).
     F4Blocks X = core::qpadm::assemble_f3_triples(be, f2, std::span<const int>(flat), prec);
-    const int m = X.nl * X.nr;  // == N (the triple m-axis)
+    const int m = X.nl * X.nr;
 
-    // A degenerate batch (all blocks missing ⇒ m or n_block 0) yields empty est/se but a
-    // populated index echo — surface as Ok with NaN rows so a caller filtering on status
-    // sees the per-row NaN sentinel (never a crash).
     if (m <= 0 || X.n_block <= 0) {
         res.est.assign(static_cast<std::size_t>(N), std::nan(""));
         res.se.assign(static_cast<std::size_t>(N), std::nan(""));
@@ -117,14 +80,6 @@ F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
         return res;
     }
 
-    // S4 — block-jackknife DIAGONAL variance over the whole m-batch (the OOM fix). A bare f3
-    // SE reads ONLY the diagonal Q[k + m*k] of the jackknife covariance and NEVER inverts Q
-    // (only qpAdm's GLS does), so we use jackknife_diag — var[k] = (1/nb)·Σ_b xtau[k,b]², the
-    // EXACT diagonal jackknife_cov used to compute — WITHOUT forming the dense m×m Q + its
-    // Cholesky inverse. At sweep scale (m = N triples) the dense m×m Q OOMs; the diagonal is
-    // O(m·nb) work / O(m) memory and is bit-equal to the deleted dense diagonal BY CONSTRUCTION
-    // (same xtau, same FP64 op-order ⇒ the f3 golden does not move). fudge is not consumed (a
-    // bare f3 SE is the UNFUDGED diagonal). NO NonSpdCovariance is possible (no Q invert).
     const JackknifeDiag diag =
         core::qpadm::jackknife_diag(be, X, std::span<const int>(X.block_sizes), prec);
 
@@ -135,36 +90,31 @@ F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
     for (int k = 0; k < N; ++k) {
         const std::size_t ks = static_cast<std::size_t>(k);
         const double est = X.x_total[ks];
-        const double var = diag.var[ks];  // the UNFUDGED diagonal variance (== diag(Q)).
+        const double var = diag.var[ks];
         const double se = (var > 0.0) ? std::sqrt(var) : std::nan("");
         const double z = est / se;
         res.est[ks] = est;
         res.se[ks] = se;
         res.z[ks] = z;
-        res.p[ks] = f4_two_sided_p(z);  // REUSED — the SAME two-sided normal z->p.
+        res.p[ks] = f4_two_sided_p(z);
     }
 
-    // Ok: the per-triple diagonal SE is valid regardless of the full Q's SPD-ness (f3 has
-    // no Qinv consumer). The only true f3 domain failure is a degenerate ASSEMBLE (handled
-    // above: m<=0 / n_block<=0 ⇒ NaN rows), not a non-invertible full covariance.
     res.status = Status::Ok;
     return res;
 }
 
 }  // namespace
 
-// ---- Public entry points (include/steppe/f3.hpp) -------------------------------------
+// The two public run_f3 overloads (DeviceF2Blocks + F2BlockTensor forwarders) — reference §8
 F3Result run_f3(const device::DeviceF2Blocks& f2,
                 std::span<const std::array<int, 3>> triples,
                 const QpAdmOptions& opts, device::Resources& resources) {
-    // S3 — device-resident assemble (zero D2H on the CUDA path).
     return run_f3_impl(primary_backend(resources), f2, triples, opts);
 }
 
 F3Result run_f3(const F2BlockTensor& f2_host,
                 std::span<const std::array<int, 3>> triples,
                 const QpAdmOptions& opts, device::Resources& resources) {
-    // S3 — host-oracle assemble (the CpuBackend reads host memory directly).
     return run_f3_impl(primary_backend(resources), f2_host, triples, opts);
 }
 

@@ -1,17 +1,19 @@
 // src/core/config/config_builder.cpp
 //
-// ConfigBuilder implementation — the §9 layered merge + the validating build()
-// (architecture.md §9; cli-bindings.md §4.5). CUDA-FREE host-pure: no device header,
-// no CUDA call, no printf/cout (the failure reason is RETURNED via error_message();
-// the app prints it — architecture.md §10).
+// ConfigBuilder implementation: folds the config layers (defaults < TOML < env <
+// CLI) into raw string state, then build() parses, range-checks, and freezes it
+// once into an immutable RunConfig. Host-pure and CUDA-free — a failure is
+// returned via error_message(), never printed.
+//
+// Reference: docs/reference/src_core_config_config_builder.cpp.md
 #include "core/config/config_builder.hpp"
 
-#include "io/genotype_source.hpp"  // io::resolve_genotype_triple (--prefix EIGENSTRAT-family vs PLINK)
+#include "io/genotype_source.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <cstdlib>   // std::getenv
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <string_view>
@@ -21,7 +23,7 @@ namespace steppe::config {
 
 namespace {
 
-// ---- small CUDA-free string helpers (no <regex>, no locale) ------------------
+// String-parsing helpers — reference §3
 
 [[nodiscard]] std::string to_lower(std::string_view s) {
     std::string out;
@@ -41,8 +43,6 @@ namespace {
     return std::string{s.substr(b, e - b)};
 }
 
-// Split a comma-separated list, trimming each token; empty tokens are dropped
-// (so a trailing comma or "0,,1" does not yield a spurious empty ordinal/label).
 [[nodiscard]] std::vector<std::string> split_csv(std::string_view s) {
     std::vector<std::string> out;
     std::size_t start = 0;
@@ -58,8 +58,6 @@ namespace {
     return out;
 }
 
-// Parse a base-10 int from a fully-consumed token (no trailing junk). Returns false
-// on any non-numeric / partial / overflowing input — the fail-fast input gate.
 [[nodiscard]] bool parse_int(std::string_view tok, int& out) {
     const std::string t = trim(tok);
     if (t.empty()) return false;
@@ -72,7 +70,6 @@ namespace {
     return true;
 }
 
-// An env var as an optional (unset OR empty ⇒ nullopt, so STEPPE_FOO= is "unset").
 [[nodiscard]] std::optional<std::string> env(const char* key) {
     const char* v = std::getenv(key);
     if (v == nullptr) return std::nullopt;
@@ -83,17 +80,8 @@ namespace {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Layer folds (precedence: compiled defaults < TOML < env STEPPE_* < CLI).
-// merged_ accumulates the RAW (still-string) state; build() parses it ONCE.
-// ---------------------------------------------------------------------------
-
+// Layer folds: defaults < TOML < env < CLI — reference §2
 ConfigBuilder& ConfigBuilder::with_defaults() {
-    // The compiled defaults are the std-struct defaults already baked into RunConfig
-    // (DeviceConfig{}, QpAdmOptions{}, FilterConfig{}, format=csv, 5 cM). At the RAW
-    // layer that is simply "nothing set" — every CliArgs optional stays nullopt, so
-    // build() falls through to the struct defaults. Reset merged_ so a reused builder
-    // starts clean (idempotent seeding).
     merged_ = CliArgs{};
     toml_path_.clear();
     toml_requested_ = false;
@@ -101,10 +89,6 @@ ConfigBuilder& ConfigBuilder::with_defaults() {
 }
 
 ConfigBuilder& ConfigBuilder::merge_file(const std::filesystem::path& path) {
-    // Record the requested TOML path (BELOW env + CLI). M(cli-0) has no TOML parser
-    // compiled in; build() rejects a non-empty path rather than silently dropping it,
-    // so a user who passes --config gets a clear error, not a confusing no-op. An
-    // empty path is a genuine no-op (no file requested).
     if (!path.empty()) {
         toml_path_ = path;
         toml_requested_ = true;
@@ -113,8 +97,6 @@ ConfigBuilder& ConfigBuilder::merge_file(const std::filesystem::path& path) {
 }
 
 ConfigBuilder& ConfigBuilder::merge_env() {
-    // STEPPE_* env layer (ABOVE TOML, BELOW CLI). Only override a field the env SETS;
-    // an unset/empty var leaves the lower layer (here: the defaults / TOML) intact.
     if (auto v = env("STEPPE_DEVICE"))    merged_.device = std::move(v);
     if (auto v = env("STEPPE_PRECISION")) merged_.precision = std::move(v);
     if (auto v = env("STEPPE_FORMAT"))    merged_.format = std::move(v);
@@ -124,8 +106,6 @@ ConfigBuilder& ConfigBuilder::merge_env() {
 }
 
 ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
-    // CLI layer (HIGHEST precedence). Each SET optional overrides the lower layer;
-    // each non-empty list overrides. command always carries (the parser sets it).
     merged_.command = args.command;
 
     const auto take = [](std::optional<std::string>& dst, const std::optional<std::string>& src) {
@@ -156,7 +136,6 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     if (!args.pop4.empty())  merged_.pop4  = args.pop4;
     if (!args.pop5.empty())  merged_.pop5  = args.pop5;
 
-    // Scalar option overrides (numeric / bool sentinels).
     const auto take_d = [](std::optional<double>& d, const std::optional<double>& s) { if (s) d = s; };
     const auto take_i = [](std::optional<int>& d, const std::optional<int>& s) { if (s) d = s; };
     const auto take_b = [](std::optional<bool>& d, const std::optional<bool>& s) { if (s) d = s; };
@@ -193,7 +172,6 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.max_nadmix, args.max_nadmix);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
-    // A --config on the CLI is the highest-precedence TOML request.
     if (args.config_path.has_value() && !args.config_path->empty()) {
         toml_path_ = *args.config_path;
         toml_requested_ = true;
@@ -201,12 +179,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     return *this;
 }
 
-// ---------------------------------------------------------------------------
-// build() — validate ONCE + freeze. Returns InvalidConfig (with a reason in
-// error_message_) on any static violation; the LIVE device/VRAM probe is the app's
-// job through build_resources (cli-bindings.md §4.5), not this CUDA-free layer.
-// ---------------------------------------------------------------------------
-
+// build(): parse the raw layers once, range-check, and freeze — reference §4-§14
 BuildResult<RunConfig> ConfigBuilder::build() {
     error_message_.clear();
     const auto fail = [this](std::string msg) -> BuildResult<RunConfig> {
@@ -217,14 +190,12 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     RunConfig cfg;
     cfg.command_ = merged_.command;
 
-    // ---- TOML: no parser compiled in this milestone -> a requested file is a fault.
     if (toml_requested_) {
         return fail("config file '" + toml_path_.string() +
                     "' requested via --config/STEPPE_CONFIG, but TOML config is not "
                     "supported in this build (no TOML parser is compiled in yet)");
     }
 
-    // ---- --device -> DeviceConfig::devices (GPU-ONLY; cli-bindings.md §5.4) -------
     if (merged_.device.has_value()) {
         const std::string raw = trim(*merged_.device);
         const std::string lower = to_lower(raw);
@@ -261,15 +232,10 @@ BuildResult<RunConfig> ConfigBuilder::build() {
             }
             cfg.device_.devices = std::move(ordinals);
         }
-        // "auto"/"" -> leave devices empty (auto-enumerate; §9 DeviceConfig contract).
     }
 
-    // ---- --precision -> Precision (cli-bindings.md §4.1) -------------------------
     if (merged_.precision.has_value()) {
         const std::string p = to_lower(trim(*merged_.precision));
-        // Canonical set emu40|emu32|fp64|tf32 + documented aliases, kept in lockstep with
-        // the Python facade (bindings/module.cpp parse_precision) so a token is spelled the
-        // same on every surface (cli-bindings.md §4.1).
         if (p == "emu40" || p == "emu" || p == "emulated_fp64") {
             cfg.device_.precision = Precision{Precision::Kind::EmulatedFp64, 40};
         } else if (p == "emu32" || p == "emulated_fp64_32") {
@@ -286,17 +252,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
     }
 
-    // ---- --tier auto|resident|host|disk -> DeviceConfig::force_tier (M5) ---------
-    // The f2_blocks OUTPUT-tier override (cli-bindings.md §4.1). This is the SINGLE,
-    // VALIDATED merge site that sets DeviceConfig::force_tier (it had no setter before —
-    // the field defaulted to Auto and only the STEPPE_FORCE_TIER env / the test-set
-    // config field reached resolve_output_tier). Mapped here so the precedence is the
-    // §9 chain: a --tier on the CLI wins, else force_tier stays Auto and
-    // resolve_output_tier falls back to the STEPPE_FORCE_TIER env, then the automatic
-    // select_output_tier policy. The CLI token spellings (resident/host/disk) mirror the
-    // STEPPE_FORCE_TIER env tokens (tier_select.hpp kForceTierToken*); they are repeated
-    // here as plain literals to keep this CUDA-free config layer free of the device
-    // header (architecture.md §4). An unknown token is InvalidConfig (never coerced).
     if (merged_.tier.has_value()) {
         const std::string t = to_lower(trim(*merged_.tier));
         if (t == "auto") {
@@ -313,7 +268,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
     }
 
-    // ---- --format csv|tsv|json (cli-bindings.md §4.4) ---------------------------
     if (merged_.format.has_value()) {
         const std::string f = to_lower(trim(*merged_.format));
         if (f != "csv" && f != "tsv" && f != "json") {
@@ -322,7 +276,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         cfg.format_ = f;
     }
 
-    // ---- QpAdmOptions overrides + range checks ----------------------------------
     QpAdmOptions& opt = cfg.qpadm_options_;
     if (merged_.fudge.has_value()) {
         if (*merged_.fudge < 0.0) return fail("--fudge must be >= 0");
@@ -333,7 +286,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         opt.als_iterations = *merged_.als_iterations;
     }
     if (merged_.rank.has_value()) {
-        // -1 ⇒ default (nl-1); any other negative is illegal.
         if (*merged_.rank < -1) return fail("--rank must be -1 (auto) or >= 0");
         opt.rank = *merged_.rank;
     }
@@ -359,7 +311,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.se_require_p.has_value()) opt.se_require_p = *merged_.se_require_p;
 
-    // ---- FilterConfig overrides + range checks (extract-f2; M(cli-4)) ------------
     FilterConfig& flt = cfg.filter_;
     if (merged_.maf.has_value()) {
         if (*merged_.maf < 0.0 || *merged_.maf > 0.5) return fail("--maf must lie in [0, 0.5]");
@@ -377,18 +328,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
         flt.mind_max_missing = *merged_.mind_max_missing;
     }
-    // autosomes_only: extract-f2 defaults this ON (AT2 extract_f2 restricts to autosomes
-    // 1..22 by default; cli_args.hpp "extract-f2 default ON, AT2 parity"). An explicit
-    // --auto-only/--no-auto-only overrides. Other commands keep the struct default (off).
-    //
-    // drop_monomorphic: extract-f2 ALSO defaults this ON (AT2 extract_f2 builds f2 on the
-    // POLYMORPHIC subset only — its `poly_only` default — dropping every SNP monomorphic
-    // across the analysis pop set before the block partition). steppe matches that by
-    // dropping monomorphic SNPs by default in extract-f2, which changes the kept-SNP count
-    // and the per-block SNP counts (hence the jackknife SEs) to AT2 parity. A monomorphic
-    // SNP contributes 0 to every f2 difference, so this never moves the f2 point estimates;
-    // it only aligns the SNP set / block partition with AT2. An explicit
-    // --drop-mono / --no-drop-mono overrides; other commands keep the struct default (off).
     if (merged_.command == Command::ExtractF2) {
         flt.autosomes_only = true;
         flt.drop_monomorphic = true;
@@ -396,12 +335,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.autosomes_only.has_value())    flt.autosomes_only = *merged_.autosomes_only;
     if (merged_.drop_monomorphic.has_value())  flt.drop_monomorphic = *merged_.drop_monomorphic;
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
-    // --strand-mode drop|keep|flip -> FilterConfig::strand_mode. UNSET ⇒ Drop (the
-    // struct default == the frozen behavior; palindromic A/T,C/G SNPs dropped, so the
-    // parity path is bit-identical when the flag is absent). keep retains them (AT2's
-    // default); flip is accepted as a documented not-yet-implemented token (stored as
-    // Flip; the keep-gate treats any non-Drop mode as retain, so flip currently behaves
-    // like keep — it does not drop palindromes but performs no freq-based reorientation).
     if (merged_.strand_mode.has_value()) {
         const std::string s = to_lower(trim(*merged_.strand_mode));
         if (s == "drop") {
@@ -416,9 +349,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
     }
 
-    // ---- PopSelection (extract-f2; M(cli-4)) — the three modes are mutually
-    // exclusive. Default stays AutoTopK{k=0} (the "no selection requested" state the
-    // app surfaces as a fail-fast when extract-f2 actually needs one).
     {
         int modes_set = 0;
         if (!merged_.pops.empty())           ++modes_set;
@@ -442,32 +372,18 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
     }
 
-    // ---- blgsize (MORGANS on the CLI, AT2 convention) ---------------------------
-    // ADMIXTOOLS 2's `blgsize` is in MORGANS (its default 0.05 == 5 cM), so the
-    // steppe `--blgsize` flag speaks Morgans too — a bare `--blgsize 0.05` reproduces
-    // AT2's block partition (same physical 5 cM block width). The RunConfig stores cM
-    // (the kDefaultBlockSizeCm convention; the block math converts cM->Morgans at the
-    // single block_size_cm_to_morgans site), so the Morgans->cM conversion lives HERE,
-    // at the CLI/config seam, via the single kCentimorgansPerMorgan constant. Do not
-    // reinterpret the stored field as Morgans — only the flag's input unit changed.
     if (merged_.blgsize.has_value()) {
         if (!(*merged_.blgsize > 0.0)) return fail("--blgsize must be > 0 (Morgans)");
         cfg.blgsize_cm_ = *merged_.blgsize * kCentimorgansPerMorgan;
     }
 
-    // ---- ploidy policy (extract-f2; the f2 pseudo-haploid fix) ------------------
-    // Default Auto (= AT2 adjust_pseudohaploid=TRUE per-sample detection); --ploidy
-    // 1/2 force a uniform pseudo-haploid/diploid ploidy. The detection/forcing
-    // happens in cmd_extract_f2 against the gathered tile (the genotypes).
     if (merged_.ploidy.has_value()) cfg.ploidy_ = *merged_.ploidy;
 
-    // ---- rotate pool-enumeration bounds ----------------------------------------
     if (merged_.min_sources.has_value()) {
         if (*merged_.min_sources < 1) return fail("--min-sources must be >= 1");
         cfg.min_sources_ = *merged_.min_sources;
     }
     if (merged_.max_sources.has_value()) {
-        // -1 ⇒ up to the whole pool; otherwise >= min_sources.
         if (*merged_.max_sources != -1 && *merged_.max_sources < 1) {
             return fail("--max-sources must be -1 (whole pool) or >= 1");
         }
@@ -477,7 +393,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         return fail("--max-sources must be >= --min-sources");
     }
 
-    // ---- f4-sweep / f3-sweep filter knobs --------------------------------------
     if (merged_.sweep_min_z.has_value()) {
         if (*merged_.sweep_min_z < 0.0) return fail("--min-z must be >= 0");
         cfg.sweep_min_z_ = *merged_.sweep_min_z;
@@ -494,31 +409,19 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         cfg.sweep_all_combinations_ = *merged_.sweep_all_combinations;
     if (merged_.shard_dir) cfg.shard_dir_ = *merged_.shard_dir;
 
-    // ---- carry the verbatim I/O strings ----------------------------------------
     if (merged_.f2_dir)   cfg.f2_dir_ = *merged_.f2_dir;
     if (merged_.target)   cfg.target_ = *merged_.target;
     cfg.left_  = merged_.left;
     cfg.right_ = merged_.right;
     cfg.pool_  = merged_.pool;
-    cfg.pop1_  = merged_.pop1;   // f4 row-aligned quartet columns (--pop1..--pop4)
+    cfg.pop1_  = merged_.pop1;
     cfg.pop2_  = merged_.pop2;
     cfg.pop3_  = merged_.pop3;
     cfg.pop4_  = merged_.pop4;
-    cfg.pop5_  = merged_.pop5;   // f4-ratio 5th row-aligned column (--pop5)
-    cfg.pops_  = merged_.pops;   // f4 --pops 4-tuple convenience (raw labels, carried verbatim)
+    cfg.pop5_  = merged_.pop5;
+    cfg.pops_  = merged_.pops;
     if (merged_.out_file) cfg.out_file_ = *merged_.out_file;
-    // qpdstat's --prefix (the Part-B normalized-D genotype prefix) is carried VERBATIM and
-    // NOT expanded into geno/snp/ind — it is only the fail-fast sentinel the qpdstat command
-    // reads (Part B not yet implemented). Distinct from extract-f2's --prefix below.
     if (merged_.qpdstat_prefix) cfg.qpdstat_prefix_ = *merged_.qpdstat_prefix;
-    // --prefix P expands to the genotype triple (cli-bindings.md §4.2). For the
-    // EIGENSTRAT family (TGENO/GENO/EIGENSTRAT) that is P.{geno,snp,ind}; for PLINK it is
-    // P.{bed,bim,fam} — resolve_genotype_triple chooses the extensions by a filesystem
-    // probe (.geno present wins; else a P.bed -> PLINK). The authoritative on-disk format
-    // is still pinned later by the GenoReader ctor; this only picks the sibling paths so a
-    // PLINK prefix opens .bed/.bim/.fam (M-FR PLINK). An explicit --geno/--snp/--ind
-    // OVERRIDES the corresponding prefix-derived path (cli_parse documents --geno overrides
-    // --prefix).
     if (merged_.prefix && !merged_.prefix->empty()) {
         const io::GenotypeTriple triple = io::resolve_genotype_triple(*merged_.prefix);
         if (!merged_.geno) cfg.geno_ = triple.geno;
@@ -531,7 +434,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.out_dir)  cfg.out_dir_ = *merged_.out_dir;
     if (merged_.dry_run)     cfg.dry_run_ = *merged_.dry_run;
     if (merged_.hash_source) cfg.hash_source_ = *merged_.hash_source;
-    // qpgraph (single-graph fit) inputs/options.
     if (merged_.graph)       cfg.graph_file_ = *merged_.graph;
     if (merged_.numstart) {
         if (*merged_.numstart < 1) return fail("--numstart must be >= 1");
@@ -540,7 +442,6 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.diag_f3)     cfg.qpgraph_diag_f3_ = *merged_.diag_f3;
     if (merged_.constrained) cfg.qpgraph_constrained_ = *merged_.constrained;
     if (merged_.max_nadmix) {
-        // v1 supports the {0,1} admixture-node ceiling (run_config.hpp:178).
         if (*merged_.max_nadmix < 0) return fail("--max-nadmix must be >= 0");
         cfg.qpgraph_max_nadmix_ = *merged_.max_nadmix;
     }

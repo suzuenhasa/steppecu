@@ -1,22 +1,10 @@
 // src/core/internal/qpfstats_jackknife.hpp
 //
-// The qpfstats per-comb / per-pair BLOCK-JACKKNIFE REFERENCE primitives (long double).
-// SINGLE-SOURCE the host long-double jackknife the CpuBackend oracle runs AND the math the
-// CUDA on-device jackknife kernel (qpfstats_jackknife_kernel.cu) is diffed against. These were
-// the file-local helpers in src/core/stats/qpfstats.cpp; they are lifted here so the CpuBackend
-// fused oracle (qpfstats_blocks_smooth) and the qpfstats driver share ONE definition (no copy).
+// The two qpfstats block-jackknife reference estimates (host long double): the
+// one definition shared by the CpuBackend oracle and the on-device GPU kernel it
+// is diffed against. Header-only, no CUDA.
 //
-// matrix_jackknife_est_col — AT2 matrix_jackknife_est_full per popcomb column (R/io.R): the
-//   GLOBAL per-comb estimate `y` (the bglob target). NaN-masked, cnt-weighted leave-one-out.
-// f2blocks_pair_est        — AT2 f2(array)$est for one pair series (the recentering target):
-//   est_to_loo (block_lengths weights) then jack_vec_stats2 = weighted.mean(loo, 1-1/h).
-//
-// LONG DOUBLE accumulation (the §12 cancellation carve-out — a leave-one-out jackknife
-// DIFFERENCE, not a matmul). The GPU kernel reproduces this in native FP64 with the EXACT
-// ascending-b operand order (the only delta is the carry precision), gated on the 9-pop golden.
-//
-// LAYERING: pure host C++20, header-only, NO CUDA. Lives in core/internal (shared by the
-// CUDA-free driver and the CPU reference backend).
+// Reference: docs/reference/src_core_internal_qpfstats_jackknife.hpp.md
 #ifndef STEPPE_CORE_INTERNAL_QPFSTATS_JACKKNIFE_HPP
 #define STEPPE_CORE_INTERNAL_QPFSTATS_JACKKNIFE_HPP
 
@@ -24,28 +12,18 @@
 #include <cstddef>
 #include <vector>
 
-#include "core/internal/host_device.hpp"  // STEPPE_ASSERT (debug-only precondition, NDEBUG-safe)
+#include "core/internal/host_device.hpp"
 
 namespace steppe::core {
 
-/// matrix_jackknife_est_full per popcomb column (AT2 R/io.R; the GLOBAL per-comb estimate
-/// `y` used for bglob). For column-c per-block means `numer[c,b]` (= numsum/cnt, NaN where
-/// invalid) + counts `cnt[c,b]`:
-///   valid = is.finite(numer); rel_bl = cnt/Σcnt;
-///   tot = Σ(numer·cnt over valid)/Σ(cnt over valid);
-///   loo = (tot - numer·rel_bl)/(1-rel_bl), masked to NA where !valid OR !finite;
-///   tot2 = Σ(loo·(1-rel_bl))/Σ(1-rel_bl) over finite loo;
-///   weighted_loo_mean = Σ(loo·cnt)/Σ(cnt) over finite loo;
-///   y = n_finite·tot2 - Σloo + weighted_loo_mean.
-/// `numer`/`cnt` are ROW-MAJOR [npopcomb × n_block] (numer[c*nb+b], the dstat output shape).
+// Global per-combination estimate (matrix_jackknife_est_full) — reference §4
 [[nodiscard]] inline double matrix_jackknife_est_col(const double* numer, const double* cnt,
                                                      int c, int n_block) {
     const std::size_t base = static_cast<std::size_t>(c) * static_cast<std::size_t>(n_block);
-    long double sum_n_all = 0.0L;  // Σ cnt (all blocks)
+    long double sum_n_all = 0.0L;
     for (int b = 0; b < n_block; ++b) sum_n_all += static_cast<long double>(cnt[base + b]);
     if (sum_n_all <= 0.0L) return std::nan("");
 
-    // tot = Σ(numer·cnt over valid) / Σ(cnt over valid).
     long double tot_num = 0.0L, tot_w = 0.0L;
     for (int b = 0; b < n_block; ++b) {
         const double nu = numer[base + b];
@@ -64,13 +42,9 @@ namespace steppe::core {
         const double nu = numer[base + b];
         const double cn = cnt[base + b];
         if (!std::isfinite(nu) || cn <= 0.0) continue;
-        const long double rel = static_cast<long double>(cn) / sum_n_all;  // rel_bl
-        if (rel >= 1.0L) continue;  // 1-rel==0 ⇒ loo not finite
+        const long double rel = static_cast<long double>(cn) / sum_n_all;
+        if (rel >= 1.0L) continue;
         const long double loo = (tot - static_cast<long double>(nu) * rel) / (1.0L - rel);
-        // Narrow to double for the finiteness gate ON PURPOSE: AT2 holds loo as an R double, so
-        // testing finiteness in double (NOT the long-double std::isfinite overload) keeps WHICH
-        // loo values survive bit-identical to the oracle — switching could change the survivor set
-        // and risk parity (§12). The accumulation itself stays long double (the cancellation carve-out).
         if (!std::isfinite(static_cast<double>(loo))) continue;
         const long double omrb = 1.0L - rel;
         sum_loo += loo;
@@ -87,17 +61,9 @@ namespace steppe::core {
                                weighted_loo_mean);
 }
 
-/// f2(f2blocks)$est for one pair series (the recentering target). AT2 f2(array): est_to_loo
-/// (block_lengths weights) then jack_vec_stats2 = weighted.mean(loo, 1-1/h), h=n/bl. For the
-/// per-block estimate vector `arr[b]` (length n_block) + block_lengths `bl[b]`:
-///   tot = weighted.mean(arr, bl); rel_bl = bl/Σbl; loo = (tot - arr·rel_bl)/(1-rel_bl);
-///   h = Σbl/bl; est = weighted.mean(loo, 1 - 1/h).
-/// NaN-safe (na.rm=TRUE: skip non-finite blocks throughout). All-zero/empty → 0.
+// Per-pair recentering estimate (f2(array)$est) — reference §5
 [[nodiscard]] inline double f2blocks_pair_est(const std::vector<double>& arr,
                                               const std::vector<int>& bl) {
-    // `arr` (per-block estimate) and `bl` (block_lengths) are both length n_block by contract;
-    // nb is derived from arr.size() yet bl[b] is indexed in lock-step. Guard the undefended
-    // precondition (debug-only; compiled out under NDEBUG, so the release hot path is unchanged).
     STEPPE_ASSERT(bl.size() == arr.size(), "f2blocks_pair_est: arr/bl length mismatch");
     const int nb = static_cast<int>(arr.size());
     long double sum_bl = 0.0L;
@@ -113,19 +79,18 @@ namespace steppe::core {
         tot_num += static_cast<long double>(a) *
                    static_cast<long double>(bl[static_cast<std::size_t>(b)]);
     }
-    const long double tot = tot_num / sum_bl;  // weighted.mean(arr, bl)
+    const long double tot = tot_num / sum_bl;
 
-    // est = weighted.mean(loo, 1 - 1/h), h = Σbl/bl, loo = (tot - arr·rel_bl)/(1-rel_bl).
     long double num = 0.0L, den = 0.0L;
     for (int b = 0; b < nb; ++b) {
         const double a = arr[static_cast<std::size_t>(b)];
         if (!std::isfinite(a)) continue;
         const long double blb = static_cast<long double>(bl[static_cast<std::size_t>(b)]);
-        const long double rel = blb / sum_bl;       // rel_bl
+        const long double rel = blb / sum_bl;
         if (rel >= 1.0L) continue;
         const long double loo = (tot - static_cast<long double>(a) * rel) / (1.0L - rel);
-        const long double h = sum_bl / blb;          // h
-        const long double w = 1.0L - 1.0L / h;       // 1 - 1/h
+        const long double h = sum_bl / blb;
+        const long double w = 1.0L - 1.0L / h;
         num += loo * w;
         den += w;
     }

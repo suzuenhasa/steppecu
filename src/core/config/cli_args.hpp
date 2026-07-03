@@ -1,23 +1,13 @@
 // src/core/config/cli_args.hpp
 //
-// CliArgs — the FLAT, parse-time-mutable command-line surface (architecture.md §9
-// "ConfigBuilder& merge_cli(const CliArgs&)"). It is the highest-precedence config
-// LAYER (compiled defaults < TOML < env STEPPE_* < CLI; architecture.md §9, ROADMAP
-// §4 / cli-bindings.md §4.5). The CLI11 parser (src/app, plain CXX) binds flags into
-// this struct, then ConfigBuilder::merge_cli folds it over the lower layers and
-// build() validates + freezes into an immutable RunConfig.
+// CliArgs — the flat, parse-time command-line surface: one raw field per flag,
+// nothing resolved or validated. The CLI parser fills it in and ConfigBuilder
+// folds it over the lower config layers (compiled defaults < TOML < env < CLI),
+// then build() freezes an immutable RunConfig. CUDA-free by contract. Each field
+// is a std::optional "was this flag set?" sentinel — an unset field leaves the
+// lower layer intact; a few vector/string fields use emptiness as that sentinel.
 //
-// CUDA-FREE BY CONTRACT — like steppe/config.hpp, it depends only on the C++ standard
-// library, so it compiles into core, the CLI, and (later) the bindings without the
-// device toolkit (architecture.md §4). It names ONLY std types and the CUDA-free
-// public enums; the app->struct mapping (e.g. "--device 0,1" string -> devices) is
-// done in ConfigBuilder, the single validated merge site, not scattered in the parser.
-//
-// std::optional is the "was this flag SET on the command line?" sentinel: an UNSET
-// optional leaves the lower-precedence layer (env / TOML / compiled default) intact;
-// a SET optional overrides it (the §9 precedence rule made explicit per field). A bare
-// value (no optional) would conflate "user passed the default" with "user passed
-// nothing", silently clobbering a TOML/env override with the compiled default.
+// Reference: docs/reference/src_core_config_cli_args.hpp.md
 #ifndef STEPPE_CORE_CONFIG_CLI_ARGS_HPP
 #define STEPPE_CORE_CONFIG_CLI_ARGS_HPP
 
@@ -27,10 +17,7 @@
 
 namespace steppe::config {
 
-/// Which subcommand was selected (mirrors cli-bindings.md §4.1 command set). `None`
-/// is the no-subcommand case (bare `steppe` -> help). The mapping to the real fit
-/// entry points (run_qpadm / run_qpwave / run_qpadm_search) is the app's job; this
-/// enum is only the parsed selection so build() can apply command-specific validation.
+// Command — the selected subcommand — reference §3
 enum class Command {
     None,
     ExtractF2,
@@ -41,191 +28,100 @@ enum class Command {
     F3,
     F4Ratio,
     Qpdstat,
-    F4Sweep,  ///< GPU-only all-combinations f4 sweep (every C(P,4); on-device filter).
-    F3Sweep,  ///< GPU-only all-combinations f3 sweep (every C(P,3); on-device filter).
-    Qpfstats, ///< genotype-path joint f2 smoother (--prefix + --pops -> a smoothed f2 dir).
-    QpGraph,  ///< single-graph qpGraph fit (--f2-dir + --graph edge-list -> the fit).
-    QpGraphSearch,  ///< topology SEARCH v1 (--f2-dir + --pops -> exhaustive bounded enumeration).
-    Dates,    ///< admixture DATING (--prefix + --target + --left{2} -> the date + SE; cuFFT LD engine).
+    F4Sweep,
+    F3Sweep,
+    Qpfstats,
+    QpGraph,
+    QpGraphSearch,
+    Dates,
 };
 
-/// extract-f2 ploidy policy (cli-bindings.md §4.1; the f2-estimator pseudo-haploid
-/// fix). `Auto` (the DEFAULT, matching AT2 adjust_pseudohaploid=TRUE) auto-detects
-/// each sample's ploidy from its genotypes (a het call ⇒ diploid, none ⇒ pseudo-
-/// haploid); `Diploid`/`PseudoHaploid` force a uniform ploidy for every sample
-/// (the --ploidy 2 / --ploidy 1 overrides; the legacy hardcoded-2 behavior is
-/// `Diploid`).
+// PloidyMode — extract-f2 ploidy policy — reference §4
 enum class PloidyMode {
     Auto,
     Diploid,
     PseudoHaploid,
 };
 
-/// The flat, parse-time CLI surface. Every field is the std::optional "was it set?"
-/// sentinel for the §9 precedence merge (an UNSET field does NOT override the lower
-/// layer). The vector/string fields that default to empty use emptiness as the
-/// "unset" sentinel where an empty value is itself the no-op (e.g. an empty pop list).
 struct CliArgs {
-    /// Selected subcommand (None ⇒ no subcommand; the app prints help).
     Command command = Command::None;
 
-    // ---- Global resource / precision knobs (every fit + extract command) -------
-
-    /// Raw `--device` argument string, UNPARSED ("auto" | "0" | "0,1"). Parsed +
-    /// validated into DeviceConfig::devices by ConfigBuilder (the single merge site),
-    /// NOT in the parser. GPU-ONLY: there is no "cpu" value (cli-bindings.md §5.4);
-    /// "cpu" is rejected at build() as InvalidConfig.
+    // Global resource and precision knobs — reference §5
     std::optional<std::string> device;
-
-    /// Raw `--precision` argument ("emu40" | "emu32" | "fp64" | "tf32"). Mapped to
-    /// steppe::Precision by ConfigBuilder; an unknown token is InvalidConfig.
     std::optional<std::string> precision;
-
-    /// `--config FILE` — a TOML config to merge BELOW the CLI but ABOVE env/defaults
-    /// (architecture.md §9). Empty ⇒ no file. The app passes this to merge_file().
     std::optional<std::string> config_path;
 
-    // ---- qpAdm / qpwave inputs + options (cli-bindings.md §4.1) ----------------
-
-    /// `--f2-dir DIR` — the precompute-once/fit-many f2_blocks dir (cli-bindings.md
-    /// §4.3). Resolved + uploaded by the app (M(cli-1)); here it is only carried.
+    // qpAdm and qpwave inputs — reference §6
     std::optional<std::string> f2_dir;
-
-    /// `--target` pop label (qpadm/qpadm-rotate). Resolved to an index against
-    /// pops.txt by the app, never here (the engine is index-only).
     std::optional<std::string> target;
-
-    /// `--left a,b,...` source labels (qpadm) / the full left set (qpwave, left[0]=ref).
     std::vector<std::string> left;
-
-    /// `--right r0,r1,...` outgroup labels; right[0] == R0.
     std::vector<std::string> right;
-
-    /// `--pool a,b,c,...` (qpadm-rotate) source pool the app enumerates subsets of.
     std::vector<std::string> pool;
 
-    /// `--pop1`/`--pop2`/`--pop3`/`--pop4` (the `f4` command) — ROW-ALIGNED quartet
-    /// columns (admixtools::f4 comb=FALSE): quartet k = (pop1[k], pop2[k], pop3[k],
-    /// pop4[k]). All four must have the same length (the app validates). The single-
-    /// quartet convenience `--pops A,B,C,D` (a 4-name --pops) is ALSO accepted by the f4
-    /// command (it reuses the `pops` field below, read in groups of 4), so a one-line f4
-    /// needs no four flags.
+    // Standalone f-statistic inputs — reference §7
     std::vector<std::string> pop1, pop2, pop3, pop4;
 
-    /// `--graph FILE` (the `qpgraph` command ONLY) — the admixture-graph edge-list file
-    /// (admixtools format: 2 whitespace/comma-separated columns parent child per line; a
-    /// header row "from,to" and #-comments are skipped). The leaves must be f2 pops.
+    // qpGraph and qpgraph-search options — reference §8
     std::optional<std::string> graph;
-
-    /// `--numstart N` (qpgraph) — the multistart restart count (the fleet parallel axis).
     std::optional<int> numstart;
-
-    /// `--diag-f3 X` (qpgraph) — the f3 covariance regularization (AT2 diag_f3 default 1e-5).
     std::optional<double> diag_f3;
-
-    /// `--constrained` / `--no-constrained` (qpgraph) — drift edges >= 0 (AT2 default TRUE).
     std::optional<bool> constrained;
-
-    /// `--max-nadmix N` (qpgraph-search) — the bounded admixture-node ceiling (v1: {0,1}).
     std::optional<int> max_nadmix;
 
-    /// `--prefix PATH` (the `qpdstat` command ONLY) — the genotype prefix for the
-    /// normalized-D MAGNITUDE (Part B; not yet implemented). DISTINCT from `prefix` below
-    /// (extract-f2's geno/snp/ind triple prefix) so the qpdstat guard checks it WITHOUT
-    /// triggering ConfigBuilder's extract-f2 prefix->geno/snp/ind expansion. When SET, the
-    /// qpdstat command fails fast with a "Part B not yet implemented" message; the --f2-dir
-    /// path reports f4 (the AT2 f2-path convention, proven byte-identical to qpdstat f4mode).
+    // qpdstat magnitude prefix and f4-ratio 5th column — reference §7
     std::optional<std::string> qpdstat_prefix;
-
-    /// `--pop5` (the `f4-ratio` command only) — the 5th ROW-ALIGNED column (admixtools
-    /// ::qpf4ratio): tuple k = (pop1[k], pop2[k], pop3[k], pop4[k], pop5[k]); alpha =
-    /// f4(p1,p2;p3,p4)/f4(p1,p2;p5,p4). All five columns must have the same length (the app
-    /// validates). The `--pops A,B,C,D,E` 5-tuple convenience (the `pops` field below, read in
-    /// groups of 5) is ALSO accepted by the f4-ratio command.
     std::vector<std::string> pop5;
 
-    // ---- QpAdmOptions overrides (default to the struct defaults; cli-bindings.md
-    // §4.1 — flag names mirror QpAdmOptions so a bare invocation reproduces goldens).
+    // qpAdm option overrides — reference §9
+    std::optional<double> fudge;
+    std::optional<int>    als_iterations;
+    std::optional<int>    rank;
+    std::optional<double> rank_alpha;
+    std::optional<bool>   allow_negative_weights;
+    std::optional<int>    jackknife;
+    std::optional<double> p_se_threshold;
+    std::optional<bool>   se_require_p;
 
-    std::optional<double> fudge;            ///< --fudge        (QpAdmOptions::fudge)
-    std::optional<int>    als_iterations;   ///< --als-iters    (QpAdmOptions::als_iterations)
-    std::optional<int>    rank;             ///< --rank         (QpAdmOptions::rank)
-    std::optional<double> rank_alpha;       ///< --rank-alpha   (QpAdmOptions::rank_alpha)
-    std::optional<bool>   allow_negative_weights;  ///< --allow-neg / --no-allow-neg
-    std::optional<int>    jackknife;        ///< --jackknife 0|1|2 (JackknifePolicy)
-    std::optional<double> p_se_threshold;   ///< --p-se-threshold
-    std::optional<bool>   se_require_p;     ///< --se-require-p
+    // qpadm-rotate enumeration bounds — reference §10
+    std::optional<int> min_sources;
+    std::optional<int> max_sources;
 
-    // ---- qpadm-rotate pool-enumeration bounds (cli-bindings.md §4.1) -----------
-    std::optional<int> min_sources;         ///< --min-sources
-    std::optional<int> max_sources;         ///< --max-sources
-
-    // ---- f4-sweep / f3-sweep (GPU-only all-combinations f-stat sweep) ----------
-    /// --all-quartets (f4 / qpdstat) / --all-triples (f3) : ENABLE the sweep mode on the
-    /// standalone-stat commands. When set, the command enumerates EVERY C(P,k) combination
-    /// over the --pops SUBSET (empty ⇒ the whole f2 dir) instead of the explicit row-aligned
-    /// --pop1..--popK list. Unset ⇒ the byte-identical explicit-list path (the goldens).
+    // f4-sweep and f3-sweep controls — reference §11
     std::optional<bool>   sweep_all_combinations;
-    /// --min-z Z : keep items with |z| >= Z (the on-device filter; default 3.0). Mutually
-    /// exclusive with --top-k.
     std::optional<double> sweep_min_z;
-    /// --top-k K : keep the K items with the largest |z| (bounded device-side reservoir, ~K resident).
     std::optional<int>    sweep_top_k;
-    /// --sure : lift the maxcomb cap (a sweep over more than kFstatMaxComb items refuses
-    /// without it — the cap guards COMPUTE TIME, every item is computed to test the filter).
     std::optional<bool>   sweep_sure;
-    /// --shard-dir DIR : write the survivor table to a CSV file under DIR (created if absent),
-    /// instead of stdout/--out. At sweep scale the survivor set (post |z| / top-k filter) is
-    /// the small output; the full C(P,k) table is NEVER materialized (it stays on-device).
     std::optional<std::string> shard_dir;
 
-    // ---- extract-f2 inputs (cli-bindings.md §4.1; consumed in M(cli-4)) --------
-    std::optional<std::string> prefix;      ///< --prefix (sets geno/snp/ind = PREFIX.{geno,snp,ind})
-    std::optional<std::string> geno;        ///< --geno
-    std::optional<std::string> snp;         ///< --snp
-    std::optional<std::string> ind;         ///< --ind
-    std::optional<std::string> out_dir;     ///< --out-dir (canonical) / --out (alias) (extract-f2 dir; also qpfstats --out-dir)
-    std::vector<std::string>   pops;        ///< --pops (PopSelection::Explicit)
-    std::optional<int>         auto_top_k;  ///< --auto-top-k (PopSelection::AutoTopK)
-    std::optional<int>         min_n;       ///< --min-n (PopSelection::MinN)
-    std::optional<double>      blgsize;     ///< --blgsize (MORGANS, AT2 convention; default 0.05 = 5 cM). ConfigBuilder converts Morgans->cM (×kCentimorgansPerMorgan) into the cM-stored RunConfig::blgsize_cm_.
-    std::optional<PloidyMode>  ploidy;      ///< --ploidy auto|1|2 (default Auto = AT2 adjust_pseudohaploid; the f2 pseudo-haploid fix)
+    // extract-f2 inputs — reference §12
+    std::optional<std::string> prefix;
+    std::optional<std::string> geno;
+    std::optional<std::string> snp;
+    std::optional<std::string> ind;
+    std::optional<std::string> out_dir;
+    std::vector<std::string>   pops;
+    std::optional<int>         auto_top_k;
+    std::optional<int>         min_n;
+    std::optional<double>      blgsize;
+    std::optional<PloidyMode>  ploidy;
 
-    // ---- FilterConfig overrides (cli-bindings.md §4.1; M(cli-4)) ---------------
-    std::optional<double> maf;              ///< --maf
-    std::optional<double> geno_max_missing; ///< --geno-max-miss
-    std::optional<double> mind_max_missing; ///< --mind-max-miss
-    std::optional<bool>   autosomes_only;   ///< --auto-only / --no-auto-only (extract-f2 default ON, AT2 parity)
-    std::optional<bool>   drop_monomorphic; ///< --drop-mono / --no-drop-mono (extract-f2 default ON, AT2 poly_only parity)
-    std::optional<bool>   transversions_only; ///< --transversions
-    /// --strand-mode drop|keep|flip (raw, UNPARSED token; ConfigBuilder maps it to
-    /// FilterConfig::strand_mode at the single merge site, an unknown token =
-    /// InvalidConfig). Default (unset) ⇒ Drop == the frozen behavior (palindromic
-    /// A/T, C/G SNPs dropped, merge-safety default, bit-identical parity). `keep`
-    /// retains ambiguous SNPs (reproduces AT2's default); `flip` is a documented
-    /// not-yet-implemented token (currently == keep, no freq-based reorientation).
+    // Filter overrides — reference §13
+    std::optional<double> maf;
+    std::optional<double> geno_max_missing;
+    std::optional<double> mind_max_missing;
+    std::optional<bool>   autosomes_only;
+    std::optional<bool>   drop_monomorphic;
+    std::optional<bool>   transversions_only;
     std::optional<std::string> strand_mode;
 
-    // ---- extract-f2 run controls (cli-bindings.md §4.1; M(cli-4)) -------------
-    /// --tier auto|resident|host|disk (the M5 f2_blocks OUTPUT-tier override). Raw,
-    /// UNPARSED token; ConfigBuilder maps it to DeviceConfig::force_tier at the single
-    /// merge site (an unknown token is InvalidConfig). `auto` (the default) = the
-    /// select_output_tier runtime policy; resident/host/disk PIN the tier. It is the
-    /// higher-precedence twin of STEPPE_FORCE_TIER (the config field wins; the env stays
-    /// the fallback resolve_output_tier honors). PARITY-NEUTRAL (the tier moves bytes to
-    /// a different store, never a reported number; architecture.md §12).
+    // extract-f2 run controls — reference §14
     std::optional<std::string> tier;
-    std::optional<bool>   dry_run;          ///< --dry-run (report tiers/sizes, no compute)
-    /// --hash (default OFF): compute the source-dataset provenance SHA-256s
-    /// (geno/snp/ind). OFF by default because the whole-.geno SHA is a ~tens-of-seconds
-    /// whole-file read+compress that dominated extract-f2 yet only yields a provenance
-    /// value; when ON it is overlapped on a background thread with the GPU pipeline.
-    /// When OFF, meta.json records source_hash_computed:false + empty *_sha256.
+    std::optional<bool>   dry_run;
     std::optional<bool>   hash_source;
 
-    // ---- Output (cli-bindings.md §4.4) ----------------------------------------
-    std::optional<std::string> out_file;    ///< --out FILE (stdout if unset)
-    std::optional<std::string> format;      ///< --format csv|tsv|json (default csv)
+    // Output — reference §15
+    std::optional<std::string> out_file;
+    std::optional<std::string> format;
 };
 
 }  // namespace steppe::config

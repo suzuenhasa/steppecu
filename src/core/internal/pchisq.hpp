@@ -1,16 +1,10 @@
 // src/core/internal/pchisq.hpp
 //
 // Host-pure, native-FP64 upper-tail chi-squared probability — the qpAdm rank-test
-// p-value special function (the loose `p` tier, OQ-13). CUDA-FREE, header-only,
-// standard-library-only — exactly like core/internal/small_linalg.hpp, so it
-// compiles into the device target (where CpuBackend's rank_sweep lives, M(fit-2))
-// AND into core/qpadm (the orchestrator + run_impl) without dragging in any
-// toolkit, keeping the formula in ONE place (DRY: qpadm_fit.cpp delegates here).
+// p-value. CUDA-free, header-only, standard-library-only, so it compiles into both
+// the device target and core/qpadm without dragging in the toolkit.
 //
-// The math is the standard Numerical-Recipes regularized incomplete gamma: the
-// upper tail P(X > x | dof) = Q(dof/2, x/2) via the series form for x < a+1 and
-// the continued-fraction form otherwise. Double precision is ample for the loose
-// p tier; the rank DECISION (p > alpha) is what gates, not the p bits.
+// Reference: docs/reference/src_core_internal_pchisq.hpp.md
 #ifndef STEPPE_CORE_INTERNAL_PCHISQ_HPP
 #define STEPPE_CORE_INTERNAL_PCHISQ_HPP
 
@@ -18,36 +12,18 @@
 
 namespace steppe::core::internal {
 
-/// Shared convergence knobs for BOTH incomplete-gamma tails — single-homed at
-/// namespace scope so the series and continued-fraction forms cannot drift apart
-/// (DRY; NAMING-STYLE-STANDARD §2.5 single-source; group-5 5.3, group-9 9.2).
-/// Compile-time constants, so `inline constexpr`, NOT `const` (standard §2.5
-/// [MIXED Group 9.1]). `kPchisqMaxIter` = the iteration cap (1000); `kPchisqEps`
-/// = the relative convergence tolerance (1e-15). Loose-`p`-tier values (OQ-13),
-/// not parity-frozen.
+// Named constants — reference §2
 inline constexpr int    kPchisqMaxIter = 1000;
 inline constexpr double kPchisqEps     = 1e-15;
 
-/// FP underflow floor for the Lentz continued-fraction (`pchisq_gammq_cf`):
-/// rescales any numerator/denominator term that drops below it so the recurrence
-/// cannot divide by zero. Loose-`p`-tier value (OQ-13), not parity-frozen.
-/// Hoisted from a block-scope `const` local so all three tuning knobs are
-/// single-homed at namespace scope (standard §2.5 [MIXED Group 9.1] single-source,
-/// group-9 9.1/9.2).
 inline constexpr double kPchisqFpMin   = 1e-300;
 
-/// The regularized-incomplete-gamma normalizing prefactor
-/// `exp(-x + a·log(x) − lgamma(a))`, shared by BOTH the series (`pchisq_gammp_series`)
-/// and continued-fraction (`pchisq_gammq_cf`) tails. Single-homed so the two tails
-/// cannot drift: the exact SAME expression — same op order, same intrinsics — must
-/// produce a bit-identical prefactor for the two forms to compose into a consistent
-/// `pchisq_upper` (DRY; NAMING-STYLE-STANDARD §2.5 single-source, §3.2 parity-sensitive
-/// — name only, value unchanged; findings group-7 7.2).
+// The shared normalizing prefactor — reference §4
 [[nodiscard]] inline double pchisq_gamma_prefactor(double a, double x) {
     return std::exp(-x + a * std::log(x) - std::lgamma(a));
 }
 
-/// Regularized lower incomplete gamma P(a, x) by series (good for x < a+1).
+// The two incomplete-gamma methods — reference §5
 [[nodiscard]] inline double pchisq_gammp_series(double a, double x) {
     double ap = a;
     double sum = 1.0 / a;
@@ -61,7 +37,6 @@ inline constexpr double kPchisqFpMin   = 1e-300;
     return sum * pchisq_gamma_prefactor(a, x);
 }
 
-/// Regularized upper incomplete gamma Q(a, x) by continued fraction (x >= a+1).
 [[nodiscard]] inline double pchisq_gammq_cf(double a, double x) {
     double b = x + 1.0 - a;
     double c = 1.0 / kPchisqFpMin;
@@ -83,14 +58,13 @@ inline constexpr double kPchisqFpMin   = 1e-300;
     return pchisq_gamma_prefactor(a, x) * h;
 }
 
-/// Upper-tail chi-squared probability P(X > x | dof) = Q(dof/2, x/2). dof <= 0 ⇒
-/// NaN (the AT2 rankdrop "NA" row, e.g. the last nested diff); x <= 0 ⇒ 1.0.
+// The entry point: pchisq_upper — reference §6
 [[nodiscard]] inline double pchisq_upper(double x, int dof) {
     if (dof <= 0) return std::nan("");
     if (x <= 0.0) return 1.0;
     const double a = 0.5 * static_cast<double>(dof);
     const double xx = 0.5 * x;
-    if (xx < a + 1.0) return 1.0 - pchisq_gammp_series(a, xx);  // Q = 1 - P
+    if (xx < a + 1.0) return 1.0 - pchisq_gammp_series(a, xx);
     return pchisq_gammq_cf(a, xx);
 }
 

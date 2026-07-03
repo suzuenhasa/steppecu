@@ -1,122 +1,39 @@
 // src/core/fstats/f2_blocks_multigpu.hpp
 //
-// The single-node multi-GPU (SPMG) precompute ENTRY POINT — the seam the
-// API / f2_from_blocks layer calls to compute the per-block f2 tensor across the
-// G devices of a Resources bundle (architecture.md §5 S2, §11.4 SPMG, §9 Resources
-// injection; design §5). It shards whole BLOCKS across the G devices, computes each
-// device's partial via the UNMODIFIED per-device `CudaBackend::compute_f2_blocks`
-// (it does NOT reimplement the per-block GEMM; design §0-§2), and COMBINES the
-// partials in the FIXED g=0..G-1 device order — BIT-IDENTICAL to the single-GPU
-// reference and identical across G (architecture.md §12 PARITY LAW).
+// Entry point for computing the per-block f2 tensor across all G GPUs of a
+// machine. Host-pure and CUDA-free: whole blocks are sharded across devices and
+// the partials combined in fixed device order, so the result is bit-identical to
+// the single-GPU path and identical for any G.
 //
-// CUDA-FREE, host-pure, in `steppe::core`: it names only the CUDA-free
-// `Resources` / `MatView` / `BlockPartition` / `Precision` / `F2BlockTensor` and
-// the CUDA-free host-staged combine, so it compiles into steppe_core without the
-// device toolkit (design §5, §8). The combine path is the host-staged baseline
-// (the portable parity baseline, architecture.md §11.4); the opt-in device-resident
-// cudaMemcpyPeer fast-path (device/p2p_combine.hpp) is a separate unit and is
-// bit-identical to the baseline by construction (§12).
+// Reference: docs/reference/src_core_fstats_f2_blocks_multigpu.hpp.md
 #ifndef STEPPE_CORE_FSTATS_F2_BLOCKS_MULTIGPU_HPP
 #define STEPPE_CORE_FSTATS_F2_BLOCKS_MULTIGPU_HPP
 
-#include "core/internal/views.hpp"               // steppe::core::MatView (Q/V/N contract)
-#include "core/domain/block_partition_rule.hpp"  // steppe::core::BlockPartition
-#include "steppe/config.hpp"                      // steppe::Precision
-#include "steppe/fstats.hpp"                      // steppe::F2BlockTensor
-#include "device/resources.hpp"                   // steppe::device::Resources (CUDA-free)
-#include "device/device_f2_blocks.hpp"            // steppe::device::DeviceF2Blocks (CUDA-free device-resident result handle)
-#include "device/f2_blocks_out.hpp"               // steppe::device::F2BlocksOut (CUDA-free adaptive tiered result)
+#include "core/internal/views.hpp"
+#include "core/domain/block_partition_rule.hpp"
+#include "steppe/config.hpp"
+#include "steppe/fstats.hpp"
+#include "device/resources.hpp"
+#include "device/device_f2_blocks.hpp"
+#include "device/f2_blocks_out.hpp"
 
 namespace steppe::core {
 
-/// M5 ADAPTIVE TIERED precompute (single-GPU first). The [P×P×n_block] f2/Vpair
-/// result lives in the FASTEST tier it FITS in, selected AUTOMATICALLY from runtime
-/// free VRAM / free host RAM (tier_select.hpp), or pinned by config.force_tier /
-/// STEPPE_FORCE_TIER (tests):
-///   * Resident (TIER 0): result + working set fit free VRAM -> the EXISTING
-///     device-resident path UNCHANGED (compute_f2_blocks_device, NO sink, NO
-///     streaming — the 3.9x win preserved; streaming is OPT-IN-BY-NEED);
-///   * HostRam (TIER 1): does not fit VRAM but fits free host RAM -> stream blocks
-///     into a host F2BlockTensor via the triple-buffered sink;
-///   * Disk (TIER 2): fits neither -> stream blocks to a disk cache file via a small
-///     persistent pinned staging buffer (laptop-friendly tiny RAM).
-/// PARITY-NEUTRAL (architecture.md §12): F2BlocksOut::to_host() is memcmp-bit-identical
-/// across all tiers and to the single-GPU device-resident reference — the tier changes
-/// only WHERE/WHEN a slab lands, never its bits. The tiered path ALWAYS drives gpus[0]
-/// regardless of G (it fail-fasts only on G < 1 and tier-selects on the root's free
-/// VRAM); multi-GPU block-sharding of the stream is the unimplemented follow-on.
+// Adaptive tiered precompute — reference §6
 [[nodiscard]] steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
     const BlockPartition& partition,
     const Precision& precision);
 
-/// M4.5 DEVICE-RESIDENT multi-GPU precompute (the PRIMARY entry; the cure). Computes
-/// the per-block f2 tensor across the G devices and returns it as a VRAM handle
-/// (DeviceF2Blocks) — NO forced D2H, NO host alloc/zero. The host
-/// compute_f2_blocks_multigpu below is now a thin wrapper = this + .to_host().
-///
-///   * G == 1: returns the ONE device's full result resident on gpus[0]
-///     (compute_f2_blocks_device) — the headline win: NO D2H AT ALL.
-///   * G >= 2 on a P2P box: per-device DevicePartials stay resident, assembled
-///     device-resident on the root (combine_f2_partials_resident_device — the
-///     no-final-D2H variant) into one DeviceF2Blocks.
-///   * G >= 2 on a NO-PEER box (the consumer 5090): full single-tensor assembly
-///     across 2 GPUs still requires P2P or a host bounce. The per-device partials
-///     stay RESIDENT (no premature D2H); this entry then materializes ONE host
-///     bounce ONLY because there is no P2P fabric to assemble a single device tensor
-///     across the two cards (documented limitation, architecture.md §11.4 no-peer
-///     tier), re-uploaded so the PRIMARY return is still a DeviceF2Blocks. The
-///     per-device compute is still resident; the host bounce is the assembly
-///     transport, not a forced output copy.
+// Device-resident multi-GPU precompute — reference §5
 [[nodiscard]] steppe::device::DeviceF2Blocks compute_f2_blocks_multigpu_device(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,
     const BlockPartition& partition,
     const Precision& precision);
 
-/// Compute the per-block f2 tensor `f2_blocks [P × P × n_block]` + the retained
-/// per-block `Vpair` across the G devices in `resources`, BIT-IDENTICAL to the
-/// single-GPU `CudaBackend::compute_f2_blocks` over the same full inputs
-/// (architecture.md §12). The bit-identity holds because the sharding is
-/// BLOCK-ALIGNED — each block is computed entirely on one device from exactly its
-/// own contiguous SNP columns, so its slab bits equal the single-GPU slab — and the
-/// combine sums the per-device partials in the fixed g=0..G-1 order onto a
-/// zero-initialized full tensor (design §0).
-///
-/// G == 1 (`resources.device_count() == 1`) is the EXACT current single-GPU path:
-/// no shard, no combine — it calls `resources.gpus[0].backend->compute_f2_blocks`
-/// over the FULL Q/V/N + partition and returns it UNCHANGED (zero behavior change,
-/// bit-for-bit the existing result; design §5). G >= 2: plan_block_shards →
-/// per-device sub-view compute → fixed-order combine via compute_multigpu_partials_into
-/// (the M4.5 direct sharded-D2H path; combine_f2_partials_host was deleted from this
-/// path, kept only as the bit-identical parity reference; architecture.md §11.4).
-///
-/// The G per-device GEMMs are driven CONCURRENTLY — one host thread (std::jthread)
-/// per device, each driving its own backend on its own device and writing its own
-/// pre-sized `partials[g]` slot, joined before the combine (architecture.md §11.4,
-/// §7). This is the SPMG speedup: each `CudaBackend::compute_f2_blocks` is blocking
-/// and self-contained (owns its device/stream/handle), so issuing them one-at-a-time
-/// serialized work the hardware overlaps; fanned out the wall-clock is max_g time(g),
-/// not Σ_g. The fan-out is PARITY-NEUTRAL: each device's bits are fixed by its
-/// block-aligned shard and are independent of execution concurrency, and the combine
-/// reads `partials[g]` in the fixed g=0..G-1 order AFTER the join barrier (§12). The
-/// combine itself is off the bandwidth critical path (kB-MB; §11.4) and stays serial.
-///
-/// @param resources  the G-device bundle (build_resources). `gpus[g]` in the FIXED
-///                   g=0..G-1 combine order (DeviceConfig::devices order). Non-const
-///                   because driving each `backend->compute_f2_blocks` mutates the
-///                   backend's device-side scratch (the backends are move-only,
-///                   owned here).
-/// @param Q,V,N      the FULL per-SNP Q/V/N contract, column-major [P × M]
-///                   (views.hpp). Each device receives a zero-copy column sub-view.
-/// @param partition  the SHARED SNP→block partition (assign_blocks); `block_id`
-///                   non-decreasing ⇒ each block's columns are contiguous, the
-///                   property block-aligned sharding requires (design §2).
-/// @param precision  governs the per-device f2 GEMMs only (architecture.md §12),
-///                   forwarded UNCHANGED to each compute_f2_blocks so every device
-///                   uses the same fixed-slice Ozaki / native FP64 path.
-/// @return  the combined full F2BlockTensor.
+// Combined host-tensor precompute — reference §4
 [[nodiscard]] F2BlockTensor compute_f2_blocks_multigpu(
     steppe::device::Resources& resources,
     const MatView& Q, const MatView& V, const MatView& N,

@@ -1,5 +1,8 @@
-// src/core/qpadm/model_search.cpp — the S8 ROTATION orchestrator + the base
-// ComputeBackend::fit_models_batched default body.
+// src/core/qpadm/model_search.cpp — orchestrates fitting a whole list of qpAdm
+// models: one shared per-model fit chain, shard/batch routing, and the multi-GPU
+// fan-out. CUDA-free — all device work happens behind ComputeBackend virtuals.
+//
+// Reference: docs/reference/src_core_qpadm_model_search.cpp.md
 
 #include "core/qpadm/model_search.hpp"
 
@@ -10,30 +13,18 @@
 #include <thread>
 #include <vector>
 
-#include "core/qpadm/model_search_core.hpp"  // plan_model_shards, ModelShard
-#include "core/qpadm/qpadm_bounds.hpp"       // model_fits_small_path — the SINGLE-SOURCE kQpMax* envelope
-#include "core/qpadm/qpadm_fit.hpp"          // run_impl, left_with_target, default_fit_precision
-#include "device/backend.hpp"                // ComputeBackend
-#include "device/device_f2_blocks.hpp"       // DeviceF2Blocks, upload_f2_blocks_to_device
-#include "device/resources.hpp"              // device::Resources
-#include "steppe/config.hpp"                 // Precision
-#include "steppe/fstats.hpp"                 // F2BlockTensor
+#include "core/qpadm/model_search_core.hpp"
+#include "core/qpadm/qpadm_bounds.hpp"
+#include "core/qpadm/qpadm_fit.hpp"
+#include "device/backend.hpp"
+#include "device/device_f2_blocks.hpp"
+#include "device/resources.hpp"
+#include "steppe/config.hpp"
+#include "steppe/fstats.hpp"
 
 namespace steppe::core::qpadm {
 
-// The single per-model fit chain ([7.4] dedup): assemble S3 → run_impl(S4→S6→S7) →
-// echo the caller's stable model_index. Templated on the f2 SOURCE so the device-
-// resident DeviceF2Blocks path AND the host-oracle F2BlockTensor path share ONE
-// assemble→run→echo definition (assemble_f4 is overloaded for both f2 types, and both
-// expose .block_sizes) — mirroring qpadm_fit.cpp's run_qpadm_impl. The precision is the
-// unified default (single-homed in qpadm_fit.hpp), passed identically to both paths.
-//
-// assemble_f4 stays native by carve-out; the covariance SYRK engages the emulated{40}
-// default (auto-native fallback) inside jackknife_cov; SVD/Qinv/chi^2 native. NOTE:
-// assemble_f4 caches tot_line_ as a per-backend member consumed by jackknife_cov inside
-// run_impl, so the assemble and the run_impl must be adjacent on the SAME backend (they
-// are — one model at a time on one backend instance; callers invoke this sequentially
-// per device worker).
+// Single per-model fit chain — reference §2
 template <class F2Src>
 QpAdmResult fit_one_model(ComputeBackend& be, const F2Src& f2,
                           const QpAdmModel& model, const QpAdmOptions& opts) {
@@ -41,32 +32,21 @@ QpAdmResult fit_one_model(ComputeBackend& be, const F2Src& f2,
     const std::vector<int> left_idx = left_with_target(model);
     F4Blocks X = be.assemble_f4(f2, std::span<const int>(left_idx),
                                 std::span<const int>(model.right), prec);
-    // F1 / OQ-12: weight the jackknife by the SURVIVOR blocks assemble_f4 kept
-    // (X.block_sizes) — a missing block (Vpair==0 for any pair) was dropped from X.
-    // With no missing blocks this == f2.block_sizes (byte-identical).
     std::span<const int> bs(X.block_sizes);
     QpAdmResult res = run_impl(be, std::move(X), bs, model, opts);
-    res.model_index = model.model_index;  // echo the caller's stable identity
+    res.model_index = model.model_index;
     return res;
 }
 
+// Device forwarder onto the fit chain — reference §2
 QpAdmResult fit_one_model_device(ComputeBackend& be,
                                  const device::DeviceF2Blocks& f2,
                                  const QpAdmModel& model,
                                  const QpAdmOptions& opts) {
-    // Thin forwarder onto the shared, f2-source-templated fit_one_model ([7.4] dedup) —
-    // the device-resident path (zero D2H of the tensor on the CUDA path).
     return fit_one_model(be, f2, model, opts);
 }
 
-// ---- The per-model DEFAULT body (the LARGE/tail path + the CpuBackend oracle) ----
-// Used for (a) the >32 / large tail of the rotation (one device dispatch per model is
-// correct for the tail, design §5) and (b) the CpuBackend parity oracle (a host loop
-// is the CORRECT shape for the oracle, NOT the deliverable). The SMALL-path rotation
-// common case does NOT come here — run_qpadm_search routes it to the device-BATCHED
-// virtual be.fit_models_batched. Each model is fit WHOLLY through `be`'s own device
-// virtuals (assemble_f4 reading the resident f2 → run_impl). Domain outcomes ride in
-// results[i].status, never a throw.
+// Default per-model batch body / large-model tail — reference §3
 std::vector<QpAdmResult> fit_models_batched_default(
     ComputeBackend& be, const device::DeviceF2Blocks& f2,
     std::span<const QpAdmModel> models, const QpAdmOptions& opts) {
@@ -78,13 +58,7 @@ std::vector<QpAdmResult> fit_models_batched_default(
     return out;
 }
 
-// CUDA-FREE host gate for the kQpMax* bit-parity small-path envelope. Used by
-// run_qpadm_search to partition the model list: small-path → the device-BATCHED
-// fit_models_batched virtual; large → per-model. Delegates to the SINGLE SOURCE
-// (qpadm_bounds.hpp model_fits_small_path) that ALSO sizes the kernel per-thread
-// arrays and backs CudaBackend::model_fits_small_path — so the host partition gate
-// cannot drift wider than the kernel arrays it routes into (a wider gate would admit
-// an oversized model and overflow the fixed device local arrays — UB).
+// Small-path partition gate — reference §4
 bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts) {
     const int nl = static_cast<int>(model.left.size());
     const int nr = static_cast<int>(model.right.size()) - 1;
@@ -92,34 +66,22 @@ bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts) {
     return model_fits_small_path(nl, nr, r);
 }
 
-// Scatter a sub-list's results back into `out` by their SAVED positions ([7.4] dedup).
-// `pos[k]` is the index into `out` that `results[k]` came from (the partition recorded
-// it). Single-homes the defensive double-bound (`k < results.size() && k < pos.size()`)
-// so the small-path and large-path scatter share one definition and cannot drift. Moves
-// each result into its slot (results is consumed).
+// Shard result scatter helper — reference §5
 void scatter_by_pos(std::vector<QpAdmResult>& out, std::vector<QpAdmResult>& results,
                     const std::vector<std::size_t>& pos) {
     for (std::size_t k = 0; k < results.size() && k < pos.size(); ++k)
         out[pos[k]] = std::move(results[k]);
 }
 
-// Fit a shard of models on `be` (one device): SMALL-path models go through the device-
-// BATCHED virtual `be.fit_models_batched` (the genuine batched rotation primitive — a
-// single batched dispatch per same-shape bucket, NOT a per-model loop); the LARGE/>32
-// tail goes through the per-model fit_models_batched_default. Returns results aligned
-// to `models` order (each result echoes its model_index for the caller's re-sort). The
-// CpuBackend does NOT provide a batched override (provides_batched_fit()==false) ⇒ the
-// oracle routes EVERY model through the per-model default (correct for the oracle).
+// Per-GPU shard fitter — reference §5
 std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blocks& f2,
                                    std::span<const QpAdmModel> models,
                                    const QpAdmOptions& opts) {
-    const Precision prec = default_fit_precision();  // single-homed ([7.2]/[9.1] dedup)
+    const Precision prec = default_fit_precision();
     std::vector<QpAdmResult> out(models.size());
 
-    // Partition into small-path (batched) and large-path (per-model) sub-lists,
-    // preserving each model's identity (model_index) for the caller's re-sort.
     std::vector<QpAdmModel> small, large;
-    std::vector<std::size_t> small_pos, large_pos;  // positions into `models`/`out`
+    std::vector<std::size_t> small_pos, large_pos;
     small.reserve(models.size());
     for (std::size_t i = 0; i < models.size(); ++i) {
         if (model_in_small_path(models[i], opts)) {
@@ -130,59 +92,33 @@ std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blo
     }
 
     if (!small.empty()) {
-        // EXPLICIT capability query (backend.hpp provides_batched_fit) — NOT a
-        // try/catch sentinel probe: the CudaBackend exposes the genuine batched
-        // rotation override; the CpuBackend oracle does not and routes the small-path
-        // models through the per-model default too. A real throw from INSIDE the
-        // batched override now PROPAGATES (it is a fault), not swallowed as "no override".
         std::vector<QpAdmResult> small_results =
             be.provides_batched_fit()
                 ? be.fit_models_batched(f2, std::span<const QpAdmModel>(small), opts, prec)
                 : fit_models_batched_default(be, f2, std::span<const QpAdmModel>(small), opts);
-        scatter_by_pos(out, small_results, small_pos);  // [7.4] dedup
+        scatter_by_pos(out, small_results, small_pos);
     }
     if (!large.empty()) {
         std::vector<QpAdmResult> large_results =
             fit_models_batched_default(be, f2, std::span<const QpAdmModel>(large), opts);
-        scatter_by_pos(out, large_results, large_pos);  // [7.4] dedup
+        scatter_by_pos(out, large_results, large_pos);
     }
     return out;
 }
 
 }  // namespace steppe::core::qpadm
 
-// ---- Public entry points (include/steppe/qpadm.hpp) -------------------------
 namespace steppe {
 
 namespace {
 
-/// One-time f2 REPLICATION broadcast (design §3.2): ensure every gpus[g] device has
-/// a resident f2. The input `f2` is resident on ONE device (f2.device_id). For each
-/// device that is NOT that one, materialize once to host (f2.to_host(), the existing
-/// opt-in D2H) and upload (upload_f2_blocks_to_device, the existing H2D). The device
-/// that already holds `f2` reuses the input handle (no copy). The returned vector is
-/// indexed by g; replicas it owns are freed at scope exit (RAII). The returned
-/// pointers are borrowed: replicated[g] points either at &f2 (the resident device)
-/// or into `owned` (a fresh upload).
-///
-/// DEFERRED — multi-GPU rotation is host-bounce-capped on no-P2P cards (consumer RTX 5090:
-/// caps.can_access_peer == false, so the device-resident cudaMemcpyPeer fast-path is
-/// unavailable). This G>=2 replication is CORRECT + deterministic (G1==G2 bit-identical)
-/// but throughput-suboptimal; the single-GPU path (run_qpadm_search G==1 fast path) is the
-/// SUPPORTED path. Known-issue narrative + the fix-to-eliminate:
-/// see docs/design/multigpu-host-bounce.md.
+// Multi-GPU f2 replication handle — reference §8
 struct F2Replication {
-    std::vector<const device::DeviceF2Blocks*> per_device;  // borrowed, indexed by g
-    std::vector<device::DeviceF2Blocks> owned;              // the fresh uploads (RAII)
+    std::vector<const device::DeviceF2Blocks*> per_device;
+    std::vector<device::DeviceF2Blocks> owned;
 };
 
-/// Scatter a worker's batch into the pre-sized result slots by model_index ([7.1]
-/// dedup). The pre-sized-slot write IS the deterministic re-sort: each model_index in
-/// [0,n) is written EXACTLY once (run_qpadm_search sets model_index = i on the input).
-/// FAIL-FAST on an out-of-range index (the determinism invariant the re-sort rests on)
-/// — single-homed here so the G==1 fast path and the G>=2 worker enforce it IDENTICALLY
-/// rather than from two divergent inline copies (the host-oracle overload keeps its own
-/// loop-index FALLBACK because its semantics genuinely differ — it does not fail-fast).
+// Deterministic re-sort by pre-sized slots — reference §6
 void scatter_into_slots(std::vector<QpAdmResult>& results,
                         std::vector<QpAdmResult>& batch, std::size_t n) {
     for (QpAdmResult& r : batch) {
@@ -194,16 +130,11 @@ void scatter_into_slots(std::vector<QpAdmResult>& results,
     }
 }
 
+// One-time f2 replication broadcast — reference §8
 F2Replication replicate_f2(const device::DeviceF2Blocks& f2, device::Resources& resources) {
     const std::size_t G = resources.device_count();
     F2Replication rep;
     rep.per_device.assign(G, nullptr);
-    // Classify per-g residency ONCE ([7.2] dedup): the residency rule
-    // `gpus[g].device_id != f2.device_id` is the single per-device "needs an upload"
-    // predicate; this one pre-pass records it per g and counts the uploads, so the rule
-    // has ONE expression. The host tensor is then materialized iff n_owned > 0 (any
-    // non-resident device) — replacing the three loops that each re-tested the predicate
-    // and could drift if someone edited only one of them.
     std::vector<bool> needs_upload(G, false);
     std::size_t n_owned = 0;
     for (std::size_t g = 0; g < G; ++g) {
@@ -212,10 +143,8 @@ F2Replication replicate_f2(const device::DeviceF2Blocks& f2, device::Resources& 
             ++n_owned;
         }
     }
-    // Materialize the host tensor ONCE only if at least one device needs a copy.
     F2BlockTensor host;
     if (n_owned > 0) host = f2.to_host();
-    // Reserve so the upload loop does not reallocate the owned vector (move-only).
     rep.owned.reserve(n_owned);
     for (std::size_t g = 0; g < G; ++g) {
         if (needs_upload[g]) {
@@ -223,7 +152,7 @@ F2Replication replicate_f2(const device::DeviceF2Blocks& f2, device::Resources& 
                 device::upload_f2_blocks_to_device(host, resources.gpus[g].device_id));
             rep.per_device[g] = &rep.owned.back();
         } else {
-            rep.per_device[g] = &f2;  // reuse the existing resident handle
+            rep.per_device[g] = &f2;
         }
     }
     return rep;
@@ -231,6 +160,7 @@ F2Replication replicate_f2(const device::DeviceF2Blocks& f2, device::Resources& 
 
 }  // namespace
 
+// Device search entry point — reference §7
 std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
                                           std::span<const QpAdmModel> models,
                                           const QpAdmOptions& opts,
@@ -239,37 +169,22 @@ std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
     const std::size_t n = models.size();
     if (G == 0) throw std::runtime_error("run_qpadm_search: no devices in Resources");
 
-    // Pre-size the result vector to n; each model_index slot is written EXACTLY once
-    // by exactly one worker. The pre-sized-slot write IS the deterministic re-sort
-    // (no post-sort needed): results[k].model_index == the k-th input's model_index
-    // for any G (the determinism gate). NOTE: this requires models[i].model_index to
-    // be a valid index into [0,n); the search sets model_index = i on the input.
     std::vector<QpAdmResult> results(n);
     if (n == 0) return results;
 
-    // ---- G == 1 fast path: no shard, no threads, no f2 replication (mirrors the f2
-    // G==1 fast path) — the single backend fits all n models on its device. -------
     if (G == 1) {
         ComputeBackend& be = *resources.gpus[0].backend;
         std::vector<QpAdmResult> batch =
             core::qpadm::fit_shard(be, f2, models, opts);
-        scatter_into_slots(results, batch, n);  // pre-sized-slot write = the re-sort ([7.1])
+        scatter_into_slots(results, batch, n);
         return results;
     }
 
-    // ---- G >= 2: replicate f2 to every device (one-time), shard the model list
-    // contiguously, fan out one jthread per device, each worker fits its sub-span
-    // WHOLLY on its device, writes its results into the pre-sized slots (race-free:
-    // distinct model_index slots per shard), rethrow the lowest-g fault.
-    // TODO(multigpu-host-bounce): replicate_f2 here is the ~3.8 s / 8.72 GB host bounce
-    // (no P2P on the 5090s) that caps multi-GPU at ~1.21x on real data — see the big
-    // TODO on replicate_f2 above. Multi-GPU is DEFERRED; prefer G==1 until the
-    // per-device-precompute fix lands.
     const F2Replication rep = replicate_f2(f2, resources);
     const std::vector<core::qpadm::ModelShard> shards =
         core::qpadm::plan_model_shards(n, G);
 
-    std::vector<std::exception_ptr> worker_errors(G);  // value-init to nullptr
+    std::vector<std::exception_ptr> worker_errors(G);
     {
         std::vector<std::jthread> workers;
         workers.reserve(G);
@@ -277,51 +192,37 @@ std::vector<QpAdmResult> run_qpadm_search(const device::DeviceF2Blocks& f2,
             workers.emplace_back([&, g]() {
                 try {
                     const core::qpadm::ModelShard& sh = shards[g];
-                    if (sh.lo >= sh.hi) return;  // empty shard (n < G) — nothing to do
+                    if (sh.lo >= sh.hi) return;
                     ComputeBackend& be = *resources.gpus[g].backend;
                     const device::DeviceF2Blocks& f2_g = *rep.per_device[g];
                     const std::span<const QpAdmModel> sub =
                         models.subspan(sh.lo, sh.hi - sh.lo);
                     std::vector<QpAdmResult> batch =
                         core::qpadm::fit_shard(be, f2_g, sub, opts);
-                    // Write each result into ITS model_index slot — distinct across
-                    // shards (contiguous, non-overlapping), so no two workers touch the
-                    // same slot (race-free without a lock). The bounds-check + slot-write
-                    // rule is single-homed in scatter_into_slots ([7.1] dedup).
                     scatter_into_slots(results, batch, n);
                 } catch (...) {
-                    worker_errors[g] = std::current_exception();  // surface on join
+                    worker_errors[g] = std::current_exception();
                 }
             });
         }
-    }  // <-- join barrier: all workers joined here (jthread dtors)
+    }
 
-    // Rethrow the FIRST worker failure (lowest g) deterministically (a genuine
-    // device/backend FAULT — domain outcomes already rode in results[*].status).
     for (std::size_t g = 0; g < G; ++g) {
         if (worker_errors[g]) std::rethrow_exception(worker_errors[g]);
     }
     return results;
 }
 
+// Host-oracle search entry point — reference §9
 std::vector<QpAdmResult> run_qpadm_search(const F2BlockTensor& f2_host,
                                           std::span<const QpAdmModel> models,
                                           const QpAdmOptions& opts,
                                           device::Resources& resources) {
-    // HOST-ORACLE overload: route EVERY model through resources.gpus[0].backend's
-    // per-model oracle chain (assemble_f4(host) → run_impl). A host loop is the
-    // CORRECT shape for the oracle (design §2.3) — it is the bit-exact reference the
-    // device batched path is diffed against, NOT the deliverable.
     ComputeBackend& be = *resources.gpus.at(0).backend;
     const std::size_t n = models.size();
     std::vector<QpAdmResult> results(n);
     for (std::size_t i = 0; i < n; ++i) {
-        // Shared per-model fit chain (assemble→run→echo model_index), [7.4] dedup —
-        // the F2BlockTensor instantiation of the same fit_one_model the device path uses.
         QpAdmResult r = core::qpadm::fit_one_model(be, f2_host, models[i], opts);
-        // Distinct from scatter_into_slots BY DESIGN: the oracle does NOT fail-fast on a
-        // bad model_index — it FALLS BACK to the loop index `i` (its semantics genuinely
-        // differ, per the [7.4] note), so this scatter stays inline here.
         const int mi = r.model_index;
         const std::size_t slot = (mi >= 0 && static_cast<std::size_t>(mi) < n)
                                      ? static_cast<std::size_t>(mi) : i;
