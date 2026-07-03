@@ -1,6 +1,6 @@
 # Steppe
 
-*A GPU reimagining of ADMIXTOOLS 2 — f-statistics and qpAdm, built to be fast.*
+*A GPU based f-statistics and qpAdm toolset.*
 
 > 🚧 **Work in progress — research preview.** Steppe is under active development. The compute
 > paths that are done are validated to bit/tolerance parity with ADMIXTOOLS 2 on real AADR
@@ -9,19 +9,17 @@
 
 ## About
 
-Steppe is a GPU implementation and reimagining of qpAdm from ADMIXTOOLS 2.
-
 One of my favorite hobbies is finding ways to make software faster, and Steppe grew out of that
-curiosity — I wanted a faster, more modern tool for my own work, and it was a great excuse to learn
+curiosity — I wanted a faster tool that would work on my not-so-modern desktop, and it was a great excuse to learn
 CUDA along the way. Somewhere in there it turned into something I was excited to share, and I hope
 it's useful to other people too.
 
 It's still very much a personal project, so you'll occasionally find opinions, experiments, and
 design decisions that reflect how I like to work. At the same time, I've done my best to make Steppe
-reliable, approachable, and useful well beyond my own tinkering.
+reliable, approachable, and useful well beyond my own tinkering. ^^
 
 If you use it, I genuinely hope it makes your work a little easier. And if you have ideas, questions,
-or spot something that could be better, I'd love to hear from you.
+or spot something that could be better, please let me know.
 
 ## What it does
 
@@ -140,7 +138,7 @@ $S qpadm --f2-dir f2_dir --target England_BellBeaker \
 $S f4 --all-quartets --f2-dir f2_dir --top-k 1000000 --sure --shard-dir sweep_out --device 0
 ```
 
-Prefer a notebook? There's a marimo walkthrough (genotypes → f2 cache → qpAdm → rotation → f4, every
+If you prefer a notebook: there's a marimo walkthrough (genotypes → f2 cache → qpAdm → rotation → f4, every
 result a pandas DataFrame) in **[docs/examples/notebooks/](docs/examples/notebooks/)**. A full
 worked example with expected output is in **[docs/examples/](docs/examples/)**, and every subcommand
 prints its complete flag reference with `steppe <subcommand> --help`.
@@ -249,7 +247,7 @@ comes first, and the goldens live under `tests/`.
 
 ## Citing Steppe
 
-Steppe is new and doesn't have its own paper yet — if it helped your work, please cite the software:
+If it helped your work, please cite the software:
 
 > Steppe (v0.1.0). https://github.com/suzuenhasa/steppecu
 
@@ -311,7 +309,6 @@ example, and is the study I use in the quickstart along with the Olalde study:
 
 ## License
 
-Steppe is released under the **GPL-3** license (see [LICENSE](LICENSE)) — the same license as
-ADMIXTOOLS 2, which it reimplements. I read through ADMIXTOOLS 2's source to understand how it works so
+Steppe is released under the **GPL-3** license (see [LICENSE](LICENSE)). I read through ADMIXTOOLS 2's source to understand how it works so
 I could build my own GPU version, and releasing Steppe under the same license is the right thing to do.
-If I've credited anything here imperfectly, please tell me — I want to get it right.
+If I've credited anything here imperfectly, please tell me — I want to get it right. ^^
