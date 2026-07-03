@@ -196,6 +196,6 @@ the GPU (pass `out=...` to also write an STPF2BK1 dir). `pandas` is imported laz
 
 ## License
 
-MIT — see [LICENSE](LICENSE). steppe is an independent reimplementation of the published
-ADMIXTOOLS / ADMIXTOOLS 2 + DATES methods; ADMIXTOOLS 2 is used only as a test oracle (no
-GPL source is vendored).
+GPL-3 — see [LICENSE](LICENSE). steppe is a GPU reimplementation of ADMIXTOOLS 2's qpAdm and is
+released under the same GPL-3 license as ADMIXTOOLS 2. Its author read ADMIXTOOLS 2's source to
+understand how it works and build this GPU version, so matching its license is the right thing to do.

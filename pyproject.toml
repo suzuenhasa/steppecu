@@ -34,7 +34,7 @@ dynamic = ["version"]
 description = "GPU/CUDA-13 qpAdm / qpWave (f-statistics & model fitting)"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-or-later" }
 # numpy is the ONLY hard runtime dep (_core's `_f2_numpy` returns an ndarray). The CUDA 13
 # runtime is a SYSTEM requirement resolved at load (see the header note) — NOT a pip dep, so
 # `pip install steppe` succeeds and `import steppe` works wherever CUDA 13 is on the loader
