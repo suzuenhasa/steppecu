@@ -1,9 +1,7 @@
-// src/device/cuda/device_decode_result.cu — the CUDA side of DeviceDecodeResult.
-// Out-of-line special members (so unique_ptr<Impl> sees a complete Impl at
-// instantiation) + the device-pointer accessors. PRIVATE to steppe_device (a CUDA
-// TU, architecture.md §4). Mirrors device_f2_blocks.cu's defaulted-special-members
-// pattern: the DeviceBuffer<double> q/v free device-agnostically in the dtor
-// (cudaFree carries the pointer's device).
+// src/device/cuda/device_decode_result.cu — CUDA-side implementation of
+// DeviceDecodeResult: out-of-line special members (so unique_ptr<Impl> sees a
+// complete Impl), the device-pointer accessors, and the compacted-Q/V/N D2H copy.
+// Private to steppe_device (a CUDA TU, architecture.md §4).
 #include "device/cuda/device_decode_result_impl.cuh"
 
 #include <cstddef>
@@ -12,7 +10,7 @@
 
 #include <cuda_runtime.h>
 
-#include "device/cuda/check.cuh"  // STEPPE_CUDA_CHECK
+#include "device/cuda/check.cuh"
 
 namespace steppe::device {
 
@@ -45,19 +43,6 @@ void DeviceDecodeResult::to_host_qvn(std::vector<double>& q_host,
     q_host.assign(pmk, 0.0);
     v_host.assign(pmk, 0.0);
     n_host.assign(pmk, 0.0);
-    // Synchronous D2H of the resident COMPACTED Q/V/N. The buffers are resident on
-    // `device_id`; the producing backend already ran on that device and synchronized
-    // its stream before returning the handle, so a default-stream copy here observes
-    // the gathered values. Only the SMALL compacted arrays cross (the regime-B cure:
-    // the host per-SNP filter loop + the full-tile D2H are gone).
-    // Fail-fast on the documented regime-B precondition (header
-    // device_decode_result.hpp:77: "Requires n_device() non-null"). A regime-A
-    // result has `impl` non-null but `impl->n` empty (n.data() == nullptr) while
-    // pmk > 0, so the N copy below would be cudaMemcpy(dst, nullptr, pmk*8, D2H) —
-    // STEPPE_CUDA_CHECK would then surface an opaque CUDA-runtime throw (a null device
-    // source) rather than the contract violated here. The empty() short-circuit at the top
-    // tests only P/M_kept, not N residency, so it cannot catch this misuse. This is
-    // a REAL runtime guard (not STEPPE_ASSERT, which compiles out under NDEBUG).
     if (impl->n.data() == nullptr) {
         throw std::invalid_argument(
             "DeviceDecodeResult::to_host_qvn: N buffer is empty — this is a "

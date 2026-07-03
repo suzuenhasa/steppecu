@@ -1,28 +1,19 @@
 // src/device/cuda/dates_kernel.cu
 //
-// The DATES cuFFT autocorrelation LD engine kernels — admixture dating (the S2 divergence;
-// include/steppe/dates.hpp). NEVER the f2 GEMM, NEVER a host O(M²) SNP-pair loop. The
-// per-sample weight/residual/scatter onto the fine genetic-map grid, the |F|² / cross-power
-// elementwise stages, and the lag-extract + re-bin into the per-(chrom, output-bin) DATES
-// CORR sufficient statistics. The cuFFT forward/inverse transforms themselves are issued from
-// the backend (cuda_backend.cu) via cufftExecD2Z/cufftExecZ2D; these kernels are the
-// elementwise / scatter / reduce glue around them.
+// The GPU kernels for DATES admixture dating: the elementwise, scatter, and
+// reduce glue around the cuFFT autocorrelation (the transforms themselves are
+// issued by the backend). The kernel bodies live only in this TU; the backend
+// reaches them through the narrow launch wrappers in dates_kernel.cuh.
 //
-// PINNED to the DATES reference C source (dates.c:585-665 per-sample scatter; fftsubs.c
-// fftauto/fftcv2 = FWD FFT -> |F|² / conj·-> INV FFT -> /n; ddcorr lag->bin). The
-// autocorrelation IS the binned pairwise double-sum (Σ_g W[g]·W[g+lag]), so the SNP pairs are
-// never materialized — O(G log G) per chrom, FLAT in M.
-//
-// CUDA TU: PRIVATE to steppe_device (architecture.md §4). The kernel bodies + <<<>>> live
-// ONLY here; the backend reaches them through the narrow launch wrappers (dates_kernel.cuh).
+// Reference: docs/reference/src_device_cuda_dates_kernel.cu.md
 #include <cstddef>
 #include <cstdint>
 
 #include <cuda_runtime.h>
 
-#include "core/internal/decode_af.hpp"  // core::genotype_code / kMissingGenotypeCode / kCodesPerByte
-#include "core/internal/nvtx.hpp"       // STEPPE_NVTX_RANGE (coarse phase marker; empty unless -DSTEPPE_NVTX)
-#include "device/cuda/check.cuh"        // STEPPE_CUDA_CHECK
+#include "core/internal/decode_af.hpp"
+#include "core/internal/nvtx.hpp"
+#include "device/cuda/check.cuh"
 #include "device/cuda/dates_kernel.cuh"
 
 namespace steppe::device {
@@ -31,7 +22,6 @@ namespace {
 
 inline constexpr int kBlock = 256;
 
-/// Decode admixed-sample `sample`'s genotype code at SNP s from the dense packed record.
 __device__ inline std::uint8_t target_code(const std::uint8_t* __restrict__ packed,
                                            std::size_t bytes_per_record, int sample, long s) {
     const std::uint8_t* rec = packed + static_cast<std::size_t>(sample) * bytes_per_record;
@@ -41,7 +31,7 @@ __device__ inline std::uint8_t target_code(const std::uint8_t* __restrict__ pack
     return core::genotype_code(rec[byte_in_rec], pos);
 }
 
-/// PHASE A — the regression dot products, atomic-reduced over the sample's valid SNPs.
+// Phase A: regression dot products — reference §3
 __global__ void regress_dots_kernel(const double* __restrict__ src1,
                                     const double* __restrict__ src2,
                                     const double* __restrict__ valid,
@@ -49,7 +39,6 @@ __global__ void regress_dots_kernel(const double* __restrict__ src1,
                                     std::size_t bytes_per_record, int sample, long M,
                                     double* __restrict__ dot12, double* __restrict__ dot22) {
     const long s = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
-    // block-wide partials then one atomicAdd per block (reduce atomic contention).
     __shared__ double sh12[kBlock];
     __shared__ double sh22[kBlock];
     double a12 = 0.0, a22 = 0.0;
@@ -68,10 +57,6 @@ __global__ void regress_dots_kernel(const double* __restrict__ src1,
     sh12[threadIdx.x] = a12;
     sh22[threadIdx.x] = a22;
     __syncthreads();
-    // Precondition: blockDim.x MUST be a power of two. This halving tree folds the upper half
-    // onto the lower each step (off >>= 1); a non-power-of-two would drop an odd remainder and
-    // skip elements. The sole caller launch_dates_regress_dots launches with kBlock=256, so the
-    // invariant holds. Do NOT add odd-remainder handling — it perturbs the §12 fixed-order sum.
     for (int off = blockDim.x / 2; off > 0; off >>= 1) {
         if (threadIdx.x < off) {
             sh12[threadIdx.x] += sh12[threadIdx.x + off];
@@ -85,7 +70,7 @@ __global__ void regress_dots_kernel(const double* __restrict__ src1,
     }
 }
 
-/// PHASE B — the residual scatter onto the fine grid.
+// Phase B: residual scatter onto the fine grid — reference §4
 __global__ void scatter_kernel(const double* __restrict__ src1, const double* __restrict__ src2,
                                const double* __restrict__ valid,
                                const std::uint8_t* __restrict__ packed,
@@ -110,7 +95,7 @@ __global__ void scatter_kernel(const double* __restrict__ src1, const double* __
     atomicAdd(&z2[cell], y * y);
 }
 
-/// PACK chrom segments into zero-padded FFT rows. One thread per (chrom, position) cell.
+// FFT glue kernels — reference §5
 __global__ void pack_segments_kernel(const double* __restrict__ grid,
                                      const int* __restrict__ chrom_first,
                                      const int* __restrict__ chrom_last, int n_chrom,
@@ -133,7 +118,6 @@ __global__ void pack_segments_kernel(const double* __restrict__ grid,
     padded[cell] = val;
 }
 
-/// |F|² power spectrum: out[k] = re²+im² + 0i. Operates on cufftDoubleComplex (re,im pairs).
 __global__ void power_spectrum_kernel(const double2* __restrict__ freq, int n_cplx, int n_chrom,
                                       double2* __restrict__ power) {
     const long k = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
@@ -143,7 +127,6 @@ __global__ void power_spectrum_kernel(const double2* __restrict__ freq, int n_cp
     power[k] = make_double2(a.x * a.x + a.y * a.y, 0.0);
 }
 
-/// Cross power conj(A)·B: out = (Ar - i·Ai)(Br + i·Bi) = (ArBr+AiBi) + i(ArBi-AiBr).
 __global__ void cross_power_kernel(const double2* __restrict__ a, const double2* __restrict__ b,
                                    int n_cplx, int n_chrom, double2* __restrict__ out) {
     const long k = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
@@ -154,7 +137,6 @@ __global__ void cross_power_kernel(const double2* __restrict__ a, const double2*
     out[k] = make_double2(av.x * bv.x + av.y * bv.y, av.x * bv.y - av.y * bv.x);
 }
 
-/// Extract + accumulate lags [0, diffmax] from the C2R inverse output, /n_fft, summed (+=).
 __global__ void extract_lags_kernel(const double* __restrict__ inv, int n_fft, int n_chrom,
                                     int diffmax, double* __restrict__ dd) {
     const long cell = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
@@ -167,8 +149,7 @@ __global__ void extract_lags_kernel(const double* __restrict__ inv, int n_fft, i
     dd[cell] += v / static_cast<double>(n_fft);
 }
 
-/// Re-bin the fine-grid lag dd moments into the per-(chrom, output-bin) corr stats.
-/// One thread per (chrom, lag); atomicAdd into the output bin (multiple lags map to one bin).
+// Re-bin lags into the correlation statistics — reference §6
 __global__ void accumulate_bins_kernel(const double* __restrict__ dd00,
                                        const double* __restrict__ dd11,
                                        const double* __restrict__ dd02,
@@ -182,10 +163,10 @@ __global__ void accumulate_bins_kernel(const double* __restrict__ dd00,
     if (cell >= total) return;
     const int kc = static_cast<int>(cell / dm);
     const int d = static_cast<int>(cell % dm);
-    if (d < 1) return;  // lag 0 skipped (DATES ddcorr d=1..)
+    if (d < 1) return;
     const double c00 = dd00[cell];
     if (c00 < 0.5) return;
-    const int s = d / qbin;  // output bin = floor(d·dbinsize/binsize) = floor(d/qbin)
+    const int s = d / qbin;
     if (s < 0 || s >= n_bin) return;
     const long o = static_cast<long>(kc) * n_bin + s;
     atomicAdd(&s0[o], c00);
@@ -194,16 +175,7 @@ __global__ void accumulate_bins_kernel(const double* __restrict__ dd00,
     atomicAdd(&s22[o], dd20[cell]);
 }
 
-/// M5 — TARGET-GENOTYPE REPACK onto the kept SNP axis (dates.cpp:296-313, on device).
-/// One thread per (target individual i, kept SNP ks): read the 2-bit code from the SOURCE
-/// record `i` at original SNP index s = kept_src[ks], then OR it into the dest record at
-/// dense bit position ks. BIT-EXACT to the host shift/OR body (dates.cpp:304-311): the read
-/// uses core::genotype_code (== io::code_in_byte, same MSB-first 6/4/2/0 shift), and the
-/// write reproduces the host `(kCodesPerByte-1-dp)*kBitsPerCode` shift. The dest byte is
-/// written by a SINGLE thread per (i, dest byte position) — but here one thread per (i, ks)
-/// would race on the shared dest byte (4 codes/byte). To stay bit-exact AND race-free, one
-/// thread owns a full DEST BYTE: it packs up to kCodesPerByte consecutive kept codes (the
-/// host writes dst by ascending ks, so a dest byte db holds kept indices [db*4, db*4+3]).
+// Target-genotype repack — reference §7
 __global__ void repack_target_kernel(const std::uint8_t* __restrict__ src, std::size_t src_bpr,
                                      const long* __restrict__ kept_src, long M_kept, int n_target,
                                      std::size_t dst_bpr, std::uint8_t* __restrict__ dst) {
@@ -212,10 +184,9 @@ __global__ void repack_target_kernel(const std::uint8_t* __restrict__ src, std::
     for (long gid = blockIdx.x * static_cast<long>(blockDim.x) + threadIdx.x;
          gid < total; gid += static_cast<long>(gridDim.x) * blockDim.x) {
         const int i = static_cast<int>(gid / dst_bytes);
-        const long db = gid % dst_bytes;  // which dest byte this thread owns
+        const long db = gid % dst_bytes;
         const std::uint8_t* src_rec = src + static_cast<std::size_t>(i) * src_bpr;
         std::uint8_t out = 0;
-        // Pack the up-to-kCodesPerByte kept codes that land in dest byte db (ascending ks).
         for (int dp = 0; dp < core::kCodesPerByte; ++dp) {
             const long ks = db * core::kCodesPerByte + dp;
             if (ks >= M_kept) break;
@@ -231,15 +202,11 @@ __global__ void repack_target_kernel(const std::uint8_t* __restrict__ src, std::
     }
 }
 
-// --- M6 exp-fit (device fit_exp_decay; NATIVE FP64) --------------------------------------
-// linfit_2x2: solve the 2×2 (or 1×1 non-affine) normal equations for (co0,c) minimizing
-// Σ(y[i] - co0·v^i - c)²; return the residual sum of squares. EXACT mirror of dates.cpp's
-// linfit_2x2, FP64 (the host long double -> device double; the cancellation carve-out form
-// for a device with no long double). co0/c returned via pointers.
+// The exponential-decay curve fit — reference §8
 __device__ inline double dev_linfit_2x2(const double* __restrict__ y, int n, double v,
                                         bool affine, double* co0, double* c) {
     double Sbb = 0.0, Sb1 = 0.0, S11 = 0.0, Sby = 0.0, Sy = 0.0;
-    double bi = 1.0;  // v^0
+    double bi = 1.0;
     for (int i = 0; i < n; ++i) {
         const double b = bi;
         const double yi = y[i];
@@ -268,7 +235,6 @@ __device__ inline double dev_linfit_2x2(const double* __restrict__ y, int n, dou
     return rss;
 }
 
-/// One thread per curve: the EXACT dates.cpp fit_exp_decay (4000-grid + ternary refine).
 __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int win_len,
                                         int n_curves, double step, bool affine,
                                         double* __restrict__ d_date, double* __restrict__ d_sd,
@@ -276,13 +242,11 @@ __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int w
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= n_curves) return;
     const double* y = curves + static_cast<long>(c) * win_len;
-    // default outputs (== ExpFit default: date 0, sd 0, ok 0).
     d_date[c] = 0.0; d_sd[c] = 0.0; d_ok[c] = 0;
     if (win_len < 3 || !(step > 0.0)) return;
 
     const int coarse = 4000;
     double best_v = 0.5, best_rss = INFINITY, best_co0 = 0.0, best_c = 0.0;
-    // coarse grid requiring a DECAYING positive exponential (co0>0).
     for (int k = 1; k < coarse; ++k) {
         const double v = static_cast<double>(k) / static_cast<double>(coarse);
         if (!(v > 0.0) || !(v < 1.0)) continue;
@@ -293,7 +257,6 @@ __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int w
         if (rss < best_rss) { best_rss = rss; best_v = v; best_co0 = co0; best_c = cc; }
     }
     if (!isfinite(best_rss)) {
-        // fallback: allow any-sign amplitude (degenerate curve).
         for (int k = 1; k < coarse; ++k) {
             const double v = static_cast<double>(k) / static_cast<double>(coarse);
             if (!(v > 0.0) || !(v < 1.0)) continue;
@@ -304,7 +267,6 @@ __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int w
         }
         if (!isfinite(best_rss)) return;
     }
-    // local ternary refine.
     double lo = fmax(1e-9, best_v - 1.0 / static_cast<double>(coarse));
     double hi = fmin(1.0 - 1e-9, best_v + 1.0 / static_cast<double>(coarse));
     const int ternary_iters = 200;
@@ -333,6 +295,7 @@ inline int grid_for(long n) { return static_cast<int>((n + kBlock - 1) / kBlock)
 
 }  // namespace
 
+// Launch wrappers and shared conventions — reference §9
 void launch_dates_regress_dots(const double* d_src1, const double* d_src2, const double* d_valid,
                                const std::uint8_t* d_packed, std::size_t bytes_per_record,
                                int sample, long M, double* d_dot12, double* d_dot22,
@@ -410,9 +373,7 @@ void launch_dates_fit_curves(const double* d_curves, int win_len, int n_curves, 
                              bool affine, double* d_date, double* d_sd, int* d_ok,
                              cudaStream_t stream) {
     if (n_curves <= 0) return;
-    STEPPE_NVTX_RANGE("dates_fit_curves");  // coarse phase boundary: the final per-bin decay-curve fit
-    // One thread per curve (n_curves ~ n_chrom+1 ~ 23): a single small block suffices, but
-    // size the grid generically so a future many-curve batch still launches correctly.
+    STEPPE_NVTX_RANGE("dates_fit_curves");
     const int grid = grid_for(static_cast<long>(n_curves));
     dates_fit_curves_kernel<<<grid, kBlock, 0, stream>>>(
         d_curves, win_len, n_curves, step, affine, d_date, d_sd, d_ok);

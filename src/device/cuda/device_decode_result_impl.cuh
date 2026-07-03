@@ -1,7 +1,10 @@
-// src/device/cuda/device_decode_result_impl.cuh — the CUDA side of
-// DeviceDecodeResult: the Impl holding the resident DeviceBuffer<double> q/v owners.
-// PRIVATE to steppe_device. Shared by cuda/device_decode_result.cu (special members +
-// q_device/v_device) and cuda_backend.cu (builds the result device-resident).
+// src/device/cuda/device_decode_result_impl.cuh
+//
+// The CUDA half of the DeviceDecodeResult handle/Impl split: the one struct that
+// names the real GPU buffer type, so this is the only file in the pair the CUDA
+// toolchain must compile. Private to steppe_device.
+//
+// Reference: docs/reference/src_device_cuda_device_decode_result_impl.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_DEVICE_DECODE_RESULT_IMPL_CUH
 #define STEPPE_DEVICE_CUDA_DEVICE_DECODE_RESULT_IMPL_CUH
 
@@ -10,14 +13,11 @@
 
 namespace steppe::device {
 
+// The three resident device buffers (n is regime-B only) — reference §2
 struct DeviceDecodeResult::Impl {
-    DeviceBuffer<double> q;  ///< [P × M_kept] resident on device_id (column-major).
-    DeviceBuffer<double> v;  ///< [P × M_kept] resident on device_id (column-major).
-    // N is populated ONLY by the regime-B filtered path (decode_af_compact_filter);
-    // the regime-A autosome path leaves it empty (its consumers read only Q/V). The
-    // extract_f2 f2-GEMM needs the compacted N too (the SEPARATE regime-B staging the
-    // device_decode_result.hpp:14-18 doc names).
-    DeviceBuffer<double> n;  ///< [P × M_kept] resident (regime-B only; empty for regime-A).
+    DeviceBuffer<double> q;
+    DeviceBuffer<double> v;
+    DeviceBuffer<double> n;
 };
 
 }  // namespace steppe::device

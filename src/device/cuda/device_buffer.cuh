@@ -1,26 +1,10 @@
 // src/device/cuda/device_buffer.cuh
 //
-// DeviceBuffer<T> — THE move-only RAII owner of device memory (architecture.md
-// §2 RAII, §7). This is one of the THREE allowlisted translation
-// units permitted to call `cudaMalloc`/`cudaFree` directly (architecture.md §2
-// DRY grep gate: `device_buffer.cuh`, `allocator.cu`, `pinned_buffer.cuh`); all
-// other code takes non-owning views and never touches the allocation family.
+// DeviceBuffer<T>: the move-only RAII owner of a device allocation. One of only
+// three translation units allowed to call cudaMalloc/cudaFree directly; all
+// other code takes non-owning views.
 //
-// Replaces raw `cudaMalloc`/`cudaFree` pairs that had no RAII. Fully move-only:
-// move-construct AND move-assign, so `buf = std::move(other)` is well-formed
-// (architecture.md §7 — a deleted move-assign would be a bug). The
-// destructor never throws, but it is not silent: a nonzero `cudaFree` status at
-// teardown is routed to a debug-only warning so "fail-fast" does not become
-// "fail-silent at teardown" (architecture.md §2, §7, §10).
-//
-// The allocating ctor is also fail-fast on a SIZE OVERFLOW: `n * sizeof(T)` is a
-// `std::size_t` product whose unsigned overflow is *defined* (modular), so an
-// unchecked multiply would silently WRAP and under-allocate rather than trap.
-// The ctor rejects any `n` for which the byte product would exceed `SIZE_MAX`
-// with a typed `CudaError` (architecture.md §2 fail-fast, §11.2),
-// which makes `bytes()` exact for the §11.2 VRAM budget.
-//
-// This is a CUDA header: PRIVATE to steppe_device (architecture.md §4).
+// Reference: docs/reference/src_device_cuda_device_buffer.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_DEVICE_BUFFER_CUH
 #define STEPPE_DEVICE_CUDA_DEVICE_BUFFER_CUH
 

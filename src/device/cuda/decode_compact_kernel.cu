@@ -1,20 +1,11 @@
 // src/device/cuda/decode_compact_kernel.cu
 //
-// The DEVICE-RESIDENT decode-and-compact kernels (host-compute audit C2/M3/M4 cure).
-// Regime (A) autosome-only: the per-SNP keep predicate + the [P×M] column gather
-// that, paired with CUB DeviceSelect::Flagged on the parallel chrom/genpos, replaces
-// the host autosome keep loop + lockstep Q/V subset (qpfstats.cpp:268-278 /
-// dstat.cpp:245-255) with a GPU-bound, device-resident compaction.
+// Device-resident decode-and-compact kernels: build a per-SNP keep mask, then gather
+// the kept [P×M] columns into a gap-free packed arena — the CPU keep-and-pack loop
+// moved onto the GPU, bit-for-bit identical to the host result.
+// Private CUDA TU: only the launch functions are visible to the rest of steppe_device.
 //
-// PARITY (architecture.md §12; the seam's GOLDEN-EXACT requirement): the autosome
-// predicate is INTEGER (chrom is an int from .snp), so the kept SET is bit-identical
-// to the host. The gather is keyed by the EXCLUSIVE scan of the keep flags, which is
-// monotone over the file-ordered SNP axis — so the compacted Q/V columns preserve
-// FILE ORDER exactly, identical to the host lockstep push_back. Q/V VALUES are the
-// same doubles decode_af already wrote (a pure copy, no arithmetic). assign_blocks
-// over the identically-compacted chrom/genpos thus reproduces the host block_id.
-//
-// This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4).
+// Reference: docs/reference/src_device_cuda_decode_compact_kernel.cu.md
 #include "device/cuda/decode_compact_kernel.cuh"
 
 #include <cstddef>
@@ -22,10 +13,10 @@
 
 #include <cuda_runtime.h>
 
-#include "core/internal/launch_config.hpp"   // cdiv, grid_for, kMaxGridX, kDecodeBlockX/Y
-#include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK_KERNEL
-#include "io/filter/snp_summary_reduce.hpp"  // derive_pooled_summary_one + keep_decision_pooled (the shared HD body)
-#include "steppe/config.hpp"                 // FilterConfig
+#include "core/internal/launch_config.hpp"
+#include "device/cuda/check.cuh"
+#include "io/filter/snp_summary_reduce.hpp"
+#include "steppe/config.hpp"
 
 namespace steppe::device {
 
@@ -33,8 +24,7 @@ namespace {
 
 constexpr int kKeepBlock = 256;
 
-/// One thread per SNP s; the autosome keep predicate, INTEGER-EXACT (matches the
-/// host `if (chr < 1 || chr > 22) continue;`). Writes the uint8 CUB flag.
+// Autosome keep mask — reference §3
 __global__ void autosome_keep_mask_kernel(const int* __restrict__ chrom, long M,
                                           int chrom_min, int chrom_max,
                                           std::uint8_t* __restrict__ flags) {
@@ -44,16 +34,7 @@ __global__ void autosome_keep_mask_kernel(const int* __restrict__ chrom, long M,
     flags[s] = (chr >= chrom_min && chr <= chrom_max) ? std::uint8_t{1} : std::uint8_t{0};
 }
 
-/// REGIME-B per-SNP keep-mask: ONE thread per SNP s in [0, M) (so the across-pop Σ
-/// runs sequentially p = 0..P-1, BIT-IDENTICAL order to the host loop). Reproduces
-/// the host extract_f2 keep decision EXACTLY: (1) the pooled-MAF reduction Σ_pop Q·N
-/// (FFMA-immune via the SHARED derive_pooled_summary_one) + the SHARED
-/// keep_decision_pooled (the same filter_decision.hpp predicates + is_monomorphic
-/// ==0.0 exact); (2) the SEPARATE pop-coverage maxmiss folded in (drop if the
-/// fraction of pops with N<=0 STRICTLY EXCEEDS maxmiss), reproducing
-/// extract_f2_core.cpp:177-191 including the `<=0.0` on N and the strict `>`. For
-/// extract_f2 the membership is the no-op, so membership_ok is unconditionally true.
-/// Writes the uint8 CUB flag (the existing scan/Flagged/gather pipeline consumes it).
+// Full extract_f2 keep mask — reference §4
 __global__ void regimeb_keep_mask_kernel(const double* __restrict__ Q,
                                          const double* __restrict__ N, int P, long M,
                                          const char* __restrict__ ref,
@@ -65,18 +46,12 @@ __global__ void regimeb_keep_mask_kernel(const double* __restrict__ Q,
     const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (s >= M) return;
 
-    // (1) The pooled-MAF reduction + the shared keep decision (membership no-op for
-    // extract_f2). geno_max_missing in cfg is FORCED to 1.0 by the host caller (the
-    // sample-axis predicate is the no-op; the pop-axis maxmiss is applied below).
     const steppe::io::filter::PooledSnpSummary ps =
         steppe::io::filter::derive_pooled_summary_one(Q, N, P, s, ploidy_d,
                                                       total_indiv_d);
     bool keep = steppe::io::filter::keep_decision_pooled(
         ps, ref[s], alt[s], chrom[s], cfg, /*membership_ok=*/true);
 
-    // (2) The SEPARATE pop-coverage maxmiss (extract_f2_core.cpp:177-191): drop if
-    // the fraction of pops with N<=0 (no data) STRICTLY exceeds maxmiss. maxmiss>=1.0
-    // ⇒ no-op (kept above untouched). Counts on N (the haploid count) with `<=0.0`.
     if (keep && maxmiss < 1.0) {
         const long base = static_cast<long>(P) * s;
         int n_missing_pops = 0;
@@ -91,22 +66,14 @@ __global__ void regimeb_keep_mask_kernel(const double* __restrict__ Q,
     flags[s] = keep ? std::uint8_t{1} : std::uint8_t{0};
 }
 
-/// One thread per (population i, source SNP s): if SNP s is kept, copy its whole
-/// P-length column from d_in[i + P·s] to d_out[i + P·keep_idx[s]]. keep_idx is the
-/// exclusive scan of the flags (the compacted column position). FILE ORDER preserved.
+// Column-gather compaction — reference §5
 __global__ void compact_columns_gather_kernel(const double* __restrict__ in, int P,
                                               long M,
                                               const std::uint8_t* __restrict__ flags,
                                               const long* __restrict__ keep_idx,
                                               double* __restrict__ out) {
-    // DELIBERATE block-axis cross (mirrors the launch_compact_columns_gather comment
-    // above): pop `i` rides threadIdx.x — the UNIT-STRIDE axis of the column-major
-    // [P×M] arena, so adjacent lanes touch adjacent addresses (coalesced) — while SNP
-    // `s` rides threadIdx.y. This is index-consistent with block=dim3(bx,by) +
-    // grid=(cdiv(M,by), grid_for(P,bx)) and is CORRECT — not an OOB to "fix". Same
-    // thread→element map as f2_block_kernel.cu's f2_feeder_kernel.
-    const long s = static_cast<long>(blockIdx.x) * blockDim.y + threadIdx.y;  // SNP
-    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;  // pop
+    const long s = static_cast<long>(blockIdx.x) * blockDim.y + threadIdx.y;
+    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
     if (s >= M || i >= P) return;
     if (flags[s] == 0) return;
     const std::size_t src = static_cast<std::size_t>(i) +
@@ -119,6 +86,7 @@ __global__ void compact_columns_gather_kernel(const double* __restrict__ in, int
 
 }  // namespace
 
+// Launch geometry + grid-size guard — reference §6
 void launch_autosome_keep_mask(const int* d_chrom, long M, int chrom_min,
                                int chrom_max, std::uint8_t* d_flags,
                                cudaStream_t stream) {
@@ -155,11 +123,6 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                                    const long* d_keep_idx, double* d_out,
                                    cudaStream_t stream) {
     if (P <= 0 || M <= 0) return;
-    // Block: x rides the POPULATION axis (unit stride in the column-major [P×M]
-    // arena, so adjacent lanes touch adjacent addresses — coalesced); y rides the
-    // SNP axis. 32×8 = 256 threads — the shared, warp-justified decode block dims
-    // (core::kDecodeBlockX/Y, launch_config.hpp) rather than bare 32/8 re-picked
-    // here, so the cross-file decode tile shape is single-sourced (§3.3).
     const int bx = core::kDecodeBlockX, by = core::kDecodeBlockY;
     const long grid_x = core::cdiv(M, static_cast<long>(by));
     STEPPE_ASSERT(grid_x >= 0 &&

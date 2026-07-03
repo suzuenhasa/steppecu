@@ -1,50 +1,26 @@
 // src/device/cuda/ratio_block_jackknife_kernel.cu
 //
-// The SHARED on-device RATIO-block-jackknife kernel (the f4ratio M1 + qpDstat M2 common
-// engine; backend.hpp ratio_block_jackknife). MOVES the former host long-double per-item
-// jackknife loops (f4ratio.cpp ratio_jackknife driven per tuple; dstat.cpp dstat_jackknife
-// driven per quadruple) ONTO the GPU, embarrassingly parallel over the N items and reducing
-// over the n_block axis from the RESIDENT per-(item,block) num/den/weight (f4ratio's dLoo +
-// dX; dstat's dNum/dDen/dCnt) — dropping the [m·nb] x_blocks/x_loo D2H (f4ratio) and the
-// numsum/densum/cnt D2H (dstat).
+// The shared on-device ratio block-jackknife kernel serving both the f4-ratio and
+// D-statistic jackknives: one thread per item, one kernel selecting the statistic via a
+// tot_mode branch behind one launch wrapper.
 //
-// PRECISION (the §12 cancellation carve-out): NATIVE FP64 with the EXACT ascending-b operand
-// order of the two host long-double references — the ONLY delta is the carry precision (long
-// double 64-bit mantissa → FP64 53-bit). This is the SAME leave-one-out block-jackknife family
-// already proven on-device in native FP64 (qpfstats_numer_jackknife_kernel, qpadm_fit
-// f4_loo_total_row). NEVER EmulatedFp64 here. Gated on the f4ratio golden + the qpDstat
-// Part-A/Part-B goldens at rtol 1e-6 + CpuBackend==CudaBackend.
-//
-// SHAPE: ONE thread per item, grid-stride over the item axis (each owns a SHORT ~n_block
-// reduction in registers). Mirrors qpfstats_numer_jackknife_kernel verbatim. The two host
-// jackknives are the SAME ratio block-jackknife differing on THREE parameterized axes — WEIGHT
-// (caller-supplied), SURVIVOR MASK (setmiss_thresh), TOT_MODE — applied as in-thread branches,
-// NOT two kernels.
-//
-// This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). The kernel body + <<<>>>
-// live ONLY here; the backend reaches it through the narrow launch wrapper
-// (ratio_block_jackknife_kernel.cuh), never includes this body (architecture.md §7).
+// Reference: docs/reference/src_device_cuda_ratio_block_jackknife_kernel.cu.md
 #include <cuda_runtime.h>
 
-#include "core/internal/launch_config.hpp"  // core::kMaxGridX (the single-source grid-dim cap)
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK_KERNEL
-#include "device/cuda/ratio_block_jackknife_kernel.cuh"  // the narrow seam + DRatioJackArray
+#include "core/internal/launch_config.hpp"
+#include "device/cuda/check.cuh"
+#include "device/cuda/ratio_block_jackknife_kernel.cuh"
 
 namespace steppe::device {
 
 namespace {
 
-/// Index element (item k, block b) of a descriptor: data[base + k*item_stride + b*block_stride].
-/// A 0 item_stride broadcasts across items (the f4ratio per-block block_sizes weight).
+// Per-(item, block) descriptor indexing — reference §4
 __device__ __forceinline__ double rj_at(const DRatioJackArray& a, long k, int b) {
     return a.data[a.base + k * a.item_stride + static_cast<long>(b) * a.block_stride];
 }
 
-/// One thread per item k. tot_mode 0 = f4ratio (block-sum tot; num/den ARE the est_to_loo
-/// replicates; reads xblk_num/xblk_den; survivor mask |xblk_den|<setmiss_thresh). tot_mode
-/// 1 = dstat (LOO-ratio tot; num/den ARE the per-block sums with weight=cnt; the LOO replicate
-/// is built in-thread; survivor mask weight>0). Native FP64, ascending-b operand order matching
-/// the host long-double references.
+// The shared ratio block-jackknife kernel (f4-ratio + D-statistic modes) — reference §6
 __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArray den,
                                              DRatioJackArray weight, DRatioJackArray xblk_num,
                                              DRatioJackArray xblk_den, int N, int n_block,
@@ -52,25 +28,20 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
                                              double* __restrict__ d_est, double* __restrict__ d_se,
                                              double* __restrict__ d_z, double* __restrict__ d_p) {
     const double knan = nan("");
-    const double kInvSqrt2 = 0.7071067811865475244;  // 1/sqrt(2) (the AT2 ztop / f4_two_sided_p).
+    const double kInvSqrt2 = 0.7071067811865475244;
     for (long k = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
          k < static_cast<long>(N);
          k += static_cast<long>(gridDim.x) * blockDim.x) {
 
-        // Per-block survivor predicate (the SAME mask reused in every pass, ascending b).
-        // f4ratio (tot_mode 0): |xblk_den(k,b)| >= setmiss_thresh. dstat (tot_mode 1): cnt>0.
-        // Captured by recomputing inline per b (matching the host's per-pass mask).
         double est = knan, se = knan, z = knan;
 
         if (tot_mode == 0) {
-            // ===== f4ratio: ratio_jackknife (f4ratio.cpp:79-155) =====
-            // Pass 1 — survivor: Σ block_sizes (=n), nb_surv, totnum/totden (Σ xblk·bl).
-            double n_w = 0.0;       // Σ survivor weight (== AT2 n)
+            double n_w = 0.0;
             int nb_surv = 0;
             double totnum = 0.0, totden = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double den_blk = rj_at(xblk_den, k, b);
-                if (fabs(den_blk) < setmiss_thresh) continue;  // AT2 setmiss: missing block
+                if (fabs(den_blk) < setmiss_thresh) continue;
                 const double bl = rj_at(weight, k, b);
                 n_w += bl;
                 ++nb_surv;
@@ -83,9 +54,8 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
                 continue;
             }
             const double nb = static_cast<double>(nb_surv);
-            const double tot = totnum / totden;  // the variance-centering term.
+            const double tot = totnum / totden;
 
-            // Pass 2 — est = mean(tot − R_b)·nb + weighted_mean(R_b, bl).
             double diffsum = 0.0, wmean_num = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double den_blk = rj_at(xblk_den, k, b);
@@ -95,11 +65,10 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
                 diffsum += tot - Rb;
                 wmean_num += Rb * bl;
             }
-            const double term1 = (diffsum / nb) * nb;  // (Σ(tot−R)/nb_surv)·nb_surv
+            const double term1 = (diffsum / nb) * nb;
             const double term2 = wmean_num / n_w;
             est = term1 + term2;
 
-            // Pass 3 — xtau variance: h=n/bl; tau=h·tot−(h−1)·R; xtau=(tau−est)/sqrt(h−1).
             double var_acc = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double den_blk = rj_at(xblk_den, k, b);
@@ -116,8 +85,6 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
             z = est / se;
 
         } else {
-            // ===== dstat: dstat_jackknife (dstat.cpp:70-157) =====
-            // Pass 1 — survivor: Σcnt, nb_surv.
             double sum_cnt = 0.0;
             int nb_surv = 0;
             for (int b = 0; b < n_block; ++b) {
@@ -131,7 +98,6 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
             }
             const double nb = static_cast<double>(nb_surv);
 
-            // Pass 2a — tot_num/tot_den = weighted.mean(est_t, cnt).
             double tot_num_w = 0.0, tot_den_w = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double cn = rj_at(weight, k, b);
@@ -144,7 +110,6 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
             const double tot_num = tot_num_w / sum_cnt;
             const double tot_den = tot_den_w / sum_cnt;
 
-            // Pass 2b — R_b = loo_num/loo_den; tot = weighted.mean(R_b, 1−rel); Σ R_b·cnt.
             double tot_w_num = 0.0, tot_w_den = 0.0, wmean_R_num = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double cn = rj_at(weight, k, b);
@@ -162,8 +127,6 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
             }
             const double tot = tot_w_num / tot_w_den;
 
-            // Pass 2c — diffsum = Σ (tot − R_b). (R_b recomputed bit-identically from the SAME
-            // tot_num/tot_den — the host stores Rb[]; recompute gives the identical double.)
             double diffsum = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double cn = rj_at(weight, k, b);
@@ -178,7 +141,6 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
             }
             est = (diffsum / nb) * nb + wmean_R_num / sum_cnt;
 
-            // Pass 3 — xtau variance: h=Σcnt/cnt; tau=h·tot−(h−1)·R−est; var=Σ(tau²/(h−1))/nb.
             double var_acc = 0.0;
             for (int b = 0; b < n_block; ++b) {
                 const double cn = rj_at(weight, k, b);
@@ -201,12 +163,13 @@ __global__ void ratio_block_jackknife_kernel(DRatioJackArray num, DRatioJackArra
         d_est[k] = est;
         d_se[k] = se;
         d_z[k] = z;
-        if (compute_p) d_p[k] = erfc(fabs(z) * kInvSqrt2);  // AT2 ztop == f4_two_sided_p.
+        if (compute_p) d_p[k] = erfc(fabs(z) * kInvSqrt2);
     }
 }
 
 }  // namespace
 
+// Launch geometry and early-out wrapper — reference §5
 void launch_ratio_block_jackknife(const DRatioJackArray& num, const DRatioJackArray& den,
                                   const DRatioJackArray& weight, const DRatioJackArray& xblk_num,
                                   const DRatioJackArray& xblk_den, int N, int n_block,

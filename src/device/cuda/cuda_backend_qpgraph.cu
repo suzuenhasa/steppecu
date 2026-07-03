@@ -1,42 +1,31 @@
 // src/device/cuda/cuda_backend_qpgraph.cu
 //
-// CudaBackend — qpGraph on-device fleet subsystem TU (cuda_backend.cu split T1;
-// docs/kimiactions/05-cuda-backend-split.md §2.3 TU-H). Out-of-line homes of
-// `CudaBackend::qpgraph_fit_fleet` + `CudaBackend::qpgraph_fit_fleet_batch` —
-// the IDEA-1 on-device qpGraph fleet (whole multistart × maxit in-kernel, ONE
-// launch). Bodies MOVED VERBATIM from cuda_backend.cu; nothing about codegen /
-// math / precision changed by the split.
+// CudaBackend's qpGraph fleet methods: host-side orchestration that uploads the
+// fit inputs, fires one kernel launch, and reduces the small result arrays. The
+// optimizer math itself lives in the companion kernel TU (qpgraph_fit_kernels.cu).
+// A CUDA TU private to steppe_device.
 //
-// FULLY DECOUPLED (§2.3 TU-H): ZERO cross-TU coupling — uses only
-// guard_device()/stream_/DeviceBuffer<T> (all in cuda_backend.cuh). The in-thread
-// objective is native FP64 (the carve-out); no BLAS / cuSOLVER. The helper types
-// QpGraphDeviceTopo / QpGraphDeviceTopoView / ScratchLayout / make_layout /
-// kMaxThetaDev + the launch_qpgraph_* wrappers come from qpgraph_fit_kernels.cuh
-// (NOT an anon-namespace migration). This TU joins the SAME steppe_device target.
-//
-// This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4).
-#include "device/cuda/cuda_backend.cuh"      // the CudaBackend class declaration (split T0/T1)
-#include "device/cuda/qpgraph_fit_kernels.cuh" // qpGraph: the on-device IDEA-1 fleet launcher + the L3 on-device edge/f3 recovery
-#include "device/cuda/check.cuh"             // STEPPE_CUDA_CHECK
+// Reference: docs/reference/src_device_cuda_cuda_backend_qpgraph.cu.md
+#include "device/cuda/cuda_backend.cuh"
+#include "device/cuda/qpgraph_fit_kernels.cuh"
+#include "device/cuda/check.cuh"
 
-#include <stdexcept>  // std::runtime_error — the over-cap kMaxThetaDev reject
-#include <string>     // std::to_string — diagnostic message for the over-cap throw
-#include <vector>     // std::vector — the host arena packing + best-of-restarts reduction
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace steppe::device {
 
+// Fit one topology: the single-topology full fit — reference §5
 QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
                                              std::span<const double> f_obs,
                                              std::span<const double> qinv,
                                              int numstart, int maxit, double tol,
                                              const Precision& precision) {
-    (void)precision;  // the in-thread objective is native FP64 (the carve-out); the
-                      // emulated GEMM seam is the production batched-cc path.
+    (void)precision;
     guard_device();
     QpGraphFleet out;
     const int D = topo.nadmix;
-    // The in-kernel fit holds theta in a fixed-size per-thread stack (kMaxThetaDev) —
-    // reject an over-cap topology before launch (a clear throw) instead of overrunning it.
     if (D > kMaxThetaDev)
         throw std::runtime_error(
             "steppe::device::CudaBackend::qpgraph_fit_fleet: topology nadmix=" +
@@ -44,7 +33,6 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
             std::to_string(kMaxThetaDev) + ".");
     const int npair = topo.npair, ne = topo.nedge_norm;
 
-    // ---- upload the resident basis + the topology arenas ----------------------
     DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
     DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
@@ -87,13 +75,9 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
     const int ns = numstart > 0 ? numstart : 1;
     DeviceBuffer<double> dTheta(static_cast<std::size_t>(ns) * static_cast<std::size_t>(D > 0 ? D : 1));
     DeviceBuffer<double> dScore(static_cast<std::size_t>(ns));
-    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     if (D == 0) {
-        // pure tree: no fleet — ONE on-device edge solve (L3: the GPU fleet adds
-        // nothing at D=0, and d_fill_pwts_centered never derefs theta when n_pae==0,
-        // so the SAME d_qpgraph_score body evaluates the tree with a null theta). The
-        // host qpgraph_score (and topo_to_model) is dropped here too.
         DeviceBuffer<double> dBl0(static_cast<std::size_t>(ne > 0 ? ne : 1));
         DeviceBuffer<double> dF30(static_cast<std::size_t>(npair > 0 ? npair : 1));
         DeviceBuffer<double> dSc0(1);
@@ -119,7 +103,6 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
         return out;
     }
 
-    // ---- the on-device fleet (ONE launch; whole multistart x maxit in-kernel) ---
     launch_qpgraph_fleet(dt, ns, maxit, tol, dFobs.data(), dQinv.data(),
                                dTheta.data(), dScore.data(), stream_.get());
 
@@ -131,7 +114,6 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
                                       cudaMemcpyDeviceToHost, stream_.get()));
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
-    // best-of-restarts + the per-weight bracket (tiny host work over ns rows).
     double best = std::numeric_limits<double>::infinity();
     double smin = best, smax = -best;
     int best_i = 0;
@@ -153,12 +135,6 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
         out.theta[static_cast<std::size_t>(d)] = h_theta[static_cast<std::size_t>(best_i) * static_cast<std::size_t>(D) + static_cast<std::size_t>(d)];
     out.theta_lo = thmin; out.theta_hi = thmax;
 
-    // recover the edge lengths + f3_fit at the best theta — L3: ON-DEVICE (was a
-    // host core::qpadm::qpgraph_score re-eval). launch_qpgraph_eval_at_theta runs the
-    // SAME d_qpgraph_score body the fleet runs, ONCE, at the winning restart's theta,
-    // exporting bl + f3_fit (= ppwts·bl) + the score — dropping the host objective.
-    // Reuses the resident dt/dFobs/dQinv (still in scope; the fleet basis). A
-    // 1e30 singular score ⇒ NonSpdCovariance (bl/f3_fit zeroed), as before.
     DeviceBuffer<double> dThetaBest(static_cast<std::size_t>(D));
     DeviceBuffer<double> dBl(static_cast<std::size_t>(ne > 0 ? ne : 1));
     DeviceBuffer<double> dF3(static_cast<std::size_t>(npair > 0 ? npair : 1));
@@ -185,19 +161,19 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
     return out;
 }
 
+// Screen many topologies at once: best score per candidate — reference §8
 QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
     const std::vector<QpGraphTopoArena>& topos, std::span<const double> f_obs,
     std::span<const double> qinv, int numstart, int maxit, double tol,
     const Precision& precision) {
-    (void)precision;  // in-thread objective is native FP64 (the carve-out).
+    (void)precision;
     guard_device();
     QpGraphFleetBatch out;
     const int G = static_cast<int>(topos.size());
     if (G == 0) { out.status = Status::Ok; return out; }
     const int ns = numstart > 0 ? numstart : 1;
-    const int npair = topos.front().npair;  // the basis dim (pop-set-bound; same for all).
+    const int npair = topos.front().npair;
 
-    // ---- resident basis (uploaded ONCE; every candidate reads it) ----------------
     DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
     DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
@@ -205,17 +181,12 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), qinv.data(), qinv.size() * sizeof(double),
                                       cudaMemcpyHostToDevice, stream_.get()));
 
-    // ---- pack every topology's arenas into contiguous host buffers + the view table -
     std::vector<double> h_pwts0;
     std::vector<int> h_pe_edge, h_pe_leaf, h_pe_path, h_pae_path, h_pae_edge, h_cmb1, h_cmb2;
     std::vector<QpGraphDeviceTopoView> h_views(static_cast<std::size_t>(G));
     int max_npop = 0, max_ne = 0, max_npair = 0, max_npath = 0;
     for (int g = 0; g < G; ++g) {
         const QpGraphTopoArena& t = topos[static_cast<std::size_t>(g)];
-        // The per-thread theta stack is fixed-size (kMaxThetaDev): reject an over-cap
-        // topology HERE (a clear throw) so the heterogeneous fleet never hands the kernel
-        // an nadmix that would overrun th[]/thp[]/thm[]/thn[]. (The kernel also returns a
-        // 1e30 sentinel on the over-cap path; this host reject is the loud failure.)
         if (t.nadmix > kMaxThetaDev)
             throw std::runtime_error(
                 "steppe::device::CudaBackend::qpgraph_fit_fleet_batch: candidate topology "
@@ -247,7 +218,6 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
         max_npair = std::max(max_npair, t.npair);
         max_npath = std::max(max_npath, t.npath);
     }
-    // the batch-MAX per-thread layout (every topology's scratch fits this slab).
     const ScratchLayout Lmax = make_layout(max_npop, max_ne, max_npair, max_npath);
 
     auto up_d = [&](const std::vector<double>& h) {
@@ -273,15 +243,12 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
                                       h_views.size() * sizeof(QpGraphDeviceTopoView),
                                       cudaMemcpyHostToDevice, stream_.get()));
 
-    // per-thread scratch slab (ntopo*numstart threads, each a batch-MAX slab) + the
-    // per-(topo,restart) score output.
     const std::size_t threads = static_cast<std::size_t>(G) * static_cast<std::size_t>(ns);
     DeviceBuffer<double> dGdbl(threads * static_cast<std::size_t>(Lmax.dbl_total));
     DeviceBuffer<int> dGint(threads * static_cast<std::size_t>(Lmax.int_total > 0 ? Lmax.int_total : 1));
     DeviceBuffer<double> dScore(threads);
-    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // arenas ready.
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
-    // ---- the ONE launch (the fleet fits ALL candidates) -------------------------
     launch_qpgraph_fleet_batch(
         dViews.data(), G, ns, maxit, tol, Lmax.dbl_total, Lmax.int_total, dPwts0.data(),
         dPeEdge.data(), dPeLeaf.data(), dPePath.data(), dPaePath.data(), dPaeEdge.data(),
@@ -293,7 +260,6 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
                                       cudaMemcpyDeviceToHost, stream_.get()));
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
-    // ---- host reduction: per-topology best-of-restarts + spread (NOT a fit) ------
     out.best_score.assign(static_cast<std::size_t>(G), std::numeric_limits<double>::infinity());
     out.restart_spread.assign(static_cast<std::size_t>(G), 0.0);
     for (int g = 0; g < G; ++g) {

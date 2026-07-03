@@ -1,27 +1,11 @@
 // src/device/backend.hpp
 //
-// ComputeBackend — the dependency-injection seam between `core` orchestration
-// and the device layer (architecture.md §4, §8).
+// ComputeBackend — the CUDA-free interface every compute operation routes
+// through, plus the plain-data structs that cross it. Two implementations
+// satisfy it: CudaBackend (the GPU deliverable) and CpuBackend (the reference
+// oracle). CUDA stays private to the device layer, behind this one door.
 //
-// THIS HEADER IS CUDA-FREE BY CONTRACT. It is the only door `core` uses to reach
-// the GPU: `core` is pure host C++20 and never includes a CUDA header or calls
-// cuBLAS/cuSOLVER directly (architecture.md §2, §4). CUDA is PRIVATE to
-// steppe_device, so this interface compiles into `core` and the CLI without
-// dragging in the device toolkit. Two implementations satisfy it — `CudaBackend`
-// (the 3-GEMM reformulation on the GPU) and `CpuBackend` (the scalar reference
-// oracle) — and the compute layer is written once against the interface, never
-// branching on GPU-vs-CPU (architecture.md §8). The CPU backend is both the DRY
-// reference and the correctness anchor the GPU is continuously diffed against
-// (architecture.md §13).
-//
-// The minimal-but-real method is `compute_f2` — compute the f2 matrix
-// from the Q/V/N contract at a given Precision, returning f2 [P × P] and the
-// pairwise-valid-SNP count Vpair [P × P]. Vpair is RETAINED, not discarded: it
-// is the weighted-block-jackknife weight at S4 (architecture.md §5 S2 caveat
-// (a)). `decode_af` / `compute_f2_blocks` extend it, and the CUDA-free
-// `capabilities()` probe + `BackendCapabilities` POD make this seam
-// single-node-multi-GPU-ready (architecture.md §9, §11.4). The gemm /
-// jackknife / svd methods live here too.
+// Reference: docs/reference/src_device_backend.hpp.md
 #ifndef STEPPE_DEVICE_BACKEND_HPP
 #define STEPPE_DEVICE_BACKEND_HPP
 
@@ -32,639 +16,297 @@
 #include <string>
 #include <vector>
 
-#include "steppe/config.hpp"        // steppe::Precision
-#include "steppe/error.hpp"         // steppe::Status (qpAdm domain-outcome POD fields)
-#include "steppe/fstats.hpp"        // steppe::F2BlockTensor (the per-block f2 deliverable)
-#include "steppe/qpadm.hpp"         // steppe::QpAdmOptions (CUDA-free; the fit seam config)
-#include "core/internal/views.hpp"  // steppe::core::MatView (Q/V/N contract)
-#include "core/internal/decode_af.hpp"  // genotype_code / kHeterozygousGenotypeCode / kPloidyDetectSnps (base ploidy default)
-#include "device/device_partial.hpp"  // steppe::device::DevicePartial (CUDA-free opaque resident handle)
-#include "device/device_f2_blocks.hpp"  // steppe::device::DeviceF2Blocks (CUDA-free opaque FULL device-resident result handle)
-#include "device/device_decode_result.hpp"  // steppe::device::DeviceDecodeResult (CUDA-free opaque autosome-compacted Q/V resident handle)
-#include "device/stream_f2_blocks.hpp"  // steppe::device::StreamTarget (CUDA-free streamed-tier request)
+#include "steppe/config.hpp"
+#include "steppe/error.hpp"
+#include "steppe/fstats.hpp"
+#include "steppe/qpadm.hpp"
+#include "core/internal/views.hpp"
+#include "core/internal/decode_af.hpp"
+#include "device/device_partial.hpp"
+#include "device/device_f2_blocks.hpp"
+#include "device/device_decode_result.hpp"
+#include "device/stream_f2_blocks.hpp"
 
 namespace steppe {
 
-/// Output of an f2 computation: the symmetric f2 matrix and the pairwise-valid
-/// SNP counts, both column-major [P × P] (element (i,j) at `i + P·j`). Plain
-/// host vectors so the type crosses the CUDA-free seam (architecture.md §4);
-/// the CUDA backend copies its device results into these before returning.
+// f2 matrix result — reference §6
 struct F2Result {
-    /// f2 matrix, column-major [P × P]. Bias-corrected, AT2-unbiased estimator
-    /// f2(i,j) = mean over jointly-valid SNPs of (p_i − p_j)² − hc_i − hc_j.
-    ///
-    /// DIAGONAL CONVENTION (pinned): f2(i,i) carries the FULL
-    /// (i,i) computation, NOT a forced 0. With p_i == p_i the per-SNP summand is
-    /// (p_i − p_i)² − hc_i − hc_i = −2·hc_i, so f2(i,i) = −2·mean within-pop het
-    /// correction (generally nonzero, and a within-pop het quantity, NOT a
-    /// between-pop f2). BOTH backends agree on the diagonal by construction: the
-    /// GPU assemble_f2_kernel writes every (i,j) with no i==j guard, and the CPU
-    /// oracle loops j = i. The diagonal is never consumed downstream (f3/f4 read
-    /// off-diagonal f2 only) but is kept consistent across backends so the §13
-    /// oracle≡GPU diff at the F2Result seam compares the FULL matrix, diagonal
-    /// included, and an F2Result round-trip cannot reintroduce a backend split.
     std::vector<double> f2;
 
-    /// Pairwise-valid SNP count, column-major [P × P]: Vpair(i,j) = number of
-    /// SNPs valid in BOTH i and j. RETAINED as the S4 jackknife weight
-    /// (architecture.md §5 S2 caveat (a)); the per-pair divide and S4 weighting
-    /// must compose to AT2's f2_blocks definition, not double-normalize. The
-    /// DIAGONAL Vpair(i,i) is i's own valid-SNP count (the i==j case of "valid in
-    /// both"); like f2(i,i) it is filled, not 0, and agrees across backends.
     std::vector<double> vpair;
 
-    /// Number of populations P (the leading dimension of both matrices).
     int P = 0;
 };
 
-// ---------------------------------------------------------------------------
-// qpAdm fit-engine PODs (design docs/design/fit-engine.md §2; the FROZEN
-// CONTRACT §2). Plain CUDA-free PODs that cross the ComputeBackend seam by
-// value, adjacent to F2Result. Flattening convention is fixed here ONCE so the
-// jackknife/ALS/cross-checks cannot disagree on the vectorization order.
-//
-// VECTORIZATION ORDER (binding — it is AT2's `c(t(xmat))` order, design §4 S4/S6;
-// verified against the golden by the R prototype): the m = nl*nr entries of the
-// per-block f4 matrix are flattened ROW-MAJOR over (i,j): k = j + nr*i, with i in
-// 0..nl-1 over left[-target] and j in 0..nr-1 over right[-R0]. AT2 builds Q with
-// this same row-major order (jack_pairarr_stats: aperm(c(2,1,3)) then row-fill),
-// and opt_A/opt_B index qinv with c(t(xmat)) = the same order. Using i + nl*j
-// would silently transpose Q vs the X vector and break parity.
-// ---------------------------------------------------------------------------
-
-/// S3 output: the per-block f4 matrix X, flattened m=nl*nr per block, plus the
-/// jackknife point estimate x_total (the AT2 $est vector).
+// Per-block f4 + jackknife estimate — reference §7
 struct F4Blocks {
-    /// [m * n_block]: x_blocks[k + m*b] = vec(f4)[k] for block b, with the
-    /// row-major k = j + nr*i convention above.
     std::vector<double> x_blocks;
 
-    /// [m]: AT2 weighted-jackknife point estimate of f4 (the $est vector), same
-    /// k = j + nr*i flatten.
     std::vector<double> x_total;
 
-    /// [m * n_block]: the per-entry leave-one-out (est_to_loo) replicate values
-    /// loo[k + m*b], carried so S7 re-fits per LOO block without recomputing S4.
     std::vector<double> x_loo;
 
-    int nl = 0;       ///< = left.size()       (rows of the f4 matrix)
-    int nr = 0;       ///< = right.size() - 1  (cols of the f4 matrix)
-    int n_block = 0;  ///< the SURVIVOR block count (== block_sizes.size()).
+    int nl = 0;
+    int nr = 0;
+    int n_block = 0;
 
-    /// [n_block]: the per-SURVIVOR-block SNP count (AT2 block_lengths) — the S4
-    /// jackknife weight. F1 / OQ-12 (est_to_loo_nafix): a jackknife block in which
-    /// ANY population pair has Vpair == 0 (no SNP jointly valid in both pops) is a
-    /// MISSING block; AT2's `read_f2(remove_na=TRUE)` DROPS such blocks ENTIRELY
-    /// (`keep = apply(f2,3,sum(!is.finite)==0)`) before the jackknife, then runs the
-    /// standard est_to_loo / jack_pairarr_stats over the survivors — NOT impute-0
-    /// (which biases f4 toward 0 + inflates variance). assemble_f4 therefore COMPACTS
-    /// the f4 block arrays (x_blocks/x_loo) to the survivor blocks and carries the
-    /// survivor SNP counts HERE (not the f2 source's full block_sizes), so jackknife_cov
-    /// / the rank sweep / S7 consume the survivor set with no further change. With NO
-    /// missing blocks (every existing maxmiss=0 golden) this equals the full f2.block_sizes
-    /// and the path is byte-identical (the keep-mask is all-true). [AT2 resampling.R /
-    /// io.R read_f2 remove_na; fit-engine.md OQ-12]
     std::vector<int> block_sizes;
 };
 
-/// S4 output: the covariance Q and the inverse of the FUDGED Q.
+// Jackknife covariance and its inverse — reference §7
 struct JackknifeCov {
-    /// [m*m] (symmetric, layout-agnostic), UNFUDGED (the golden Q convention).
     std::vector<double> Q;
 
-    /// [m*m] inverse of the FUDGED Q (diag += fudge*tr(Q)).
     std::vector<double> Qinv;
 
     int m = 0;
 
-    /// NonSpdCovariance if the fudged Q is not invertible (value, not throw).
     Status status = Status::Ok;
 };
 
-/// S6 output: the GLS weight fit.
+// GLS weight fit — reference §7
 struct GlsWeights {
-    std::vector<double> w;  ///< [nl] normalized admixture weights (Σw = 1).
-    std::vector<double> A;  ///< [nl*r] col-major refined left factor (rows=left, cols=rank).
-    std::vector<double> B;  ///< [r*nr] col-major refined right factor.
-    double chisq = 0.0;     ///< vec(E)' Qinv vec(E), E = X - A*B.
+    std::vector<double> w;
+    std::vector<double> A;
+    std::vector<double> B;
+    double chisq = 0.0;
     int r = 0;
 
-    /// RankDeficient if svd(X)/the constrained solve degenerates (value, not throw).
     Status status = Status::Ok;
 };
 
-/// qpfstats SMOOTHING-SOLVE output (the genotype-path joint f2 smoother;
-/// include/steppe/qpfstats.hpp). The shared-factor batched least-squares solution: for the
-/// design x [npopcomb × npairs] and the per-block numerator ymat [npopcomb × n_block],
-/// A_shared = x'x + ridge·I (SPD), and the per-block smoothed f-stat-basis coefficients
-///   b[:,block] = solve(A_shared, x'·ymat[:,block])
-/// (a NaN-comb-row block downdates A_b = A_shared - x[nan]'x[nan] before the solve; an
-/// ALL-NaN block → b=0). bglob is the SAME shared solve over the GLOBAL jackknife-est y
-/// [npopcomb] (AT2 matrix_jackknife_est). The CUDA backend runs ONE syrk (A_shared), ONE
-/// potrf (the shared factor), ONE gemm (x'·ymat) + a cublasDtrsm PAIR over ALL n_block
-/// columns (no host per-block loop), with the NaN/missing blocks grouped (CUB segmented) +
-/// per-group batched potrf/potrs downdate; the CpuBackend is the small_linalg native oracle.
+// qpfstats smoothing-solve output — reference §9
 struct QpfstatsSmooth {
-    /// [npairs * n_block] COLUMN-MAJOR: b[pair + npairs*block] — the per-block smoothed
-    /// coefficient on the outgroup-f basis pair (the AT2 `b` matrix, npairs × nblocks).
     std::vector<double> b;
 
-    /// [npairs] — the GLOBAL smoothed coefficients (AT2 `bglob`), the recentering target.
     std::vector<double> bglob;
 
-    /// [npairs] — the per-pair RECENTER SHIFT (AT2 f2blocks2 = f2blocks - f2(f2blocks)$est
-    /// + bglob): shift[pair] = bglob[pair] - f2blocks_pair_est(b[pair, :], block_sizes).
-    /// EMPTY unless the fused entry (qpfstats_blocks_smooth) computed the recenter on-device;
-    /// the plain qpfstats_smooth seam leaves it empty (the host applies the recenter).
     std::vector<double> recenter_shift;
 
-    int npairs = 0;    ///< n(n-1)/2 (the f-stat basis dim == ncol(x)).
-    int n_block = 0;   ///< the jackknife block count (== ncol(ymat)).
+    int npairs = 0;
+    int n_block = 0;
 
-    /// NonSpdCovariance if A_shared (ridge-regularized) is not factorable (value, not throw;
-    /// should not occur with ridge>0 over a real basis).
     Status status = Status::Ok;
 };
 
-/// S4 DIAGONAL-only output: the per-item jackknife VARIANCE vector — the production-scale
-/// shape for the per-item f-stats (f4/f3), which read ONLY diag(Q) and never invert Q.
-/// var[k] == JackknifeCov.Q[k + m*k] == (1/nb)·Σ_b xtau[k,b]², computed WITHOUT forming the
-/// dense m×m Q / its Cholesky inverse (O(m·nb) work, O(m) memory — no N² OOM at sweep scale).
-/// se[k] = sqrt(var[k]); the est is read separately from F4Blocks.x_total[k]. Native FP64 (it
-/// IS the diagonal jackknife_cov computes; a tiny per-item sum-of-squares — bit-equal to the
-/// deleted dense path BY CONSTRUCTION, so the f4/f3 goldens do not move). Mined from
-/// wip/fstats-massive-overbuild (backend.hpp JackknifeDiag).
+// Diagonal-only jackknife variance — reference §7
 struct JackknifeDiag {
-    std::vector<double> var;  ///< [m] the per-item diagonal variance (== diag(Q)).
+    std::vector<double> var;
     int m = 0;
-    Status status = Status::Ok;  ///< Ok always (no Q invert ⇒ no NonSpdCovariance).
+    Status status = Status::Ok;
 };
 
-/// SHARED RATIO-block-jackknife output (the f4ratio + qpDstat common engine). The AT2
-/// jack_mat_stats / jack_dat_stats `$est` of a per-block RATIO statistic R_b = num_loo_b /
-/// den_loo_b, batched over the N items (each item reducing over the n_block axis). One slot
-/// per item: est = the jackknife point estimate ($est, NOT tot — the f4ratio.cpp header pins
-/// est==alpha to 2e-15 while tot errs by 3e-4); se = sqrt(var); z = est/se; p the two-sided
-/// tail (filled only when compute_p, i.e. the dstat path; f4ratio leaves p empty). A
-/// degenerate item (≤1 survivor block / degenerate total) is the per-row NaN sentinel.
-/// Native FP64 (the §12 cancellation carve-out — NEVER emulated).
+// Ratio block-jackknife output — reference §8
 struct RatioBlockJackknife {
-    std::vector<double> est;  ///< [N] the jackknife point estimate ($est).
-    std::vector<double> se;   ///< [N] sqrt(var).
-    std::vector<double> z;    ///< [N] est/se.
-    std::vector<double> p;    ///< [N] two-sided tail (EMPTY unless compute_p).
+    std::vector<double> est;
+    std::vector<double> se;
+    std::vector<double> z;
+    std::vector<double> p;
     int N = 0;
     Status status = Status::Ok;
 };
 
-/// CUDA-FREE indexing descriptor for ONE per-(item,block) input array of the shared
-/// ratio-block-jackknife (so f4ratio's column-major-in-k x_loo/x_blocks and dstat's
-/// row-major numsum/densum/cnt feed the SAME kernel with ZERO repacking — the kernel reads
-/// element (item k, block b) at base + k*item_stride + b*block_stride). A null `data` means
-/// the array is absent (e.g. f4ratio omits nothing, dstat omits the x_blocks pair). A 0
-/// item_stride BROADCASTS the array across items (f4ratio's per-block block_sizes weight).
+// Ratio-jackknife input array descriptor — reference §8
 struct RatioJackArray {
-    const double* data = nullptr;  ///< base pointer (host OR device per the overload).
-    long base = 0;                 ///< element offset of item 0, block 0.
-    long item_stride = 0;          ///< step between consecutive items (0 ⇒ broadcast).
-    long block_stride = 0;         ///< step between consecutive blocks.
+    const double* data = nullptr;
+    long base = 0;
+    long item_stride = 0;
+    long block_stride = 0;
 };
 
-/// qpGraph TOPOLOGY ARENAS carried INTO the fleet virtual (the CUDA-free device-facing
-/// twin of core::qpadm::QpGraphModel — backend.hpp need not include the model header).
-/// All flat int/double arenas, uploaded ONCE per topology (the qpAdm per-model index-
-/// arena pattern). The device kernel runs the SAME fill_pwts (path tables) -> centered
-/// pwts -> ppwts_2d -> native SPD edge solve -> GLS quadratic form per (restart) thread.
+// qpGraph topology arena — reference §10
 struct QpGraphTopoArena {
     int npop = 0, nedge_norm = 0, nadmix = 0, npair = 0, npath = 0, base_leaf = 0;
-    std::vector<double> pwts0;          ///< [nedge_norm x npop] col-major (theta-independent).
-    std::vector<int> pe_edge, pe_leaf, pe_path;        ///< fill_pwts path-edge table.
-    std::vector<int> pae_path, pae_admixedge;          ///< fill_pwts path-admixedge table.
-    std::vector<int> cmb1, cmb2;        ///< [npair] centered-column pair indices (0-based).
-    bool constrained = true;            ///< drift>=0 (the box-constrained edge solve).
-    double fudge = 1e-4;                ///< the cc trace-scaled ridge (AT2 `diag`).
+    std::vector<double> pwts0;
+    std::vector<int> pe_edge, pe_leaf, pe_path;
+    std::vector<int> pae_path, pae_admixedge;
+    std::vector<int> cmb1, cmb2;
+    bool constrained = true;
+    double fudge = 1e-4;
 };
 
-/// qpGraph FLEET output: the best-of-restarts {score, theta} + the per-weight restart
-/// bracket + the fitted edge lengths at the optimum. NonSpdCovariance/RankDeficient ⇒
-/// a degenerate inner solve at every restart (value, not throw).
+// qpGraph best-of-restarts fit — reference §10
 struct QpGraphFleet {
-    std::vector<double> theta;       ///< [nadmix] the best restart's mixture weights.
-    std::vector<double> theta_lo;    ///< [nadmix] min over restarts (the bracket low).
-    std::vector<double> theta_hi;    ///< [nadmix] max over restarts (the bracket high).
-    std::vector<double> edge_length; ///< [nedge_norm] the fitted drift edge lengths at theta.
-    std::vector<double> f3_fit;      ///< [npair] the fitted f3 (ppwts_2d * edge_length).
-    double score = 0.0;              ///< the best (min) GLS score.
-    double restart_spread = 0.0;     ///< max-min score across restarts (convergence witness).
+    std::vector<double> theta;
+    std::vector<double> theta_lo;
+    std::vector<double> theta_hi;
+    std::vector<double> edge_length;
+    std::vector<double> f3_fit;
+    double score = 0.0;
+    double restart_spread = 0.0;
     Status status = Status::Ok;
 };
 
-/// HETEROGENEOUS-TOPOLOGY FLEET output (the topology-search fleet; qpgraph_search.hpp). The
-/// per-topology best-of-restarts GLS score for EVERY enumerated candidate, produced in ONE
-/// launch over the flattened (topo,restart) axis. The host does the global-best argmin +
-/// the per-topology bracket over these small arrays (a reduction, NOT a per-candidate fit).
+// qpGraph batched best scores — reference §10
 struct QpGraphFleetBatch {
-    std::vector<double> best_score;  ///< [G] the best (min over restarts) score per topology.
-    std::vector<double> restart_spread;  ///< [G] the per-topology max-min restart spread.
+    std::vector<double> best_score;
+    std::vector<double> restart_spread;
     Status status = Status::Ok;
 };
 
-/// GPU-ONLY f-stat SWEEP survivors (the CUDA-free seam between the core sweep driver and the
-/// CUDA backend's on-device pipeline). The backend enumerates+computes+filters+compacts EVERY
-/// C(P,k) item ON THE DEVICE and returns ONLY the survivors here (the full N-row table is never
-/// host-materialized). Parallel arrays, one slot per survivor; keys[r] holds the k P-axis
-/// indices of survivor r (k<=4; the unused slot is 0). `enumerated` is the total C(P,k) (echoed
-/// even when capped); `capped` ⇒ the maxcomb cap refused (no compute ran). Status is Ok unless
-/// capped (InvalidConfig). Native FP64 (the f-stat cancellation carve-out + the diagonal SE).
+// f-stat sweep survivors — reference §11
 struct SweepSurvivors {
-    std::vector<std::array<int, 4>> keys;  ///< survivor index tuples (k<=4; unused slot 0).
-    std::vector<double> est;               ///< f4/f3 point estimate per survivor.
-    std::vector<double> se;                ///< diagonal jackknife SE per survivor.
-    std::vector<double> z;                 ///< est/se per survivor.
+    std::vector<std::array<int, 4>> keys;
+    std::vector<double> est;
+    std::vector<double> se;
+    std::vector<double> z;
 
-    std::size_t enumerated = 0;  ///< total C(P,k) the sweep would enumerate.
-    bool capped = false;         ///< refused by the maxcomb cap (no compute ran).
+    std::size_t enumerated = 0;
+    bool capped = false;
     Status status = Status::Ok;
 };
 
-/// SweepConfig::filter_mode contract — the two on-device sweep filter modes, named at one
-/// source so the host setter (core/qpadm/fstat_sweep.cpp) and the device reader
-/// (device/cuda/cuda_backend.cu) cite the same constants instead of bare 0/1 literals.
-/// These are NOT a §3.2 parity-frozen oracle value: behavior-neutral mode tags, name-and-keep
-/// (§2.5, §4 "unnamed literal → name it; keep value"). The field stays `int` (the POD seam +
-/// device path read it as int) — these are not an enum-type change.
-inline constexpr int kSweepFilterMinZ = 0;  ///< fixed-threshold |z|>=min_z filter; tau pinned at the floor.
-inline constexpr int kSweepFilterTopK = 1;  ///< rising-tau device top-K reservoir; tau rises to the K-th |z|.
+// Sweep filter-mode constants — reference §11
+inline constexpr int kSweepFilterMinZ = 0;
+inline constexpr int kSweepFilterTopK = 1;
 
-/// CUDA-FREE request carried INTO the backend sweep virtual (the public SweepRequest's device-
-/// facing twin; the core driver fills it from the public type so backend.hpp need not include
-/// the public sweep header). k is the arity (4 quartet / 3 triple). filter_mode: kSweepFilterMinZ
-/// (on-device |z|>=min_z); kSweepFilterTopK = keep-all (TopK/All — the device keeps every item,
-/// the host ranks the compacted set). pop_subset empty ⇒ sweep [0,P).
+// f-stat sweep request — reference §11
 struct SweepConfig {
-    int k = 4;                    ///< item arity (quartet/triple).
-    /// kSweepFilterMinZ: a fixed-threshold |z|>=min_z filter; tau does NOT rise (but the device
-    /// reservoir still caps to top_k as a hard safety ceiling so even a billions-item MinZ sweep
-    /// cannot OOM the host). kSweepFilterTopK: a DEVICE-BOUNDED rising-tau reservoir — keep the
-    /// top_k most-significant |z| in a fixed CAP=O(top_k) buffer; tau RISES to the running K-th |z|
-    /// (min_z is its floor), monotonically shrinking the per-chunk survivor count. Either way the
-    /// host receives <=top_k rows, sorted by |z| descending, INDEPENDENT of how many billions are
-    /// computed.
+    int k = 4;
     int filter_mode = kSweepFilterMinZ;
-    double min_z = 3.0;          ///< |z| threshold / the rising-tau FLOOR.
-    std::size_t top_k = 1000000; ///< device reservoir cap K (the bounded top-K target).
-    std::vector<int> pop_subset; ///< optional subset of f2 indices; empty ⇒ all P.
-    bool sure = false;           ///< lift the maxcomb cap.
+    double min_z = 3.0;
+    std::size_t top_k = 1000000;
+    std::vector<int> pop_subset;
+    bool sure = false;
 };
 
-/// S5 sweep output: the qpWave / qpAdm rank test over r = 0..rmax (rmax =
-/// min(nl,nr)-1). Per-rank chisq/dof; the AT2 res$rankdrop nested table; f4rank
-/// (the smallest non-rejected rank). All host-pure value data (CUDA-free seam).
-/// Native FP64 (SVD + Qinv quadratic form are cuSOLVER/ill-conditioned; §1.4).
+// Rank-test sweep output — reference §7
 struct RankSweep {
-    // ---- per-rank sweep (index = candidate rank r, 0..rmax) ----
-    std::vector<double> chisq;   ///< [rmax+1] chisq(r) = vec(E_r)'Qinv vec(E_r) at the ALS-refined rank-r fit.
-    std::vector<int>    dof;     ///< [rmax+1] (nl-r)*(nr-r).
-    std::vector<double> p;       ///< [rmax+1] pchisq_upper(chisq(r), dof(r)).
+    std::vector<double> chisq;
+    std::vector<int>    dof;
+    std::vector<double> p;
 
-    // ---- AT2 res$rankdrop nested table (rows = r descending: rmax..0) ----
-    //   The AT2 rankdrop row order is f4rank DESCENDING (top row = highest rank
-    //   tested = rmax; last row = 0). dofdiff/chisqdiff/p_nested compare row k to
-    //   the NEXT row (k+1), i.e. rank (rmax-k) vs (rmax-k-1); the last row is NA.
-    std::vector<int>    rd_f4rank;    ///< [rmax+1] the rank of this row (rmax, rmax-1, ..., 0).
-    std::vector<int>    rd_dof;       ///< [rmax+1] dof at this rank.
-    std::vector<double> rd_chisq;     ///< [rmax+1] chisq at this rank.
-    std::vector<double> rd_p;         ///< [rmax+1] p at this rank.
-    std::vector<int>    rd_dofdiff;   ///< [rmax+1] dof(next) - dof(this); INT_MIN ⇒ NA (last row).
-    std::vector<double> rd_chisqdiff; ///< [rmax+1] chisq(next) - chisq(this); NaN ⇒ NA (last row).
-    std::vector<double> rd_p_nested;  ///< [rmax+1] pchisq_upper(chisqdiff, dofdiff); NaN ⇒ NA (last row).
+    std::vector<int>    rd_f4rank;
+    std::vector<int>    rd_dof;
+    std::vector<double> rd_chisq;
+    std::vector<double> rd_p;
+    std::vector<int>    rd_dofdiff;
+    std::vector<double> rd_chisqdiff;
+    std::vector<double> rd_p_nested;
 
-    int f4rank = 0;  ///< the smallest non-rejected rank (the AT2 res$f4rank); see §3 decision rule.
-    int rank_Q = 0;  ///< numerical rank of Q (the golden model_well_determined.rank_Q).
+    int f4rank = 0;
+    int rank_Q = 0;
 
-    /// DISPATCH report (SPEC §5:231; observability only). 0 = on-device Jacobi
-    /// (the path EXECUTED at these sizes); 1 = gesvdjBatched WOULD be
-    /// selected (nl,nr<=32); 2 = per-model gesvd WOULD be selected (else). The
-    /// executed SVD is the deterministic on-device Jacobi at all sizes;
-    /// the cuSOLVER routing is the documented PENDING seam (fit-engine.md §1.4).
     int svd_path = 0;
 
-    Status status = Status::Ok;  ///< NonSpdCovariance / RankDeficient propagate as values.
+    Status status = Status::Ok;
 };
 
-/// S5 popdrop output: AT2 res$popdrop — leave-one-LEFT-SOURCE-out feasibility.
-/// One row per pattern over the nl left SOURCES (AT2 keeps the full model row
-/// "0..0" plus each single-drop). Built by the HOST orchestrator (it re-runs the
-/// fit on the reduced left set), NOT a backend virtual — recorded here for the
-/// contract shape (src/core/qpadm/ranktest.cpp).
+// Leave-one-source-out feasibility row — reference §7
 struct PopDropRow {
-    std::string         pat;        ///< AT2 bit pattern over the nl sources (e.g. "00","01","10"); "1"=dropped.
-    int                 wt = 0;     ///< number of sources dropped (popcount(pat)).
+    std::string         pat;
+    int                 wt = 0;
     int                 dof = 0;
     double              chisq = 0.0;
     double              p = 0.0;
     int                 f4rank = 0;
-    std::vector<double> weight;     ///< per-source weight for the SURVIVING sources (NaN for a dropped slot).
-    bool                feasible = false;  ///< AT2 feasible: all surviving weights in [0,1] (the §3 rule).
+    std::vector<double> weight;
+    bool                feasible = false;
     Status              status = Status::Ok;
 };
 
-/// A CUDA-FREE, NON-OWNING view of one packed genotype tile + its population
-/// partition — the input to `decode_af` (architecture.md §5 S0/S1).
-/// This is the plain-data seam between the `io` leaf (which produces an
-/// io::GenotypeTile of the same shape) and the device/CPU decode backend: `io`
-/// does NOT depend on `device`, and `backend.hpp` does NOT depend on the `io`
-/// leaf — `app`/the test bridge them by filling this view from a GenotypeTile.
-/// All pointers are borrowed (the caller owns the storage for the call's
-/// duration); no CUDA type appears.
-///
-/// TGENO individual-major packing: `packed` holds `n_individuals` records of
-/// `bytes_per_record` bytes each, gathered POPULATION-CONTIGUOUS; SNP `s` of
-/// gathered individual `g` is the 2-bit code at byte `g*bytes_per_record + s/4`,
-/// position `s%4` (MSB-first). Population `p` owns gathered individuals
-/// `[pop_offsets[p], pop_offsets[p+1])`. `n_pop == pop_offsets length − 1`.
+// Genotype decode input tile view — reference §5
 struct DecodeTileView {
-    const std::uint8_t* packed = nullptr;   ///< packed bytes, pop-contiguous records
-    std::size_t bytes_per_record = 0;       ///< stride between individual records
-    std::size_t n_snp = 0;                  ///< SNPs in the tile (the column axis M)
-    std::size_t n_individuals = 0;          ///< gathered individuals across all pops
-    const std::size_t* pop_offsets = nullptr;  ///< P+1 segment boundaries (sample axis)
-    int n_pop = 0;                          ///< number of populations P (row axis)
+    const std::uint8_t* packed = nullptr;
+    std::size_t bytes_per_record = 0;
+    std::size_t n_snp = 0;
+    std::size_t n_individuals = 0;
+    const std::size_t* pop_offsets = nullptr;
+    int n_pop = 0;
 
-    /// PER-SAMPLE PLOIDY (length n_individuals, parallel to the GATHERED sample axis
-    /// — sample_ploidy[g] is the ploidy of gathered individual g): 2 diploid, 1
-    /// pseudo-haploid (ancient DNA). AT2's adjust_pseudohaploid=TRUE auto-detects this
-    /// PER SAMPLE (a het call ⇒ diploid; none ⇒ pseudo-haploid), so MIXED-PLOIDY
-    /// populations (real for aDNA) are handled correctly. The io leaf
-    /// (geno_reader::detect_sample_ploidy) fills it; the decode folds it via
-    /// core::accumulate_genotype_ploidy (AC += code/(3-ploidy), N += ploidy).
-    ///
-    /// NULL ⇒ use the scalar `ploidy` for EVERY sample (the legacy uniform-ploidy
-    /// path; the existing all-diploid callers/tests that never set this stay
-    /// bit-identical). When non-null it OVERRIDES the scalar.
     const int* sample_ploidy = nullptr;
 
-    /// The uniform fallback ploidy when `sample_ploidy == nullptr` (2 diploid / 1
-    /// pseudo-haploid). Default 2 (diploid). With `sample_ploidy` set this is unused.
     int ploidy = 2;
 
-    /// ON-DEVICE PLOIDY PREPASS request (the host-compute fix). When TRUE
-    /// AND `sample_ploidy == nullptr`, the backend derives the per-sample ploidy
-    /// ITSELF, in lockstep with the decode, from the SAME packed bytes — the CUDA
-    /// backend runs a one-thread-per-individual GPU prepass on the uploaded d_packed
-    /// (launch_detect_ploidy), the CpuBackend runs the host io::detect_sample_ploidy
-    /// ORACLE — instead of the caller doing the host scan up front. Bit-identical to
-    /// the host detector by construction: it is a literal port of the host loop using
-    /// the SAME core::genotype_code / kHeterozygousGenotypeCode / kPloidyDetectSnps
-    /// primitives (scan the first min(kPloidyDetectSnps, n_snp) SNPs of each sample;
-    /// a het call ⇒ diploid, else pseudo-haploid). This is the GPU-FIRST path: the
-    /// ploidy detection moves on-device, off the host critical path.
-    ///
-    /// IGNORED when `sample_ploidy != nullptr` (an explicit per-sample vector always
-    /// wins) and FALSE by default (the legacy paths that set `sample_ploidy` or rely
-    /// on the uniform `ploidy` are bit-unchanged). This flag is CUDA-FREE (a plain
-    /// bool); the GPU prepass it triggers is PRIVATE to steppe_device.
     bool detect_ploidy_on_device = false;
 };
 
-/// Output of a genotype-decode: the Q/V/N contract as plain column-major [P × M]
-/// host arrays (element (pop i, snp s) at `i + P·s` — the views.hpp layout that
-/// drops straight into MatView/compute_f2). Plain host vectors so the type
-/// crosses the CUDA-free seam (architecture.md §4); the CUDA backend copies its
-/// device results into these before returning.
+// Genotype decode output — reference §5
 struct DecodeResult {
-    /// Reference-allele frequency in [0,1], 0 where invalid. Column-major [P × M].
     std::vector<double> q;
-    /// Validity mask (1.0 valid / 0.0 missing). Column-major [P × M].
     std::vector<double> v;
-    /// Non-missing haploid count (ploidy × non-missing individuals). [P × M].
     std::vector<double> n;
-    /// Number of populations P (the leading dimension of Q/V/N).
     int P = 0;
-    /// Number of SNPs M (the column count of Q/V/N).
     long M = 0;
 };
 
-/// The native-code -> canonical-code map a SNP-major source needs before its codes
-/// pack into the canonical individual-major tile (format-readers.md §3.2). P0
-/// PACKEDANCESTRYMAP/GENO already uses the canonical raw-value convention (0/1/2 ref
-/// copies, 3 missing) AND the MSB-first bit order, so its map is IDENTITY. Later
-/// formats (EIGENSTRAT ASCII, PLINK) add enumerators WITHOUT touching the transpose
-/// body. CUDA-FREE plain enum (the device twin TransposeEncoding mirrors it 1:1;
-/// transpose_canonical_kernel.cuh); the seam stays CUDA-free.
+// Native→canonical code map — reference §5
 enum class TileEncoding : int {
-    Identity = 0,  ///< P0 PACKEDANCESTRYMAP/GENO — the native code IS the canonical code.
+    Identity = 0,
 };
 
-/// A CUDA-FREE, NON-OWNING view of a SNP-MAJOR packed source + the SELECTED,
-/// REORDERED individual gather list — the input to `transpose_to_canonical`
-/// (format-readers.md §2.4). The mirror of `DecodeTileView` for the
-/// transpose-on-read path: a new SNP-major reader (PACKEDANCESTRYMAP/GENO,
-/// EIGENSTRAT, PLINK) gathers its raw SNP-major bytes + builds the selection here,
-/// the app layer (the only `io`<->`device` wiring point) fills this view, and the
-/// backend transposes it into the canonical individual-major tile decode_af /
-/// detect_ploidy already consume. All pointers are borrowed (the caller owns the
-/// storage for the call's duration); no CUDA type appears.
-///
-/// SNP-MAJOR source packing: `snp_major` holds `n_snp` records of
-/// `src_bytes_per_record` bytes each (record s = SNP s); SOURCE individual `i` of
-/// SNP `s` is the 2-bit code at byte `s*src_bytes_per_record + i/4`, position `i%4`
-/// (MSB-first; the same code_in_byte order, with the individual axis interleaved
-/// within each SNP byte). `src_bytes_per_record` is the GENO rlen-floored stride
-/// max(48, ceil(n_ind/4)) — possibly LARGER than ceil(n_ind/4); only `i/4` for the
-/// SELECTED rows (each < n_ind) is read, so a small-n_ind record's PADDING bytes are
-/// never decoded as phantom individuals (format-readers.md §3.4).
+// SNP-major source tile view — reference §5
 struct SnpMajorTileView {
-    const std::uint8_t* snp_major = nullptr;  ///< SNP-major source bytes (record s = SNP s)
-    std::size_t src_bytes_per_record = 0;     ///< source SNP-record stride (the rlen-floored max(48,ceil(n_ind/4)))
-    std::size_t n_snp = 0;                     ///< SNPs the tile covers (source records AND output columns)
+    const std::uint8_t* snp_major = nullptr;
+    std::size_t src_bytes_per_record = 0;
+    std::size_t n_snp = 0;
 
-    /// SOURCE individual ROW per OUTPUT column g, in pop-contiguous Q/V/N order: the
-    /// IndPartition's selected, label-ASC-ordered set flattened pop-by-pop (output
-    /// column g -> source row sel_rows[g]). Length `n_individuals`. This is the
-    /// selection + reorder the transpose applies output-driven (the SNP-major source
-    /// interleaves ALL individuals, so the gather happens at transpose time — the
-    /// axis-swapped twin of the TGENO read_tile per-individual gather).
     const std::size_t* sel_rows = nullptr;
-    std::size_t n_individuals = 0;             ///< gathered output individuals (output record count)
+    std::size_t n_individuals = 0;
 
-    /// Population segment boundaries over the OUTPUT individual axis: pop `p` owns
-    /// gathered individuals [pop_offsets[p], pop_offsets[p+1]). Length P+1, copied
-    /// straight onto the output tile (the transpose does not touch the partition).
     const std::size_t* pop_offsets = nullptr;
-    int n_pop = 0;                             ///< number of populations P (== pop_offsets length − 1)
+    int n_pop = 0;
 
-    /// The native-code -> canonical-code map (P0 = Identity). Applied per code by the
-    /// transpose before the MSB-first re-pack into the canonical output byte.
     TileEncoding encoding = TileEncoding::Identity;
 };
 
-/// Output of `transpose_to_canonical`: the canonical INDIVIDUAL-MAJOR genotype tile
-/// as plain host data — the SAME packing io::GenotypeTile / DecodeTileView carry
-/// (gathered individual `g` at `packed[g*bytes_per_record + s/4]`, position `s%4`,
-/// MSB-first; pop-contiguous, segmented by `pop_offsets`). A backend-local POD
-/// (NOT io::GenotypeTile) so backend.hpp stays a CUDA-free seam that does NOT depend
-/// on the `io` leaf (the established DecodeTileView/DecodeResult pattern); the app
-/// layer copies these fields into an io::GenotypeTile (or fills a DecodeTileView
-/// directly) for the unchanged downstream decode/ploidy/f2 path.
+// Canonical individual-major tile — reference §5
 struct CanonicalTile {
-    std::vector<std::uint8_t> packed;        ///< canonical individual-major bytes, pop-contiguous
-    std::size_t bytes_per_record = 0;        ///< ceil(n_snp/4) — the output record stride
-    std::size_t n_snp = 0;                   ///< SNPs the tile covers
-    std::size_t n_individuals = 0;           ///< gathered individuals (== packed.size()/bytes_per_record)
-    std::vector<std::size_t> pop_offsets;    ///< P+1 segment boundaries (copied from the input view)
+    std::vector<std::uint8_t> packed;
+    std::size_t bytes_per_record = 0;
+    std::size_t n_snp = 0;
+    std::size_t n_individuals = 0;
+    std::vector<std::size_t> pop_offsets;
 };
 
-/// CUDA-FREE probe result describing the ONE device a backend instance is bound
-/// to, plus whether that device can peer-access the other visible devices — the
-/// capability-tier datum the single-node multi-GPU machinery reads
-/// (architecture.md §9 DeviceConfig/Resources, §11.4 SPMG capability-tiered
-/// combine, §12 parity). Plain old data so it crosses the CUDA-free seam
-/// (architecture.md §4) and slots by value into `Resources`/a result envelope.
-///
-/// WHY OUT-OF-BAND, NEVER ON `F2BlockTensor`. The capability TAG (which combine
-/// path a run took, why it degraded) is recorded in `Resources`/the run record,
-/// NEVER on the numeric payload (`F2BlockTensor` stays pure numeric storage so
-/// the §12 parity diff compares only bits that the math produced). This struct is
-/// the *probe input* to that out-of-band tag; it carries no statistic.
-///
-/// PARITY-NEUTRAL BY CONSTRUCTION. Every field here drives a data-movement /
-/// observability lever only (which combine transport, which precision lane is
-/// honorable) — never the arithmetic. §12 parity holds identically whether
-/// `can_access_peer` is true (PRO 6000 device-resident `cudaMemcpyPeer` combine)
-/// or false (the host-staged fixed-order combine baseline): both sum the same
-/// fixed `g=0..G-1` device order, so the reported numbers are bit-identical on
-/// both tiers (architecture.md §11.4, §12).
-///
-/// The real probe (the values these fields actually take on a device) is asserted
-/// in the CUDA path's probe test; this header only fixes the SHAPE and the
-/// value-initialized "unknown" defaults (every field zero/false ⇒ "nothing
-/// probed yet", the contract `ComputeBackend::capabilities()`'s base returns).
+// Backend capability probe — reference §13
 struct BackendCapabilities {
-    /// Number of CUDA devices VISIBLE to this process (`cudaGetDeviceCount`). The
-    /// SPMG combine fans out over the subset pinned by `DeviceConfig::devices`
-    /// (architecture.md §9, §11.4); this is the upper bound the probe saw. 0 ⇒
-    /// unknown / no CUDA device (the CPU backend / value-initialized default).
     int device_count = 0;
 
-    /// Compute capability of THE device this backend instance is bound to
-    /// (`cudaDeviceProp::major`/`minor`; sm_120 ⇒ {12, 0} on the Blackwell box).
-    /// One build (sm_120) serves both boxes (architecture.md §0), so this is
-    /// observability, not a dispatch key. {0,0} ⇒
-    /// unknown.
     int compute_major = 0;
     int compute_minor = 0;
 
-    /// Total / currently-free VRAM in bytes on the bound device (`cudaMemGetInfo`,
-    /// which yields BOTH — `cuda_backend.cu` historically discarded `total`; the
-    /// probe captures it). `total` feeds the
-    /// §11.2 VRAM budget / per-box P_max; `free` is the live headroom. 0 ⇒ unknown.
     std::size_t total_vram_bytes = 0;
     std::size_t free_vram_bytes  = 0;
 
-    /// Whether the bound device (conventionally GPU 0, the combine root) can
-    /// PEER-ACCESS the other visible devices — `cudaDeviceCanAccessPeer`
-    /// (architecture.md §11.4, §9 `enable_peer_access`). The capability-tier law
-    /// (architecture.md §11.4): true is the PRO 6000 /
-    /// datacenter-Blackwell stock-driver case (the device-resident `cudaMemcpyPeer`
-    /// combine fast-path); false is EXPECTED on consumer GeForce (P2P
-    /// driver-disabled) and triggers the NON-throwing tagged degrade to the
-    /// host-staged fixed-order combine baseline — never a fault. false ⇒ no peer
-    /// access (also the value-initialized default).
     bool can_access_peer = false;
 
-    /// Whether `EmulatedFp64` is HONORABLE on this build/device — i.e. the
-    /// fixed-slice Ozaki tuning API is present so cuBLAS pins the FIXED mantissa
-    /// rather than silently falling back to the DYNAMIC ~60-bit trap (architecture
-    /// .md §12; `emulation_honorable`, `STEPPE_HAVE_EMU_TUNING`).
-    /// false ⇒ an `EmulatedFp64` request must degrade to native `Fp64` with a
-    /// logged capability tag (never run dynamic under the `EmulatedFp64` tag).
-    /// false is also the value-initialized "unknown" default.
     bool emulated_fp64_honorable = false;
 };
 
-/// DATES weighted-LD moment sufficient-statistics (include/steppe/dates.hpp; the cuFFT
-/// autocorrelation LD engine output). The per-(chromosome, output-bin) DATES CORR
-/// sufficient statistics summed over EVERY admixed sample — the tiny reduced result the host
-/// finishes the date with (fixjcorr leave-one-chrom + the corr curve + the exp fit). The
-/// ~10^12 SNP-pair object is never formed: these are the IFFT(|FFT|^2) autocorrelation
-/// moments (dates.c ddadd/ddcorr -> addcorr2). ROW-MAJOR [n_chrom × n_bin] per moment.
-/// Chromosomes are indexed 0..n_chrom-1 in the SAME order as the caller's `chrom_present`
-/// list (the per-chrom segmentation), bins 0..n_bin-1 are the output distance bins
-/// (bin s spans [s*binsize, (s+1)*binsize) Morgans). The six moments map to the DATES CORR
-/// struct accumulators (addcorr2(corr, dd00, dd01, dd10, dd11, dd02, dd20)):
-///   s0  += dd00 (count autocorr  = the per-lag pair COUNT, the denominator)
-///   s1  += dd01, s2 += dd10 (count×signal cross — for the mean terms, unused at mode 1)
-///   s12 += dd11 (signal autocorr = the covariance NUMERATOR)
-///   s11 += dd02, s22 += dd20 (count×signal² cross — the variance moments)
-/// The reported curve is corr = (s12/s0)/sqrt((s11/s0)*(s22/s0)) (calccorr mode 1, datacol 3).
+// DATES weighted-LD moments — reference §12
 struct DatesMoments {
-    int n_chrom = 0;  ///< number of present chromosomes (== chrom_present length).
-    int n_bin = 0;    ///< number of output distance bins.
-    std::vector<double> s0;   ///< [n_chrom × n_bin] Σ dd00 (pair-count autocorr / denominator).
-    std::vector<double> s1;   ///< [n_chrom × n_bin] Σ dd01.
-    std::vector<double> s2;   ///< [n_chrom × n_bin] Σ dd10.
-    std::vector<double> s11;  ///< [n_chrom × n_bin] Σ dd02 (signal² variance moment).
-    std::vector<double> s12;  ///< [n_chrom × n_bin] Σ dd11 (signal autocorr / covariance numerator).
-    std::vector<double> s22;  ///< [n_chrom × n_bin] Σ dd20 (signal² variance moment).
+    int n_chrom = 0;
+    int n_bin = 0;
+    std::vector<double> s0;
+    std::vector<double> s1;
+    std::vector<double> s2;
+    std::vector<double> s11;
+    std::vector<double> s12;
+    std::vector<double> s22;
     Status status = Status::Ok;
 };
 
-/// One DATES single-exponential fit outcome (date_gen + residual sd + ok), the result of
-/// dates_fit over ONE windowed corr curve. Batched: dates_fit fits n_curves curves and
-/// returns n_curves of these (the full-data fit + the n_chrom leave-one-chrom LOO fits).
+// DATES exponential-decay fit — reference §12
 struct DatesExpFit {
-    double date_gen = 0.0;  ///< decay rate λ (generations); see fit_exp_decay.
-    double error_sd = 0.0;  ///< sqrt(rss / win_len) residual sd.
-    int ok = 0;             ///< 1 iff a decaying positive exponential was fit (date_gen>0).
+    double date_gen = 0.0;
+    double error_sd = 0.0;
+    int ok = 0;
 };
 
-class ComputeBackend;  // fwd for the fit_models_batched default delegate below
+class ComputeBackend;
 
+// Host helper functions — reference §15
 namespace core::qpadm {
-/// The CUDA-FREE per-model default body of ComputeBackend::fit_models_batched
-/// (defined in steppe_core, src/core/qpadm/model_search.cpp). It drives each model's
-/// assemble_f4 → run_impl chain through `be`'s OWN device virtuals — so the device
-/// backend runs resident batched GPU kernels and the CPU backend runs the scalar
-/// oracle, with NO per-backend override. Declared here so the inline base virtual
-/// can delegate to it without backend.hpp depending on the core qpadm headers
-/// (the symbol is pulled in ONLY when the rotation is actually used).
 [[nodiscard]] std::vector<QpAdmResult> fit_models_batched_default(
     ComputeBackend& be, const steppe::device::DeviceF2Blocks& f2,
     std::span<const QpAdmModel> models, const QpAdmOptions& opts);
 
-/// CUDA-FREE host gate for the kQpMax* bit-parity envelope (nl<=kQpMaxNl=5,
-/// nr<=kQpMaxNr=10, r<=kQpMaxR=4 — the SINGLE SOURCE: core/qpadm/qpadm_bounds.hpp).
-/// The S8 orchestrator (run_qpadm_search, core) partitions the model list by this
-/// predicate: small-path models route to the device-BATCHED virtual
-/// fit_models_batched (the cuSOLVER-batched rotation primitive); the large/>32 tail
-/// routes to the per-model fit_models_batched_default (one device dispatch per model
-/// is correct for the tail, design §5). It delegates to the SAME qpadm_bounds.hpp
-/// predicate that CudaBackend::model_fits_small_path dispatches on AND that sizes the
-/// kernel per-thread arrays, so this host gate cannot drift wider than those arrays
-/// (a wider gate would overflow them — UB). Declared here so the host orchestrator can
-/// bucket WITHOUT naming the CUDA backend. nl = left.size(), nr = right.size()-1,
-/// r = (opts.rank<0 ? nl-1 : opts.rank).
 [[nodiscard]] bool model_in_small_path(const QpAdmModel& model, const QpAdmOptions& opts);
 
 }  // namespace core::qpadm
 
-/// Abstract compute backend. One interface, two implementations (CUDA, CPU
-/// reference). All device operations route through here; `core` never issues a
-/// GEMM/SVD/Cholesky itself (architecture.md §2, §8). Move-only ownership of
-/// concrete backends is by `std::unique_ptr<ComputeBackend>` in `Resources`
-/// (architecture.md §9).
-///
-/// PER-DEVICE-INSTANCE CONTRACT (architecture.md §9 PerGpuResources, §11.4 SPMG).
-/// One backend instance is bound to exactly ONE
-/// CUDA device — the single-process-multi-GPU model is ONE backend (and one
-/// `PerGpuResources`: stream + cuBLAS/cuSOLVER handle) PER device in
-/// `DeviceConfig::devices`, constructed with that device's id and
-/// `cudaSetDevice`-bound to it. The interface is therefore SINGLE-DEVICE: SNP
-/// sharding across the G devices and the host-side fixed-order combine of their
-/// per-device full-shape partials are orchestrated ABOVE this seam (by
-/// `Resources`/the streamer, architecture.md §11.4), NOT inside any one method —
-/// that combine algorithm is the next workflow, not implemented here.
+// The ComputeBackend interface — reference §14
 class ComputeBackend {
 public:
     ComputeBackend() = default;
@@ -674,55 +316,11 @@ public:
     ComputeBackend& operator=(ComputeBackend&&) = delete;
     virtual ~ComputeBackend() = default;
 
-    /// Compute the bias-corrected f2 matrix and pairwise-valid counts from the
-    /// Q/V/N contract (column-major [P × M] views, views.hpp) at the requested
-    /// precision.
-    ///
-    /// @param Q  reference-allele frequencies in [0,1], zero-filled where
-    ///           invalid (the zero is what makes the masked GEMM correct).
-    /// @param V  validity mask (1.0 valid / 0.0 missing).
-    /// @param N  non-missing haploid count (2 × diploids, or 1 × pseudo-haploids
-    ///           for ancient DNA). Enters only the het correction.
-    /// @param precision  governs the matmul-heavy f2 GEMMs ONLY (default
-    ///           EmulatedFp64{40} ⇒ ≈ native, MEASURED 7–17× faster on real
-    ///           AADR). The small numerator/divide stays native
-    ///           FP64 regardless (architecture.md §12). The CPU backend computes
-    ///           the native-FP64 reference and ignores the matmul mode.
-    ///
-    /// Preconditions: Q, V, N share the same P and M and refer to the same SNP
-    /// block. Returns f2 [P × P] + Vpair [P × P] (column-major). Both backends
-    /// must agree at the f2/Vpair seam within the tight tolerance tier
-    /// (architecture.md §12, §13) — the formula is shared via
-    /// core/internal/f2_estimator.hpp so they cannot diverge.
     [[nodiscard]] virtual F2Result compute_f2(const core::MatView& Q,
                                               const core::MatView& V,
                                               const core::MatView& N,
                                               const Precision& precision) = 0;
 
-    /// Compute the PER-BLOCK f2 tensor `f2_blocks [P × P × n_block]` + the retained
-    /// per-block `Vpair` from the FULL per-SNP Q/V/N contract and a SNP→block
-    /// assignment — the per-block f2 deliverable (architecture.md §5 S2, §11.1).
-    ///
-    /// The inputs Q/V/N are the SAME column-major [P × M] contract as `compute_f2`,
-    /// but spanning ALL M SNPs (not one block). `block_id` is an M-vector from the
-    /// shared `assign_blocks` (core/domain/block_partition_rule.hpp): `block_id[s]`
-    /// is the dense jackknife block of SNP s, in `0 .. n_block-1`, non-decreasing in
-    /// file order (so a block's SNPs are CONTIGUOUS — the property the batched
-    /// reorder relies on). The GPU backend runs the SIZE-GROUPED
-    /// strided-batched design over the blocks; the CPU backend is the per-block
-    /// long-double oracle. `precision` governs only the matmul-heavy GEMMs
-    /// (architecture.md §12); the numerator/divide stays native FP64.
-    ///
-    /// @param Q         reference-allele frequencies in [0,1], 0 where invalid,
-    ///                  column-major [P × M] over ALL SNPs.
-    /// @param V         validity mask (1.0 valid / 0.0 missing), [P × M].
-    /// @param N         non-missing haploid count, [P × M] (enters het correction).
-    /// @param block_id  per-SNP dense block id (length M), from assign_blocks;
-    ///                  non-decreasing ⇒ each block's columns are contiguous.
-    /// @param n_block   number of distinct blocks (== max(block_id)+1).
-    /// @param precision governs the f2 GEMMs only (default EmulatedFp64{40}).
-    /// @return  F2BlockTensor with f2 + Vpair [P × P × n_block] (block-major outer,
-    ///          column-major within a block: `i + P·j + P·P·b`) + block_sizes.
     [[nodiscard]] virtual F2BlockTensor compute_f2_blocks(const core::MatView& Q,
                                                           const core::MatView& V,
                                                           const core::MatView& N,
@@ -730,18 +328,6 @@ public:
                                                           int n_block,
                                                           const Precision& precision) = 0;
 
-    /// DEVICE-RESIDENT primary: compute the FULL per-block f2 tensor
-    /// [P × P × n_block] + Vpair EXACTLY as compute_f2_blocks does (same GEMM body,
-    /// bit-identical bits; §12), but LEAVE the result RESIDENT in VRAM and return a
-    /// move-only DeviceF2Blocks handle — NO forced D2H, NO host alloc, NO host
-    /// zero-fill. THE PRIMARY OUTPUT (architecture.md §11.1 "f2_blocks stays on the
-    /// device"). compute_f2_blocks (host) is now a thin wrapper = this + .to_host().
-    /// The ONLY difference from compute_f2_blocks is the result stays on the device
-    /// instead of being copied to a host F2BlockTensor and freed.
-    ///
-    /// NON-PURE: the base throws (the device-resident output is a CUDA-backend
-    /// concept; nothing routes the CPU backend / a GPU-free fake through it). Only
-    /// the CUDA backend overrides it — CpuBackend / any fake need NOT.
     [[nodiscard]] virtual steppe::device::DeviceF2Blocks compute_f2_blocks_device(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, const Precision& precision) {
@@ -751,21 +337,6 @@ public:
             "(device-resident output requires a CUDA backend)");
     }
 
-    /// Device-resident variant of compute_f2_blocks: compute the per-block
-    /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does, but LEAVE the
-    /// f2/Vpair tensors RESIDENT on this backend's device (NO D2H, NO free) and
-    /// return an opaque, move-only DevicePartial owning them — the input to the
-    /// device-resident cudaMemcpyPeer combine (device/p2p_combine.hpp). Bit-identical
-    /// per-block bits to compute_f2_blocks over the same inputs (same GEMM body; §12):
-    /// the ONLY difference is the result stays on the device instead of being copied
-    /// to a host F2BlockTensor and freed.
-    ///
-    /// @param b0  the GLOBAL block placement offset for this partial (== shard.b0),
-    ///            carried on the returned handle so the combine knows the disjoint
-    ///            destination slice [b0, b0+n_block) without consulting the shard.
-    /// NON-PURE: the base throws (it is reached only behind the four-term §4 gate,
-    /// which requires caps.can_access_peer == true — only the CUDA backend reports
-    /// that). CpuBackend / any fake need NOT override it.
     [[nodiscard]] virtual steppe::device::DevicePartial compute_f2_blocks_resident(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, int b0, const Precision& precision) {
@@ -776,29 +347,6 @@ public:
             "must have routed a non-CUDA/non-peer backend to the host-staged path)");
     }
 
-    /// Host-staged-direct variant of compute_f2_blocks: compute the per-block
-    /// [P × P × n_block] partial EXACTLY as compute_f2_blocks does (same GEMM body,
-    /// bit-identical per-block bits; §12), but instead of allocating a fresh host
-    /// F2BlockTensor and D2H-copying into it, D2H the compact f2/vpair slabs DIRECTLY
-    /// into the caller-provided PINNED host destination at the disjoint block offset
-    /// slab_off = (size_t)P*P*b0. The destination is ONE shared result owned by the
-    /// orchestrator; this device owns the disjoint slice [slab_off, slab_off +
-    /// P*P*n_block) and writes ONLY it (block-aligned shards are disjoint, so two
-    /// devices' slices never overlap — concurrent D2H into one buffer is race-free).
-    ///
-    /// The backend page-locks [dst_f2+slab_off, ... +P*P*n_block) and the vpair slice
-    /// for the D2H window (RegisteredHostRegion, graceful pageable degrade) so the two
-    /// devices' D2Hs run as concurrent pinned DMAs. block_sizes for this device's blocks
-    /// are written into block_sizes_dst[b0 .. b0+n_block) (host int).
-    ///
-    /// @param dst_f2          base pointer of the shared result f2 buffer (length >=
-    ///                        P*P*n_block_full); the device writes [slab_off, +slab*nb).
-    /// @param dst_vpair       base pointer of the shared result vpair buffer (same shape).
-    /// @param block_sizes_dst base pointer of the shared result block_sizes (length >=
-    ///                        n_block_full); the device writes [b0, b0+n_block).
-    /// @param b0              the GLOBAL block placement offset for this partial (== shard.b0).
-    /// NON-PURE: default base throws (only the CUDA backend implements it; the CPU
-    /// backend / fakes need not override — but see §(4): the host test fake must).
     virtual void compute_f2_blocks_into(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, int b0,
@@ -810,19 +358,6 @@ public:
             "ComputeBackend::compute_f2_blocks_into: not supported by this backend");
     }
 
-    /// STREAMED (out-of-core) per-block f2 — the HostRam + Disk tiers. Computes the
-    /// FULL per-block [P × P × n_block] f2/Vpair EXACTLY as compute_f2_blocks_device does
-    /// (same run_f2_blocks_resident prologue + per-block gather/GEMM/assemble; the
-    /// per-block bits are BIT-IDENTICAL; §12), but instead of leaving the whole result
-    /// resident it SPILLS each block's [P²] slab block-by-block through a triple-buffered
-    /// sink into the tier `target` selects (HostRam: into target.host_dst; Disk: to
-    /// target.disk_path, reopened read-only into target.disk_dst). The ONLY difference
-    /// from the resident path is WHEN/WHERE a slab lands, never its bits. TIER 0
-    /// (Resident) never routes here — the orchestrator calls compute_f2_blocks_device.
-    ///
-    /// NON-PURE: the base throws (streaming is a CUDA-backend concept; the CPU backend /
-    /// any fake need NOT override it). Only the CUDA backend overrides it — exactly the
-    /// compute_f2_blocks_device pattern.
     virtual void compute_f2_blocks_streamed(
         const core::MatView& Q, const core::MatView& V, const core::MatView& N,
         const int* block_id, int n_block, const Precision& precision,
@@ -833,41 +368,8 @@ public:
             "(out-of-core block streaming requires a CUDA backend)");
     }
 
-    /// Decode a packed genotype tile into the Q/V/N contract (architecture.md §5
-    /// S0 Format decode + S1 Allele-freq reduction). Unpacks the
-    /// 2-bit codes (raw-value mapping: 0/1/2 ref-allele copies, 3 missing),
-    /// reduces over the individuals within each population segment into integer
-    /// AC (ref-allele count) / AN (non-missing individual count), then a single
-    /// FP64 divide yields Q = AC/(ploidy·AN), N = ploidy·AN, V = (AN>0) — the EXACT
-    /// oracle math, shared with the CPU reference via core/internal/decode_af.hpp
-    /// so the two cannot diverge (architecture.md §13).
-    ///
-    /// @param tile  the packed tile + population partition + ploidy (CUDA-free
-    ///              view; the `io` leaf fills it from an io::GenotypeTile).
-    /// @return Q/V/N as column-major [P × M] host arrays (i + P·s), dropping
-    ///         straight into MatView/compute_f2. Both backends must agree exactly
-    ///         (N, V integer-valued ⇒ zero diff; Q via integer-accumulate AC/AN +
-    ///         single FP64 divide ⇒ exact is the goal/gate).
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
 
-    /// PER-SAMPLE PLOIDY PREPASS (the host-compute fix) — derive the
-    /// AT2 adjust_pseudohaploid per-sample ploidy vector for `tile` and RETURN it as
-    /// a host int vector of length tile.n_individuals (parallel to the gathered sample
-    /// axis; 2 diploid / 1 pseudo-haploid). The CUDA backend OVERRIDES this with the
-    /// GPU prepass (launch_detect_ploidy, one thread per individual, on the uploaded
-    /// d_packed) and copies the result to host; the CpuBackend runs the same host scan
-    /// ORACLE. Bit-identical across backends BY CONSTRUCTION (a literal port of the host
-    /// loop over the SAME core decode primitives — this BASE default IS that port, so a
-    /// non-overriding fake inherits the identical result). This is the standalone entry
-    /// the prepass is exposed through (decode_af / the resident paths run it INTERNALLY
-    /// when tile.detect_ploidy_on_device is set); the bit-parity gate compares
-    /// the CUDA device vector against io::detect_sample_ploidy on a real-AADR Auto tile.
-    ///
-    /// NON-PURE with a CUDA-FREE base default (the host scan over the shared core
-    /// decode primitives — `core` is a base layer, always available): unlike the
-    /// resident GPU methods (which throw because they need a CUDA backend), the ploidy
-    /// scan is a pure integer/bit operation expressible host-side, so the base provides
-    /// the correct fallback and the test fakes need no override.
     [[nodiscard]] virtual std::vector<int> detect_sample_ploidy_device(
         const DecodeTileView& tile) {
         std::vector<int> ploidy(tile.n_individuals, core::kPloidyPseudoHaploid);
@@ -893,51 +395,14 @@ public:
         return ploidy;
     }
 
-    /// TRANSPOSE + GATHER + ENCODING: convert a SNP-MAJOR packed source
-    /// (PACKEDANCESTRYMAP/GENO, EIGENSTRAT, PLINK) into the canonical INDIVIDUAL-MAJOR
-    /// tile decode_af / detect_ploidy already consume (format-readers.md §2.4, the
-    /// transpose-on-read engine). The ONE on-device op a new SNP-major format needs;
-    /// after it the entire downstream genotype pipeline is UNCHANGED (it only ever
-    /// sees the canonical tile). Three steps fused in one pass:
-    ///   1. GATHER + REORDER — output column g reads SOURCE individual row
-    ///      view.sel_rows[g] (the IndPartition selection in pop-contiguous Q/V/N
-    ///      order); the SNP-major source interleaves ALL individuals per SNP byte, so
-    ///      the selection is output-driven here (the axis-swapped TGENO gather).
-    ///   2. ENCODING — each native 2-bit code is mapped to the canonical raw-value
-    ///      convention (view.encoding; P0 PACKEDANCESTRYMAP = IDENTITY).
-    ///   3. TRANSPOSE + RE-PACK — the codes pack MSB-first into the canonical
-    ///      individual-major byte (gathered individual g, SNP s at byte s/4 pos s%4).
-    /// rlen-floor (format-readers.md §3.4): individuals are bounded by the EXPLICIT
-    /// sel_rows (each < n_ind), so a small-n_ind GENO record's PADDING bytes beyond
-    /// ceil(n_ind/4) are never read as phantom individuals.
-    ///
-    /// INTEGER/BIT-EXACT (the transpose gate): the transpose is pure 2-bit unpack +
-    /// remap + MSB-first re-pack (no FP, no reduction, no precision lane — the
-    /// emulated-FP64 policy is matmul-only and does NOT apply; format-readers.md
-    /// §2.2). The CUDA backend's device transpose is bit-identical to this host-loop
-    /// ORACLE BY CONSTRUCTION (same core::genotype_code extractor, same encoding,
-    /// same packer); the unit gate asserts GPU == CPU == expected (memcmp==0),
-    /// and the Tier-1 gate asserts the PA path == the TGENO tile of the SAME
-    /// data (memcmp==0).
-    ///
-    /// NON-PURE with a CUDA-FREE base default (the host nested loop over the shared
-    /// `core` decode primitive — `core` is a base layer, always available). The CUDA
-    /// backend OVERRIDES this with launch_transpose_to_canonical (one thread per
-    /// output byte on the uploaded source); the CpuBackend inherits this base as its
-    /// reference oracle, and any GPU-free fake gets the correct result with no
-    /// override. The base body IS the oracle the GPU is diffed against.
     [[nodiscard]] virtual CanonicalTile transpose_to_canonical(
         const SnpMajorTileView& view) {
         CanonicalTile out;
         out.n_snp = view.n_snp;
         out.n_individuals = view.n_individuals;
-        // ceil(n_snp/4) — the canonical output record stride (the SAME formula
-        // io::packed_bytes / read_tile derives; spelled via core::kCodesPerByte so the
-        // device twin and this oracle cannot drift on the radix).
         const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
         out.bytes_per_record =
             view.n_snp == 0 ? 0 : (view.n_snp + cpb - 1) / cpb;
-        // Copy the partition straight onto the tile (the transpose does not touch it).
         if (view.pop_offsets != nullptr && view.n_pop >= 0) {
             out.pop_offsets.assign(
                 view.pop_offsets,
@@ -945,27 +410,21 @@ public:
         }
         const std::size_t total = view.n_individuals * out.bytes_per_record;
         out.packed.assign(total, std::uint8_t{0});
-        if (total == 0) return out;  // empty tile (no individuals or no SNPs)
+        if (total == 0) return out;
 
-        // ONE pass per output byte (g, b): assemble the <=4 canonical codes of output
-        // SNPs {4b..4b+3} for gathered individual g by gathering+encoding from the
-        // SNP-major source, then MSB-first re-pack — the literal port of the device
-        // transpose_to_canonical_kernel (so they are bit-identical).
         for (std::size_t g = 0; g < view.n_individuals; ++g) {
             const std::size_t src_row = view.sel_rows[g];
-            const std::size_t src_byte_in_snp = src_row / cpb;  // source byte holding src_row
-            const int src_pos = static_cast<int>(src_row % cpb);  // its in-byte position
+            const std::size_t src_byte_in_snp = src_row / cpb;
+            const int src_pos = static_cast<int>(src_row % cpb);
             for (std::size_t b = 0; b < out.bytes_per_record; ++b) {
                 std::uint8_t out_byte = 0;
                 const std::size_t s0 = b * cpb;
                 for (int k = 0; k < core::kCodesPerByte; ++k) {
                     const std::size_t s = s0 + static_cast<std::size_t>(k);
-                    if (s >= view.n_snp) break;  // partial last byte: remaining SNPs are 0
+                    if (s >= view.n_snp) break;
                     const std::uint8_t src_byte =
                         view.snp_major[s * view.src_bytes_per_record + src_byte_in_snp];
                     const std::uint8_t code = core::genotype_code(src_byte, src_pos);
-                    // P0 encoding is IDENTITY; later formats remap here (the device twin
-                    // does the same switch). Kept explicit so the seam stays format-ready.
                     std::uint8_t canon = code;
                     switch (view.encoding) {
                         case TileEncoding::Identity:
@@ -974,7 +433,7 @@ public:
                             break;
                     }
                     const int shift =
-                        (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;  // 6,4,2,0
+                        (core::kCodesPerByte - 1 - k) * core::kBitsPerCode;
                     out_byte = static_cast<std::uint8_t>(
                         out_byte | static_cast<std::uint8_t>(canon << shift));
                 }
@@ -984,36 +443,6 @@ public:
         return out;
     }
 
-    /// DEVICE-RESIDENT decode + AUTOSOME compaction (the host-compute audit cure
-    /// for the regime-(A) consumers qpfstats / dstat). Decodes the tile
-    /// to Q/V/N RESIDENT in VRAM (NO full host D2H — the ~1.1GB copy is GONE),
-    /// runs the on-device per-SNP autosome keep-mask (chr in [kAutosomeChromMin,
-    /// kAutosomeChromMax] — the INTEGER-EXACT host predicate `if (chr<1||chr>22)
-    /// continue;`, the host filter loop GONE), and stream-compacts Q/V onto the
-    /// kept axis (CUB DeviceSelect::Flagged for the 1-D chrom/genpos + a scan-keyed
-    /// column gather for the [P×M] Q/V — the host lockstep subset + H2D
-    /// re-upload GONE). Only the small kept chrom/genpos cross to host (for the
-    /// CUDA-free assign_blocks, unchanged → identical block_id parity).
-    ///
-    /// PARITY (GOLDEN-EXACT): the autosome predicate is INTEGER (chrom is an int
-    /// from .snp), CUB Flagged preserves the file-order relative ordering, and Q/V
-    /// values are the same doubles decode_af writes (a pure copy). So the kept SET,
-    /// kept ORDER, and assign_blocks over the compacted axis are bit-identical to
-    /// the host autosome loop (qpfstats.cpp:268-278 / dstat.cpp:245-255).
-    ///
-    /// @param tile         the packed tile + population partition + ploidy.
-    /// @param chrom        per-SNP chromosome (length tile.n_snp, from snptab.chrom).
-    /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
-    /// @param physpos      per-SNP physical position in base pairs (length
-    ///                     tile.n_snp), compacted in lockstep for the AT2 bp
-    ///                     block-fallback; pass an EMPTY span to skip it (then
-    ///                     ddr.physpos_kept is left empty — the fallback is off).
-    /// @param chrom_min    autosome lower bound (kAutosomeChromMin = 1).
-    /// @param chrom_max    autosome upper bound (kAutosomeChromMax = 22).
-    /// @return DeviceDecodeResult: the resident compacted Q/V [P × M_kept] + the
-    ///         small file-ordered kept chrom/genpos/physpos for assign_blocks.
-    /// NON-PURE: the base throws (the established backend.hpp pattern; the CPU oracle
-    /// uses decode_af + the host autosome loop directly, never this resident entry).
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
         std::span<const double> genpos, std::span<const double> physpos,
@@ -1025,52 +454,6 @@ public:
             "(the device-resident decode seam requires a CUDA backend)");
     }
 
-    /// DEVICE-RESIDENT decode + REGIME-B (extract_f2 FULL filter) compaction — the
-    /// host-compute audit regime (B) cure (the extract_f2 host per-SNP filter loop +
-    /// the full Q/V/N D2H GONE). SIBLING of decode_af_compact_autosome: it REUSES the
-    /// same decode_af_resident front-end and the IDENTICAL CUB ExclusiveSum + Flagged
-    /// + scan-gather idiom, but REPLACES the autosome-only keep-mask with the regime-B
-    /// keep-mask kernel (one thread per SNP: the pooled-MAF reduction Σ_pop Q·N
-    /// [FFMA-immune, the SHARED derive_pooled_summary_one] + the SHARED
-    /// keep_decision_pooled [class / MAF / geno / monomorphic ==0.0 exact / transversion
-    /// / autosome] + the SEPARATE pop-coverage maxmiss), and adds the THIRD lockstep
-    /// gather of N (the f2-GEMM needs the compacted N too). The resident compacted
-    /// Q/V/N escape in the DeviceDecodeResult (n_device() non-null); only the small
-    /// kept chrom/genpos cross to host (for assign_blocks).
-    ///
-    /// PARITY (GOLDEN-EXACT): one SNP per thread ⇒ the across-pop Σ order is
-    /// sequential p = 0..P-1, bit-identical to the host loop; the integer class /
-    /// chrom / maxmiss filters are FMA-immune; the FFMA-immune __dmul_rn/__dadd_rn
-    /// pin makes the pooled-MAF comparison bit-identical host==device. The kept SET,
-    /// ORDER, and assign_blocks reproduce the host extract_f2 path exactly.
-    ///
-    /// @param tile         the packed tile + population partition + per-sample ploidy.
-    /// @param ref / alt    per-SNP .snp allele chars (length tile.n_snp).
-    /// @param chrom        per-SNP chromosome (length tile.n_snp).
-    /// @param genpos       per-SNP genetic position in Morgans (length tile.n_snp).
-    /// @param physpos      per-SNP physical position in base pairs (length
-    ///                     tile.n_snp), compacted in lockstep for the AT2 bp
-    ///                     block-fallback; pass an EMPTY span to skip it (then
-    ///                     ddr.physpos_kept is left empty — the fallback is off).
-    /// @param cfg          the FilterConfig (maf_min / drop_monomorphic /
-    ///                     transversions_only / autosomes_only; geno_max_missing is
-    ///                     FORCED to 1.0 internally — the pop-axis maxmiss is separate).
-    /// @param pop_individuals  per-pop kept-individual count (the missing-frac
-    ///                     denominator; length tile.n_pop).
-    /// @param ploidy       the ploidy (2 diploid / 1 pseudo-haploid) for N/ploidy.
-    /// @param maxmiss      the AT2 pop-coverage maxmiss (drop if frac of pops with
-    ///                     N<=0 > maxmiss; >=1.0 ⇒ no-op).
-    /// @param s_lo         SNP-TILE START: the tile's first SNP index into the FULL
-    ///                     genotype record (tile.n_snp is the tile WIDTH; the ref/alt/
-    ///                     chrom/genpos/physpos spans are the tile subspans). The
-    ///                     backend uploads only the [s_lo, s_lo+tile.n_snp) 2-bit slice
-    ///                     so peak VRAM is O(P × tile.n_snp), not O(P × M). The caller
-    ///                     SNP-tiles [0,M) in multiple-of-4 steps and appends each
-    ///                     tile's compacted Q/V/N + kept axis in file order — the
-    ///                     result is byte-identical to a single full-M call. s_lo % 4
-    ///                     == 0 is REQUIRED (the 2-bit packing alignment).
-    /// NON-PURE: the base throws (the established pattern; the CpuBackend uses
-    /// decode_af + the host filter loop directly, never this resident entry).
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_filter(
         const DecodeTileView& tile, std::span<const char> ref, std::span<const char> alt,
         std::span<const int> chrom, std::span<const double> genpos,
@@ -1084,45 +467,8 @@ public:
             "(the regime-B device-resident decode seam requires a CUDA backend)");
     }
 
-    // -----------------------------------------------------------------------
-    // qpAdm fit-engine virtuals (design §1.7 + the FROZEN CONTRACT §2).
-    // BATCHED-CAPABLE by signature (a leading n_block / model axis) so the CUDA
-    // backend never needs a per-model/per-block host-loop retrofit.
-    // NON-PURE: the base throws (the established backend.hpp pattern); CpuBackend
-    // overrides all four with the native-FP64 reference. Each takes a `Precision`
-    // that governs ONLY matmul sub-steps; the SVD/Cholesky/weight solves DEFAULT to
-    // native FP64 (the §12 backend invariant) and are PROMOTABLE to EmulatedFp64 via
-    // `set_solve_precision` under a validated per-stage policy (the CUDA
-    // backend's CusolverMathModeScope) — native FP64 remains the oracle/fallback.
-    // The CpuBackend ignores `Precision` and is unconditionally FP64.
-    // -----------------------------------------------------------------------
-
-    /// SOLVE-PRECISION promotion knob (the fit-solve promotion seam).
-    /// The §12 conditioning rule pins the small ill-conditioned solves
-    /// (SVD/Cholesky/GLS) native FP64 by DEFAULT — the matmul `Precision` passed to
-    /// the virtuals above does NOT govern them. This setter is the per-stage seam
-    /// that lets a caller PROMOTE a backend's solve stages to an emulated-FP64
-    /// tensor-core path for the S8 rotation throughput wall (millions of small
-    /// solves), validated per stage against the native oracle before any default
-    /// flip. DEFAULT is native, so a backend that never calls this is byte-for-byte
-    /// the native-default behavior (the golden parity is unchanged). The base is a
-    /// NO-OP (the CpuBackend oracle is unconditionally FP64 and ignores it); the
-    /// CUDA backend overrides it to drive `CusolverMathModeScope` at the solve sites.
-    /// EXPLORATORY/measurement use today (the non-gating emulated-40 parity probe);
-    /// the S8 milestone wires the validated per-stage policy.
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }
 
-    /// S3 — assemble the per-block f4 matrix X from device-resident f2 (zero D2H on
-    /// the CUDA path). BATCHED over n_block (the whole [m × n_block] tensor in one
-    /// call) and resident-capable. left_idx[0] is the TARGET (L_0, prepended);
-    /// right_idx[0] is R_0. AT2 identity (per block b), for i in 0..nl-1 (left
-    /// source i), j in 0..nr-1 (right j):
-    ///   X[i,j,b] = 0.5*( f2(left_idx[i+1], right_idx[0], b)
-    ///                  + f2(left_idx[0],   right_idx[j+1], b)
-    ///                  - f2(left_idx[0],   right_idx[0],   b)
-    ///                  - f2(left_idx[i+1], right_idx[j+1], b) )
-    /// nl = left_idx.size()-1, nr = right_idx.size()-1, m = nl*nr; flatten
-    /// k = j + nr*i (row-major; the F4Blocks vectorization). Native FP64 (OQ-5).
     [[nodiscard]] virtual F4Blocks assemble_f4(const steppe::device::DeviceF2Blocks& f2,
                                                std::span<const int> left_idx,
                                                std::span<const int> right_idx,
@@ -1132,11 +478,6 @@ public:
             "ComputeBackend::assemble_f4: not implemented by this backend");
     }
 
-    /// S3 host-oracle overload — the SAME AT2 f4 combine reading a host
-    /// F2BlockTensor directly (the parity/oracle door; design §6 table:
-    /// the CpuBackend reads host memory). Identical math to the DeviceF2Blocks
-    /// overload; only the f2 storage differs (host vs VRAM). The GPU backend
-    /// overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides this.
     [[nodiscard]] virtual F4Blocks assemble_f4(const F2BlockTensor& f2,
                                                std::span<const int> left_idx,
                                                std::span<const int> right_idx,
@@ -1146,20 +487,6 @@ public:
             "ComputeBackend::assemble_f4(host): not implemented by this backend");
     }
 
-    /// STANDALONE f4 (the run_f4 seam; fit-engine §6) — assemble ONE F4Blocks whose m
-    /// axis is the N input QUARTETS (heterogeneous (L0,R0) per column, unlike assemble_f4
-    /// above whose single (L0,R0) yields an nl×nr grid). For quartet k = (p1,p2,p3,p4),
-    /// per block b:
-    ///   X[k,b] = 0.5*( f2(p2,p3,b) + f2(p1,p4,b) - f2(p1,p3,b) - f2(p2,p4,b) )
-    /// i.e. the SAME four-slab AT2 identity specialized to left={p1,p2}, right={p3,p4},
-    /// nl=1, nr=1 — ZERO new math. The returned F4Blocks sets nl = N, nr = 1 (so m =
-    /// nl*nr = N), and carries x_blocks / x_loo / x_total / block_sizes EXACTLY like
-    /// assemble_f4, so jackknife_cov (S4) consumes the whole m-batch with NO change and
-    /// se[k] = sqrt(Q[k + m*k]). Native FP64 (the cancellation carve-out, OQ-5; the
-    /// `precision` argument is acknowledged but the 4-slab diff stays native). The GPU
-    /// backend overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides the
-    /// host F2BlockTensor form (the oracle door). `quartets` is the flattened P-axis index
-    /// quad array (length 4*N, quad k at [4*k .. 4*k+3] = {p1,p2,p3,p4}).
     [[nodiscard]] virtual F4Blocks assemble_f4_quartets(
         const steppe::device::DeviceF2Blocks& f2,
         std::span<const int> quartets,
@@ -1169,9 +496,6 @@ public:
             "ComputeBackend::assemble_f4_quartets: not implemented by this backend");
     }
 
-    /// STANDALONE f4 host-oracle overload — the SAME per-quartet four-slab combine reading
-    /// a host F2BlockTensor (the CpuBackend oracle door; sibling of assemble_f4(host)).
-    /// Identical math to the DeviceF2Blocks overload; only the f2 storage differs.
     [[nodiscard]] virtual F4Blocks assemble_f4_quartets(
         const F2BlockTensor& f2,
         std::span<const int> quartets,
@@ -1181,20 +505,6 @@ public:
             "ComputeBackend::assemble_f4_quartets(host): not implemented by this backend");
     }
 
-    /// STANDALONE f3 (the run_f3 seam; fit-engine §6) — the THREE-slab clone of
-    /// assemble_f4_quartets. Assemble ONE F4Blocks (reused as the generic per-block X
-    /// carrier) whose m axis is the N input TRIPLES. For triple k = (C=p1, A=p2, B=p3),
-    /// per block b:
-    ///   X[k,b] = 0.5*( f2(C,A,b) + f2(C,B,b) - f2(A,B,b) )
-    /// i.e. the THREE-slab AT2 f3 identity (vs the four-slab quartet diff) — the ONE new
-    /// math seam f3 adds over f4. The returned F4Blocks sets nl = N, nr = 1 (so m = nl*nr =
-    /// N), and carries x_blocks / x_loo / x_total / block_sizes EXACTLY like
-    /// assemble_f4_quartets, so jackknife_cov (S4) consumes the whole m-batch with NO change
-    /// and se[k] = sqrt(Q[k + m*k]). Native FP64 (the cancellation carve-out, OQ-5; the
-    /// `precision` argument is acknowledged but the 3-slab diff stays native). The GPU
-    /// backend overrides the DeviceF2Blocks form (zero D2H); the CpuBackend overrides the
-    /// host F2BlockTensor form (the oracle door). `triples` is the flattened P-axis index
-    /// triple array (length 3*N, triple k at [3*k .. 3*k+2] = {p1=C, p2=A, p3=B}).
     [[nodiscard]] virtual F4Blocks assemble_f3_triples(
         const steppe::device::DeviceF2Blocks& f2,
         std::span<const int> triples,
@@ -1204,9 +514,6 @@ public:
             "ComputeBackend::assemble_f3_triples: not implemented by this backend");
     }
 
-    /// STANDALONE f3 host-oracle overload — the SAME per-triple three-slab combine reading
-    /// a host F2BlockTensor (the CpuBackend oracle door; sibling of assemble_f4_quartets(host)).
-    /// Identical math to the DeviceF2Blocks overload; only the f2 storage differs.
     [[nodiscard]] virtual F4Blocks assemble_f3_triples(
         const F2BlockTensor& f2,
         std::span<const int> triples,
@@ -1216,18 +523,6 @@ public:
             "ComputeBackend::assemble_f3_triples(host): not implemented by this backend");
     }
 
-    /// qpGraph FLEET (the productized optimizer + the path-algebra
-    /// objective; docs/research/qpgraph-gpu-design.md). Given the resident f3 basis
-    /// (f_obs[npair] + qinv[npair*npair] col-major, assembled ONCE by the core driver via
-    /// assemble_f3_triples + jackknife_cov and kept device-resident on the CUDA path) and
-    /// the topology arenas, run `numstart` projected-Newton restarts. On the CUDA backend
-    /// each restart is ONE GPU thread running the WHOLE multistart x maxit loop in-kernel
-    /// (the GPU-BOUND shape: NO host objective per iteration — the AT2 optim() host-loop
-    /// trap designed out); the host launches ONCE and gets back only {score, theta,
-    /// edges}. The CpuBackend is the native small_linalg fleet oracle (the bit-exact diff
-    /// reference). `precision` governs the (production-scale) cc design GEMM; the inner SPD
-    /// edge solve + the GLS form are native FP64 (the cancellation carve-out). NON-PURE:
-    /// the base throws (the established backend.hpp pattern).
     [[nodiscard]] virtual QpGraphFleet qpgraph_fit_fleet(const QpGraphTopoArena& topo,
                                                          std::span<const double> f_obs,
                                                          std::span<const double> qinv,
@@ -1240,17 +535,6 @@ public:
             "ComputeBackend::qpgraph_fit_fleet: not implemented by this backend");
     }
 
-    /// HETEROGENEOUS-TOPOLOGY FLEET (the qpGraph topology SEARCH; qpgraph_search.hpp). The
-    /// GENERALIZATION of qpgraph_fit_fleet from ONE topology to a BATCH: pack every
-    /// candidate topology's path-table arena into one device buffer + a per-topology index
-    /// table, flatten the launch over (topo,restart) [topo_id=inst/numstart], and fit ALL
-    /// `topos` in ONE launch reading the SAME resident f_obs/qinv (the basis is pop-set-
-    /// bound, NOT topology-bound — the key reuse). Per-thread scratch is sized to the BATCH-
-    /// MAX (npop,nedge,npair,npath). D==0 (pure-tree) candidates are handled in-kernel
-    /// (the host-side D==0 carve-out is dropped — no host fit loop). Returns the per-topology
-    /// best-of-restarts score (the host does the global-best argmin). NON-PURE: the base
-    /// throws (the established backend.hpp pattern); the CpuBackend is the small_linalg
-    /// oracle (the same per-restart fleet, looped over topos).
     [[nodiscard]] virtual QpGraphFleetBatch qpgraph_fit_fleet_batch(
         const std::vector<QpGraphTopoArena>& topos, std::span<const double> f_obs,
         std::span<const double> qinv, int numstart, int maxit, double tol,
@@ -1261,31 +545,6 @@ public:
             "ComputeBackend::qpgraph_fit_fleet_batch: not implemented by this backend");
     }
 
-    /// qpDstat Part B (the genotype-path NORMALIZED-D reduction; include/steppe/dstat.hpp).
-    /// The S2 DIVERGENCE — NOT the f2 GEMM, NOT the f2 cache. Per BLOCK b, per QUADRUPLE k =
-    /// (p1,p2,p3,p4), a segmented reduction over the block's SNP columns accumulating
-    ///   numsum[k,b] += (a-b)*(c-d),  densum[k,b] += (a+b-2ab)*(c+d-2cd),  cnt[k,b] += 1
-    /// over ONLY the SNPs where V==1 for all 4 pops (a,b,c,d = Q[p1,s]..Q[p4,s]; the
-    /// allsnps=TRUE per-(block,quadruple) finiteness mask). Q/V are the column-major [P × M]
-    /// decode_af outputs over ALL M SNPs; `block_id` is the per-SNP dense block id from
-    /// assign_blocks (length M, non-decreasing ⇒ each block's columns are contiguous);
-    /// `quadruples` is the flattened P-axis index quad array (length 4*N, quad k at
-    /// [4*k .. 4*k+3] = {p1,p2,p3,p4}). Outputs are ROW-MAJOR [N × n_block]: numsum[k*nb+b]
-    /// etc. (tiny, like F4Blocks::x_blocks). The CUDA backend uploads Q/V to VRAM and runs
-    /// the SNP-tile-streamed batched-over-N kernel (device-resident); the CpuBackend is the
-    /// long-double host oracle. Native FP64 / long-double accumulation (cancellation in
-    /// num/den per §12). NON-PURE: the base throws (the established backend.hpp pattern).
-    ///
-    /// @param Q          reference-allele frequencies in [0,1], 0 where invalid, [P × M].
-    /// @param V          validity mask (1.0 valid / 0.0 missing), [P × M].
-    /// @param P          number of populations (the leading dimension of Q/V).
-    /// @param M          number of SNPs (the column count of Q/V).
-    /// @param block_id   per-SNP dense block id (length M), from assign_blocks.
-    /// @param n_block    number of distinct blocks (== max(block_id)+1).
-    /// @param quadruples flattened P-axis index quad array (length 4*N).
-    /// @param numsum     OUT [N * n_block] row-major Σnum per (quadruple, block).
-    /// @param densum     OUT [N * n_block] row-major Σden per (quadruple, block).
-    /// @param cnt        OUT [N * n_block] row-major used-SNP count per (quadruple, block).
     virtual void dstat_block_reduce(const double* Q, const double* V, int P, long M,
                                     const int* block_id, int n_block,
                                     std::span<const int> quadruples,
@@ -1296,14 +555,6 @@ public:
             "ComputeBackend::dstat_block_reduce: not implemented by this backend");
     }
 
-    /// DEVICE-RESIDENT dstat_block_reduce — the SAME math as the host-pointer form,
-    /// but reading Q/V already RESIDENT in VRAM from a DeviceDecodeResult (the
-    /// host-compute audit cure: drops the Q/V H2D the host-pointer overload does
-    /// at cuda_backend.cu:1286-1289). dec.q_device()/v_device() are the compacted
-    /// [P × M_kept] from decode_af_compact_autosome; M is dec.M_kept; block_id is
-    /// the host assign_blocks output over dec.chrom_kept/genpos_kept (H2D'd small).
-    /// Outputs the tiny [N × n_block] numsum/densum/cnt to host (the only D2H).
-    /// NON-PURE: the base throws (the established backend.hpp pattern).
     virtual void dstat_block_reduce(const steppe::device::DeviceDecodeResult& dec,
                                     const int* block_id, int n_block,
                                     std::span<const int> quadruples,
@@ -1315,51 +566,6 @@ public:
             "by this backend (the device-resident decode seam requires a CUDA backend)");
     }
 
-    /// DATES weighted-LD CURVE — the cuFFT autocorrelation LD engine (include/steppe/dates.hpp).
-    /// The whole GPU-bound per-admixed-sample pipeline reduced to the tiny per-(chrom,bin)
-    /// CORR sufficient statistics, with the ~10^12 SNP-pair object never materialized (the
-    /// ALDER FFT trick: cov(d=lag) = IFFT(|FFT(signal-grid)|²) / IFFT(|FFT(count-grid)|²)).
-    /// Summed over EVERY admixed-target sample (DATES per-sample main loop, dates.c:585-740):
-    ///   1. per sample i, per valid SNP s: regress dosage w0 = genotype(i,s)/2 on the two
-    ///      source freqs {w1=Q[src1,s], w2=Q[src2,s]}: y = Σ(w0-w2)(w1-w2)/Σ(w1-w2)², residual
-    ///      res = w0 - (y·w1 + (1-y)·w2); the per-SNP scattered value is res·wt,
-    ///      wt = w1-w2 (the population-delta weight; native FP64 cancellation carve-out).
-    ///   2. scatter-add onto the FINE per-chrom grid at cell grid_cell[s] (spacing binsize/qbin):
-    ///      z0q[g] += 1, z1q[g] += res·wt, z2q[g] += (res·wt)².
-    ///   3. batched cuFFT autocorrelation over each chrom's grid segment -> the six dd moments
-    ///      (fftauto/fftcv2; native double FFT, UNNORMALIZED so an explicit 1/n scale matches
-    ///      the FFTW reference bit-for-bit), accumulated per chrom.
-    ///   4. re-bin lag d (distance d·binsize/qbin) to the output bin s = floor(d·dbinsize/binsize)
-    ///      and add the six moments into the per-(chrom, bin) DatesMoments (dates.c ddcorr +
-    ///      addcorr2). The host finishes: fixjcorr leave-one-chrom + the corr curve + the fit.
-    ///
-    /// INPUTS (device-resident on the CUDA path; the host never loops over SNP pairs):
-    /// @param src1_freq  per-SNP source-1 allele freq Q[src1,s], length M (decode_af row).
-    /// @param src2_freq  per-SNP source-2 allele freq Q[src2,s], length M.
-    /// @param src_valid  per-SNP validity (1.0 iff BOTH sources valid at s), length M.
-    /// @param packed     the admixed-target packed genotype bytes (TGENO/GENO individual-major
-    ///                   sub-tile for the target samples), length n_target·bytes_per_record.
-    /// @param bytes_per_record  per-target-individual record stride in `packed`.
-    /// @param n_target   number of admixed-target individuals (the per-sample loop count).
-    /// @param target_ploidy per-target-sample ploidy (length n_target; dosage = code/ploidy·...)
-    ///                   — DATES uses g/2 (diploid); a pseudo-haploid sample is folded the same
-    ///                   way the decode does. NULL ⇒ uniform diploid.
-    /// @param grid_cell  per-SNP fine-grid cell index (DATES setqbins tagnumber; cumulative
-    ///                   genpos/qb with a +5 Morgan inter-chrom gap), length M.
-    /// @param M          number of (autosome-kept) SNPs.
-    /// @param chrom_first per-present-chromosome first grid cell (slo), length n_chrom.
-    /// @param chrom_last  per-present-chromosome last grid cell (shi), length n_chrom.
-    /// @param n_chrom    number of present chromosomes.
-    /// @param numqbins   total fine-grid length (max grid_cell + 1).
-    /// @param n_bin      number of output distance bins (== round(maxdis/binsize)).
-    /// @param diffmax    max FFT lag = round(qbin·maxdis/binsize).
-    /// @param binsize    output bin width (Morgans).
-    /// @param qbin       fine-grid refinement factor (dbinsize = binsize/qbin).
-    /// @param precision  governs ONLY any matmul-heavy sub-step; the cuFFT + the weight/residual
-    ///                   accumulation are NATIVE double (FFT well-conditioned; weight is the
-    ///                   cancellation carve-out). The §12 invariant.
-    /// NON-PURE: the base throws (the established backend.hpp pattern). The CpuBackend gives the
-    /// native FFT-free direct-autocorrelation oracle; the CUDA backend the batched cuFFT path.
     [[nodiscard]] virtual DatesMoments dates_curve(
         const double* src1_freq, const double* src2_freq, const double* src_valid,
         const std::uint8_t* packed, std::size_t bytes_per_record, int n_target,
@@ -1377,25 +583,6 @@ public:
             "CpuBackend provides the FFT-free reference oracle)");
     }
 
-    /// DATES TARGET-GENOTYPE REPACK onto the kept SNP axis (host-compute audit; the
-    /// dates.cpp:296-313 host bit-shuffle as a backend seam). Per target individual i, per
-    /// kept SNP ks, read the 2-bit code at original (file-order) SNP index `kept_src[ks]`
-    /// from `src` record i and write it to dense bit position ks of dst record i. Produces
-    /// the dense per-target record `dst` (n_target · dst_bpr bytes), the SAME bytes the
-    /// host loop produced (INTEGER/BIT-EXACT). The CUDA backend runs the device gather
-    /// (no host bit-shuffle hot loop); the base runs the CUDA-FREE host oracle so the
-    /// CpuBackend repack is bit-identical (the parity anchor). NON-PURE delegate: the
-    /// base body lives in steppe_core (dates.cpp) so backend.hpp stays io-free.
-    /// @param src       FULL per-target packed records (n_target · src_bpr).
-    /// @param src_bpr   source per-record stride (the tile bytes_per_record).
-    /// @param kept_src  kept index ks -> original SNP index s, length M_kept.
-    /// @param M_kept    number of kept SNPs.
-    /// @param n_target  number of target individuals.
-    /// @param dst_bpr   dest per-record stride (packed_bytes(M_kept)).
-    /// @param dst       OUT: the dense repacked records (n_target · dst_bpr, sized by caller).
-    /// NON-PURE: the base throws (the established backend.hpp seam pattern — both real
-    /// backends override: CpuBackend with core::dates::dates_repack_default, CUDA with the
-    /// device gather). run_dates dispatches through the bound backend, never the base.
     virtual void dates_repack(const std::uint8_t* src, std::size_t src_bpr,
                               const long* kept_src, long M_kept, int n_target,
                               std::size_t dst_bpr, std::uint8_t* dst) {
@@ -1406,18 +593,6 @@ public:
             "(CpuBackend uses core::dates::dates_repack_default; CUDA the device gather)");
     }
 
-    /// DATES EXPONENTIAL-DECAY FIT, batched over the n_curves windowed corr curves
-    /// (host-compute audit; the dates.cpp fit_exp_decay host loop as a backend seam). Each
-    /// curve is `win_len` corr values, row-major in `curves` (curve c at [c*win_len ...]).
-    /// Fits A·v^i + c (affine adds the constant) by the EXACT DATES coarse-to-fine 1-D
-    /// search (4000-point v-grid + 200-iter ternary refine + the inner 2×2 normal-equation
-    /// solve), one fit per curve, writing n_curves DatesExpFit out. `step` is the bin width
-    /// in Morgans. The CUDA backend runs one thread per curve (the n_chrom+1 fits batched);
-    /// the base runs the CUDA-FREE host oracle. PRECISION: the inner normal-equation
-    /// accumulators are the cancellation carve-out — NATIVE FP64 on device (long double on
-    /// host). The DATES date golden is the LOOSE 2% tier (test_cli_dates.cpp:193), held by
-    /// either reduction. NON-PURE: the base throws (both real backends override — CpuBackend
-    /// with core::dates::dates_fit_default, CUDA with the one-thread-per-curve device fit).
     virtual std::vector<DatesExpFit> dates_fit(const double* curves, int win_len,
                                                int n_curves, double step, bool affine) {
         (void)curves; (void)win_len; (void)n_curves; (void)step; (void)affine;
@@ -1426,34 +601,6 @@ public:
             "(CpuBackend uses core::dates::dates_fit_default; CUDA the device fit)");
     }
 
-    /// qpfstats SMOOTHING SOLVE (the genotype-path joint f2 smoother; the shared-factor
-    /// batched least-squares; include/steppe/qpfstats.hpp). REFORMULATES the AT2
-    /// qpfstats_regression host block loop (R io.R CHUNK_SIZE=64 per-block solve, the
-    /// CPU-bound trap) into ONE shared SPD factor + a batched multi-column solve over the
-    /// WHOLE n_block axis — NO host per-block loop on the CUDA path.
-    ///
-    ///   A_shared = x'x + ridge·I  (SPD; ONE cublasDsyrk, EmulatedFp64 via the f2 policy)
-    ///   L = chol(A_shared)        (ONE cusolverDnDpotrf, native FP64 carve-out)
-    ///   RHS = x' · ymat            (ONE cublasDgemm, [npairs × n_block], EmulatedFp64)
-    ///   b[:,blk] = solve(A_shared, RHS[:,blk])   for blocks with NO NaN comb-row:
-    ///                                            a cublasDtrsm PAIR (forward t(L) then back L)
-    ///                                            over ALL n_block columns at once.
-    ///   NaN-comb-row block: A_b = A_shared - x[nan]'x[nan]; b = solve(A_b, RHS[:,blk])
-    ///                       (grouped by missing-row-set + batched potrf/potrs downdate).
-    ///   ALL-NaN block: b = 0 (the AT2 nan_chunk policy; must be ZERO, not dropped).
-    ///   bglob = solve(A_shared (or A_y downdated by y's NaNs), x'·y)   (the recentering target).
-    ///
-    /// @param x        the design matrix, COLUMN-MAJOR [npopcomb × npairs] (x[c + npopcomb*p]).
-    /// @param ymat     the per-(comb,block) numerator, COLUMN-MAJOR [npopcomb × n_block]
-    ///                 (ymat[c + npopcomb*b] = numsum[c,b]/cnt[c,b], or NaN where cnt==0).
-    /// @param y        the GLOBAL per-comb jackknife estimate, length npopcomb (NaN allowed).
-    /// @param npopcomb the number of population combinations (rows of x / ymat).
-    /// @param npairs   the f-stat basis dim n(n-1)/2 (cols of x).
-    /// @param n_block  the jackknife block count (cols of ymat).
-    /// @param ridge    the L2 ridge added to diag(A_shared) (AT2 constant 1e-5).
-    /// @param precision governs ONLY the matmul sub-steps (SYRK / GEMM); the Cholesky +
-    ///                 triangular solve default native FP64 (the §12 carve-out).
-    /// NON-PURE: the base throws (the established backend.hpp pattern).
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                          std::span<const double> ymat,
                                                          std::span<const double> y,
@@ -1466,36 +613,6 @@ public:
             "ComputeBackend::qpfstats_smooth: not implemented by this backend");
     }
 
-    /// qpfstats FUSED reduce→jackknife→smooth→recenter (the PERF path; one device residency).
-    /// Folds the genotype-f4 NUMERATOR reduce (dstat_block_reduce), the per-comb block-
-    /// JACKKNIFE (matrix_jackknife_est_col, formerly the host long-double per-comb loop), the
-    /// smoothing SOLVE (qpfstats_smooth), AND the per-pair RECENTER jackknife (f2blocks_pair_est)
-    /// into ONE call that keeps numsum/cnt/ymat/y/b RESIDENT in VRAM — the ~1.7GB-each
-    /// numsum/cnt D2H and the host ~305k×711 long-double jackknife loop (the GPU-idle "0" half
-    /// of the 100/0 alternation) are ELIMINATED. Only the small b[npairs×n_block] / bglob[npairs]
-    /// / recenter_shift[npairs] cross back to the host (the host scatters them into the f2 tensor).
-    ///
-    /// The on-device jackknife is the SAME leave-one-out block jackknife already proven on this
-    /// codebase (qpadm_fit_kernels.cu f4_loo_total_row), in NATIVE FP64 with the EXACT ascending-b
-    /// operand order of the host long-double loop (the §12 cancellation carve-out — NEVER
-    /// EmulatedFp64 here). The CpuBackend implements this by composing its existing oracles
-    /// (dstat_block_reduce → matrix_jackknife_est_col → qpfstats_smooth → f2blocks_pair_est) so the
-    /// reference math is UNCHANGED. The matmul sub-steps of the solve obey `precision` (the f2
-    /// policy); the Cholesky/solve + the jackknives are native FP64.
-    ///
-    /// @param Q,V         decode_af outputs, COLUMN-MAJOR [P × M] (element (pop i, SNP s) at i+P·s).
-    /// @param P,M         the Q/V dims (P pops, M autosome-kept SNPs).
-    /// @param block_id    per-SNP dense block id (length M) from assign_blocks (non-decreasing).
-    /// @param n_block     the jackknife block count.
-    /// @param quadruples  flat 4*npopcomb popcomb table (quad k at [4k..4k+3] = {p1,p2,p3,p4}).
-    /// @param x           the design, COLUMN-MAJOR [npopcomb × npairs] (x[c + npopcomb*p]).
-    /// @param npopcomb    rows of x / quadruple count.
-    /// @param npairs      the f-stat basis dim n(n-1)/2 (cols of x).
-    /// @param block_sizes per-block SNP count (length n_block) — the recenter jackknife weights.
-    /// @param ridge       the L2 ridge added to diag(A_shared) (AT2 1e-5).
-    /// @param precision   governs ONLY the matmul sub-steps; the jackknives + solve are native FP64.
-    /// @return QpfstatsSmooth with b, bglob AND recenter_shift populated (the recenter ON-DEVICE).
-    /// NON-PURE: the base throws (the established backend.hpp pattern).
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_blocks_smooth(
         const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
         std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
@@ -1506,14 +623,6 @@ public:
             "ComputeBackend::qpfstats_blocks_smooth: not implemented by this backend");
     }
 
-    /// DEVICE-RESIDENT qpfstats_blocks_smooth — the SAME fused reduce→jackknife→
-    /// smooth→recenter math as the host-pointer form, but reading Q/V already
-    /// RESIDENT in VRAM from a DeviceDecodeResult (the host-compute audit cure:
-    /// drops the Q/V H2D the host-pointer overload does at cuda_backend.cu:1753-1756).
-    /// dec.q_device()/v_device() are the compacted [P × M_kept] from
-    /// decode_af_compact_autosome; M is dec.M_kept; block_id is the host
-    /// assign_blocks output over dec.chrom_kept/genpos_kept (H2D'd small). Only the
-    /// small b/bglob/recenter_shift cross back. NON-PURE: the base throws.
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_blocks_smooth(
         const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
         std::span<const int> quadruples, std::span<const double> x, int npopcomb, int npairs,
@@ -1525,13 +634,6 @@ public:
             "by this backend (the device-resident decode seam requires a CUDA backend)");
     }
 
-    /// S4 — weighted block-jackknife covariance Q[m × m] from the per-block X and
-    /// the per-block jackknife WEIGHTS. OQ-3 RESOLVED: the weight is block_sizes[b]
-    /// (AT2 block_lengths, the per-block SNP count) — NOT Vpair. Pipeline (AT2
-    /// jack_pairarr_stats / est_to_loo, design §4 S4): the est_to_loo conversion to
-    /// LOO replicates (carried on F4Blocks.x_loo), the AT2 jackknife `est` total,
-    /// the xtau pseudo-values, Q = xtau·xtauᵀ/n_block (UNFUDGED), then Qinv =
-    /// inverse(Q with diag += fudge·tr(Q)). BATCHED over the m axis. Native FP64.
     [[nodiscard]] virtual JackknifeCov jackknife_cov(const F4Blocks& x,
                                                      std::span<const int> block_sizes,
                                                      double fudge,
@@ -1541,15 +643,6 @@ public:
             "ComputeBackend::jackknife_cov: not implemented by this backend");
     }
 
-    /// S4 DIAGONAL-only — the per-item jackknife VARIANCE (== diag(Q)) for the per-item
-    /// f-stats (f4/f3) that read only diag(Q) and never invert Q. The production-scale
-    /// shape (the OOM fix; a sweep of ~36k+ items would form a dense m×m Q in jackknife_cov
-    /// ⇒ ~10GB+ OOM). var[k] = (1/nb)·Σ_b xtau[k,b]² over the SAME est_to_loo / x_total /
-    /// tot_line xtau seam jackknife_cov uses — minus the dense SYRK + Cholesky inverse:
-    /// O(m·nb) work, O(m) memory. fudge is NOT consumed (a bare f-stat SE is the UNFUDGED
-    /// diagonal; the qpAdm ridge is a Q-invert concern only). Native FP64 (it IS the diagonal
-    /// jackknife_cov computes ⇒ bit-equal to the deleted dense path, golden-exact). NON-PURE:
-    /// base throws (the established backend.hpp pattern). Mined from wip/fstats-massive-overbuild.
     [[nodiscard]] virtual JackknifeDiag jackknife_diag(const F4Blocks& x,
                                                        std::span<const int> block_sizes,
                                                        const Precision& precision) {
@@ -1558,45 +651,6 @@ public:
             "ComputeBackend::jackknife_diag: not implemented by this backend");
     }
 
-    /// SHARED on-device RATIO-block-jackknife — the ONE engine for BOTH f4ratio and
-    /// qpDstat, batched over the N items, each item a SHORT register reduction over the
-    /// n_block axis (the proven qpfstats_numer_jackknife_kernel idiom, RATIO-valued). The two
-    /// host jackknives (f4ratio.cpp ratio_jackknife, dstat.cpp dstat_jackknife) are the SAME
-    /// AT2 jack_mat_stats / jack_dat_stats ratio block-jackknife — R_b = num_loo_b/den_loo_b;
-    /// est = mean(tot−R_b)·nb + weighted_mean(R_b, w); tau_b = h_b·tot − (h_b−1)·R_b;
-    /// var = (1/nb)·Σ((tau_b−est)²/(h_b−1)) — differing on exactly THREE parameterized axes,
-    /// NOT two kernels:
-    ///   (a) WEIGHT — the caller-supplied per-(item,block) `weight` (f4ratio BROADCASTS the
-    ///       per-block block_sizes across items via weight.item_stride=0; dstat passes cnt[k,b]).
-    ///   (b) SURVIVOR MASK — `setmiss_thresh>0` ⇒ drop block b when |xblk_den(k,b)|<thresh
-    ///       (f4ratio AT2 setmiss=1e-6, needs the raw per-block f4 denominator); `thresh<=0` ⇒
-    ///       drop when weight(k,b)<=0 (dstat cnt>0).
-    ///   (c) TOT_MODE (the variance-centering term) — 0 (f4ratio): R_b = num(k,b)/den(k,b)
-    ///       directly (num/den ARE the est_to_loo replicates x_loo), tot = Σ(xblk_num·w)/
-    ///       Σ(xblk_den·w) [the block-sum ratio — reads xblk_num/xblk_den]; 1 (dstat): num/den
-    ///       ARE the per-block sums (numsum/densum) with weight=cnt, est_t_b = num/cnt, the LOO
-    ///       replicate loo_t_b = (Σ(est_t·cnt)/Σcnt − est_t·rel)/(1−rel) is built IN-KERNEL,
-    ///       R_b = loo_num/loo_den, tot = weighted_mean(R_b, 1−rel) [xblk_* unused / null].
-    /// The reported point estimate is the jackknife $est, NOT tot (f4ratio.cpp pins est==alpha
-    /// to 2e-15; tot errs by 3e-4). `compute_p` ⇒ fill p[k] = f4_two_sided_p(z[k]) on-device
-    /// (the dstat path); f4ratio leaves p empty. NATIVE FP64 with the EXACT ascending-b operand
-    /// order of the host long-double reference (the §12 cancellation carve-out — NEVER
-    /// EmulatedFp64). CpuBackend delegates to the existing long-double oracle (ratio_jackknife /
-    /// dstat_jackknife verbatim). NON-PURE: the base throws (the established backend.hpp pattern).
-    ///
-    /// @param num    per-(item,block) numerator descriptor (f4ratio x_loo_num; dstat numsum).
-    /// @param den    per-(item,block) denominator descriptor (f4ratio x_loo_den; dstat densum).
-    /// @param weight per-(item,block) jackknife weight (f4ratio block_sizes broadcast; dstat cnt).
-    /// @param xblk_num per-(item,block) RAW block numerator (f4ratio x_blocks_num; dstat null).
-    /// @param xblk_den per-(item,block) RAW block denominator (f4ratio x_blocks_den + the
-    ///                 setmiss mask source; dstat null).
-    /// @param N      the item count (rows of the output).
-    /// @param n_block the per-item block-reduction length.
-    /// @param tot_mode 0 = f4ratio (block-sum tot, replicates given); 1 = dstat (LOO-ratio tot,
-    ///                 replicates built in-kernel from num/den/weight).
-    /// @param setmiss_thresh >0 ⇒ |xblk_den|<thresh drops the block; <=0 ⇒ weight<=0 drops it.
-    /// @param compute_p ⇒ fill p (two-sided tail); else p is left empty.
-    /// @param precision honored only as the tag source; the jackknife is native FP64 (§12).
     [[nodiscard]] virtual RatioBlockJackknife ratio_block_jackknife(
         const RatioJackArray& num, const RatioJackArray& den, const RatioJackArray& weight,
         const RatioJackArray& xblk_num, const RatioJackArray& xblk_den, int N, int n_block,
@@ -1608,16 +662,6 @@ public:
             "ComputeBackend::ratio_block_jackknife: not implemented by this backend");
     }
 
-    /// FUSED f4ratio assemble→ratio-jackknife (the device-resident producer entry). Builds
-    /// the interleaved num/den quartet f4 X (assemble_f4_quartets) and runs the SHARED
-    /// ratio_block_jackknife over it WITHOUT D2H'ing the [m·n_block] x_blocks/x_loo (the
-    /// host-compute-audit cure: the f4ratio x_blocks/x_loo D2H is DROPPED — the resident
-    /// dX/dLoo feed launch_ratio_block_jackknife directly). `flat` is the interleaved 2N-quartet
-    /// flat array (length 8N; num quartets [0,N), den quartets [N,2N)); the result rows are the N
-    /// tuples (num row k, den row N+k). tot_mode=0, setmiss_thresh=1e-6, weight=block_sizes
-    /// broadcast, compute_p=false (f4ratio reports alpha/se/z only). The CudaBackend keeps dX/dLoo
-    /// resident + launches the kernel; the CpuBackend assembles then delegates to the long-double
-    /// ratio_jackknife oracle (the reference math UNCHANGED). NON-PURE: the base throws.
     [[nodiscard]] virtual RatioBlockJackknife f4ratio_blocks_jackknife(
         const steppe::device::DeviceF2Blocks& f2, std::span<const int> flat, int N,
         double setmiss_thresh, const Precision& precision) {
@@ -1627,10 +671,6 @@ public:
             "backend (the device-resident assemble seam requires a CUDA backend)");
     }
 
-    /// FUSED f4ratio host-oracle overload — the CpuBackend parity door (assemble over the host
-    /// F2BlockTensor, then delegate to the long-double ratio_jackknife oracle). The CudaBackend
-    /// reads DEVICE-RESIDENT f2 (the DeviceF2Blocks overload); this host-tensor overload is the
-    /// CpuBackend entry. NON-PURE: the base throws.
     [[nodiscard]] virtual RatioBlockJackknife f4ratio_blocks_jackknife(
         const F2BlockTensor& f2, std::span<const int> flat, int N, double setmiss_thresh,
         const Precision& precision) {
@@ -1639,15 +679,6 @@ public:
             "ComputeBackend::f4ratio_blocks_jackknife(host): not implemented by this backend");
     }
 
-    /// FUSED dstat block-reduce→ratio-jackknife (the device-resident producer entry). Runs
-    /// the per-(quadruple,block) D reduce (dstat_block_reduce) and the SHARED ratio_block_jackknife
-    /// over the RESIDENT numsum/densum/cnt WITHOUT D2H'ing them (the host-compute-audit cure:
-    /// the numsum/densum/cnt D2H is DROPPED — the resident dNum/dDen/dCnt feed
-    /// launch_ratio_block_jackknife directly). tot_mode=1, setmiss_thresh=0 (cnt>0 mask),
-    /// weight=cnt, compute_p=true (p = f4_two_sided_p(z), on-device). The CudaBackend keeps
-    /// dNum/dDen/dCnt resident + launches the kernel; the CpuBackend composes
-    /// dstat_block_reduce → the long-double dstat_jackknife oracle (the reference math UNCHANGED).
-    /// NON-PURE: the base throws.
     [[nodiscard]] virtual RatioBlockJackknife dstat_blocks_jackknife(
         const steppe::device::DeviceDecodeResult& dec, const int* block_id, int n_block,
         std::span<const int> quadruples) {
@@ -1657,9 +688,6 @@ public:
             "backend (the device-resident decode seam requires a CUDA backend)");
     }
 
-    /// FUSED dstat host-pointer overload — the CpuBackend parity door (the non-resident Q/V path:
-    /// reduce over host Q/V, then delegate to the long-double dstat_jackknife oracle). NON-PURE:
-    /// the base throws.
     [[nodiscard]] virtual RatioBlockJackknife dstat_blocks_jackknife(
         const double* Q, const double* V, int P, long M, const int* block_id, int n_block,
         std::span<const int> quadruples) {
@@ -1668,20 +696,6 @@ public:
             "ComputeBackend::dstat_blocks_jackknife(host): not implemented by this backend");
     }
 
-    /// GPU-ONLY f-stat SWEEP (the production-scale fix for the CPU-bound host-enumeration
-    /// disaster). Enumerate EVERY C(P,k) item (k from cfg.k; subset from cfg.pop_subset),
-    /// compute its f4/f3 point estimate + diagonal jackknife SE + |z| ON THE DEVICE, filter
-    /// (on-device |z|>=min_z flag, or keep-all for TopK) + cub::DeviceSelect::Flagged stream-
-    /// compact ON THE DEVICE, and return ONLY the survivors. The HOST does NOT enumerate, NOT
-    /// filter, NOT loop per item — it drives ONLY the chunk loop + receives survivors. The
-    /// per-chunk pipeline REUSES the SAME device kernels as the explicit run_f4 path (the
-    /// unrank kernel WRITES the device quartet list assemble_f4_quartets_gather reads, then
-    /// loo/total/xtau/diag_var run verbatim) — NO forked compute. The maxcomb cap
-    /// (kFstatMaxComb) fires up-front (capped ⇒ no compute). `precision` engages the
-    /// emulated-FP64 policy where it applies (the f-stat combine + diagonal SE are the native
-    /// cancellation carve-out, so the sweep is native-by-carve-out end-to-end — consistent
-    /// with the policy, not a violation). NON-PURE: base throws (the established pattern; only
-    /// the CUDA backend overrides — the sweep is a GPU-only product, no CPU runtime).
     [[nodiscard]] virtual SweepSurvivors f4_sweep(const steppe::device::DeviceF2Blocks& f2,
                                                   const SweepConfig& cfg,
                                                   const Precision& precision) {
@@ -1691,8 +705,6 @@ public:
             "(the GPU-only sweep requires a CUDA backend)");
     }
 
-    /// GPU-ONLY f3 sweep — the three-slab sibling of f4_sweep (cfg.k == 3; reuses the f3
-    /// triple gather instead of the quartet gather). Same on-device pipeline + cap + filter.
     [[nodiscard]] virtual SweepSurvivors f3_sweep(const steppe::device::DeviceF2Blocks& f2,
                                                   const SweepConfig& cfg,
                                                   const Precision& precision) {
@@ -1702,19 +714,6 @@ public:
             "(the GPU-only sweep requires a CUDA backend)");
     }
 
-    /// S5 SWEEP — the qpWave / qpAdm rank test over ALL candidate ranks r = 0..rmax
-    /// (rmax = min(nl,nr)-1), producing the per-rank chisq/dof/p, the AT2 res$rankdrop
-    /// nested table, and f4rank (the smallest non-rejected rank). Reuses the rank-r ALS
-    /// machinery (the SVD seed → als refine → chisq quadratic form) per r; the
-    /// SVD is recomputed per r (the deterministic on-device Jacobi is bit-identical on
-    /// the same input, so per-r recompute is exact; the SVD-once kernel is an S8
-    /// follow-on). `alpha` is the rank-decision significance (AT2 default 0.05; §3).
-    /// The popdrop table is built by the HOST orchestrator (it re-gathers a reduced X),
-    /// NOT here. NON-PURE: base throws (the established backend.hpp pattern). DISPATCH
-    /// (SPEC §5:231): the backend REPORTS which SVD path the model WOULD take
-    /// (gesvdjBatched iff nl,nr<=32 else per-model gesvd) on RankSweep.svd_path —
-    /// observability; the executed SVD is the deterministic on-device Jacobi
-    /// at these sizes. Native FP64 (SVD + Qinv quadratic form).
     [[nodiscard]] virtual RankSweep rank_sweep(const F4Blocks& x,
                                                const JackknifeCov& cov,
                                                double alpha,
@@ -1725,27 +724,8 @@ public:
             "ComputeBackend::rank_sweep: not implemented by this backend");
     }
 
-    /// CAPABILITY QUERY — does THIS backend override `rank_sweep` (and so the
-    /// rankdrop/popdrop path that routes through it) with a REAL implementation?
-    /// The EXPLICIT, type-safe replacement for try/catch-as-capability-detection:
-    /// the host orchestrator (core/qpadm/qpadm_fit.cpp) branches on this instead of
-    /// CATCHING the `rank_sweep` sentinel `std::runtime_error`, so a GENUINE
-    /// numerical throw from INSIDE an overridden sweep now PROPAGATES as a fault
-    /// rather than being silently swallowed (which used to blank rankdrop/popdrop
-    /// with no diagnostic). NON-PURE — the sanctioned base-default idiom, exactly
-    /// like `capabilities()` (:1840) and `batched_dispatch_count()` (:1852): the
-    /// base returns `false` (the sentinel-throwing `rank_sweep` above is NOT a real
-    /// implementation), and BOTH CpuBackend (the oracle) and CudaBackend (the
-    /// deliverable) override `rank_sweep`, so both override this to `true`. The
-    /// unit test pins `false ⇒ rank_sweep throws the sentinel` so the two cannot
-    /// drift apart.
     [[nodiscard]] virtual bool provides_rank_sweep() const { return false; }
 
-    /// S6 — GLS weights via AT2 ALS (OQ-1, the load-bearing primitive). Seed A,B
-    /// from svd(X_total) at rank r; refine by opt_A/opt_B for opts.als_iterations
-    /// (default 20) with the fudge ridge; then the CONSTRAINED weight solve on the
-    /// (r+1)×(r+1) SPD system; normalize Σw=1. Returns w, refined A,B, and chisq.
-    /// AT2 `qpadm.R` reproduced verbatim (design §4). Native FP64 throughout.
     [[nodiscard]] virtual GlsWeights gls_weights(const F4Blocks& x,
                                                  const JackknifeCov& cov,
                                                  int r,
@@ -1756,17 +736,6 @@ public:
             "ComputeBackend::gls_weights: not implemented by this backend");
     }
 
-    /// S7 — BATCHED leave-one-block-out weight re-fits (design §1.2 S7; AT2
-    /// get_weights_covariance). For each block b in 0..n_block-1, re-solve the GLS
-    /// weights using x.x_loo[:,:,b] as the xmat (REUSING cov.Qinv unchanged — the
-    /// AT2 parity pin: AT2 does NOT re-invert per replicate). Returns the AT2
-    /// replicate matrix wmat[n_block*nl], ROW-MAJOR (b*nl + i). The CUDA backend
-    /// runs all n_block re-fits as BATCHED on-device solves (getrfBatched /
-    /// getrsBatched, batchCount=n_block — NOT a host loop); the CpuBackend overrides
-    /// with the per-block host loop (the bit-exact oracle). Native FP64. NON-PURE:
-    /// the base throws (the established backend.hpp pattern). This is the batched-
-    /// capable S7 seam that makes se_from_loo backend-agnostic (the host loop body
-    /// moves into the CpuBackend override).
     [[nodiscard]] virtual std::vector<double> gls_weights_loo_batched(
         const F4Blocks& x, const JackknifeCov& cov, int r,
         const QpAdmOptions& opts, const Precision& precision) {
@@ -1775,18 +744,6 @@ public:
             "ComputeBackend::gls_weights_loo_batched: not implemented by this backend");
     }
 
-    /// S7 — the FULL leave-one-block-out SE reduction (design §1.2 S7; AT2
-    /// get_weights_covariance). Subsumes gls_weights_loo_batched + the AT2
-    /// (nb-1)/sqrt(nb) wmat scale + the sample-covariance-diagonal variance reduction
-    /// (se[i] = sqrt(diag(cov(scale*wmat))[i])) into ONE backend call so the reduction
-    /// stays on the device that produced the resident wmat (no dWmat D2H). Returns the
-    /// nl-length SCALED se (the (nb-1)/sqrt(nb) factor folded in). The CUDA backend
-    /// keeps the resident dWmat and runs the EXISTING qpadm_se_from_wmat kernel
-    /// (native FP64; the §1.4 cancellation carve-out — emulated/Ozaki is matmul-only
-    /// and would not help a cancellation-sensitive reduction); the CpuBackend overrides
-    /// with the long-double sample_cov_diag ORACLE. z is host-derived (weight/se) in
-    /// se_from_loo, unchanged. NON-PURE: the base throws (the established backend.hpp
-    /// pattern). Native FP64 on the GPU.
     [[nodiscard]] virtual std::vector<double> se_from_wmat(
         const F4Blocks& x, const JackknifeCov& cov, int r,
         const QpAdmOptions& opts, const Precision& precision) {
@@ -1795,38 +752,6 @@ public:
             "ComputeBackend::se_from_wmat: not implemented by this backend");
     }
 
-    /// S8 — BATCHED qpAdm fit over MANY same-shape models against ONE device-resident
-    /// f2 (the rotation primitive; design §1.6 / the FROZEN CONTRACT §2.2).
-    /// Fits all `models` (a bucket of identical (nl,nr,r)) WHOLLY on this backend's
-    /// device in ONE batched dispatch — NOT a per-model host loop: the S3 f4 gather +
-    /// loo/total/xtau over a (k,b,MODEL) grid reading the resident f2 with per-model
-    /// index arenas; the covariance Q via cublasDgemmStridedBatched (engages
-    /// `precision`); the SPD inverse Qinv via cuSOLVER potrfBatched + potrsBatched
-    /// across models; the rank sweep + weight solve + chisq + LOO-SE + popdrop via a
-    /// MODEL-batched kernel (one thread per model, the proven loo_batched_kernel lift).
-    /// `run_qpadm_search` calls THIS for the SMALL-path bucket (the rotation common
-    /// case); the >32 / large tail it routes to fit_models_batched_default (one device
-    /// dispatch per model is correct for the tail). Each result's model_index ECHOES
-    /// models[i].model_index. Domain outcomes are per-result `status`
-    /// (RankDeficient/NonSpdCovariance), never a throw — record-and-continue (a search of thousands must not abort on one
-    /// degenerate model). `precision` governs the matmul sub-steps (default
-    /// EmulatedFp64{40}); SVD/Qinv/chi^2 native by the §1.4 carve-out + the
-    /// set_solve_precision promotion seam.
-    ///
-    /// NON-PURE: the base provides a per-model DEFAULT (it delegates to
-    /// core::qpadm::fit_models_batched_default — assemble_f4 → run_impl per model
-    /// through THIS backend's own device virtuals). The CudaBackend OVERRIDES this with
-    /// the genuine model-BATCHED device path (the deliverable). The CpuBackend does NOT
-    /// override — it inherits the per-model default (a host loop is the CORRECT shape
-    /// for the parity oracle, design §2.3). The orchestrator run_qpadm_search shards
-    /// `models` across Resources::gpus and calls this once per device sub-span.
-    ///
-    /// The base body cannot name core::qpadm::fit_models_batched_default inline (that
-    /// would pull steppe_core into every TU that instantiates the vtable, incl. host-
-    /// only unit TUs), so it throws a SENTINEL; run_qpadm_search never reaches it (it
-    /// dispatches small-path models to the override and large-path models to
-    /// fit_models_batched_default directly). The sentinel only fires if a future caller
-    /// invokes the virtual on a backend that did not override it.
     [[nodiscard]] virtual std::vector<QpAdmResult> fit_models_batched(
         const steppe::device::DeviceF2Blocks& f2,
         std::span<const QpAdmModel> models,
@@ -1838,50 +763,12 @@ public:
             "(route through core::qpadm::fit_models_batched_default instead)");
     }
 
-    /// CAPABILITY QUERY — does THIS backend override `fit_models_batched` with a
-    /// GENUINE model-BATCHED device path (not the per-model sentinel fallback)? The
-    /// EXPLICIT replacement for try/catch-as-capability-detection at the S8 shard
-    /// dispatch (core/qpadm/model_search.cpp): the orchestrator branches on this
-    /// instead of CATCHING the `fit_models_batched` sentinel, routing small-path
-    /// models to the batched override when present and to the per-model
-    /// fit_models_batched_default otherwise. NON-PURE — the base-default idiom: the
-    /// base returns `false` (the sentinel above is the per-model fallback marker, NOT
-    /// a batched override). Only CudaBackend overrides `fit_models_batched`, so only
-    /// it overrides this to `true`; CpuBackend (the oracle) inherits `false` and
-    /// routes every model through the per-model default (the correct oracle shape).
     [[nodiscard]] virtual bool provides_batched_fit() const { return false; }
 
-    /// Probe the capability tier of THE device this backend instance is bound to
-    /// (the per-device-instance contract above): compute capability, total/free
-    /// VRAM, whether this device can peer-access the other visible devices, and
-    /// whether `EmulatedFp64` is honorable on this build (architecture.md §9,
-    /// §11.4, §12). The result
-    /// is recorded OUT-OF-BAND in `Resources`/the run record so the combine
-    /// picks the device-resident `cudaMemcpyPeer` fast-path vs the host-staged
-    /// fixed-order baseline and logs which/why — the TAG never lands on the
-    /// numeric `F2BlockTensor` (kept pure; see `BackendCapabilities`).
-    ///
-    /// NON-VIRTUAL-PURE on purpose: this has a DEFAULT base implementation
-    /// returning a value-initialized (all-zero/false ⇒ "unknown") `BackendCapabilities`,
-    /// so (a) `CpuBackend` — which has no device tier to report — need not override
-    /// it, and (b) `backend.hpp` compiles standalone with no CUDA. Only the CUDA
-    /// backend overrides it with the real probe (the probe values are asserted in
-    /// the CUDA path's probe test, not here). The probe is NON-throwing: a
-    /// "no peer access" answer (`cudaDeviceCanAccessPeer` == 0, EXPECTED on the
-    /// budget GeForce tier) is a tagged degrade, not a fault (architecture.md
-    /// §11.4 capability-tier law).
     [[nodiscard]] virtual BackendCapabilities capabilities() const {
         return BackendCapabilities{};
     }
 
-    /// S8 instrumentation (observability only; NOT on the numeric path): the number of
-    /// BATCHED model-dispatches this backend has issued through fit_models_batched —
-    /// ONE per same-shape (nl,nr,r) bucket (or VRAM sub-chunk), NOT one per model. The
-    /// rotation test asserts this is << the model count (a few buckets, not thousands
-    /// of per-model launches) to PROVE the rotation ran GPU-BATCHED, not as a per-model
-    /// host loop. Base returns 0 (a backend with no batched override never increments
-    /// it — the CpuBackend oracle). The CUDA backend increments it once per bucket
-    /// chunk. Monotonic across calls on one instance.
     [[nodiscard]] virtual std::size_t batched_dispatch_count() const { return 0; }
 };
 

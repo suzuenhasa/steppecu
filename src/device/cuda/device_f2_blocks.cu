@@ -1,8 +1,7 @@
-// src/device/cuda/device_f2_blocks.cu — the CUDA side of DeviceF2Blocks. Out-of-line
-// special members (so unique_ptr<Impl> has a complete Impl at instantiation), the
-// device-pointer accessors, to_host() — the ONLY D2H + host alloc in the
-// device-resident pipeline — and upload_f2_blocks_to_device() (the H2D inverse for the
-// no-peer assembly transport). PRIVATE to steppe_device (a CUDA TU, architecture.md §4).
+// src/device/cuda/device_f2_blocks.cu — the CUDA side of DeviceF2Blocks: out-of-line
+// special members, the device-pointer accessors, to_host() (the only D2H + host alloc
+// in the device-resident pipeline), and upload_f2_blocks_to_device() (its H2D inverse).
+// PRIVATE to steppe_device (a CUDA TU, architecture.md §4).
 #include "device/cuda/device_f2_blocks_impl.cuh"
 
 #include <cuda_runtime.h>
@@ -10,22 +9,15 @@
 #include <cstddef>
 #include <memory>
 
-#include "device/cuda/check.cuh"            // STEPPE_CUDA_CHECK
-#include "device/cuda/device_buffer.cuh"    // DeviceBuffer<double>
-#include "device/cuda/device_guard.cuh"     // DeviceGuard (shared scoped device-restore RAII, §3.3)
-#include "device/cuda/pinned_buffer.cuh"    // RegisteredHostRegion (pin the D2H; graceful degrade)
-#include "steppe/fstats.hpp"                // F2BlockTensor
+#include "device/cuda/check.cuh"
+#include "device/cuda/device_buffer.cuh"
+#include "device/cuda/device_guard.cuh"
+#include "device/cuda/pinned_buffer.cuh"
+#include "steppe/fstats.hpp"
 
 namespace steppe::device {
 
 DeviceF2Blocks::DeviceF2Blocks() = default;
-// Defaulted dtor -> ~unique_ptr<Impl> -> ~DeviceBuffer<double>'s bare cudaFree. The
-// resident f2/vpair were cudaMalloc'd on device_id under the upload prologue's
-// set+restore guard (:80-83), but this free is INTENTIONALLY device-agnostic and
-// symmetric to that alloc guard only on the alloc side: cudaFree carries the
-// pointer's device, so the cross-device combine free is sound and no record-and-
-// restore cudaSetDevice is needed here (single home: device_buffer.cuh::reset; the
-// escape contract is documented at device_f2_blocks.hpp:26-29; cleanup [17.5]).
 DeviceF2Blocks::~DeviceF2Blocks() = default;
 DeviceF2Blocks::DeviceF2Blocks(DeviceF2Blocks&&) noexcept = default;
 DeviceF2Blocks& DeviceF2Blocks::operator=(DeviceF2Blocks&&) noexcept = default;
@@ -37,14 +29,6 @@ const double* DeviceF2Blocks::vpair_device() const noexcept {
     return impl ? impl->vpair.data() : nullptr;
 }
 
-// THE ONLY D2H + host alloc in the device-resident pipeline (opt-in). Bit-identical
-// to the result the old host-returning compute_f2_blocks produced (same doubles,
-// same [P×P×n_block] layout; §12). PINS the host destinations for the D2H window
-// (RegisteredHostRegion, graceful pageable degrade), EXACTLY like the pin window in
-// combine_f2_partials_resident (p2p_combine.cu) — parity-neutral (pinned vs pageable
-// moves the same bytes). Sets device_id current for the copy and restores the caller's
-// device (RAII guard), mirroring that routine's set + DeviceGuard restore, because
-// cudaMemcpy targets the buffers' device.
 F2BlockTensor DeviceF2Blocks::to_host() const {
     F2BlockTensor out;
     out.P = P;
@@ -57,10 +41,6 @@ F2BlockTensor DeviceF2Blocks::to_host() const {
 
     int prev = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-    // RAII-restore the caller's device on every exit (including the throw path) via the
-    // shared DeviceGuard (device_guard.cuh; standard §3.3 single device-restore helper):
-    // the dtor must not throw, so the restore routes through the non-throwing
-    // STEPPE_CUDA_WARN (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t).
     DeviceGuard restore{prev};
     STEPPE_CUDA_CHECK(cudaSetDevice(device_id));
 
@@ -74,13 +54,6 @@ F2BlockTensor DeviceF2Blocks::to_host() const {
     return out;
 }
 
-// H2D inverse of to_host (M4.5 no-peer assembly transport): allocate the resident
-// f2/vpair pair on device_id and cudaMemcpy the host tensor up. Raw byte copy =>
-// bit-faithful (preserves −0.0). PINS the host SOURCES for the H2D window
-// (RegisteredHostRegion, graceful pageable degrade), mirroring to_host's D2H dest
-// pinning — parity-neutral (pinned vs pageable moves the same bytes).
-// Re-selects device_id for the alloc+copy (DeviceBuffer cudaMalloc allocates on the
-// current device) and restores the caller's device.
 DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_id) {
     DeviceF2Blocks out;
     out.P = host.P;
@@ -92,10 +65,6 @@ DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_
 
     int prev = 0;
     STEPPE_CUDA_CHECK(cudaGetDevice(&prev));
-    // RAII-restore the caller's device on every exit (including the throw path) via the
-    // shared DeviceGuard (device_guard.cuh; standard §3.3 single device-restore helper):
-    // the dtor must not throw, so the restore routes through the non-throwing
-    // STEPPE_CUDA_WARN (CUDA 13.x Device Management — cudaSetDevice returns cudaError_t).
     DeviceGuard restore{prev};
     STEPPE_CUDA_CHECK(cudaSetDevice(device_id));
 
@@ -103,13 +72,6 @@ DeviceF2Blocks upload_f2_blocks_to_device(const F2BlockTensor& host, int device_
     out.impl->f2 = DeviceBuffer<double>(total);
     out.impl->vpair = DeviceBuffer<double>(total);
     const std::size_t bytes = total * sizeof(double);
-    // PIN the H2D source pages for the copy window (RegisteredHostRegion, graceful
-    // pageable degrade — never throws, pinned_buffer.cuh:159-176), mirroring the D2H
-    // dest pinning in to_host and resolving the documented direction
-    // asymmetry. cudaHostRegister takes void* and page-locks in place WITHOUT writing
-    // the bytes, so a const H2D source registers soundly via the ctor's const_cast
-    // (pinned_buffer.cuh:159-163); pinned vs pageable moves the identical bytes, so
-    // this is PARITY-NEUTRAL (§12). The registrations RAII-unregister at scope exit.
     RegisteredHostRegion pin_f2(host.f2.data(), bytes);
     RegisteredHostRegion pin_vp(host.vpair.data(), bytes);
     STEPPE_CUDA_CHECK(cudaMemcpy(out.impl->f2.data(), host.f2.data(), bytes,

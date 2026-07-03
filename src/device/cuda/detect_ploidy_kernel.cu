@@ -1,27 +1,12 @@
 // src/device/cuda/detect_ploidy_kernel.cu
 //
-// M-FR-0 — the AT2 pseudo-haploid PER-SAMPLE PLOIDY prepass on the GPU (the L2
-// host-compute fix). A literal bit-parity port of the host io::detect_sample_ploidy
-// loop (src/io/ploidy_detect.cpp): one thread per gathered individual scans the
-// first min(kPloidyDetectSnps, n_snp) SNPs of that individual's packed record for a
-// HETEROZYGOUS call and emits 2 (diploid) on the first het, else 1 (pseudo-haploid).
+// GPU per-individual ploidy prepass: one thread per gathered individual scans the
+// leading SNPs of its packed record and writes 2 (diploid) on the first heterozygous
+// call, else 1 (pseudo-haploid). The on-device twin of the host detector in
+// src/io/ploidy_detect.cpp, bit-identical by construction (integer/bit ops via the
+// shared core primitives).
 //
-// What this TU owns:
-//   1. detect_ploidy_kernel  — one thread per individual; the het-scan over the
-//                              detection window via the SHARED core::genotype_code.
-//   2. launch_detect_ploidy  — the narrow launch wrapper (no <<<>>> in host code).
-//
-// BIT-PARITY (the M-FR-0 gate): the detection is INTEGER / BIT ops only — the 2-bit
-// unpack (core::genotype_code), the het comparison (== kHeterozygousGenotypeCode),
-// and the window cap (min(kPloidyDetectSnps, n_snp)) are EXACTLY the host loop's,
-// using the SAME shared core primitives (core/internal/decode_af.hpp). No floating
-// point, no reduction order, no precision lane — so the device ploidy vector is
-// bit-identical to the host detector by construction (architecture.md §13). It reads
-// the SAME individual-major packed bytes decode_af reads (byte s/4, position s%4,
-// MSB-first), so it is the on-device twin of the host scan over the same tile.
-//
-// This is a CUDA TU: PRIVATE to steppe_device (architecture.md §4). It includes the
-// SHARED host/device decode primitive so the host scan and this path cannot diverge.
+// Reference: docs/reference/src_device_cuda_detect_ploidy_kernel.cu.md
 #include "device/cuda/detect_ploidy_kernel.cuh"
 
 #include <cstddef>

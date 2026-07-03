@@ -1,59 +1,49 @@
 // src/device/cuda/qpgraph_fit_kernels.cuh
 //
-// The qpGraph FLEET launch wrapper (the productized IDEA-1 optimizer spike). Declares
-// the host-callable launcher the CudaBackend::qpgraph_fit_fleet override calls; the
-// kernel + device-side objective live in qpgraph_fit_kernels.cu. CUDA-only TU (the §4
-// layering: kernels in .cu, the seam in backend.hpp is CUDA-free).
+// GPU-side interface for fitting admixture-graph topologies (qpGraph): the
+// host-callable launchers the CUDA backend calls, plus the flat data structures they
+// pass to the kernels. The kernels + device-side objective live in the paired
+// qpgraph_fit_kernels.cu, keeping the backend interface header CUDA-free.
+//
+// Reference: docs/reference/src_device_cuda_qpgraph_fit_kernels.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_QPGRAPH_FIT_KERNELS_CUH
 #define STEPPE_DEVICE_CUDA_QPGRAPH_FIT_KERNELS_CUH
 
 #include <cuda_runtime.h>
 
-#include "core/internal/host_device.hpp"  // STEPPE_HD — the project host/device qualifier macro.
+#include "core/internal/host_device.hpp"
 
 namespace steppe::device {
 
-/// The device theta-stack cap. The per-restart fit holds the admixture weights theta (and
-/// its forward-diff perturbations thp/thm/thn) in FIXED-SIZE per-thread stack arrays of this
-/// length — so `nadmix` MUST be `<= kMaxThetaDev`. The host launchers reject an over-cap
-/// topology before launch (a clear throw) and the kernel returns a 1e30 sentinel score on
-/// the over-cap path, so an oversized topology fails LOUDLY instead of silently overrunning
-/// the stack. 16 comfortably covers production nadmix (admixture-node counts are small).
-/// Single-source: both the header (host reject) and the kernel (device guard) read this.
+// Per-thread theta cap — reference §3
 constexpr int kMaxThetaDev = 16;
 
-/// The flat device-arena pointers for the topology (uploaded ONCE per fit; the qpAdm
-/// per-model index-arena pattern). All device pointers; the scalars are by value.
-/// PRECONDITION: `nadmix <= kMaxThetaDev` (the per-thread theta stack cap) — enforced by the
-/// host launchers (throw) + the kernel (1e30 sentinel); see kMaxThetaDev.
+// QpGraphDeviceTopo: one topology, uploaded once — reference §4
 struct QpGraphDeviceTopo {
     int npop, nedge_norm, nadmix, npair, npath, base_leaf;
-    int n_pe, n_pae;                 ///< path-edge / path-admixedge table lengths.
-    int constrained;                 ///< 1 => the box-constrained (NNLS) edge solve.
-    double fudge;                    ///< the cc trace-scaled ridge (AT2 `diag`).
-    const double* pwts0;             ///< [nedge_norm x npop] col-major (device).
-    const int* pe_edge;              ///< [n_pe] (device).
-    const int* pe_leaf;              ///< [n_pe] (device).
-    const int* pe_path;              ///< [n_pe] (device).
-    const int* pae_path;             ///< [n_pae] (device).
-    const int* pae_admixedge;        ///< [n_pae] (device).
-    const int* cmb1;                 ///< [npair] centered-col pair index (device).
-    const int* cmb2;                 ///< [npair] (device).
+    int n_pe, n_pae;
+    int constrained;
+    double fudge;
+    const double* pwts0;
+    const int* pe_edge;
+    const int* pe_leaf;
+    const int* pe_path;
+    const int* pae_path;
+    const int* pae_admixedge;
+    const int* cmb1;
+    const int* cmb2;
 };
 
-/// The per-thread scratch slab layout (all doubles except the int sub-arrays). Sized to the
-/// topology (or the BATCH-MAX) via make_layout; offsets computed on the host + passed in.
-/// In the header so the backend TU (qpgraph_fit_fleet_batch) can size the batch-MAX slab.
+// ScratchLayout: per-thread scratch slab — reference §5
 struct ScratchLayout {
-    int pwts_c, ppwts, Wm, cc, ccs, sc, q1, bl, res, path_w, qf;  // double sub-array offsets
-    int nn_w, nn_Ap, nn_qp, nn_z, nn_lu, nn_y;                    // NNLS / solve scratch
-    long dbl_total;                                               // total doubles per thread
-    int nn_P, nn_piv, nn_pass;                                    // int sub-array offsets
-    long int_total;                                               // total ints per thread
+    int pwts_c, ppwts, Wm, cc, ccs, sc, q1, bl, res, path_w, qf;
+    int nn_w, nn_Ap, nn_qp, nn_z, nn_lu, nn_y;
+    long dbl_total;
+    int nn_P, nn_piv, nn_pass;
+    long int_total;
 };
 
-/// Build the per-thread scratch layout for a topology of (npop,nedge,npair,npath). STEPPE_HD
-/// (host + device): the host sizes the slab + the kernel reconstructs per-topology offsets.
+// make_layout: build the per-thread scratch layout — reference §5
 STEPPE_HD inline ScratchLayout make_layout(int npop, int nedge, int npair, int npath) {
     ScratchLayout L{};
     long o = 0;
@@ -85,57 +75,30 @@ STEPPE_HD inline ScratchLayout make_layout(int npop, int nedge, int npair, int n
     return L;
 }
 
-/// Launch the fleet: `numstart` restarts, ONE thread each, the WHOLE multistart x maxit
-/// projected-Newton loop in-kernel (GPU-bound; NO host objective per iteration). f_obs
-/// [npair] + qinv [npair*npair] col-major are device-resident. Per-restart outputs:
-///   out_theta [numstart * nadmix], out_score [numstart].
-/// (Best-of-restarts + the bracket + the final edge-length recovery are done host-side
-/// over these small per-restart arrays by the caller.)
+// launch_qpgraph_fleet: multistart fleet for a single topology — reference §6
 void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit,
                           double tol, const double* d_fobs, const double* d_qinv,
                           double* d_out_theta, double* d_out_score, cudaStream_t stream);
 
-/// L3: evaluate the objective at a GIVEN theta and EXPORT the edge lengths + f3_fit
-/// ON-DEVICE (was a host core::qpadm::qpgraph_score re-eval at the winning restart's
-/// theta — the per-fit host objective, L3). Runs the IDENTICAL d_qpgraph_score body
-/// the fleet runs, ONCE, at `d_theta` (the host-selected best restart's converged
-/// theta), and writes out_bl[nedge_norm] (the fitted drift edge lengths) + out_f3[npair]
-/// (the fitted f3 = ppwts·bl = f_obs - res) + out_score[1] (the objective there; the
-/// host maps a 1e30 singular score to NonSpdCovariance). f_obs[npair] + qinv[npair²]
-/// col-major are device-resident. Single thread, native FP64 (the objective carve-out).
+// launch_qpgraph_eval_at_theta: evaluate and export at a chosen theta — reference §7
 void launch_qpgraph_eval_at_theta(const QpGraphDeviceTopo& topo, const double* d_theta,
                                   const double* d_fobs, const double* d_qinv,
                                   double* d_out_bl, double* d_out_f3, double* d_out_score,
                                   cudaStream_t stream);
 
-/// The per-topology VIEW into the PACKED batch arenas (the topology-search heterogeneous
-/// fleet). Scalars by value; the array fields are BASE OFFSETS (element counts) into the
-/// single packed device buffers (d_pwts0 / d_pe_* / d_pae_* / d_cmb*). The kernel
-/// reconstructs a QpGraphDeviceTopo for topology g by adding the base device pointers to
-/// these offsets — so G heterogeneous topologies live in ONE buffer + one index table.
-/// PRECONDITION: `nadmix <= kMaxThetaDev` (same per-thread theta stack cap as
-/// QpGraphDeviceTopo) — enforced by the batch host launcher (throw) + the kernel (1e30
-/// sentinel); see kMaxThetaDev.
+// QpGraphDeviceTopoView: one topology inside a packed batch — reference §8
 struct QpGraphDeviceTopoView {
     int npop, nedge_norm, nadmix, npair, npath, base_leaf;
     int n_pe, n_pae;
     int constrained;
     double fudge;
-    long off_pwts0;     ///< element offset into d_pwts0  (len nedge_norm*npop).
-    long off_pe;        ///< element offset into d_pe_edge/leaf/path (len n_pe each).
-    long off_pae;       ///< element offset into d_pae_path/admixedge (len n_pae each).
-    long off_cmb;       ///< element offset into d_cmb1/d_cmb2 (len npair each).
+    long off_pwts0;
+    long off_pe;
+    long off_pae;
+    long off_cmb;
 };
 
-/// HETEROGENEOUS-TOPOLOGY FLEET launch: fit ALL `ntopo` packed topologies in ONE launch
-/// over the flattened (topo,restart) axis (inst = blockIdx*blockDim+tid; topo_id =
-/// inst/numstart; restart = inst%numstart). Every thread reads the SAME resident d_fobs/
-/// d_qinv (the pop-set-bound basis). Per-thread scratch is sized to the BATCH-MAX layout
-/// the caller computes (make_layout at the batch-max npop/nedge/npair/npath), passed via
-/// `dbl_per_thread`/`int_per_thread`. D==0 (tree) topologies do a single in-kernel objective
-/// eval (no theta axis) — the host-side D==0 carve-out is dropped. Output: the per-(topo,
-/// restart) score d_out_score[ntopo*numstart] (the host reduces to the per-topology best +
-/// the global-best argmin — a reduction, NOT a fit). The host owns out_score's [G*numstart].
+// launch_qpgraph_fleet_batch: fitting many topologies in one launch — reference §9
 void launch_qpgraph_fleet_batch(const QpGraphDeviceTopoView* d_views, int ntopo,
                                 int numstart, int maxit, double tol, int dbl_per_thread,
                                 int int_per_thread, const double* d_pwts0,
