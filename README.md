@@ -91,7 +91,8 @@ you can fit a qpAdm model immediately — no data download, no build:
 steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
   --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
-#  -> weights (Czechia_EBA_CordedWare ~0.56, Turkey_N ~0.44) + tail p ~0.33 — a real fit.
+#  -> weights (Czechia_EBA_CordedWare ~0.87, Turkey_N ~0.13) + tail p ~0.41 — a real fit.
+#     (steppe-dominated Bell Beaker ancestry, à la Olalde et al. 2018 — see docs/examples/)
 ```
 
 Built from source, or want it by hand? Grab the same example directly:
@@ -120,9 +121,9 @@ $S qpadm --f2-dir f2_dir --target England_BellBeaker \
 $S f4 --all-quartets --f2-dir f2_dir --top-k 1000000 --sure --shard-dir sweep_out --device 0
 ```
 
-The full copy-paste command sheet for every subcommand — including the 2M-SNP AADR panel and
-measured sweep timings (e.g. C(700,4) = 9.9 B quartets in ~12 min on one RTX 5090) — is in
-**[docs/commands.md](docs/commands.md)**.
+A full worked example — install → f2 → qpAdm with the expected output — is in
+**[docs/examples/](docs/examples/)**. Every subcommand also prints its complete flag reference with
+`steppe <subcommand> --help`.
 
 ---
 
@@ -186,9 +187,10 @@ the GPU (pass `out=...` to also write an STPF2BK1 dir). `pandas` is imported laz
 
 ## Documentation
 
-- **[docs/commands.md](docs/commands.md)** — the runnable copy-paste command sheet (kept live).
-- Deeper design/reference docs (architecture spec, feature matrix, run-sheet, study
-  reproductions, perf notes) live under **[docs/archive/](docs/archive/)**.
+- **[docs/examples/](docs/examples/)** — a worked end-to-end example (install → f2 → qpAdm) with
+  expected output, plus runnable Python and C++ quickstarts.
+- **[docs/reference/](docs/reference/)** — per-module reference docs: plain-English explanations of
+  how each part of the codebase works, one file per source file.
 
 ---
 

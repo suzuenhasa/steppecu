@@ -1,6 +1,33 @@
 {
   "format": "STPF2BK1",
+  "meta_schema_version": 1,
+  "steppe_version": "0.1.0",
+  "provenance": "steppe quickstart example: a real-AADR 9-population f2 cache (AADR v66 HO -> convertf PACKEDANCESTRYMAP -> steppe extract-f2, maxmiss 0). Tiny by design so `steppe qpadm --f2-dir` yields a real result seconds after install. qpAdm(target=England_BellBeaker, left=Czechia_EBA_CordedWare,Turkey_N, right=6 outgroups) -> weights ~[0.869, 0.131], tail p ~0.41.",
   "P": 9,
-  "n_block": 708,
-  "provenance": "steppe quickstart example: a real-AADR 9-population f2 cache (the qpGraph 9-pop golden). Tiny by design so `steppe qpadm --f2-dir` yields a real result seconds after install."
+  "n_block": 710,
+  "precision_tag": "emu",
+  "precision_mantissa_bits": 40,
+  "blgsize_cm": 5,
+  "n_snp_total": 584131,
+  "n_snp_kept": 351539,
+  "filters": {
+    "maf_min": 0,
+    "maxmiss": 0,
+    "mind_max_missing": 1,
+    "autosomes_only": true,
+    "drop_monomorphic": true,
+    "transversions_only": false
+  },
+  "pop_selection": "explicit:England_BellBeaker,Czechia_EBA_CordedWare,Turkey_N,Mbuti,Israel_Natufian,Iran_GanjDareh_N,Han,Papuan,Karitiana",
+  "source": {
+    "geno": "v66_HO_pa.geno",
+    "snp": "v66_HO_pa.snp",
+    "ind": "v66_HO_pa.ind",
+    "source_hash_computed": false,
+    "geno_sha256": "",
+    "snp_sha256": "",
+    "ind_sha256": ""
+  },
+  "pops_sha256": "sha256:895fe01ab1f8eb773ebd4f541149b470f94c5bd746c2a44def1fc70103a514d6",
+  "f2_cache_id": "sha256:1bc49e1c764b7652443a6636b813758be486b456fd783832f9cfb0fddf242a85"
 }

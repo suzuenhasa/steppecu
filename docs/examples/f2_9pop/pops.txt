@@ -1,9 +1,9 @@
-England_BellBeaker
 Czechia_EBA_CordedWare
-Turkey_N
-Mbuti
-Israel_Natufian
-Iran_GanjDareh_N
+England_BellBeaker
 Han
-Papuan
+Iran_GanjDareh_N
+Israel_Natufian
 Karitiana
+Mbuti
+Papuan
+Turkey_N

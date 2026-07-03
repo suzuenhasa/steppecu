@@ -147,5 +147,5 @@ if [ -n "$EXAMPLE_DIR" ] && [ -f "$EXAMPLE_DIR/f2.bin" ]; then
   say "    --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian"
   say ""
 fi
-say "next:  steppe --help   ·   your own data (AADR → f2 → fit): the cheatsheet"
-say "       # https://github.com/$REPO/blob/main/docs/cheatsheet.md"
+say "next:  steppe --help   ·   a full worked example (install → f2 → qpAdm):"
+say "       # https://github.com/$REPO/blob/main/docs/examples"
