@@ -1,20 +1,39 @@
-# steppe
+# Steppe
 
-**A GPU/CUDA-13 reimplementation of [ADMIXTOOLS 2](https://github.com/uqrmaie1/admixtools) + qpAdm / DATES.**
+*A GPU reimagining of ADMIXTOOLS 2 — f-statistics and qpAdm, built to be fast.*
 
-> 🚧 **Work in progress — research preview.** steppe is under active development. The compute
+> 🚧 **Work in progress — research preview.** Steppe is under active development. The compute
 > paths that are done are validated to bit/tolerance parity with ADMIXTOOLS 2 on real AADR
 > data, but install/onboarding, docs, and some APIs are still rough and may change. **Not a
 > stable release yet** — expect sharp edges, and please don't rely on it for production work.
 
-steppe computes f-statistics (the pairwise-f2 block tensor) and fits admixture models —
-qpAdm / qpWave / qpGraph / DATES, plus the standalone f3 / f4 / f4-ratio / D-statistic
-family — entirely **on the GPU**. The f2 tensor stays resident in VRAM and the fits run
-device-side, so a model fit does zero host round-trips. Results are validated to
-bit/tolerance parity against ADMIXTOOLS 2 on real ancient-DNA (AADR) data.
+## About
 
-> **steppe is a GPU product.** A CUDA-13 GPU is required at runtime; there is no CPU
-> runtime path (the bundled `CpuBackend` is a test/parity oracle only).
+Steppe is a GPU implementation and reimagining of qpAdm from ADMIXTOOLS 2.
+
+One of my favorite hobbies is finding ways to make software faster, and Steppe grew out of that
+curiosity — I wanted a faster, more modern tool for my own work, and it was a great excuse to learn
+CUDA along the way. Somewhere in there it turned into something I was excited to share, and I hope
+it's useful to other people too.
+
+It's still very much a personal project, so you'll occasionally find opinions, experiments, and
+design decisions that reflect how I like to work. At the same time, I've done my best to make Steppe
+reliable, approachable, and useful well beyond my own tinkering.
+
+If you use it, I genuinely hope it makes your work a little easier. And if you have ideas, questions,
+or spot something that could be better, I'd love to hear from you.
+
+## What it does
+
+Steppe computes f-statistics (the pairwise-f2 block tensor) and fits admixture models —
+qpAdm / qpWave / qpGraph / DATES, plus the standalone f3 / f4 / f4-ratio / D-statistic family —
+entirely **on the GPU**. The idea it rests on is ADMIXTOOLS's own: *precompute once, fit many*. One
+streaming pass over the genotypes builds an f2 cache; after that the tensor stays resident in VRAM
+and every fit runs device-side, so a model fit does zero host round-trips. That's most of why it's
+fast.
+
+> **Steppe is a GPU product.** A CUDA-13 GPU is required at runtime; there is no CPU runtime path
+> (the bundled `CpuBackend` is a test/parity oracle only).
 
 ---
 
@@ -57,7 +76,7 @@ chmod +x steppe
 ```
 
 It links the system CUDA 13 runtime at load. If you see `libcudart.so.13: cannot open
-shared object file`, your box has CUDA 12 (or CUDA isn't on the loader path) — steppe needs
+shared object file`, your box has CUDA 12 (or CUDA isn't on the loader path) — Steppe needs
 CUDA 13. Point the loader at it if needed: `export LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
 
 ### 2. Prebuilt wheel — the Python API
@@ -102,7 +121,7 @@ mkdir example_9pop && curl -fsSL \
   | tar xz -C example_9pop
 ```
 
-**Your own data.** steppe works over an **f2-blocks directory** — a precomputed cache of pairwise
+**Your own data.** Steppe works over an **f2-blocks directory** — a precomputed cache of pairwise
 f2 per genome block. Build it once from a genotype prefix, then run any number of stats/fits:
 
 ```bash
@@ -121,13 +140,14 @@ $S qpadm --f2-dir f2_dir --target England_BellBeaker \
 $S f4 --all-quartets --f2-dir f2_dir --top-k 1000000 --sure --shard-dir sweep_out --device 0
 ```
 
-A full worked example — install → f2 → qpAdm with the expected output — is in
-**[docs/examples/](docs/examples/)**. Every subcommand also prints its complete flag reference with
-`steppe <subcommand> --help`.
+Prefer a notebook? There's a marimo walkthrough (genotypes → f2 cache → qpAdm → rotation → f4, every
+result a pandas DataFrame) in **[docs/examples/notebooks/](docs/examples/notebooks/)**. A full
+worked example with expected output is in **[docs/examples/](docs/examples/)**, and every subcommand
+prints its complete flag reference with `steppe <subcommand> --help`.
 
 ---
 
-## CLI
+## Commands
 
 `steppe --help` lists the **14 subcommands**; `steppe <cmd> --help` documents each one's flags.
 All compute runs on the GPU.
@@ -152,8 +172,7 @@ All compute runs on the GPU.
 **Precision & output.** `--precision emu40` (default: emulated-FP64 / Ozaki for the
 matmul-heavy paths, native FP64 for the cancellation-sensitive stats) · `emu32` · `fp64`
 (native) · `tf32` (screening only). f4/f3/qpDstat and the jackknife SEs run in native FP64 and
-are **bit-identical across GPU arches**; the emulated path is accuracy-approximate (~1e-15,
-well below the statistical noise floor). Output: `--format csv|tsv|json`, `--out FILE`
+are **bit-identical across GPU arches**. Output: `--format csv|tsv|json`, `--out FILE`
 (stdout if omitted), `--device 0`.
 
 ---
@@ -179,23 +198,120 @@ print(res.weights)          # DataFrame: [target, left, weight, se, z]
 print(res.p, res.chisq, res.f4rank)
 ```
 
-`steppe.extract_f2(prefix, pops=[...])` builds an f2 handle straight from a genotype prefix on
-the GPU (pass `out=...` to also write an STPF2BK1 dir). `pandas` is imported lazily, so
-`import steppe` works without it.
+`steppe.extract_f2(prefix, pops=[...], out="f2_dir")` builds an f2 cache straight from a genotype
+prefix on the GPU. `pandas` is imported lazily, so `import steppe` works without it.
+
+---
+
+## Performance
+
+Making things fast is the whole point, so here's what **one RTX 5090** does on real AADR data
+(single GPU, the release binary; measured on a shared box, so these are conservative).
+
+**Precompute — stream genotypes → f2 cache** (`extract-f2`, the one expensive step):
+
+| Panel | SNPs | genotypes | 100 pops | 500 pops |
+|---|---|---|---|---|
+| Human Origins | 584 K | 3.8 GB | 5.5 s | 18 s |
+| 1240k | 1.23 M | 6.7 GB | 9 s | 37 s |
+| 2M | 2.14 M | 12 GB | 12 s | 58 s |
+
+The genotype matrix streams out-of-core, and large caches **auto-tier** (the f2 blocks spill from
+VRAM → host RAM → disk as needed), so panels far bigger than the card's memory still build.
+
+**Fits & stats** — single call on a 500-population cache: qpAdm, qpWave, f4, f3, f4-ratio, and D all
+land in **~3 seconds**; DATES in ~2 s; `qpfstats` in under a second.
+
+**Model search** — a qpAdm **rotation of 4,047 candidate models** in **2.8 s** (~1,400 models/s), and
+an admixture-graph topology search of **25,560 graphs** in **14.5 s** (~1,770 graphs/s).
+
+**Sweeps** — every combination, filtered on-device to the top survivors:
+
+| Sweep | statistics computed | time |
+|---|---|---|
+| f3, all triples (500 pops) | 20.7 million | 4 s |
+| f4, all quartets (500 pops) | 2.57 **billion** | 2.9 min |
+| **f4, all quartets (700 pops)** | **9.92 billion** | **12 min** |
+
+→ roughly **14 million f4-statistics per second** — 9.9 billion of them in about twelve minutes, on
+one GPU.
+
+---
+
+## Accuracy
+
+Steppe is checked against ADMIXTOOLS 2 (the reference implementation) on real AADR data: f4 / f3 /
+qpAdm weights, chi-square, p, and the block-jackknife standard errors match to bit/tolerance parity.
+The point of a reimplementation is to be a *faster* ADMIXTOOLS, not a different one — so correctness
+comes first, and the goldens live under `tests/`.
+
+---
+
+## Citing Steppe
+
+Steppe is new and doesn't have its own paper yet — if it helped your work, please cite the software:
+
+> Steppe (v0.1.0). https://github.com/suzuenhasa/steppecu
+
+And please **also cite ADMIXTOOLS 2 and the underlying methods** — they're the science Steppe reruns;
+see [Acknowledgments](#acknowledgments) for the references.
 
 ---
 
 ## Documentation
 
 - **[docs/examples/](docs/examples/)** — a worked end-to-end example (install → f2 → qpAdm) with
-  expected output, plus runnable Python and C++ quickstarts.
+  expected output, runnable Python and C++ quickstarts, and a marimo notebook walkthrough.
 - **[docs/reference/](docs/reference/)** — per-module reference docs: plain-English explanations of
   how each part of the codebase works, one file per source file.
 
 ---
 
+## Acknowledgments
+
+Steppe stands on the shoulders of giants, and would not have been possible without the work of great
+people in this field. Here are the projects and papers Steppe builds on or was inspired by:
+
+**ADMIXTOOLS 2** — I used this to check Steppe against constantly. The f-statistics and qpAdm fits are
+the parity oracle that I validated Steppe against, bit for bit. If you use Steppe, please also cite
+their work, which can be found here: <https://doi.org/10.7554/eLife.85492> ·
+[article](https://elifesciences.org/articles/85492) · [GitHub](https://github.com/uqrmaie1/admixtools).
+
+**ADMIXTOOLS** — the f2/f3/f4/D and the qp* methods (qpAdm, qpWave, qpGraph, qpDstat) all come from the
+original ADMIXTOOLS methods worked out by Nick Patterson, David Reich, and colleagues. Steppe is a new
+engine, but the hard part was based on their work: <https://doi.org/10.1534/genetics.112.145037>.
+
+**Dating / DATES / ALDER** — Steppe reimplements the DATES admixture-dating method, which is based on
+the earlier approach in ALDER that Steppe's dating lineage builds on. You can find the relevant papers
+here: <https://doi.org/10.7554/eLife.77625>, <https://doi.org/10.1126/science.aat7487>,
+<https://doi.org/10.1534/genetics.112.147330>.
+
+**EIGENSOFT, convertf, PLINK** — Steppe supports various genotype formats and can regenerate parity
+goldens, including PLINK. You can find the relevant information here:
+<https://doi.org/10.1371/journal.pgen.0020190>, <https://doi.org/10.1038/ng1847>,
+<https://doi.org/10.1186/s13742-015-0047-8>, <https://www.cog-genomics.org/plink/2.0/>,
+<https://doi.org/10.1086/519795>.
+
+**igraph** — Steppe mirrors ADMIXTOOLS 2's graph data-structure conventions on-device with igraph. I
+can't find a DOI to cite, but here's the website: <https://igraph.org>.
+
+**AADR datasets** — Steppe's validations and benchmarks were run on real ancient-DNA genotypes from the
+Allen Ancient DNA Resource. I'd also like to point out that the AADR datasets are curated, managed, and
+made freely available. If you found their efforts contributed to anything you've done, please show the
+team your support! Here are the relevant citations: <https://doi.org/10.1038/s41597-024-03031-7>,
+<https://doi.org/10.7910/DVN/FFIDCW>.
+
+**The name "Steppe"** — the name was coined for the steppe-ancestry migration story, and the one paper
+that specifically inspired it was the Haak 2015 study of *Massive migration from the steppe as a source
+for Indo-European languages in Europe*. It was the first study I was able to reproduce and used as an
+example, and is the study I use in the quickstart along with the Olalde study:
+<https://doi.org/10.1038/nature14317>, <https://doi.org/10.1038/nature25738>.
+
+---
+
 ## License
 
-GPL-3 — see [LICENSE](LICENSE). steppe is a GPU reimplementation of ADMIXTOOLS 2's qpAdm and is
-released under the same GPL-3 license as ADMIXTOOLS 2. Its author read ADMIXTOOLS 2's source to
-understand how it works and build this GPU version, so matching its license is the right thing to do.
+Steppe is released under the **GPL-3** license (see [LICENSE](LICENSE)) — the same license as
+ADMIXTOOLS 2, which it reimplements. I read through ADMIXTOOLS 2's source to understand how it works so
+I could build my own GPU version, and releasing Steppe under the same license is the right thing to do.
+If I've credited anything here imperfectly, please tell me — I want to get it right.

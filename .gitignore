@@ -90,3 +90,6 @@ docs/commentdump/*
 docs/*
 !docs/reference/
 !docs/examples/
+
+# generated marimo render (keep the .py, not the html)
+docs/examples/notebooks/*.html
