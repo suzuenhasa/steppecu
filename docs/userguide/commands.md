@@ -54,6 +54,35 @@ steppe qpadm-rotate --f2-dir ~/.local/share/steppe/example \
   --min-sources 1 --max-sources -1 --format csv
 ```
 
+## scan — guided, gated, best-first proxy/model search
+
+Searches the pool for a better source model, gated + ranked best-first (with a marked winner),
+plus a relatedness shortlist, swap suggestions, and an outgroup-admissibility check. See
+[scan](./scan.md).
+
+```bash
+# guided search: gate + rank, winner marked "selected, not confirmed"
+steppe scan --f2-dir ~/.local/share/steppe/example \
+  --target England_BellBeaker \
+  --pool  Czechia_EBA_CordedWare,Turkey_N,Iran_GanjDareh_N,Israel_Natufian \
+  --right Mbuti,Han,Papuan,Karitiana --strategy beam
+
+# --prerank: which sources are closest to the target (outgroup-f3 shortlist)
+steppe scan --f2-dir ~/.local/share/steppe/example --target England_BellBeaker \
+  --pool  Czechia_EBA_CordedWare,Turkey_N,Iran_GanjDareh_N,Israel_Natufian \
+  --right Mbuti,Han,Papuan,Karitiana --prerank
+
+# --suggest-swaps: for failing models, "drop the culprit, add a related source" (refit-verified)
+steppe scan --f2-dir ~/.local/share/steppe/example --target England_BellBeaker \
+  --pool  Czechia_EBA_CordedWare,Turkey_N,Iran_GanjDareh_N,Israel_Natufian,Han \
+  --right Mbuti,Papuan,Karitiana --min-sources 2 --max-sources 2 --suggest-swaps
+
+# --right-search: do the outgroups actually distinguish the sources? (anti-circularity)
+steppe scan --f2-dir ~/.local/share/steppe/example --target England_BellBeaker \
+  --pool  Czechia_EBA_CordedWare,Turkey_N --right Mbuti,Han,Papuan,Karitiana \
+  --no-allow-clade --right-search check
+```
+
 ---
 
 ## Standalone f-statistics

@@ -573,7 +573,7 @@ int run_cli(int argc, char** argv) {
             "Rank the pool by mean outgroup-f3 relatedness to the target (over the right set), then exit");
         sub->add_flag_function(
             "--suggest-swaps", [&](std::int64_t) { scan_args.scan_suggest_swaps = true; },
-            "For infeasible models, suggest dropping the culprit source and adding a related one");
+            "For models that fail the gate, suggest dropping the least-related source and adding a related one");
         sub->add_option_function<std::string>(
             "--right-search", [&](const std::string& v) { scan_args.scan_right_search = v; },
             "Outgroup admissibility: none | check | add-drop (sources-only qpWave gate; R0 pinned)");

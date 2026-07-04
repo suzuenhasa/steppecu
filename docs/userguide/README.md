@@ -102,6 +102,8 @@ Almost every command below needs an f2-dir from step 2 first, so start there.
   populations to the right outgroups (the rank test behind qpAdm).
 - **[qpadm-rotate](./qpadm-rotate.md)** — sweep many source combinations for one target from a
   pool of candidates, ranking the feasible models.
+- **[scan](./scan.md)** — guided, gated, best-first proxy/model search with a relatedness
+  shortlist, swap suggestions, and an outgroup-admissibility check.
 - **[qpgraph](./qpgraph.md)** — fit and score admixture graphs (topologies with drift and
   admixture edges).
 - **[dates](./dates.md)** — estimate admixture dates from the decay of ancestry linkage
