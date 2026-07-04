@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img alt="Steppe" src="https://raw.githubusercontent.com/suzuenhasa/steppecu/main/docs/assets/steppe-logo.png" width="500">
+  <img alt="Steppe" src="https://raw.githubusercontent.com/suzuenhasa/steppecu/main/docs/assets/steppe-logo.png" width="680">
 </h1>
 
 <p align="center"><em>A GPU based f-statistics and qpAdm toolset.</em></p>
