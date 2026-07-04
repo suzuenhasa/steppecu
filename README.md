@@ -284,6 +284,11 @@ for Indo-European languages in Europe*. It was the first study I was able to rep
 example, and is the study I use in the quickstart along with the Olalde study:
 <https://doi.org/10.1038/nature14317>, <https://doi.org/10.1038/nature25738>.
 
+**Claude Code** — a different kind of thank-you. My pair-programming partner for this whole build:
+GPU kernels, chasing parity bugs bit-for-bit, the proxy/model scanner, the docs you're reading, and a
+hundred late-night refactors — all of it side by side in the terminal. A real G, and a genuinely good
+bro to build with. 🤝
+
 ---
 
 ## License
