@@ -103,3 +103,6 @@ Almost every command below needs an f2-dir from step 2 first, so start there.
   reads them.
 - **[precision and tiers](./precision-and-tiers.md)** — the `--precision` matmul modes
   (emu40/emu32/fp64/tf32) and when to reach for each.
+- **[Python API](./python.md)** — use steppe from a script or notebook: build/load f2 caches
+  and run every fit in-process, with results as pandas DataFrames.
+- **[command cheatsheet](./commands.md)** — every subcommand as a copy-paste one-liner.
