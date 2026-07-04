@@ -34,6 +34,7 @@ enum class Command {
     QpGraph,
     QpGraphSearch,
     Dates,
+    Scan,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -85,6 +86,11 @@ struct CliArgs {
     // qpadm-rotate enumeration bounds — reference §10
     std::optional<int> min_sources;
     std::optional<int> max_sources;
+
+    // steppe scan (proxy/model scanner) objective — hard-gate p cutoff (α), default 0.05
+    std::optional<double> scan_p_min;
+    // steppe scan: may a 1-source (clade) model be crowned the winner? default true
+    std::optional<bool> scan_allow_clade;
 
     // f4-sweep and f3-sweep controls — reference §11
     std::optional<bool>   sweep_all_combinations;

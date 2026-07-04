@@ -31,6 +31,11 @@ enum class OutputFormat { Csv, Tsv, Json };
 
 [[nodiscard]] std::string json_quote(const std::string& s);
 
+// Exact-round-trip number formatters (17 digits; NaN -> "NA" for CSV/TSV, "null" for JSON).
+// Shared so every command's numeric output formats identically — reference §3
+[[nodiscard]] std::string fmt_double(double v);
+[[nodiscard]] std::string json_double(double v);
+
 // Serialize one qpAdm result — reference §4
 void emit_qpadm_result(std::ostream& os, OutputFormat fmt,
                        const QpAdmResult& result,

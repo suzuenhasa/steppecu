@@ -22,23 +22,6 @@ namespace steppe::app {
 
 namespace {
 
-// Number formatters (17-digit exact round-trip) — reference §2
-[[nodiscard]] std::string fmt_double(double v) {
-    if (std::isnan(v)) return "NA";
-    std::ostringstream o;
-    o.precision(17);
-    o << v;
-    return o.str();
-}
-
-[[nodiscard]] std::string json_double(double v) {
-    if (std::isnan(v)) return "null";
-    std::ostringstream o;
-    o.precision(17);
-    o << v;
-    return o.str();
-}
-
 // Status and precision labels — reference §4
 [[nodiscard]] const char* status_str(Status s) {
     switch (s) {
@@ -500,6 +483,23 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
 }
 
 }  // namespace
+
+// Number formatters (17-digit exact round-trip; NaN -> "NA"/"null") — reference §3
+std::string fmt_double(double v) {
+    if (std::isnan(v)) return "NA";
+    std::ostringstream o;
+    o.precision(17);
+    o << v;
+    return o.str();
+}
+
+std::string json_double(double v) {
+    if (std::isnan(v)) return "null";
+    std::ostringstream o;
+    o.precision(17);
+    o << v;
+    return o.str();
+}
 
 // Conditional RFC-4180 CSV field (public) — reference §6
 std::string csv_field(const std::string& s, char sep) {

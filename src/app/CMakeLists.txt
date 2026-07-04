@@ -36,6 +36,7 @@ add_executable(steppe_app
     cmd_qpfstats.cpp
     cmd_dates.cpp
     cmd_rotate.cpp
+    cmd_scan.cpp
     cmd_extract_f2.cpp
     result_emit.cpp)
 add_executable(steppe::app ALIAS steppe_app)

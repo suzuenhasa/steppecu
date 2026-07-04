@@ -61,6 +61,8 @@ public:
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
+    [[nodiscard]] double scan_p_min()           const noexcept { return scan_p_min_; }
+    [[nodiscard]] bool scan_allow_clade()       const noexcept { return scan_allow_clade_; }
 
     // f-statistic sweep controls — reference §10
     [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
@@ -112,6 +114,8 @@ private:
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;
     int max_sources_ = -1;
+    double scan_p_min_ = 0.05;
+    bool scan_allow_clade_ = true;
     double sweep_min_z_ = 3.0;
     int sweep_top_k_ = -1;
     bool sweep_sure_ = false;

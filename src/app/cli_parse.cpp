@@ -28,6 +28,7 @@
 #include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
 #include "app/cmd_rotate.hpp"
+#include "app/cmd_scan.hpp"
 #include "core/config/cli_args.hpp"
 #include "core/config/config_builder.hpp"
 #include "core/config/exit_code.hpp"
@@ -272,6 +273,7 @@ int run_cli(int argc, char** argv) {
     CliArgs qpgraphsearch_args;
     CliArgs qpwave_args;
     CliArgs rotate_args;
+    CliArgs scan_args;
     CliArgs extract_args;
     CliArgs f4_args;
     CliArgs f3_args;
@@ -532,6 +534,36 @@ int run_cli(int argc, char** argv) {
             auto config = build_config(rotate_args);
             if (!config) std::exit(cfg::kExitInvalidConfig);
             std::exit(run_qpadm_rotate_command(*config));
+        });
+    }
+
+    {
+        CLI::App* sub = app.add_subcommand(
+            "scan", "Proxy/model scanner: gated, best-first ranked qpAdm search");
+        scan_args.command = Command::Scan;
+        add_f2_dir_flag(sub, scan_args, "The f2_blocks directory");
+        add_target_flag(sub, scan_args);
+        sub->add_option_function<std::vector<std::string>>(
+            "--pool", [&](const std::vector<std::string>& v) { scan_args.pool = v; },
+            "Source pool to enumerate subsets of")->delimiter(',');
+        add_right_flag(sub, scan_args, "Right outgroup labels");
+        sub->add_option_function<int>("--min-sources", [&](int v) { scan_args.min_sources = v; },
+                                      "Minimum sources per model (default 1)");
+        sub->add_option_function<int>("--max-sources", [&](int v) { scan_args.max_sources = v; },
+                                      "Maximum sources per model (-1 = whole pool)");
+        sub->add_option_function<double>("--p-min", [&](double v) { scan_args.scan_p_min = v; },
+                                         "Objective hard-gate tail-p cutoff alpha (default 0.05)");
+        sub->add_flag_function("--allow-clade,!--no-allow-clade",
+                               [&](std::int64_t v) { scan_args.scan_allow_clade = (v >= 0); },
+                               "May a 1-source (clade) model be the winner? (default on; "
+                               "--no-allow-clade prefers genuine >=2-source mixtures)");
+        add_qpadm_option_flags(sub, scan_args);
+        add_output_flags(sub, scan_args);
+        add_common_flags(sub, scan_args);
+        sub->callback([&]() {
+            auto config = build_config(scan_args);
+            if (!config) std::exit(cfg::kExitInvalidConfig);
+            std::exit(run_scan_command(*config));
         });
     }
 

@@ -149,6 +149,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.se_require_p, args.se_require_p);
     take_i(merged_.min_sources, args.min_sources);
     take_i(merged_.max_sources, args.max_sources);
+    take_d(merged_.scan_p_min, args.scan_p_min);
+    take_b(merged_.scan_allow_clade, args.scan_allow_clade);
     take_d(merged_.sweep_min_z, args.sweep_min_z);
     take_i(merged_.sweep_top_k, args.sweep_top_k);
     take_b(merged_.sweep_sure, args.sweep_sure);
@@ -389,6 +391,13 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
         cfg.max_sources_ = *merged_.max_sources;
     }
+    if (merged_.scan_p_min.has_value()) {
+        if (*merged_.scan_p_min <= 0.0 || *merged_.scan_p_min >= 1.0) {
+            return fail("--p-min must be in (0,1)");
+        }
+        cfg.scan_p_min_ = *merged_.scan_p_min;
+    }
+    if (merged_.scan_allow_clade.has_value()) cfg.scan_allow_clade_ = *merged_.scan_allow_clade;
     if (cfg.max_sources_ != -1 && cfg.max_sources_ < cfg.min_sources_) {
         return fail("--max-sources must be >= --min-sources");
     }
