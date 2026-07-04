@@ -91,6 +91,7 @@ docs/*
 !docs/reference/
 !docs/examples/
 !docs/userguide/
+!docs/assets/
 
 # generated marimo render (keep the .py, not the html)
 docs/examples/notebooks/*.html
