@@ -4,6 +4,15 @@
 
 <p align="center"><em>A GPU based f-statistics and qpAdm toolset.</em></p>
 
+<p align="center">
+  <img src="https://img.shields.io/github/v/release/suzuenhasa/steppecu?color=orange" alt="release">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="license">
+  <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="python">
+  <img src="https://img.shields.io/badge/CUDA-13.x-76B900" alt="CUDA">
+  <img src="https://img.shields.io/badge/GPU-sm__75%E2%80%93sm__120-76B900" alt="GPU">
+  <img src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey" alt="platform">
+</p>
+
 > 🚧 **Work in progress — research preview.** Steppe is under active development. The compute
 > paths that are done are validated to bit/tolerance parity with ADMIXTOOLS 2 on real AADR
 > data, but install/onboarding, docs, and some APIs are still rough and may change. **Not a
@@ -135,7 +144,7 @@ all live in the **[user guide](docs/userguide/)** — start with **[getting star
 
 ## Commands
 
-`steppe --help` lists the **14 subcommands** (all compute runs on the GPU); the
+`steppe --help` lists the **15 subcommands** (all compute runs on the GPU); the
 **[user guide](docs/userguide/)** has a page per command explaining every flag with runnable examples.
 
 | Command | What it does |
@@ -143,6 +152,7 @@ all live in the **[user guide](docs/userguide/)** — start with **[getting star
 | `extract-f2` | Precompute the f2_blocks dir from a genotype prefix (the precompute-once / fit-many artifact). |
 | `qpadm` | Single-model qpAdm fit over an f2_blocks dir. |
 | `qpadm-rotate` | qpAdm rotation sweep over a source pool (batched on the GPU). |
+| `scan` | Guided proxy/model scanner: a gated, best-first-ranked qpAdm search over a pool, with a relatedness pre-rank, drop/replace swap suggestions, and a sources-only outgroup-admissibility check. |
 | `qpwave` | qpWave rank-sufficiency sweep (no target; `left[0]` is the reference). |
 | `qpgraph` | Fit a single fixed admixture graph (`--graph` edge-list). |
 | `qpgraph-search` | Exhaustive bounded admixture-graph topology search (returns the global-best). |
