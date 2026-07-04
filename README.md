@@ -1,6 +1,8 @@
-# Steppe
+<h1 align="center">
+  <img alt="Steppe" src="https://raw.githubusercontent.com/suzuenhasa/steppecu/main/docs/assets/steppe-logo.png" width="500">
+</h1>
 
-*A GPU based f-statistics and qpAdm toolset.*
+<p align="center"><em>A GPU based f-statistics and qpAdm toolset.</em></p>
 
 > 🚧 **Work in progress — research preview.** Steppe is under active development. The compute
 > paths that are done are validated to bit/tolerance parity with ADMIXTOOLS 2 on real AADR
