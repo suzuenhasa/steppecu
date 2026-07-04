@@ -104,7 +104,7 @@ sample is scored as diploid or pseudo-haploid.
 
 | Value | Meaning |
 |---|---|
-| `Auto` | **The default.** Auto-detect each sample's ploidy from its own genotypes: a sample with any heterozygous call is treated as diploid, a sample with none as pseudo-haploid. This matches ADMIXTOOLS 2's `adjust_pseudohaploid = TRUE`. |
+| `Auto` | **The default.** Auto-detect each sample's ploidy from its own genotypes: a sample with any heterozygous call is treated as diploid, a sample with none as pseudo-haploid. This matches the `adjust_pseudohaploid = TRUE` policy[^at2]. |
 | `Diploid` | Force every sample to diploid (the `--ploidy 2` override). This is also the legacy hardcoded behavior. |
 | `PseudoHaploid` | Force every sample to pseudo-haploid (the `--ploidy 1` override). |
 
@@ -151,8 +151,8 @@ These carry the inputs for the standalone statistic commands (`f4`, `f4-ratio`,
 
 The f4 command takes four parallel columns; quartet number *k* is
 `(pop1[k], pop2[k], pop3[k], pop4[k])`. This is the "no combinations" form — it
-evaluates exactly the listed quartets, row by row, and matches ADMIXTOOLS 2's f4
-with combinations disabled. All four columns must have the same length (the
+evaluates exactly the listed quartets, row by row, and matches f4
+with combinations disabled[^at2]. All four columns must have the same length (the
 application checks this). The f4-ratio command adds a fifth parallel column, so
 tuple *k* becomes `(pop1[k], ..., pop5[k])` and the reported quantity is
 `f4(p1,p2;p3,p4) / f4(p1,p2;p5,p4)`; all five columns must be the same length.
@@ -177,8 +177,8 @@ field** from the extract-f2 `prefix` below so that a check for it does not trip
 the configuration builder's extract-f2 expansion of `prefix` into `.geno`/`.snp`/
 `.ind` file paths. That magnitude path is not yet implemented: when this field is
 set, the command fails fast with a "not yet implemented" message. The alternative
-route — qpdstat via `--f2-dir` — reports f4 instead, following ADMIXTOOLS 2's
-convention on the f2 path (proven byte-identical to its D-statistic f4 mode).
+route — qpdstat via `--f2-dir` — reports f4 instead, following the
+convention on the f2 path[^at2] (proven byte-identical to its D-statistic f4 mode).
 
 ---
 
@@ -190,8 +190,8 @@ Options for the single-graph fit and the bounded topology search.
 |---|---|---|
 | `graph` | `--graph FILE` | The admixture-graph edge-list file, for the `qpgraph` command only. The file has two whitespace- or comma-separated columns per line — parent then child — with an optional `from,to` header row and `#` comment lines skipped. The leaf nodes must be populations present in the f2 directory. |
 | `numstart` | `--numstart N` | The number of independent restarts for the multistart fit — the axis the optimizer runs in parallel. |
-| `diag_f3` | `--diag-f3 X` | The regularization added to the f3 covariance. Matches ADMIXTOOLS 2's `diag_f3` default of `1e-5`. |
-| `constrained` | `--constrained` / `--no-constrained` | Whether drift edges are constrained to be non-negative. Matches ADMIXTOOLS 2's default of on. |
+| `diag_f3` | `--diag-f3 X` | The regularization added to the f3 covariance. Matches the `diag_f3` default of `1e-5`[^at2]. |
+| `constrained` | `--constrained` / `--no-constrained` | Whether drift edges are constrained to be non-negative. Matches the parity default of on[^at2]. |
 | `max_nadmix` | `--max-nadmix N` | For qpgraph-search: the ceiling on the number of admixture nodes to consider. The first version supports 0 or 1. |
 
 ---
@@ -257,8 +257,8 @@ are selected.
 | `pops` | `--pops` | An explicit population selection. (Also reused as the flat convenience list for the f4 and f4-ratio commands — see section 7.) |
 | `auto_top_k` | `--auto-top-k` | Select populations automatically by taking the top *K*. |
 | `min_n` | `--min-n` | Select populations by a minimum sample-count threshold. |
-| `blgsize` | `--blgsize` | The jackknife block size, in **Morgans** (the ADMIXTOOLS 2 convention). Default `0.05`, which is 5 centimorgans. The configuration builder converts Morgans to centimorgans (multiplying by 100) into the centimorgan-stored run configuration. |
-| `ploidy` | `--ploidy auto\|1\|2` | The ploidy policy (see `PloidyMode`). Default `Auto`, matching ADMIXTOOLS 2's pseudo-haploid adjustment. |
+| `blgsize` | `--blgsize` | The jackknife block size, in **Morgans** (the parity convention[^at2]). Default `0.05`, which is 5 centimorgans. The configuration builder converts Morgans to centimorgans (multiplying by 100) into the centimorgan-stored run configuration. |
+| `ploidy` | `--ploidy auto\|1\|2` | The ploidy policy (see `PloidyMode`). Default `Auto`, matching the pseudo-haploid adjustment[^at2]. |
 
 ---
 
@@ -266,7 +266,7 @@ are selected.
 
 These override the quality-control filters applied while reading genotypes. The
 continuously-valued thresholds are unset by default (leaving the lower layer's
-value in place). The flag-gated filters carry an ADMIXTOOLS 2-parity note where
+value in place). The flag-gated filters carry a parity note where
 relevant.
 
 | Field | Flag | Meaning |
@@ -274,10 +274,10 @@ relevant.
 | `maf` | `--maf` | Minimum minor-allele frequency to keep a SNP. |
 | `geno_max_missing` | `--geno-max-miss` | Maximum per-SNP missing-data fraction. |
 | `mind_max_missing` | `--mind-max-miss` | Maximum per-sample missing-data fraction. |
-| `autosomes_only` | `--auto-only` / `--no-auto-only` | Keep only autosomes. For extract-f2 the effective default is on, matching ADMIXTOOLS 2. |
-| `drop_monomorphic` | `--drop-mono` / `--no-drop-mono` | Drop SNPs with no variation. For extract-f2 the effective default is on, matching ADMIXTOOLS 2's poly-only behavior. |
+| `autosomes_only` | `--auto-only` / `--no-auto-only` | Keep only autosomes. For extract-f2 the effective default is on, matching the parity default[^at2]. |
+| `drop_monomorphic` | `--drop-mono` / `--no-drop-mono` | Drop SNPs with no variation. For extract-f2 the effective default is on, matching the poly-only behavior[^at2]. |
 | `transversions_only` | `--transversions` | Keep only transversion SNPs. |
-| `strand_mode` | `--strand-mode drop\|keep\|flip` | The strand-ambiguous-SNP policy, carried as a **raw, unparsed** token; the builder maps it at the single merge site and an unknown token is an invalid configuration. When unset the behavior is `drop` — the frozen default that drops palindromic (A/T and C/G) SNPs for merge safety and bit-identical parity. `keep` retains ambiguous SNPs (reproducing ADMIXTOOLS 2's default). `flip` is a documented not-yet-implemented token that currently behaves like `keep` (no frequency-based reorientation yet). |
+| `strand_mode` | `--strand-mode drop\|keep\|flip` | The strand-ambiguous-SNP policy, carried as a **raw, unparsed** token; the builder maps it at the single merge site and an unknown token is an invalid configuration. When unset the behavior is `drop` — the frozen default that drops palindromic (A/T and C/G) SNPs for merge safety and bit-identical parity. `keep` retains ambiguous SNPs (reproducing the parity default[^at2]). `flip` is a documented not-yet-implemented token that currently behaves like `keep` (no frequency-based reorientation yet). |
 
 ---
 
@@ -303,3 +303,7 @@ Where results go and in what format.
 |---|---|---|
 | `out_file` | `--out FILE` | The output file. Standard output if unset. |
 | `format` | `--format csv\|tsv\|json` | The output format. Default `csv`. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

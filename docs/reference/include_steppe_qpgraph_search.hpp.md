@@ -19,25 +19,25 @@ entry-point functions. It contains no GPU code — it only uses the C++ standard
 library and other steppe headers — so it can be included by the core library, the
 command-line tool, and the language bindings without pulling in CUDA.
 
-### Why exhaustive enumeration instead of copying ADMIXTOOLS 2's search
+### Why exhaustive enumeration instead of copying the reference search
 
-ADMIXTOOLS 2 finds graphs with a *stochastic* search: it starts from random
+The reference finds graphs with a *stochastic* search[^at2]: it starts from random
 seeds and hill-climbs, and the best graph it lands on varies from run to run
 (each seed tends to find a different over-fitted graph, and it rarely recovers a
 known hand-curated answer). Because there is no single deterministic result to
-match, there is no way to build a "reproduce ADMIXTOOLS 2's search exactly"
-reference test against it.
+match, there is no way to build a "reproduce the reference search exactly"
+test against it.
 
 This search sidesteps that problem. In a *bounded, enumerable* space — a fixed
 list of populations and a small cap on the number of mixture events — the set of
 possible graph shapes is finite, so the global best can be computed exhaustively
-and is fully deterministic. Two facts make ADMIXTOOLS 2 still usable as an
+and is fully deterministic. Two facts make the reference still usable as an
 oracle:
 
 - **Each candidate is scored** by the ordinary single-graph fit, which *is*
-  validated against ADMIXTOOLS 2's `qpgraph()` to a tight relative tolerance
-  (about 1e-6). So every individual score is trustworthy.
-- **The enumeration itself is checked** against ADMIXTOOLS 2's own
+  validated against the reference `qpgraph()` to a tight relative tolerance
+  (about 1e-6)[^at2]. So every individual score is trustworthy.
+- **The enumeration itself is checked** against the reference
   `generate_all_trees` / `generate_all_graphs`: the number of shapes produced and
   the set of canonical graph identities match one-for-one. So the coverage is
   provably complete.
@@ -97,7 +97,7 @@ winning graph's detailed fit, the heuristic self-check, and timing.
 ### Exhaustive-coverage counts
 
 These are the witnesses that the enumeration was complete; they are the numbers
-compared against ADMIXTOOLS 2's own enumeration.
+compared against the reference enumeration.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -116,13 +116,13 @@ compared against ADMIXTOOLS 2's own enumeration.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `candidates` | `vector<QpGraphCandidate>` | empty | Every shape that was successfully fit, each with its canonical hash, edge list, and best-of-restarts score, in the deterministic enumeration order (all trees first, then the single-admixture shapes). This is exactly the per-shape data the global-best reduction ran over. Exposing it is purely additive — it does not change any fit, score, or enumeration math — and it lets a parity test look up a candidate by its canonical hash or edges and compare its score against ADMIXTOOLS 2's `qpgraph()` for the same shape. A candidate whose graph failed to build (a bad parse) is omitted, because it has no score. |
+| `candidates` | `vector<QpGraphCandidate>` | empty | Every shape that was successfully fit, each with its canonical hash, edge list, and best-of-restarts score, in the deterministic enumeration order (all trees first, then the single-admixture shapes). This is exactly the per-shape data the global-best reduction ran over. Exposing it is purely additive — it does not change any fit, score, or enumeration math — and it lets a parity test look up a candidate by its canonical hash or edges and compare its score against the reference `qpgraph()` for the same shape. A candidate whose graph failed to build (a bad parse) is omitted, because it has no score. |
 
 ### The winner's detailed fit
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `best_fit` | `QpGraphResult` | — | The complete single-graph fit of the winning shape — the full-detail result the parity gate diffs against a standalone ADMIXTOOLS 2 `qpgraph()` of the same edge list. |
+| `best_fit` | `QpGraphResult` | — | The complete single-graph fit of the winning shape — the full-detail result the parity gate diffs against a standalone reference `qpgraph()` of the same edge list. |
 
 ### The heuristic self-check
 
@@ -179,5 +179,9 @@ QpGraphSearchResult run_qpgraph_search(const F2BlockTensor& f2_host,
 ```
 
 Reads f2 statistics from host memory. This overload exists for the CPU reference
-backend used to validate the GPU path against ADMIXTOOLS 2; it is not the runtime
+backend used to validate the GPU path against the reference[^at2]; it is not the runtime
 users go through.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

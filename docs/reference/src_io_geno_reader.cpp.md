@@ -63,7 +63,7 @@ The probes run in this order:
    rejected with a clear "re-export SNP-major" error rather than silently
    mis-read.
 4. **ANCESTRYMAP text triples.** If still unknown, probe for the legacy unpacked
-   EIGENSOFT `.geno`: one text line per (SNP, individual) pair of the form
+   EIGENSOFT[^eigensoft] `.geno`: one text line per (SNP, individual) pair of the form
    `<snp_id> <sample_id> <genotype>`. This is neither a packed magic nor the dense
    `0`/`1`/`2`/`9` character matrix EIGENSTRAT uses, so the earlier probes already
    declined it. Recognition needs only the first non-blank line to have exactly
@@ -130,7 +130,7 @@ The path splits by whether the format has a fixed-width packed data region:
   rejects a degenerate header (a zero stride or zero record count). It then
   measures the file size, subtracts `header_bytes`, and divides the remaining data
   bytes by `bytes_per_record`. That quotient is `records_present_`, matching the
-  reference tool's rule of `n_records = (file_size - header) / bytes_per_record`.
+  reference tool's rule of `n_records = (file_size - header) / bytes_per_record`[^at2].
   A file smaller than its own header, or one with no complete records at all, is
   rejected. `records_present_` is capped so it can never exceed the header's
   record count, and if it is smaller, that smaller value is the cap all later
@@ -276,3 +276,8 @@ mismatch messages:
   file's actual format does not match the reader it was handed to, the message
   names the real format and points at the correct reader. Keeping this in one
   place replaced a per-reader chain that had drifted stale as formats were added.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^eigensoft]: **EIGENSOFT / convertf** — the EIGENSTRAT and ANCESTRYMAP genotype formats and the `convertf` converter. Patterson N, Price AL, Reich D. *Population structure and eigenanalysis.* PLoS Genetics 2006;2(12):e190.

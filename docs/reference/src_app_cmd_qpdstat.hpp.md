@@ -16,7 +16,7 @@ command adds no new statistical engine of its own — each path reuses machinery
 that is already built and validated elsewhere.
 
 The numbers, signs, z-scores, and p-values this command reports are meant to
-match what ADMIXTOOLS 2 produces for the same inputs.
+match the reference implementation for the same inputs[^at2].
 
 ---
 
@@ -27,8 +27,8 @@ Which statistic `qpdstat` computes depends on which input the user points it at.
 ### The f2-directory path (reports f4)
 
 When the command is given a precomputed f2 blocks directory (`--f2-dir`), it
-reports the **f4 statistic**. This is deliberate and follows ADMIXTOOLS 2's own
-convention: when ADMIXTOOLS 2's `qpdstat` runs against an f2-data directory
+reports the **f4 statistic**. This is deliberate and follows the reference
+convention[^at2]: when the reference `qpdstat` runs against an f2-data directory
 rather than raw genotypes, its result *is* f4. The "D mode" toggle that would
 normalize the statistic is a no-op once you are working from f2 blocks, because
 normalization needs the per-SNP genotypes that an f2 directory has already
@@ -92,7 +92,7 @@ Both paths emit one row per quartet with the same columns:
 — the four population names, the estimate, its standard error, the z-score, and
 the p-value.
 
-The z-score and p-value follow ADMIXTOOLS 2's D-statistic convention exactly:
+The z-score and p-value follow the reference D-statistic convention exactly[^at2]:
 
 - **z is the estimate divided by its standard error** (`z = est / se`), and
 - **p is the two-sided normal tail** — `p = 2 × (1 − Φ(|z|))`, where Φ is the
@@ -100,8 +100,8 @@ The z-score and p-value follow ADMIXTOOLS 2's D-statistic convention exactly:
   z-score at least this large in magnitude if the true value were zero.
 
 The **sign** of the estimate carries meaning (it says which pair shares more
-alleles), so it is preserved and follows the same sign convention ADMIXTOOLS 2
-uses. Reusing one emitter for both paths guarantees the f4 result and the
+alleles), so it is preserved and follows the same reference sign convention.
+Reusing one emitter for both paths guarantees the f4 result and the
 normalized-D result cannot drift apart in their column layout or their
 sign/z/p conventions.
 
@@ -161,3 +161,7 @@ categories:
 The practical rule for a caller: a nonzero exit means the command could not run,
 while a zero exit means it ran and you should read each row's `status` (and its
 estimate and standard error) to learn what happened for that quartet.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

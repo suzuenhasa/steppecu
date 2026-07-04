@@ -60,7 +60,7 @@ than polluting the result.
 ### Why N counts alleles, not individuals
 
 N being a haploid (allele) count rather than a per-individual count matches the
-bias-correction convention used by ADMIXTOOLS 2. This distinction matters for
+bias-correction convention used for parity[^at2]. This distinction matters for
 ancient-DNA data, where samples are frequently pseudo-haploid: such a sample
 contributes 1 to N, not 2. Honoring this is mandatory. It changes *how N is
 computed* upstream, but it does not change this contract — N is always "alleles
@@ -129,3 +129,7 @@ the GPU feeder, so neither side hand-writes the offset.
 It performs **no bounds checking**, by design: it sits on a hot path, and callers
 are required to stay within `0 ≤ i < P` and `0 ≤ s < M`. It is marked so that it
 can never throw and its result must not be ignored.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -25,9 +25,9 @@ Two facts follow from that role:
   gold reference that every GPU precision mode is validated against, so it is
   never itself downgraded.
 
-The math throughout reproduces ADMIXTOOLS 2 exactly (or, where floating-point
+The math throughout reproduces the reference exactly[^at2] (or, where floating-point
 order matters, within a tight tolerance). Many methods were validated bit-for-bit
-against saved ADMIXTOOLS 2 reference outputs.
+against saved reference outputs.
 
 ## 2. Why this is an oracle, not a template the GPU copies
 
@@ -43,8 +43,8 @@ the correction denominator, the unbiased summand, and the divide-by-zero guard
 physically cannot drift between the oracle and the GPU feeder — there is one copy
 of each formula, consumed by both.
 
-This is the guiding principle for the whole file: reproduce the ADMIXTOOLS 2 math
-for parity, but keep the reference in its simplest, most obviously-correct scalar
+This is the guiding principle for the whole file: reproduce the parity math[^at2],
+but keep the reference in its simplest, most obviously-correct scalar
 form, and route both backends through the same shared primitives so neither can
 diverge on the formula.
 
@@ -141,7 +141,7 @@ the GPU's on-device detector is diffed against.
 
 ## 5. Dropping partially-covered blocks
 
-`survivor_blocks` reproduces ADMIXTOOLS 2's behavior of dropping genome blocks that
+`survivor_blocks` reproduces the parity behavior[^at2] of dropping genome blocks that
 contain missing data before the jackknife. It returns, in ascending order, the
 original block ids that survive.
 
@@ -153,7 +153,7 @@ This distinction matters:
   information" sentinel. Some legacy and parity inputs zero-fill `vpair`, and the
   block-assignment step never emits an empty block, so a real block always has a
   positive diagonal `vpair`. Requiring the *mix* of missing-and-present makes the
-  drop fire exactly on the ADMIXTOOLS 2 case and leaves the "no info" path keeping
+  drop fire exactly on the parity case and leaves the "no info" path keeping
   every block.
 - When `vpair` is absent entirely (older fixtures that do not carry it, where a
   global-intersection guarantee means there are no missing blocks) or is present
@@ -176,8 +176,8 @@ point estimate once (section 7) so downstream steps share one array.
   a left set of `[target, sources…]` and a right set of `[R0, rights…]`, each block
   entry is
   `X[i, j, b] = ( f2(Li, R0) + f2(L0, Rj) − f2(L0, R0) − f2(Li, Rj) ) / 2`.
-  The `(i, j)` pair is flattened row-major as `k = j + nr·i` — the ADMIXTOOLS 2
-  vectorization order, which the later weight-fit indexing relies on.
+  The `(i, j)` pair is flattened row-major as `k = j + nr·i` — the parity
+  vectorization order[^at2], which the later weight-fit indexing relies on.
 
 - `assemble_f4_quartets` builds f4 for a batch of `N` explicit quartets
   `(p1, p2, p3, p4)`:
@@ -195,7 +195,7 @@ point estimate once (section 7) so downstream steps share one array.
 ## 7. The block jackknife
 
 The jackknife turns the per-block statistic into a point estimate and a covariance,
-reproducing ADMIXTOOLS 2's resampling code. It is split across one private helper
+reproducing the reference resampling code[^at2]. It is split across one private helper
 and two public methods.
 
 ### The leave-one-out pass (private)
@@ -272,10 +272,10 @@ cancellation-sensitive. The qpfstats path in section 12 reuses this same reducti
 
 ## 9. The qpAdm rank test and weight fit
 
-The qpAdm fit engine reproduces ADMIXTOOLS 2's qpadm and resampling code in native
+The qpAdm fit engine reproduces the reference qpadm and resampling code[^at2] in native
 double precision and was validated bit-for-bit against a saved golden. Its
 vectorization order is the row-major `k = j + nr·i` order throughout, so the matrix
-reshapes line up with ADMIXTOOLS 2's indexing.
+reshapes line up with the parity indexing.
 
 ### Rank sweep
 
@@ -339,7 +339,7 @@ for parity:
 
 `se_from_wmat` is the leave-one-block-out standard error. It runs the per-block
 re-fit loop to get an `n_block × nl` matrix of replicate weights, applies
-ADMIXTOOLS 2's scale of `(n_block − 1) / sqrt(n_block)`, takes the sample-covariance
+the parity scale of `(n_block − 1) / sqrt(n_block)`[^at2], takes the sample-covariance
 diagonal, and returns the element-wise square root — the `nl`-length standard error.
 It needs at least two blocks.
 
@@ -362,7 +362,7 @@ pairs at a given genetic-distance lag equals the **autocorrelation of the
 genetic-map-binned grid**. Autocorrelating the grid is algebraically identical to
 the result the GPU's fast-Fourier-transform path produces, so this direct
 autocorrelation is both the within-codebase parity pin and an exact reproduction of
-the DATES program. Crucially, the roughly 10^12-entry SNP-pair object is never
+the DATES program[^dates]. Crucially, the roughly 10^12-entry SNP-pair object is never
 formed — the code autocorrelates the grid (length equal to the number of fine bins),
 not the SNP pairs.
 
@@ -388,8 +388,8 @@ Two companions complete DATES:
 
 ## 12. qpfstats joint f2 smoothing
 
-`qpfstats_smooth` is the joint-f2 smoothing solve, reproducing ADMIXTOOLS 2's
-qpfstats regression exactly. It builds one shared normal-equation matrix
+`qpfstats_smooth` is the joint-f2 smoothing solve, reproducing the
+qpfstats regression exactly[^at2]. It builds one shared normal-equation matrix
 `A_shared = xᵀx + ridge·I`, then for each block downdates it by the outer product of
 the block's not-a-number rows and solves against `xᵀ·(y with not-a-number entries
 zeroed)`. An all-not-a-number block yields a zero solution. The global solution is
@@ -442,3 +442,8 @@ batch, so the search still ranks the well-identified candidates.
 the dependency-injection seam: the backend is injected into the shared resources
 rather than referenced directly. The GPU factory mirrors this signature in the same
 namespace, so the two backends are interchangeable at the call site.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

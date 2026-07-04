@@ -13,7 +13,7 @@ The reason this is its own command is a compute-once / fit-many split. Scanning
 the genotypes and building the f2 blocks is the expensive part, so steppe does it
 once and writes the result to a directory. The model-fitting commands then read
 that directory back many times, cheaply, without ever touching the genotype files
-again. This mirrors how ADMIXTOOLS 2 precomputes and caches its f2 data.
+again — the same precompute-and-cache f2 workflow steppe reproduces[^at2].
 
 ---
 
@@ -105,3 +105,7 @@ With `--dry-run`, the command does **no** compute. It performs only the resoluti
 step and reports the resolved sizes, the chosen memory tier, and the precision
 policy, then returns `0`. This lets you see what a run would do — how big it is and
 which path it would take — without spending any GPU time.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

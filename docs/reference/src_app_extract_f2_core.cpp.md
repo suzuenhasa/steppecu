@@ -59,22 +59,21 @@ together and must stay aligned on the SNP axis.
 
 ---
 
-## 3. ADMIXTOOLS 2 parity pins
+## 3. Parity pins
 
-Four decisions are made deliberately so that the results match ADMIXTOOLS 2
-exactly. They are called out here because each one is easy to get subtly wrong
+Four decisions are made deliberately so that the results stay parity-exact[^at2]. They are called out here because each one is easy to get subtly wrong
 in a way that would still "run" but produce different numbers.
 
 1. **Population-axis order.** The populations are ordered by reading the
    individual file for the selection and sorting ascending by population label.
    That sorted order is the P-axis index order used everywhere downstream, and
-   it is the same order ADMIXTOOLS 2 uses.
+   it is the parity-fixed order.
 2. **Per-sample pseudo-haploid detection.** Unless a ploidy is forced, each
    sample's ploidy is detected individually (some ancient-DNA samples are
-   pseudo-haploid, some are diploid). This mirrors ADMIXTOOLS 2's
+   pseudo-haploid, some are diploid). This mirrors the parity
    pseudo-haploid adjustment. See section 5.
-3. **The `maxmiss` coverage test is on the population axis.** ADMIXTOOLS 2's
-   `maxmiss` is a per-SNP test over *populations*, not over individuals, and it
+3. **The `maxmiss` coverage test is on the population axis.** The
+   `maxmiss` filter is a per-SNP test over *populations*, not over individuals, and it
    is applied as a separate step. The individual-axis missingness filter is
    forced off during extract so it cannot double-filter. See section 6.
 4. **Autosomes-only is a filter flag.** Restricting to chromosomes 1–22 is a
@@ -127,7 +126,7 @@ exist (the two SNP axes must line up).
 ## 5. Per-sample ploidy detection
 
 Each sample is either pseudo-haploid (effectively one allele observed, encoded
-as ploidy `1`) or diploid (ploidy `2`). These two values mirror ADMIXTOOLS 2's
+as ploidy `1`) or diploid (ploidy `2`). These two values mirror the parity
 pseudo-haploid adjustment. The caller chooses one of three modes:
 
 | Mode | What happens |
@@ -163,7 +162,7 @@ at that SNP (a sample count of zero), and drops the SNP if that fraction exceeds
   the global intersection.
 
 This is separate from, and must not be confused with, the individual-axis
-missingness filter. To honor ADMIXTOOLS 2's semantics, the individual-axis
+missingness filter. To honor the parity semantics[^at2], the individual-axis
 missingness threshold is forced to its no-op value (`1.0`) during extract, so
 only the population-axis `maxmiss` decides coverage. Letting both run would
 double-filter and change the kept set.
@@ -276,7 +275,7 @@ kept chromosome and genetic-position arrays. The kept physical-position array is
 passed alongside for one specific fallback: when a dataset ships with no genetic
 map (the genetic-position column is all zeros, common for data derived from VCF
 or PLINK), blocks are formed by a fixed span of physical position instead. When a
-real genetic map is present (as in the AADR data), the physical positions are
+real genetic map is present (as in the AADR data[^aadr]), the physical positions are
 ignored and the partition is bit-identical to a genetic-map partition. The
 function throws if the partition comes out empty.
 
@@ -302,3 +301,8 @@ result:
   the CUDA-free public mirror so a caller (or the CLI summary) can see whether a
   forced-tier override was honored;
 - a status of `Ok`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^aadr]: **AADR** — the Allen Ancient DNA Resource, the ancient-genome dataset steppe validates against. Mallick S, Micco A, Mah M, et al. *The Allen Ancient DNA Resource (AADR): a curated compendium of ancient human genomes.* Scientific Data 2024;11:182.

@@ -56,20 +56,20 @@ named.
 ## 3. Why the f2-directory path equals f4
 
 The f2-directory path reports an f4 statistic and does nothing D-specific. This is
-correct, not a shortcut, and rests on a verified fact about ADMIXTOOLS 2:
+correct, not a shortcut, and rests on a verified parity fact[^at2]:
 
-- ADMIXTOOLS 2's `qpdstat`, when run on precomputed f2 data rather than raw
+- The reference `qpdstat`, when run on precomputed f2 data rather than raw
   genotypes, produces results byte-identical to its `f4`. The "f4mode" switch that
   would distinguish a D-statistic from f4 is a no-op without per-SNP genotypes, so
   `qpdstat(f2dir, f4mode=TRUE)` equals `qpdstat(f2dir, f4mode=FALSE)` equals `f4`.
 
-Because of that, the f2-directory path is full parity with ADMIXTOOLS 2's f2-data
+Because of that, the f2-directory path is full parity with the reference f2-data
 `qpdstat` while adding zero new computation and zero new output code. It runs the
 existing f4 engine once over the quartets and emits with the existing f4 emitter.
 The reported estimate, standard error, z-score, and p-value are f4's, where the
 z-score is estimate divided by standard error and the p-value is
 `2 * (1 - Phi(|z|))` (Phi is the standard normal cumulative distribution). That
-sign/z/p convention is exactly ADMIXTOOLS 2's D-statistic convention.
+sign/z/p convention is exactly the reference D-statistic convention[^at2].
 
 The genuinely different, per-SNP *normalized* D magnitude is only available on the
 genotype path (section 6).
@@ -144,16 +144,16 @@ The steps are:
    GPU resources.
 5. **Emit** the resulting table (section 8).
 
-Several ADMIXTOOLS 2 parity choices are pinned inside `run_dstat` itself and are not
+Several parity choices are pinned inside `run_dstat` itself[^at2] and are not
 options here: the data are treated as forced-diploid, all SNPs are used
 (`allsnps = TRUE`), and only autosomes are kept. Those are fixed to match
-ADMIXTOOLS 2's `qpdstat` on genotypes.
+the reference `qpdstat` on genotypes.
 
 **Block size units.** The jackknife groups SNPs into blocks along the genome. The
 config surface speaks in centimorgans (`blgsize_cm`), but the block math works in
 Morgans, so the command divides by 100 (100 centimorgans per Morgan) before handing
-the value to `run_dstat`. ADMIXTOOLS 2's default block size is 0.05 Morgans, which
-is 5 centimorgans.
+the value to `run_dstat`. The parity default block size is 0.05 Morgans, which
+is 5 centimorgans[^at2].
 
 ---
 
@@ -207,7 +207,7 @@ types carry the same fields precisely so this copy is total — and reusing the 
 emitter this way keeps the genotype path's output schema byte-for-byte identical to
 the f2-directory path's. This is the concrete reason the normalized-D result and the
 f4 result look the same on screen: the D estimate/standard error/z-score/p-value are
-reported in the same ADMIXTOOLS 2 D convention.
+reported in the same D convention[^at2].
 
 ---
 
@@ -237,3 +237,7 @@ as the f4 command does. Keeping the GPU out of this translation unit is a
 deliberate layering rule (enforced by a build-time check), and the command's `main`
 owns all printing to standard output and standard error so the underlying library
 never prints on its own.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

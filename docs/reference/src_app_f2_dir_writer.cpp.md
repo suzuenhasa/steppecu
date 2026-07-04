@@ -6,9 +6,9 @@
 precomputed cache that lets steppe compute the expensive f2 statistics once and
 then fit many models against them without recomputing. It is the write side of the
 same directory format the loader reads back, and the byte layout it produces round-
-trips through that loader by construction. The directory format is shaped to match
-the f2 cache ADMIXTOOLS 2 keeps, so the artifact is a portable interchange rather
-than a private format.
+trips through that loader by construction. The directory format matches the f2
+cache layout of the reference implementation[^at2], so the artifact is a portable
+interchange rather than a private format.
 
 The file also contains a **self-contained SHA-256 implementation**. steppe stamps
 content hashes into the cache directory so a cache is content-addressed and its
@@ -272,3 +272,7 @@ Two subtleties are worth calling out:
   at the default output precision (about six significant figures) with no extra
   precision applied. It is a coarse binning knob, not a value that parity depends on,
   so a coarse serialization is deliberate.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

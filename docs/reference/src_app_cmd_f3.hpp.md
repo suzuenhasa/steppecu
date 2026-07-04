@@ -13,7 +13,7 @@ iterative fitting step, and **no** rank test. It simply computes, for each
 requested triple of populations, a single f3 number (the point estimate) plus
 an estimate of that number's uncertainty (the standard error). The math it
 uses — a weighted block-jackknife f3 point estimate with a jackknife-derived
-standard error — reproduces what ADMIXTOOLS 2 produces for the same input.
+standard error — reproduces the reference f3 for the same input[^at2].
 
 ## 2. What the command computes
 
@@ -44,8 +44,8 @@ There are two ways a caller names the triples, and the command accepts either.
 **Row-aligned columns.** The caller supplies three equal-length lists via
 `--pop1`, `--pop2`, and `--pop3`. The lists are read in lockstep: triple
 number *k* is `(pop1[k], pop2[k], pop3[k])`. This is the "give me exactly
-these specific triples, one per row" style, and it matches ADMIXTOOLS 2's f3
-call with combination-generation turned off (`comb = FALSE`). The three lists
+these specific triples, one per row" style, and it matches the reference f3
+call with combination-generation turned off (`comb = FALSE`)[^at2]. The three lists
 must be the same length; a length mismatch is a configuration error.
 
 The ordering within a triple follows the f3 convention `f3(pop1; pop2, pop3)`:
@@ -116,3 +116,7 @@ outcomes:
 
 The `[[nodiscard]]` marking means callers are not allowed to silently ignore
 the returned exit code.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

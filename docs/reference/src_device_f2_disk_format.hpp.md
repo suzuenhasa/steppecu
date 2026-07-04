@@ -6,7 +6,7 @@
 cache — the file steppe writes when the f2 results are too large to keep in GPU
 memory or host RAM and have to spill to disk. It is the "compute the expensive f2
 statistics once, then fit many models against them" artifact, the same kind of
-reusable cache that ADMIXTOOLS 2 keeps.
+reusable cache steppe keeps[^at2].
 
 The header describes the byte layout, names the small set of constants that identify
 and version the file, defines the fixed 64-byte header record that sits at the front
@@ -57,12 +57,12 @@ f2 block tensor, which uses that same `i + P·j + P·P·b` indexing. Because the
 layouts match exactly, loading the file is a straight bulk copy into the tensor and
 saving is the reverse — there is no transpose or repack step in either direction.
 
-### ADMIXTOOLS 2 compatibility
+### On-disk ordering compatibility
 
-Matching ADMIXTOOLS 2's on-disk ordering is a **goal** of this format. ADMIXTOOLS 2
-stores its f2_blocks as one `P²` slab per block in block-major order, which is the
-same ordering used here. The one difference is the steppe file's fixed 64-byte
-header prefix; a reader aiming for ADMIXTOOLS 2 compatibility strips that prefix and
+Matching the reference on-disk ordering is a **goal** of this format[^at2]. That
+format stores its f2_blocks as one `P²` slab per block in block-major order, which is
+the same ordering used here. The one difference is the steppe file's fixed 64-byte
+header prefix; a reader aiming for that compatibility strips that prefix and
 reads the numeric regions that follow.
 
 ---
@@ -164,3 +164,7 @@ are 32-bit values, and for a large population count and many blocks their produc
 would overflow a 32-bit intermediate and produce a wrong (wrapped-around) offset.
 Widening every factor up front guarantees the stride is computed at full 64-bit
 width and cannot wrap.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

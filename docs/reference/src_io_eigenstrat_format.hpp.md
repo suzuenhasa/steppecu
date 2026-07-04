@@ -86,12 +86,12 @@ record stride from them.
 
 ### Pseudo-haploid auto-detection
 
-ADMIXTOOLS 2 optionally auto-detects whether each sample is diploid or
-pseudo-haploid (its `adjust_pseudohaploid` option). The rule this header
+steppe optionally auto-detects whether each sample is diploid or
+pseudo-haploid[^at2] (the `adjust_pseudohaploid` option). The rule this header
 supports: a sample is **diploid** if it has at least one heterozygous call
 (`kHetCode`) within the first `kPloidyDetectSnps` SNPs, because a truly haploid
 genome can never be heterozygous; otherwise it is treated as **pseudo-haploid**.
-The window default of `1000` matches ADMIXTOOLS 2.0.10 (its `ntest` default). A
+The window default of `1000` is the parity `ntest` default. A
 record shorter than the window simply scans fewer SNPs. `kHetCode` and
 `kPloidyDetectSnps` are mirrored from the core layer's equivalents, kept here so
 the file-reading layer does not have to depend on core.
@@ -103,7 +103,7 @@ the file-reading layer does not have to depend on core.
 The EIGENSTRAT `.snp` file labels each SNP with a chromosome code. These three
 constants name the non-autosomal codes so the label→code convention lives in one
 place instead of as bare literals at the `.snp` parse site. They are *format*
-conventions (the EIGENSOFT integer codes), not mathematical constants.
+conventions (the EIGENSOFT integer codes[^eigensoft]), not mathematical constants.
 
 | Constant | Value | Chromosome |
 |---|---|---|
@@ -368,3 +368,8 @@ On a bad magic or unparsable counts it returns a header with
 `format == Unknown` and leaves the caller to decide how to fail; the function
 itself is `noexcept` and never throws across the layer boundary on a format
 probe.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^eigensoft]: **EIGENSOFT / convertf** — the EIGENSTRAT and ANCESTRYMAP genotype formats and the `convertf` converter. Patterson N, Price AL, Reich D. *Population structure and eigenanalysis.* PLoS Genetics 2006;2(12):e190.

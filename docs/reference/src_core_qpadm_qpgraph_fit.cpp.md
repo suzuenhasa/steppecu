@@ -83,7 +83,7 @@ that array by walking the `npair` pairs and, for each, pushing three f2 column
 indices in a fixed order: `{ base, leaf_a, leaf_b }`. The seam reads this array and
 produces, for every triple, the assembled f3 value using the standard three-term
 identity. The result is `f_obs` — the vector of observed f3 statistics, one per pair.
-This exactly reproduces ADMIXTOOLS 2's weighted block-jackknife f3 estimate.
+This is the weighted block-jackknife f3 estimate[^at2].
 
 ### The covariance and its inverse
 
@@ -96,11 +96,11 @@ the fit uses:
 - `Q` — the raw covariance matrix of the basis.
 - `Qinv` — an inverse covariance used as the fit's weighting matrix.
 
-`Qinv` is not the plain inverse of `Q`. It is a *regularized* inverse that matches
-ADMIXTOOLS 2's `ppinv`: before inverting, a small ridge is added to the diagonal,
+`Qinv` is not the plain inverse of `Q`. It is a *regularized* inverse matching the
+`ppinv` computation[^at2]: before inverting, a small ridge is added to the diagonal,
 scaled by the trace of `Q`. Concretely, `Qinv = inverse(Q + diag_f3 * trace(Q) * I)`,
-which is the same thing ADMIXTOOLS 2 computes when it solves against the f3 variance
-with the diagonal bumped by `diag_f3 * sum(diag)`. The `diag_f3` factor is the ridge
+which solves against the f3 variance with the diagonal bumped by
+`diag_f3 * sum(diag)`. The `diag_f3` factor is the ridge
 strength and comes from the options struct (default `1e-5`). The raw, *unfudged* `Q`
 is kept separately because the residual diagnostic in stage 6 needs the true
 diagonal, not the regularized one.
@@ -283,3 +283,7 @@ template means the two entry points can never drift apart in behavior — they a
 same pipeline fed from two different f2 sources. Selecting the primary GPU here
 reflects that this operation runs on one device; the resources handle is still passed
 through so the backend seam has everything it needs.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

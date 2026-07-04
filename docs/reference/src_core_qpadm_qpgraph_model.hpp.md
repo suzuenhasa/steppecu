@@ -31,8 +31,8 @@ identical numbers, which is why the evaluation logic is written once, in this
 header, as an inline function.
 
 The whole model is a deliberate, line-for-line reproduction of the equivalent
-routines in ADMIXTOOLS 2 (its `graph_to_pwts`, `graph_to_weightind`, and
-`fill_pwts` functions), so that steppe's graph fit matches ADMIXTOOLS 2 exactly.
+reference routines (`graph_to_pwts`, `graph_to_weightind`, and
+`fill_pwts`), so that steppe's graph fit matches for numerical parity[^at2].
 
 ---
 
@@ -104,8 +104,8 @@ Two parallel arrays identify the leaves:
 | `leaf_to_f2` | `vector<int>` | For each leaf, its index into the f2 population axis. `leaf_to_f2[i]` is the f2 population index of leaf `i`. The f3 basis triples use these to look up the right f2 entries. |
 
 Leaf order is "first-seen" order: leaves come out in the order their names first
-appear while scanning the input edge list. This matches ADMIXTOOLS 2's leaf
-ordering.
+appear while scanning the input edge list. This matches the parity leaf
+ordering[^at2].
 
 ---
 
@@ -174,7 +174,7 @@ Which of an admixture node's two parents is treated as "the theta parent" is an
 arbitrary but fixed choice: the parent whose feeding edge appears first in the
 input edge list. The graph's fit score is unaffected by this choice (swapping
 the two parents just replaces theta with `1 - theta`), and the fitted weight is
-reported keyed by parent name, so the result matches ADMIXTOOLS 2 regardless.
+reported keyed by parent name, so the result matches for parity regardless.
 
 Together these tables let the evaluation compute each path's total mixture
 factor (the product of the theta/`1 - theta` values along it) and then sum those
@@ -304,7 +304,7 @@ produces `pwts_c`, the centered, base-dropped leaf-weight matrix of shape
 running over the `npop - 1` non-base leaves in leaf order). This is the matrix
 the fit multiplies against edge lengths to predict f-statistics.
 
-It reproduces ADMIXTOOLS 2's sequence exactly: fill the mixture-weight-dependent
+It reproduces the reference sequence[^at2]: fill the mixture-weight-dependent
 cells of the base matrix, then center and drop the base column, i.e.
 `pwts = fill_pwts(pwts0, theta)` followed by `pwts = pwts[, -base] - pwts[, base]`.
 It works in three steps:
@@ -325,3 +325,7 @@ link against the core library's symbols — many device-only tests link the devi
 layer without core. Defining the evaluation inline lets any translation unit
 that includes this header use it directly, with no core link dependency, while
 keeping the CPU reference and the GPU path running literally the same code.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

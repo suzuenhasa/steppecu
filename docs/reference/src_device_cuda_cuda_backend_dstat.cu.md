@@ -66,7 +66,7 @@ every population quadruple, three running sums:
 
 where `a, b, c, d` are the four populations' allele frequencies at a SNP. A SNP only
 contributes to a block/quadruple cell if all four populations have a valid
-(non-missing) frequency there. This is the normalized-D form used by ADMIXTOOLS 2,
+(non-missing) frequency there. This is the normalized-D form[^at2],
 and all three sums are accumulated in native double precision because the numerator
 and denominator each subtract nearly equal quantities and are sensitive to
 cancellation.
@@ -135,8 +135,8 @@ shared kernel; the two mappings are described in sections 5 and 6.
 ### The two modes
 
 The kernel takes a `tot_mode` flag that selects which statistic's jackknife formula to
-use. Mode 0 is the f4-ratio; mode 1 is the D-statistic. Both reproduce ADMIXTOOLS 2's
-corresponding jackknife exactly — the same block drop rule, the same operand order,
+use. Mode 0 is the f4-ratio; mode 1 is the D-statistic. Both reproduce the
+corresponding jackknife exactly[^at2] — the same block drop rule, the same operand order,
 and the same variance form — and both run in native double precision, matching the
 CPU long-double reference at the tested tolerance.
 
@@ -149,7 +149,7 @@ This function computes the f4-ratio and its jackknife from a resident f2 tensor
 
 1. **Drop missing blocks.** `device_survivor_blocks` returns the ascending list of
    blocks that are usable — dropping any block that is partially missing, matching
-   ADMIXTOOLS 2's behavior of removing blocks with missing data. If that leaves no
+   the behavior of removing blocks with missing data[^at2]. If that leaves no
    surviving block, the function returns all-not-a-number results. The surviving
    block sizes are gathered into both an integer and a double copy (the double copy is
    the per-block weight the kernel broadcasts).
@@ -167,7 +167,7 @@ This function computes the f4-ratio and its jackknife from a resident f2 tensor
    rows). The weight is the per-block size, broadcast across items. The kernel runs in
    mode 0, with `compute_p` off, and the per-block denominator threshold
    (`setmiss_thresh`) passed through so blocks with a near-zero denominator are
-   dropped, again matching ADMIXTOOLS 2.
+   dropped, again matching the reference.
 
 The `precision` argument is accepted but deliberately ignored: the ratio difference
 is cancellation-sensitive, so this path always uses native double precision rather
@@ -242,3 +242,7 @@ jackknife variance forms all subtract nearly equal quantities and are therefore 
 argument only to ignore it, and why the reduction kernel accumulates in double. Native
 double precision here reproduces the CPU long-double reference at the tested tolerance,
 which the emulated form would not reliably do for these cancellation-prone quantities.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

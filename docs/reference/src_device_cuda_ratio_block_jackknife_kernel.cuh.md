@@ -116,7 +116,7 @@ Four device output buffers, each of length `N` (one slot per item):
 | `d_p` | The two-sided p-value — written **only** when `compute_p` is true; otherwise this buffer is left untouched. |
 
 When `compute_p` is true, each item's p-value is `erfc(|z| / sqrt(2))`, the same
-two-sided tail formula ADMIXTOOLS 2 uses. The f4-ratio path passes `compute_p` false
+two-sided tail formula the reference uses[^at2]. The f4-ratio path passes `compute_p` false
 (it reports estimate, standard error, and z only); the D-statistic path passes it true.
 
 If an item cannot produce a valid answer — fewer than two surviving blocks, a
@@ -161,7 +161,7 @@ reference exactly:
 
 - **`setmiss_thresh > 0` (f4-ratio):** a block is dropped when the magnitude of its raw
   denominator is below the threshold — that is, `|xblk_den(k, b)| < setmiss_thresh`.
-  This reproduces ADMIXTOOLS 2's "set missing" behavior, where a block whose
+  This reproduces the reference "set missing" behavior[^at2], where a block whose
   denominator is effectively zero is treated as absent.
 - **`setmiss_thresh <= 0` (D-statistic):** a block is dropped when its weight is not
   positive — that is, `weight <= 0` (a block with no observations).
@@ -184,13 +184,13 @@ Both modes, once their survivors and total are settled, build the answer the sam
    each replicate deviates from the total, plus a weight-weighted average of the
    replicates. This is a bias-corrected weighted jackknife estimate, not just the
    plain full-data total. The reported number is deliberately this jackknife estimate,
-   **not** the raw total: on the f4-ratio golden it matches ADMIXTOOLS 2's answer to
+   **not** the raw total: on the f4-ratio golden it matches the reference answer[^at2] to
    about 2e-15, whereas the raw total is off by about 3e-4.
 3. **Standard error.** For each surviving block the kernel forms a pseudo-value from
    the total and the replicate, scaled by that block's relative weight, subtracts the
    estimate, and accumulates the square. Averaging those squares gives the jackknife
    variance; its square root is the standard error. (This is the standard weighted
-   delete-block jackknife variance that ADMIXTOOLS uses, where blocks of unequal size
+   delete-block jackknife variance that the reference uses[^at2], where blocks of unequal size
    are weighted by their relative size.)
 4. **z-score.** Simply `est / se`. A non-positive variance yields a NaN standard error
    and z.
@@ -220,3 +220,7 @@ results agree at the validation tolerance.
 The precision setting a caller may pass through the higher-level API is honored only as
 a label on the result — it does not change the arithmetic here. This kernel is always
 native double precision.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

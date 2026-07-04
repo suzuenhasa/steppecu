@@ -58,7 +58,7 @@ switches on it. There are five recognized formats plus a defensive default.
 | `Geno` | PACKEDANCESTRYMAP — the packed binary SNP-major format, where genotypes are stored as raw 2-bit codes. | Reads the raw SNP-major bytes with the file-reading leaf, then runs the shared SNP-major transpose path (section 4). |
 | `Eigenstrat` | The text SNP-major format, where each SNP is a line of ASCII digits. | Parses and packs the ASCII line into the canonical SNP-major layout, then runs the same shared transpose path. |
 | `Plink` | The PLINK `.bed` binary SNP-major format (2-bit codes, but bit-ordered and value-coded differently from PACKEDANCESTRYMAP). | Reads and **normalizes** the `.bed` records into the canonical SNP-major layout, then runs the same shared transpose path. |
-| `Ancestrymap` | The unpacked legacy EIGENSOFT text format — one line per (SNP, sample, genotype) triple. | Parses the triples and packs them into the canonical SNP-major layout, then runs the same shared transpose path. |
+| `Ancestrymap` | The unpacked legacy EIGENSOFT text format[^eigensoft] — one line per (SNP, sample, genotype) triple. | Parses the triples and packs them into the canonical SNP-major layout, then runs the same shared transpose path. |
 | `Unknown` / default | — | Throws `std::runtime_error`. See section 7. |
 
 The four non-TGENO formats all end up calling the same helper, `transpose_snp_major`.
@@ -166,3 +166,7 @@ loudly rather than silently mis-handled.
 Any failure inside the reader gather or the GPU transpose propagates out as an
 exception, matching the same failure contract the underlying read functions already
 carry.
+
+---
+
+[^eigensoft]: **EIGENSOFT / convertf** — the EIGENSTRAT and ANCESTRYMAP genotype formats and the `convertf` converter. Patterson N, Price AL, Reich D. *Population structure and eigenanalysis.* PLoS Genetics 2006;2(12):e190.

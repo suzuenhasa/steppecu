@@ -32,35 +32,35 @@ jackknife blocks, compute the per-block f2 values on the GPU, and copy the resul
 back to host memory. That math was lifted verbatim out of the command-line
 command — it is byte-identical, and the reference result files (the "goldens")
 were left untouched — so a plain extract through this function reproduces the
-same numbers ADMIXTOOLS 2 produces.
+same numbers as the reference[^at2].
 
 ---
 
 ## 2. The parity pins
 
 Four behaviors are carried over exactly from the command-line command so that a
-bare extract reproduces the ADMIXTOOLS 2 reference result. These are fixed
+bare extract reproduces the parity reference result[^at2]. These are fixed
 conventions, not tunable options.
 
 1. **Population-axis order.** The populations are read from the individual
    (`.ind`) file using the explicit selection you pass in, then sorted in
    ascending order by label. That sorted order is the order of the population
-   axis in the result, and it matches the order ADMIXTOOLS 2 uses (the order of
-   a `pops.txt` file).
+   axis in the result, and it matches the parity population-axis order[^at2] (the
+   order of a `pops.txt` file).
 
 2. **Per-sample ploidy auto-detection.** Unless you force a ploidy, each sample's
    ploidy is detected individually — this is the same pseudo-haploid adjustment
-   ADMIXTOOLS 2 performs. It is the default for extract.
+   used for parity[^at2]. It is the default for extract.
 
-3. **Coverage test on the population axis.** ADMIXTOOLS 2's `maxmiss` missingness
-   test is a *population*-axis coverage test, applied as its own per-SNP check,
+3. **Coverage test on the population axis.** The reference's `maxmiss` missingness
+   test is a *population*-axis coverage test[^at2], applied as its own per-SNP check,
    not the *sample*-axis predicate. To reproduce that, the sample-axis
    missing-data filter is forced to its do-nothing setting while the
    population-axis coverage test does the real work.
 
 4. **Autosomes only.** Keeping only chromosomes 1 through 22 is controlled by a
-   flag on the filter configuration. ADMIXTOOLS 2's `extract_f2` defaults to
-   autosomes-only, so that is the matching setting.
+   flag on the filter configuration. The parity `extract_f2` defaults to
+   autosomes-only[^at2], so that is the matching setting.
 
 ---
 
@@ -73,7 +73,7 @@ run-configuration types.
 
 | Value | Meaning |
 |---|---|
-| `Auto` | **The default.** Detect each sample's ploidy individually, using the same pseudo-haploid adjustment ADMIXTOOLS 2 uses. This is the `extract-f2` default. |
+| `Auto` | **The default.** Detect each sample's ploidy individually, using the same per-sample pseudo-haploid adjustment (see section 2). This is the `extract-f2` default. |
 | `PseudoHaploid` | Force every sample to pseudo-haploid — a single uniform per-sample setting instead of per-sample detection. |
 | `Diploid` | Force every sample to diploid — again a single uniform per-sample setting. |
 
@@ -147,8 +147,8 @@ parked, so a single device is used).
 | `pops` | `const io::PopSelection&` | Which populations to use. The named-subset form is what the bindings use, and it is what the population axis is partitioned from; the top-K and minimum-count selection forms are also supported, identical to the command-line tool. The population axis is this selection sorted in ascending order by label. |
 | `filter` | `const FilterConfig&` | The on-the-fly quality-control configuration: the population-axis coverage test (through the missing-data field), autosomes-only, minor-allele-frequency, drop-monomorphic, transversions-only, and the SNP include/exclude lists. |
 | `precision` | `const Precision&` | Which arithmetic the f2 matrix multiplications run in. The default is emulated double precision at 40 mantissa bits. |
-| `blgsize_morgans` | `double` | The jackknife block size, in Morgans. The ADMIXTOOLS 2 default is `0.05`. |
-| `ploidy` | `ExtractPloidy` | The ploidy convention (see section 3). `Auto` by default, which is the ADMIXTOOLS 2 per-sample pseudo-haploid detection. |
+| `blgsize_morgans` | `double` | The jackknife block size, in Morgans. The parity default is `0.05`[^at2]. |
+| `ploidy` | `ExtractPloidy` | The ploidy convention (see section 3). `Auto` by default, which is the per-sample pseudo-haploid detection. |
 | `resources` | `device::Resources&` | The GPU resources handle. The decode and the f2 computation run on this handle's first GPU. |
 
 ### Failure behavior
@@ -161,3 +161,7 @@ usable device, an unknown population name in an explicit selection, a missing or
 unreadable input file, an empty selection, and every SNP being filtered out. It
 never returns a partial or half-built result; a returned `F2ExtractResult` is
 always complete and successful.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -17,15 +17,15 @@ shape (isomorphic) so duplicates can be thrown away.
 The whole file is host-only C++ with no GPU code and no randomness. Because there
 is no random-number generator anywhere, the same leaves always produce the same
 topologies in the same order, run after run. That determinism is a deliberate
-property: the reference tool's own random graph-finder does not have it, and this
+property: the reference tool's own random graph-finder[^at2] does not have it, and this
 code exists partly to replace that nondeterminism with a stable, reproducible
 enumeration.
 
-Every construction here is a one-to-one reproduction of ADMIXTOOLS 2's own
-enumerator, checked line-by-line against version 2.0.10 and checked for an exact
+Every construction here reproduces the reference enumerator exactly[^at2],
+checked line-by-line against version 2.0.10 and checked for an exact
 match against a committed fixture:
 
-- The tree enumeration matches ADMIXTOOLS 2's `generate_all_trees`, producing
+- The tree enumeration matches `generate_all_trees`, producing
   exactly `(2n-3)!!` trees for `n` leaves (for example, 105 trees for 5 leaves).
 - The one-admixture enumeration matches `generate_all_graphs(leaves, 1)`,
   producing exactly the same set of non-isomorphic graphs (1485 of them for 5
@@ -83,7 +83,7 @@ Three short functions read structural facts out of an `IGraph`:
   graph is malformed and has no such node it returns `-1`.)
 - `outpop_of` finds the outgroup population: the single leaf that hangs directly
   off the root. It returns that leaf only when there is *exactly one* such leaf,
-  matching ADMIXTOOLS 2's `get_outpop`, and returns `-1` otherwise.
+  matching `get_outpop`[^at2], and returns `-1` otherwise.
 - `reachable_from` answers "can I get from node `src` to node `target` by
   following edges downward?" — a depth-first reachability test used as the
   acyclicity guard when adding admixture edges. There are two versions: one takes
@@ -144,7 +144,7 @@ their identity:
    number with the FNV-1a hash. Sorting both lists is again what makes the key
    independent of how the graph happened to be laid out.
 
-This matches ADMIXTOOLS 2's `graph_hash` semantics. It is an empirically proven
+This matches the `graph_hash` semantics[^at2]. It is an empirically proven
 invariant on the reference set: zero collisions and an exact set match across all
 1485 canonical one-admixture graphs on 5 leaves.
 
@@ -154,8 +154,7 @@ The exported `graph_hash` takes a string-labeled edge list and does the same
 thing from the outside. It first works out which nodes are leaves (a leaf is any
 node that is never a parent), sorts those leaf labels to give them stable ids,
 assigns ids to the rest, and then calls `hash_igraph`. Anchoring the leaf colors
-by label is what makes the hash respect leaf identity, exactly as ADMIXTOOLS 2
-does.
+by label is what makes the hash respect leaf identity.
 
 ---
 
@@ -177,7 +176,7 @@ on `nleaf` leaves. The method is sequential leaf insertion:
 
 Each insertion step allocates exactly one fresh internal id, and every tree
 carries its own copy of these ids, so ids never collide across trees. The final
-count is `(2n-3)!!`, exactly matching ADMIXTOOLS 2's `numtrees`.
+count is `(2n-3)!!`, exactly matching `numtrees`[^at2].
 
 The exported `enumerate_trees` wraps this: it runs the integer enumeration,
 converts each tree to named edges, tags it with `nadmix = 0`, a sequential `id`,
@@ -195,8 +194,8 @@ neighborhood call it, so the wiring lives in exactly one place.
 ### Choosing the two edges
 
 The construction adds an admixture node that draws from one edge (the *source*)
-and lands on another (the *destination*). Following ADMIXTOOLS 2's `find_newedges`
-exactly:
+and lands on another (the *destination*). Following `find_newedges`
+exactly[^at2]:
 
 - The fixed outgroup edge (root to the single outgroup leaf) is removed from the
   candidate set entirely — it can be neither a source nor a destination.
@@ -208,7 +207,7 @@ exactly:
 
 ### Wiring the two new nodes
 
-For each accepted pair, following ADMIXTOOLS 2's `insert_admix` exactly, two
+For each accepted pair, following `insert_admix` exactly[^at2], two
 fresh nodes are introduced:
 
 - A split node `x` is inserted on the source edge, so `source_parent -> x` and
@@ -238,7 +237,7 @@ duplicates are discarded via a shared `seen` set.
 `enumerate_admix1` maps this over *every* base tree, feeding all of them through a
 single shared `seen` set so the whole one-admixture space is de-duplicated
 together, then assigns each surviving graph a sequential `id`. The count matches
-ADMIXTOOLS 2's non-isomorphic `generate_all_graphs(n, 1)`.
+the non-isomorphic `generate_all_graphs(n, 1)`[^at2].
 
 ---
 
@@ -340,3 +339,7 @@ One caller-facing caveat: neighbors returned here carry `id == 0`, which is *not
 a meaningful enumeration index — unlike the whole-space enumerators, where `id` is
 a stable position. Neighbor results are identified and de-duplicated by their
 `hash`, not by `id`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -69,7 +69,7 @@ input quartets — one f4 value per quartet, per genome block. For quartet
 X[k, b] = 0.5 * ( f2(p2, p3, b) + f2(p1, p4, b) - f2(p1, p3, b) - f2(p2, p4, b) )
 ```
 
-This is the standard four-slab f4 identity, matching ADMIXTOOLS 2. Each quartet in
+This is the standard four-slab f4 identity[^at2]. Each quartet in
 the batch can name a completely different set of four populations (the batch is
 heterogeneous), which is why the input is a flat list of explicit index quads rather
 than a single left/right grid.
@@ -102,3 +102,7 @@ delicate (it is prone to catastrophic cancellation), so it is carved out to run 
 full double precision to protect accuracy. The `precision` argument is accepted and
 acknowledged for interface consistency with the other assembly seams, but it does not
 downgrade this particular four-slab difference to a faster, lower-precision mode.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

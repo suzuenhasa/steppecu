@@ -90,7 +90,7 @@ single combination is scored on the GPU in order to test it against the filter
 So a billion-combination sweep is hours of GPU work even if only a handful of
 results ultimately survive. The cap is the guard against that. A caller who
 genuinely wants an over-cap sweep can lift the cap by setting `sure` on the
-request (the analogue of ADMIXTOOLS 2's `sure` flag).
+request (the analogue of the reference `sure` flag[^at2]).
 
 ### The two filters
 
@@ -98,7 +98,7 @@ request (the analogue of ADMIXTOOLS 2's `sure` flag).
   `|z|` is at least `min_z`. The flagging happens entirely on the device, so the
   full table is never materialized — this is the mode that stays safe at
   multi-terabyte scale. The default threshold of `3.0` matches the
-  significance cut ADMIXTOOLS 2 uses.
+  parity significance cut[^at2].
 - **Top-K (`SweepFilter::TopK`).** Keep the K combinations with the largest
   `|z|`. The device keeps all items through compaction and the host ranks the
   compacted set down to K, returning them sorted by `|z|` descending.
@@ -126,10 +126,10 @@ groups of 4, `run_f3_sweep` means groups of 3).
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `filter` | `SweepFilter` | `MinZ` | Which survivor rule to apply (see section 4). |
-| `min_z` | `double` | `3.0` | The `|z|` threshold for the `MinZ` filter. The default of 3.0 matches ADMIXTOOLS 2's significance cut. Ignored when the filter is `TopK`. |
+| `min_z` | `double` | `3.0` | The `|z|` threshold for the `MinZ` filter. The default of 3.0 matches the parity significance cut. Ignored when the filter is `TopK`. |
 | `top_k` | `std::size_t` | `100` | How many top items to keep when the filter is `TopK`. Ignored when the filter is `MinZ`. |
 | `pop_subset` | `vector<int>` | empty | An optional subset of the population axis to restrict the sweep to. These are indices into the f2 population axis. Empty means sweep the entire population set. A non-empty list means enumerate combinations only over those indices — useful for narrowing an otherwise over-cap sweep to a set of interest. |
-| `sure` | `bool` | `false` | Lift the maxcomb cap. Left false, a sweep that would exceed `kFstatMaxComb` refuses before doing any work. Set true to force it to run anyway. This is the analogue of ADMIXTOOLS 2's `sure` flag. |
+| `sure` | `bool` | `false` | Lift the maxcomb cap. Left false, a sweep that would exceed `kFstatMaxComb` refuses before doing any work. Set true to force it to run anyway. This is the analogue of the reference `sure` flag. |
 
 ---
 
@@ -180,3 +180,5 @@ multi-GPU is parked, so a sweep is single-GPU.
   In its results the fourth key slot is unused.
 
 ---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

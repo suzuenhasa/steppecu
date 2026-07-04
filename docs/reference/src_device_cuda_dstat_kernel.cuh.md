@@ -44,8 +44,8 @@ Summed over the SNPs in a block, these become `numsum`, `densum`, and `cnt`. A
 later stage divides the numerator total by the denominator total to get the
 normalized D value for that block, and uses the per-block totals to compute a
 block-jackknife standard error. The denominator is a heterozygosity-style
-normalizer that keeps D within the range −1 to +1. This matches ADMIXTOOLS 2's
-normalized-D definition.
+normalizer that keeps D within the range −1 to +1. This is the parity
+normalized-D definition[^at2].
 
 All three sums accumulate in native double precision. The numerator and
 denominator involve differences of nearly equal frequencies (`a - b`, `c - d`),
@@ -80,9 +80,9 @@ A SNP contributes to a cell only when `V == 1` for all four of p1..p4 at that
 SNP. Any SNP missing in even one of the four populations is skipped for that
 quadruple. This decision is made independently for each (block, quadruple) pair
 rather than by pre-filtering to a single shared SNP set — so two different
-quadruples can legitimately use different SNPs within the same block. This
-reproduces ADMIXTOOLS 2's behavior of using every SNP that is present in all the
-populations of a given comparison (its "all SNPs" mode).
+quadruples can legitimately use different SNPs within the same block. This is the
+parity behavior of using every SNP that is present in all the populations of a
+given comparison (the "all SNPs" mode)[^at2].
 
 ---
 
@@ -148,3 +148,7 @@ steppe keeps a firm line between two kinds of header:
 Keeping the kernel-launch declaration here — rather than in the public header —
 is exactly what lets the public API stay free of any CUDA dependency. A caller
 who only wants to request a D-statistic never has to pull in `<cuda_runtime.h>`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

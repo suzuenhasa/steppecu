@@ -66,8 +66,8 @@ thread reads that SNP's chromosome number and writes a `1` flag if the number fa
 in the inclusive range `[chrom_min, chrom_max]`, otherwise a `0`.
 
 The range bounds are passed in; in practice they are `1` and `22`, meaning
-"chromosomes 1 through 22," which is the same set of autosomes ADMIXTOOLS 2 keeps by
-default (dropping X, Y, mitochondrial, and other codes).
+"chromosomes 1 through 22," which is the parity set of autosomes kept by
+default[^at2] (dropping X, Y, mitochondrial, and other codes).
 
 The comparison is done entirely in integers, because the chromosome number is read
 straight from the `.snp` file as an integer. There is no floating-point rounding
@@ -83,8 +83,8 @@ This mask corresponds to the case where the *only* filter being applied is
 ## 4. The full keep mask (`regimeb_keep_mask_kernel`)
 
 This is the richer keep-mask kernel. It reproduces the complete keep decision used
-when building the f2 statistics — the same set of quality filters ADMIXTOOLS 2's
-`extract_f2` applies — but on the GPU. Like the autosome kernel it runs one thread
+when building the f2 statistics — the same set of quality filters
+`extract_f2` applies[^at2] — but on the GPU. Like the autosome kernel it runs one thread
 per SNP and writes one flag per SNP.
 
 Running exactly one thread per SNP is a deliberate choice, not just convenience.
@@ -236,3 +236,7 @@ Because the kept set, the order, and the values all match, everything computed
 afterward from the packed arrays — including how SNPs are assigned to jackknife
 blocks from the compacted chromosome and genetic-position arrays — comes out
 identical to the old CPU path.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

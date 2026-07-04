@@ -40,12 +40,12 @@ and the run options. It runs the following stages in order and fills one
 
 2. **Covariance of the statistics.** A block jackknife estimates the covariance of
    the f4 statistics across the genome. Blocks are weighted by their size (the count
-   of SNPs in each block), which matches ADMIXTOOLS 2. If the resulting covariance
+   of SNPs in each block), the parity weighting[^at2]. If the resulting covariance
    matrix is not symmetric-positive-definite, the fit cannot proceed; this is
    reported as a status value (see section 7), not an exception.
 
 3. **Weights.** A generalized-least-squares solve produces the mixture weights. This
-   uses the same alternating-least-squares procedure as ADMIXTOOLS 2. It yields the
+   uses an alternating-least-squares procedure[^at2]. It yields the
    fitted weights and a chi-squared statistic measuring how far the model is from a
    perfect fit. A rank-deficient system is again reported as a status value.
 
@@ -249,11 +249,15 @@ convention, not a cross-module tunable.
 
 **Survivor-block subtlety.** The jackknife is run over the block sizes that the
 assembly step *kept* in `X`, not the full block list of the original f2 source. If any
-genome block had a missing pairwise value it was dropped during assembly, matching
-ADMIXTOOLS 2's "remove missing" read semantics. When nothing is missing the two block
+genome block had a missing pairwise value it was dropped during assembly, following
+the "remove missing" read semantics[^at2]. When nothing is missing the two block
 lists are byte-for-byte identical.
 
 **One shared special function.** `pchisq_upper` — the upper-tail chi-squared
 probability used for every p-value — is a thin wrapper delegating to a single internal
 implementation, so the whole fit chain shares one definition of that function (and one
 NaN-for-non-positive-degrees-of-freedom convention).
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -68,7 +68,7 @@ actually scores a single graph has its own separate constants elsewhere.
 |---|---|---|
 | `kPrimaryGpu` | `0` | The device index the search runs on. The search always uses a single, primary GPU; the entry points pull that GPU's backend out of the resource set through this index. |
 | `kMaxHillClimbSteps` | `1000` | A safety cap on how many steps a single hill-climb descent may take before giving up. The bounded search space has finite neighborhoods and the climb is strictly downhill, so it reaches a local minimum in far fewer steps than this in practice. The cap exists only to guard against a pathological walk that never terminates — it is not expected to fire. |
-| `kRecoveryRtol` | `1e-6` | The **relative** tolerance in the recovery check that compares the hill-climb's answer against the exhaustive global-best score. This mirrors the roughly 1e-6 relative tolerance used for the qpGraph fit's own reference comparison against ADMIXTOOLS 2. |
+| `kRecoveryRtol` | `1e-6` | The **relative** tolerance in the recovery check that compares the hill-climb's answer against the exhaustive global-best score. This mirrors the roughly 1e-6 relative tolerance used for the qpGraph fit's own parity comparison[^at2]. |
 | `kRecoveryAtol` | `1e-9` | The **absolute** tolerance in that same recovery check. Two scores count as equal when `|a − b| <= kRecoveryAtol + kRecoveryRtol · |b|`. |
 
 ---
@@ -163,7 +163,7 @@ It runs the assembly line in numbered stages that match the comments in the sour
    cheap, single-topology launch through the same seam — to obtain the complete result
    structure (score, admixture weights with confidence bounds, edge lengths, and the
    graph's edge and leaf tables). This is the reference-grade result that the
-   per-candidate parity check diffs against ADMIXTOOLS 2's fit of the same edges. It
+   per-candidate parity check diffs against the reference fit of the same edges[^at2]. It
    is a genuine new fit, not a reuse of the batch scores.
 
 8. **Heuristic recovery** (optional, see §7).
@@ -217,3 +217,7 @@ Each resolves the primary GPU's backend (via `kPrimaryGpu`) from the passed-in
 resource set and forwards to the shared `run_search_impl` body. The result type,
 options, and per-candidate structures they exchange are declared in the public
 header and described in its own reference.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

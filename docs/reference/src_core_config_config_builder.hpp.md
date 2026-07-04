@@ -132,7 +132,7 @@ reported as `InvalidConfig`.
 ### A unit conversion worth knowing
 
 The command line takes the jackknife block size (`--blgsize`) in Morgans, which
-matches ADMIXTOOLS 2's convention (its default is `0.05` Morgans). The frozen
+matches the parity convention[^at2] (its default is `0.05` Morgans). The frozen
 `RunConfig` stores this value in centimorgans instead. `build()` performs the
 Morgans-to-centimorgans conversion (multiplying by 100) in this single place, so
 the two unit conventions can never drift apart.
@@ -200,3 +200,7 @@ failed, or an empty string if `build()` succeeded or has not run. The applicatio
 prints this string to standard error; the library itself never prints. This keeps
 `printf`-style output out of the library while still giving the user a specific,
 readable explanation of what was wrong with their configuration.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

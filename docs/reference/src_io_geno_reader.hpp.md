@@ -274,7 +274,7 @@ SnpMajorTile read_ancestrymap_snp_major_tile(const IndPartition& part,
                                              std::size_t snp_end);
 ```
 
-The text-triple twin of the EIGENSTRAT reader, for the legacy unpacked EIGENSOFT
+The text-triple twin of the EIGENSTRAT reader, for the legacy unpacked EIGENSOFT[^eigensoft]
 ANCESTRYMAP format. Its `.geno` is text with one line per *(SNP, individual)* pair:
 `<snp_id> <sample_id> <genotype>`. The lines are laid out SNP-major — each SNP's
 individual rows appear consecutively, in `.ind` order, with SNPs in `.snp` order —
@@ -372,3 +372,7 @@ Its private state is just the file path, the parsed `GenoHeader`, and the
 `records_present_` count. Keeping one reader open and moving it (rather than copying)
 across a tile loop is the intended usage — construction parses and validates once,
 and each subsequent read reuses that already-open, already-validated state.
+
+---
+
+[^eigensoft]: **EIGENSOFT / convertf** — the EIGENSTRAT and ANCESTRYMAP genotype formats and the `convertf` converter. Patterson N, Price AL, Reich D. *Population structure and eigenanalysis.* PLoS Genetics 2006;2(12):e190.

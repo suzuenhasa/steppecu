@@ -27,8 +27,8 @@ the Python bindings — without forcing any of them to also pull in the GPU code
 `F2BlockTensor` is the hand-off point between steppe's two computational phases:
 the GPU precompute engine that turns raw genotypes into per-block f2 values, and the
 much smaller linear-algebra fit engine that consumes those values to fit models.
-Because it sits on that boundary, it is also the cacheable, ADMIXTOOLS-2-compatible
-interchange artifact — the "compute the f2 values once, fit many models against them
+Because it sits on that boundary, it is also the cacheable, parity-compatible
+interchange artifact[^at2] — the "compute the f2 values once, fit many models against them
 later" cache.
 
 It lives in `include/` rather than deep inside the GPU source for a deliberate
@@ -84,7 +84,7 @@ equals the value for (`j`, `i`).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `f2` | `vector<double>` | The per-block, bias-corrected f2 values. Entry `f2[i + P·j + P·P·b]` is the unbiased f2 for the population pair (`i`, `j`), computed over just the SNPs in block `b` that have non-missing data in *both* population `i` and population `j` (the "pairwise-complete" path — each pair uses exactly the SNPs valid for that pair). Matches ADMIXTOOLS 2's unbiased f2 definition. Length `P · P · n_block`. |
+| `f2` | `vector<double>` | The per-block, bias-corrected f2 values. Entry `f2[i + P·j + P·P·b]` is the unbiased f2 for the population pair (`i`, `j`), computed over just the SNPs in block `b` that have non-missing data in *both* population `i` and population `j` (the "pairwise-complete" path — each pair uses exactly the SNPs valid for that pair). Matches the parity unbiased f2 definition[^at2]. Length `P · P · n_block`. |
 | `vpair` | `vector<double>` | The per-block pairwise-valid SNP count. Entry `vpair[i + P·j + P·P·b]` is *how many* SNPs in block `b` were valid in both population `i` and population `j`. This is kept, not discarded, because it is the weight the block jackknife needs — blocks with more valid SNPs count for more. Integer-valued, but stored as `double` to sit alongside `f2`. Length `P · P · n_block`. |
 | `block_sizes` | `vector<int>` | The number of SNPs assigned to each block. `block_sizes[b]` is the SNP count of block `b`; summing over all blocks gives the total SNP count. Length `n_block`. |
 | `P` | `int` | The number of populations — the side length of each `P × P` slab. Defaults to `0`. |
@@ -95,7 +95,7 @@ equals the value for (`j`, `i`).
 `vpair` and `f2` interact in a way that is easy to get wrong. The per-block f2 value
 is already divided by its per-block valid count when it is produced, and the block
 jackknife *also* weights each block by its valid count. These two steps must
-**compose** into ADMIXTOOLS 2's `f2_blocks` definition — they must not both divide by
+**compose** into the parity `f2_blocks` definition[^at2] — they must not both divide by
 the count and thereby normalize twice. Keeping `vpair` around (rather than folding it
 away early) is what lets the later jackknife apply exactly the one weighting the
 reference expects.
@@ -151,3 +151,7 @@ operands to `std::size_t` before multiplying keeps the arithmetic correct at tha
 scale. This is the same cast pattern `size()` uses, and it is the reason the private
 `flat_index` helper exists: get the formula and the wide arithmetic right in one
 place, and every accessor inherits it.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

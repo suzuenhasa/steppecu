@@ -52,14 +52,14 @@ est = 0.5 * ( f2(p2,p3) + f2(p1,p4) - f2(p1,p3) - f2(p2,p4) )
 
 Here `f2(a,b)` is the per-block f2 statistic between populations `a` and `b` (the
 squared allele-frequency difference, computed block by block along the genome).
-This matches ADMIXTOOLS 2's `f4(p1, p2; p3, p4)`. It was validated against the
+This matches the parity `f4(p1, p2; p3, p4)` definition[^at2]. It was validated against the
 regenerated golden reference to a maximum relative difference of about
 `1.36e-12` — i.e. agreement to roughly twelve significant figures.
 
 ### The point estimate and standard error
 
 Both the estimate and its error come from the same **weighted block jackknife**
-that ADMIXTOOLS 2 uses. The genome is partitioned into blocks; the statistic is
+used for parity[^at2]. The genome is partitioned into blocks; the statistic is
 recomputed with each block left out in turn; and the leave-one-out values are
 combined (weighted by how much data each block holds) into a jackknife point
 estimate and a jackknife variance. The standard error is the square root of that
@@ -91,7 +91,7 @@ From the estimate and error:
 - **`z`** = `est / se`.
 - **`p`** = the two-sided normal tail probability `2 * (1 - Phi(|z|))`, where
   `Phi` is the standard normal cumulative distribution. This is the two-sided
-  normal convention ADMIXTOOLS 2 uses for f4.
+  normal convention used for f4[^at2].
 
 ---
 
@@ -184,3 +184,7 @@ CPU reference backend — which reads host memory — can be exercised for parit
 checking. The parity test stages the golden f2 values as a host tensor and calls
 this overload (or the device overload above when running on a real GPU), so the
 two backends can be compared against the same reference.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

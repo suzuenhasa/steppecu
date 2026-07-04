@@ -8,8 +8,8 @@ estimates **when two populations mixed** — how many generations ago an admixtu
 event happened — for one present-day admixed population.
 
 The method is admixture dating by ancestry-covariance decay, the same approach
-used by the ALDER and DATES tools (Loh et al. 2013; Chintalapati, Patterson, and
-Moorjani 2022). The intuition: when two ancestral populations mix, each admixed
+used by the ALDER[^alder] and DATES[^dates] tools. The intuition: when two
+ancestral populations mix, each admixed
 chromosome starts out as long alternating blocks of the two ancestries. Every
 generation of recombination chops those blocks shorter. So the rate at which
 ancestry correlation falls off as you move along the genome — measured against
@@ -128,3 +128,8 @@ code**. The contract distinguishes real faults from an honest "no answer":
   "record-and-continue" convention: a batch that dates many targets records the
   empty result for this one and keeps going instead of aborting the whole run.
   It matches how the other genotype-path commands behave.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.
+[^alder]: **ALDER** — admixture-induced linkage-disequilibrium decay. Loh P-R, Lipson M, Patterson N, Moorjani P, Pickrell JK, Reich D, Berger B. *Inferring admixture histories of human populations using linkage disequilibrium.* Genetics 2013;193(4):1233–1254.

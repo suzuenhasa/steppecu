@@ -12,8 +12,8 @@ That distinction matters: f4-ratio has **no** target population being modeled,
 **no** iterative fitting step, and **no** rank test. For each requested group of
 five populations it computes a single admixture-proportion number (the point
 estimate, written alpha) plus an estimate of that number's uncertainty (the
-standard error). The math it uses reproduces what ADMIXTOOLS 2's `qpf4ratio`
-produces for the same input.
+standard error). The math it uses reproduces what the `qpf4ratio` function
+produces for the same input[^at2].
 
 ## 2. What the command computes
 
@@ -54,7 +54,7 @@ combined. Instead the *ratio itself* is jackknifed: the whole ratio is
 recomputed once for each block left out, and the standard error is the jackknife
 spread of those recomputed ratios. This is the correct way to get the
 uncertainty of a ratio (the numerator and denominator move together across
-blocks), and it is what ADMIXTOOLS 2 does. It is a per-group diagonal only — each
+blocks), and it is what the reference implementation does[^at2]. It is a per-group diagonal only — each
 group's own uncertainty is reported, and the command does not build or report a
 full covariance matrix across groups.
 
@@ -66,7 +66,7 @@ There are two ways a caller names the groups, and the command accepts either.
 `--pop1`, `--pop2`, `--pop3`, `--pop4`, and `--pop5`. The lists are read in
 lockstep: group number *k* is `(pop1[k], pop2[k], pop3[k], pop4[k], pop5[k])`.
 This is the "give me exactly these specific groups, one per row" style, and it
-matches ADMIXTOOLS 2's `qpf4ratio` call. The five lists must be the same length;
+matches the `qpf4ratio` call[^at2]. The five lists must be the same length;
 a length mismatch is a configuration error.
 
 **The `--pops` convenience form.** As a shortcut, the caller can pass a flat list
@@ -132,3 +132,7 @@ The return value encodes an important distinction between two kinds of outcomes:
 
 The `[[nodiscard]]` marking means callers are not allowed to silently ignore the
 returned exit code.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

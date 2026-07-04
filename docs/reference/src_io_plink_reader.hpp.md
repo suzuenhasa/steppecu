@@ -99,7 +99,7 @@ A standalone PLINK dataset is fully self-describing through its own `.bim`: ther
 no external reference file to reconcile against, so making A1 the reference is
 correct by construction rather than a guess.
 
-This choice is pinned by a bit-exact test. When the conversion tool `convertf`
+This choice is pinned by a bit-exact test. When the conversion tool `convertf`[^eigensoft]
 writes a PACKEDANCESTRYMAP/EIGENSTRAT dataset out as PLINK, it stores the
 EIGENSTRAT reference allele as PLINK's A1. So for every SNP, the PLINK reference
 (`:= A1`) equals the reference the EIGENSTRAT/PACKEDANCESTRYMAP reader would pick,
@@ -135,8 +135,7 @@ individual-record indices by that column-6 label and then applies the caller's
 `PopSelection` using the same selection logic as `read_ind`. Because the selection
 rules and the final ordering are identical, the partition built from a PLINK dataset
 matches the partition built from the EIGENSTRAT or PACKEDANCESTRYMAP version of the
-same subset — and matches the partition ADMIXTOOLS 2 itself would build from this
-`.fam`.
+same subset — and the parity partition for this `.fam`[^at2].
 
 ### The `n_records_present` cap
 
@@ -158,7 +157,7 @@ surfaces failures as exceptions rather than returning an empty result.
 
 PLINK's `.fam` has no dedicated population/group column, so the population label is
 carried in **column 6, the phenotype field**. `read_fam` interprets that column
-exactly the way ADMIXTOOLS 2's own PLINK reader does:
+exactly the way the parity PLINK reader does[^at2]:
 
 | Column-6 value | Meaning |
 |---|---|
@@ -194,4 +193,9 @@ lined up with its correct `.bed` genotype record.
 - **MinN** — take every population with at least a minimum number of individuals.
 
 Whichever mode is used, the resulting set is finally sorted ascending by population
-label before it is returned, matching `read_ind` and ADMIXTOOLS 2 exactly.
+label before it is returned, matching `read_ind` exactly.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^eigensoft]: **EIGENSOFT / convertf** — the EIGENSTRAT and ANCESTRYMAP genotype formats and the `convertf` converter. Patterson N, Price AL, Reich D. *Population structure and eigenanalysis.* PLoS Genetics 2006;2(12):e190.

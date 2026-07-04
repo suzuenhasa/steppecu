@@ -151,11 +151,11 @@ statistic subcommands:
 
 `add_qpadm_option_flags` attaches the model-fit knobs shared by `qpadm`, `qpwave`,
 and `qpadm-rotate`. Their names mirror the underlying options so that a bare
-invocation reproduces the ADMIXTOOLS 2 reference results.
+invocation reproduces the reference results[^at2].
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--fudge` | `1e-4` | The ridge constant added for numerical stability (matches ADMIXTOOLS 2). |
+| `--fudge` | `1e-4` | The ridge constant added for numerical stability (parity default[^at2]). |
 | `--als-iters` | `20` | Alternating-least-squares iteration count. |
 | `--rank` | `-1` | The f4-matrix rank used for the fit; `-1` means auto (number of left populations minus one). |
 | `--rank-alpha` | `0.05` | Significance level for the automatic rank decision. |
@@ -180,7 +180,7 @@ comma- or space-separated.
 
 ### f4 quartets
 
-`f4` takes quartets. Column meaning follows `admixtools::f4` with `comb = FALSE`, so
+`f4` takes quartets. Column meaning follows `admixtools::f4` with `comb = FALSE`[^at2], so
 row `k` is the quartet `(pop1[k], pop2[k], pop3[k], pop4[k])`:
 
 | Column | Role |
@@ -207,7 +207,7 @@ row `k` is the quartet `(pop1[k], pop2[k], pop3[k], pop4[k])`:
 ### f4-ratio 5-tuples
 
 `f4-ratio` takes 5-tuples and computes `alpha = f4(p1,p2;p3,p4) / f4(p1,p2;p5,p4)`
-(following `admixtools::qpf4ratio`):
+(following `admixtools::qpf4ratio`[^at2]):
 
 | Column | Role |
 |---|---|
@@ -286,12 +286,12 @@ given a callback that builds the config and dispatches to its `run_*_command`.
 statistic it reports depends on which input it was given:
 
 - **With `--f2-dir`** it reports f4 (the f2-cache path). This reproduces the
-  ADMIXTOOLS 2 f2-path convention and is byte-identical to that tool's f4 mode.
+  f2-path convention and is byte-identical to the reference f4 mode[^at2].
 - **With `--prefix`** it reads the genotype triple (`PREFIX.geno`, `PREFIX.snp`,
   `PREFIX.ind`) and reports the genotype-path normalized-D magnitude: the mean
   numerator over the mean denominator across per-SNP allele frequencies,
-  block-jackknifed. This matches the ADMIXTOOLS 2 genotype D-statistic with all-SNPs
-  jackknifing.
+  block-jackknifed. This matches the reference genotype D-statistic with all-SNPs
+  jackknifing[^at2].
 
 The `--prefix` here (and on `dates` and `qpfstats`) is bound to a dedicated
 genotype-prefix field, kept separate from the `extract-f2` `--prefix`. That
@@ -306,7 +306,7 @@ concepts do not share a field.
 
 `extract-f2` has the richest flag set because it is where genotypes are read and
 filtered on the way to an f2_blocks directory. Several of its defaults intentionally
-match ADMIXTOOLS 2, and a few are frozen for reproducibility.
+match the reference[^at2], and a few are frozen for reproducibility.
 
 ### Inputs and outputs
 
@@ -323,21 +323,21 @@ match ADMIXTOOLS 2, and a few are frozen for reproducibility.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--blgsize` | `0.05` Morgans (= 5 cM) | Jackknife block size, in Morgans (the ADMIXTOOLS 2 convention). |
+| `--blgsize` | `0.05` Morgans (= 5 cM) | Jackknife block size, in Morgans (the parity convention[^at2]). |
 | `--maf` | — | Minimum minor-allele frequency. |
-| `--geno-max-miss` (alias `--maxmiss`) | — | Maximum per-SNP missing fraction. `--maxmiss` is the ADMIXTOOLS 2-ergonomic alias for the same field. |
+| `--geno-max-miss` (alias `--maxmiss`) | — | Maximum per-SNP missing fraction. `--maxmiss` is the parity-ergonomic alias for the same field. |
 | `--mind-max-miss` | — | Maximum per-sample missing fraction. |
 
-### Flag-gated filters and their ADMIXTOOLS 2-parity defaults
+### Flag-gated filters and their parity defaults
 
-Note that `extract-f2` turns two of these on by default, to match ADMIXTOOLS 2 — the
+Note that `extract-f2` turns two of these on by default, to match the reference[^at2] — the
 opposite of the underlying filter struct's own "everything off" defaults. This is
 where those parity defaults are set.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--auto-only` / `--no-auto-only` | **on** | Keep only autosomes (chromosomes 1–22). Default on to match ADMIXTOOLS 2; `--no-auto-only` disables it. |
-| `--drop-mono` / `--no-drop-mono` | **on** | Drop monomorphic SNPs. Default on to match ADMIXTOOLS 2's polymorphic-only behavior; `--no-drop-mono` keeps them. |
+| `--auto-only` / `--no-auto-only` | **on** | Keep only autosomes (chromosomes 1–22). Default on to match the reference; `--no-auto-only` disables it. |
+| `--drop-mono` / `--no-drop-mono` | **on** | Drop monomorphic SNPs. Default on to match the reference polymorphic-only behavior; `--no-drop-mono` keeps them. |
 | `--transversions` | off | Keep only transversion SNPs. |
 
 ### Enum-token flags
@@ -348,12 +348,12 @@ unrecognized keyword is a configuration error.
 - **`--strand-mode`** (`drop` \| `keep` \| `flip`) — the strand-ambiguous (A/T, C/G
   palindrome) SNP policy. `drop` is the default: it drops palindromes, which is the
   merge-safe, bit-identical frozen behavior. `keep` retains them, reproducing
-  ADMIXTOOLS 2's default of keeping ambiguous SNPs. `flip` is a documented but
+  the reference default of keeping ambiguous SNPs. `flip` is a documented but
   not-yet-implemented token that currently behaves exactly like `keep` (no
   frequency-based reorientation yet). The raw keyword is carried through and mapped
   during configuration.
 - **`--ploidy`** (`auto` \| `1` \| `2`) — the pseudo-haploid handling. `auto`
-  (default) does per-sample detection (matching ADMIXTOOLS 2's pseudo-haploid
+  (default) does per-sample detection (matching the reference pseudo-haploid
   adjustment); `1` forces pseudo-haploid; `2` forces diploid (the legacy hard-coded
   behavior). This flag validates its token inline and rejects anything else.
 - **`--tier`** (`auto` \| `resident` \| `host` \| `disk`) — overrides the f2_blocks
@@ -370,3 +370,7 @@ unrecognized keyword is a configuration error.
 |---|---|---|
 | `--dry-run` | off | Report the sizes, tier, and precision that a run would use, then stop without computing. |
 | `--hash` / `--no-hash` | **off** | Compute a SHA-256 provenance hash of the source dataset. Off by default because hashing the whole genotype file is a tens-of-seconds whole-file read that would dominate the run for a provenance value that does not affect correctness. When on, it is overlapped on a background thread with the GPU decode/f2 pipeline. When off, `meta.json` records that the hash was skipped and leaves the hash fields empty as a deliberate-absence marker. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

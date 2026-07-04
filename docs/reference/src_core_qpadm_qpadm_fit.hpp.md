@@ -141,7 +141,7 @@ std::vector<int> left_with_target(const QpAdmModel& model);
 Returns the model's target population index prepended to its list of left (source)
 population indices — that is, `[target, source_0, source_1, ...]`.
 
-This tiny helper exists to match the convention used by ADMIXTOOLS 2, where the
+This tiny helper exists to match the parity convention[^at2], where the
 "left" set passed into the underlying f4 machinery is the concatenation of the target
 and the sources. Isolating that convention in a named function keeps the "target goes
 first" rule in one place instead of being re-open-coded wherever the combined list is
@@ -167,7 +167,7 @@ of the fit to completion, returning a fully populated `QpAdmResult`.
 |---|---|
 | `be` | The compute backend (CPU reference or GPU). All heavy math is issued through it, never directly. |
 | `X` | The assembled f4 statistics for this model, laid out in genome blocks — the input the fit consumes. It is moved in (`F4Blocks&&`) because the fit takes ownership and reuses it across stages. The caller assembles this from either GPU-resident or host-memory f2 data before calling; that assembly step is the only part that differs between the two public entry points. |
-| `block_sizes` | The per-block weights for the block jackknife — the number of SNPs (the block lengths) each genome block contributes. Used to weight the uncertainty estimate, matching ADMIXTOOLS 2's jackknife weighting. |
+| `block_sizes` | The per-block weights for the block jackknife — the number of SNPs (the block lengths) each genome block contributes. Used to weight the uncertainty estimate, the parity jackknife weighting[^at2]. |
 | `model` | The model being fit (target, sources, references, and an optional index tag). |
 | `opts` | The per-call options, including the jackknife policy discussed below. |
 
@@ -181,7 +181,7 @@ The fit runs a fixed chain of stages. Naming them by their internal stage labels
    resulting covariance is not usable (not positive-definite), the fit does not throw
    — it returns a result whose `status` records that outcome.
 2. **Weights (the generalized least-squares fit).** Solves for the mixture weights
-   using an alternating fitting procedure that matches ADMIXTOOLS 2, producing the
+   using an alternating fitting procedure[^at2], producing the
    weight vector and the fit chi-squared. A rank-deficient system is again returned as
    a status value, not an exception.
 3. **The p-value.** Turns the chi-squared and its degrees of freedom into a fit
@@ -239,3 +239,7 @@ When a model does not qualify for standard errors, its `se` and `z` fields are l
 **empty** — an explicit sentinel meaning "not computed", never a fabricated zero. A
 consumer reading a result must therefore treat empty `se`/`z` as "no standard error
 available", not as "standard error of zero".
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

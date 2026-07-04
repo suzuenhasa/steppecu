@@ -164,7 +164,7 @@ starting points, no data-dependent ordering.
 ## 7. The SVD tolerance constants
 
 `jacobi_svd` defines three compile-time constants. Two of them are frozen — their
-*values* are checked against the reference SVD (both ADMIXTOOLS 2 and cuSOLVER) and
+*values* are checked against the reference SVD (both the parity oracle[^at2] and cuSOLVER) and
 must not change; only their names may be edited. The third is a plain safety cap.
 
 | Constant | Value | Role | Frozen? |
@@ -195,3 +195,7 @@ order — so results are bit-for-bit the same.
 | `col_dot(x, y, len)` | The inner product `Σ x[i]·y[i]` of two columns — the cross term the Jacobi step drives toward zero. |
 | `lu_solve_rhs(...)` | The forward-then-back substitution for one right-hand side through an already-LU-factored matrix. Shared by `solve` (writing into a contiguous solution vector) and `inverse` (writing into one column of the result), which differ only in where the answer is written. |
 | `lu_factor(a, n, piv)` | In-place LU factorization with partial pivoting of an `n×n` column-major matrix, recording the row permutation in `piv`. Returns `ok == false` if a pivot is essentially zero (singular). This is the shared engine underneath both `solve` and `inverse`; it is an internal helper, not part of the public surface. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

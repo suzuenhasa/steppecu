@@ -4,7 +4,7 @@
 
 This file is the GPU implementation of the three DATES routines that live on the
 CUDA backend. DATES estimates when an admixture event happened by measuring how a
-weighted ancestry signal decays as you move apart along the genome: recent
+weighted ancestry signal decays as you move apart along the genome[^dates]: recent
 admixture leaves long-range correlation, older admixture leaves only short-range
 correlation, and the rate of decay converts to a number of generations.
 
@@ -33,7 +33,7 @@ within each distance group. For a real dataset that is on the order of a trillio
 pairs — far too many to form directly.
 
 DATES avoids ever building that object by using a fast Fourier transform (the same
-trick the ALDER method uses). If you lay the per-SNP signal down on a fine grid
+trick the ALDER method uses[^alder]). If you lay the per-SNP signal down on a fine grid
 indexed by genetic-map position, then the sum over all pairs at a given lag is
 exactly the *autocorrelation* of that grid at that lag. And an autocorrelation is
 cheap to compute through the frequency domain:
@@ -282,3 +282,8 @@ For each curve the routine returns three values:
 
 Curves that fail the sanity checks (non-positive window, non-positive step, or no
 decaying fit) come back with `ok = 0` so the caller can discard them.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.
+[^alder]: **ALDER** — admixture-induced linkage-disequilibrium decay. Loh P-R, Lipson M, Patterson N, Moorjani P, Pickrell JK, Reich D, Berger B. *Inferring admixture histories of human populations using linkage disequilibrium.* Genetics 2013;193(4):1233–1254.

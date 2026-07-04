@@ -117,9 +117,9 @@ sample, `1` for a pseudo-haploid sample. When present, it is parallel to the
 gathered individual axis, so `sample_ploidy[g]` is the ploidy of gathered
 individual `g`, and its length equals `n_individuals`.
 
-**How it is filled.** The value is auto-detected per sample, matching ADMIXTOOLS
-2's pseudo-haploid handling: if a sample shows any heterozygous call among the
-leading SNPs it is treated as diploid, otherwise it is treated as pseudo-haploid.
+**How it is filled.** The value is auto-detected per sample[^at2]: if a sample
+shows any heterozygous call among the leading SNPs it is treated as diploid,
+otherwise it is treated as pseudo-haploid.
 A separate detection step is what populates this array.
 
 **Empty means "not detected."** An empty `sample_ploidy` is a valid, meaningful
@@ -141,3 +141,7 @@ accessor that simply returns `pop_labels.size()`. `P` is the leading dimension o
 the decoded output the backend produces from this tile (the per-population
 result), so this accessor gives that dimension a name instead of making callers
 reach for `pop_labels.size()` directly. It does no work and cannot fail.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

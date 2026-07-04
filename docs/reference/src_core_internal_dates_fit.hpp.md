@@ -3,10 +3,9 @@
 ## 1. Purpose
 
 `src/core/internal/dates_fit.hpp` holds the host (CPU) building blocks for
-steppe's DATES computation — the method that estimates how many generations ago
+steppe's DATES computation[^dates] — the method that estimates how many generations ago
 two ancestral populations mixed, by measuring how a correlation signal decays
-along the genome. DATES is one of the tools in the ADMIXTOOLS family, and steppe
-reproduces its math.
+along the genome. steppe reproduces its math for parity[^at2].
 
 The file contains three things:
 
@@ -227,3 +226,8 @@ clear the buffer itself.
 | `n_target` | How many target individuals to repack. |
 | `dst_bpr` | Bytes per record in the destination — the stride in the new dense packing. |
 | `dst` | Pointer to the destination buffer. **Must be pre-zeroed** (see the invariant above). |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

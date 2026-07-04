@@ -79,11 +79,11 @@ The per-block count sorts every block into one of three cases:
 | `count == 0` (nothing was non-finite) | The block is fully defined. | It rides the shared, no-adjustment fast path — the common case. |
 | `0 < count < npopcomb` (a few rows were non-finite) | The block is partly defined. | The shared factor no longer matches this block exactly, so it needs a per-block correction (dropping the non-finite rows from the shared matrix and re-solving just those columns). This is handled on the host afterward, using the counts to find exactly which columns need it. |
 
-### Matches ADMIXTOOLS 2
+### Matches the reference behavior
 
 Zeroing the non-finite entries and taking the per-block count reproduces
-ADMIXTOOLS 2's behavior exactly. In particular, the all-non-finite case
-(`count == npopcomb`) reproduces ADMIXTOOLS 2's "an entirely undefined block
+the reference behavior exactly[^at2]. In particular, the all-non-finite case
+(`count == npopcomb`) reproduces the "an entirely undefined block
 contributes a zero result" rule, and it does so through the very same shared
 solve rather than a separate branch — the zeroed column simply produces a zero
 solution.
@@ -120,3 +120,7 @@ touches.
 ### Behavior on an empty input
 
 If `n` is zero or negative the wrapper returns immediately and launches nothing.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

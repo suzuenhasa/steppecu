@@ -49,7 +49,7 @@ A run walks through a fixed, short sequence:
    variance, `z = est / se`, and `p` is the two-sided normal p-value.
 
 The p-value reuses the exact z-to-p routine the f4 path uses (`f4_two_sided_p`).
-That routine matches ADMIXTOOLS 2's convention (`erfc(|z| / sqrt(2))`), so f3 and
+That routine matches the parity convention[^at2] (`erfc(|z| / sqrt(2))`), so f3 and
 f4 p-values are produced by identical arithmetic.
 
 ---
@@ -176,10 +176,14 @@ pipeline:
 - **`F2BlockTensor` overload** — the host-oracle / parity path. The f2 values come
   from ordinary host memory; the CPU reference backend reads them directly. This is
   how the reference-comparison test stages a known-good f2 tensor and checks
-  steppe's f3 output against ADMIXTOOLS 2.
+  steppe's f3 output against the parity oracle[^at2].
 
 Both overloads run on the first GPU in the supplied resources. The file pins that
 choice with a translation-unit-private constant `kPrimaryGpu = 0` (mirroring
 `f4.cpp`). Any spreading of work across multiple GPUs happens **above** this seam —
 the model-batched rotation drives the other GPUs — so this file always targets the
 one primary device.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

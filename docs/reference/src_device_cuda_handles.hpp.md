@@ -272,7 +272,7 @@ teardown; a moved-from wrapper owns nothing.
 
 ## 9. CufftPlan
 
-An owning, move-only wrapper for a cuFFT plan — used by the DATES
+An owning, move-only wrapper for a cuFFT plan — used by the DATES[^dates]
 autocorrelation-curve engine's batched forward and inverse transforms.
 
 The stakes are higher than for a plain handle: a cuFFT plan *backs a device
@@ -413,3 +413,7 @@ the predicate returns "not honorable," the scope targets native, and the
 reference golden parity is unchanged. A future per-stage policy can pass an
 emulated-double `Precision` to promote that one solve — and, on a toolkit that has
 the emulated-double cuSOLVER mode, get the faster path for free.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

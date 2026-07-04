@@ -31,12 +31,12 @@ of the read path.
 | Source file | What it does |
 |---|---|
 | `eigenstrat_format.cpp` | Parses the header of a packed `.geno` file and derives the record stride (how many bytes each SNP row occupies on disk). |
-| `ind_reader.cpp` | Reads the `.ind` file into population labels and the sample selection. It follows the same rules as the ADMIXTOOLS 2 reader it is validated against, so the two agree on exactly which samples are selected. |
+| `ind_reader.cpp` | Reads the `.ind` file into population labels and the sample selection. It follows the parity sample-selection rules[^at2], so it agrees on exactly which samples are selected. |
 | `snp_reader.cpp` | Reads the `.snp` file: for each SNP it pulls the ID, chromosome, genetic position (in Morgans), reference allele, and alternate allele. |
 | `plink_reader.cpp` | Reads the PLINK format pair: the `.bim` file into a SNP table and the `.fam` file into the individual partition (which samples belong to which population). |
 | `genotype_source.cpp` | The front door. Given a `--prefix`, it figures out which on-disk format the triple of files is in, resolves the three file paths, and hands back the SNP table and individual partition. |
 | `geno_reader.cpp` | Reads tiles of raw genotype bytes from a `.geno` or PLINK `.bed` file. It gathers the raw bytes only — it does **not** decode them into genotype values. Decoding happens later, on the GPU. |
-| `ploidy_detect.cpp` | Auto-detects, per sample, whether the data is pseudo-haploid, reproducing the same adjustment ADMIXTOOLS 2 applies. |
+| `ploidy_detect.cpp` | Auto-detects, per sample, whether the data is pseudo-haploid, reproducing the same pseudo-haploid adjustment[^at2]. |
 | `filter/include_exclude.cpp` | Resolves an explicit include/exclude SNP set and an external `prune.in` list. These lists are **read** from disk; steppe never computes them (for example, it never computes linkage-disequilibrium pruning itself). |
 | `filter/snp_filter.cpp` | Builds a per-SNP keep-or-drop mask by applying the quality filters: pooled minor-allele frequency, per-SNP missingness, SNP class (transition vs. transversion, palindrome handling), population membership, and the various on/off flags. |
 | `filter/mind_prepass.cpp` | The optional per-sample missingness pre-pass for the `--mind` filter. It runs only when that filter is actually active, because deciding which samples exceed the missingness threshold requires a streaming pass over every SNP first. |
@@ -91,3 +91,7 @@ the whole codebase.
 
 **Language standard.** The library is compiled as C++20, and that requirement is
 public, so any target that links `steppe_io` also compiles as at least C++20.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

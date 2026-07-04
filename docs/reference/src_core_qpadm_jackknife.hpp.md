@@ -60,8 +60,7 @@ JackknifeCov jackknife_cov(ComputeBackend& be, const F4Blocks& x,
 This produces the full `m × m` covariance matrix over the `m` f-statistic entries
 being fit, plus the inverse that the fit consumes.
 
-Inside the backend, the pipeline runs in these stages (matching ADMIXTOOLS 2's
-jackknife):
+Inside the backend, the pipeline runs in these stages[^at2]:
 
 1. **Leave-one-out replicates.** For each block, form the statistic with that
    block removed. (These replicate values are carried alongside the input so the
@@ -85,7 +84,7 @@ The `precision` argument is threaded through the seam for consistency with the
 other backend calls, but this particular computation does not run in the emulated
 mode.
 
-The `fudge` argument is the ADMIXTOOLS 2 ridge. See section 6 for the output type
+The `fudge` argument is the parity ridge[^at2]. See section 6 for the output type
 and its status field.
 
 ---
@@ -136,16 +135,16 @@ Both functions take a `block_sizes` span, and its meaning is a specific,
 non-obvious contract worth stating plainly:
 
 **`block_sizes[b]` is the number of SNPs in block `b`** — the count that weights
-that block in the jackknife (ADMIXTOOLS 2 calls this `block_lengths`). It is
+that block in the jackknife (the `block_lengths` weight[^at2]). It is
 **not** a count of how many population pairs had valid data in the block, and it
 is not any pairwise-validity quantity. The caller is responsible for passing the
 per-block SNP counts here.
 
 There is one subtlety about *which* blocks these counts describe. A block in which
 some population pair has no SNP that is jointly valid across both populations is a
-**missing block**. ADMIXTOOLS 2 drops such blocks entirely before running the
-jackknife (rather than filling them with zeros, which would bias the statistic
-toward zero and inflate the variance). steppe follows the same rule: the caller
+**missing block**. steppe drops such blocks entirely before running the
+jackknife[^at2] (rather than filling them with zeros, which would bias the statistic
+toward zero and inflate the variance): the caller
 compacts the block data down to the surviving blocks and passes the **survivor**
 SNP counts here — so this driver and everything downstream see a clean survivor
 set and need no further filtering. When there are no missing blocks (which is the
@@ -176,3 +175,7 @@ decide how to handle a degenerate covariance without exception handling.
 | `var` | The `m` per-item variances — exactly the diagonal of `Q`. The standard error of item `k` is `sqrt(var[k])`. |
 | `m` | The number of items. |
 | `status` | Always `Ok`. Because nothing is inverted, this path has no failure mode to report. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

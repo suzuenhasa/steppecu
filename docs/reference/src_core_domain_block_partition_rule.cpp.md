@@ -21,9 +21,9 @@ library, so it can be shared, byte-for-byte, by both the file-reading front end
 and the GPU compute path. That single-source rule is the whole point: the block a
 SNP lands in must never be computed two different ways.
 
-The block boundaries produced here are engineered to match ADMIXTOOLS 2 exactly.
+The block boundaries produced here are engineered to match the reference exactly[^at2].
 Several specific choices below (an inclusive comparison, a hardcoded 2-megabase
-fallback window, a verbatim warning message) exist to reproduce ADMIXTOOLS 2's
+fallback window, a verbatim warning message) exist to reproduce that
 behavior bit-for-bit, and are noted as such.
 
 ---
@@ -72,7 +72,7 @@ These are the observable consequences that the parity tests pin down.
 
 The distance test uses "greater than or equal": a SNP that sits *exactly* one
 width from the anchor closes the block. This inclusive form is a direct port of
-the equivalent comparison in ADMIXTOOLS 2 (both its C and its R implementations),
+the equivalent comparison[^at2] (both its C and its R implementations),
 and is kept inclusive on purpose so the boundaries line up with the reference.
 
 ### One walk, two regimes
@@ -189,7 +189,7 @@ taken only when **all** of these hold:
    nothing to gain and the code stays on the genetic walk.
 
 When the fallback fires, the code prints a warning to standard error — the exact
-same message text ADMIXTOOLS 2 prints in this situation — once per call, and then
+same message text the reference prints in this situation[^at2] — once per call, and then
 runs the identical walk over the physical positions with the physical window
 (2 megabases by default). It uses raw base-pair positions directly, which keeps
 the arithmetic in exact integer-valued numbers and makes the partition robust and
@@ -205,3 +205,7 @@ why adding it did not disturb existing reference-parity results.
 If the fallback conditions are not met, `assign_blocks` runs the walk over the
 genetic positions with the genetic block width. This is the common case for
 datasets that carry a real linkage map.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

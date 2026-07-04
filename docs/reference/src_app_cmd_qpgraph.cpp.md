@@ -31,8 +31,8 @@ those types and turns the result back into text.
 ## 2. The `--graph` edge-list file format
 
 `steppe qpgraph` reads the graph topology from the file named by `--graph`. The
-parser (`read_edge_list`) accepts the same 2-column edge list that ADMIXTOOLS 2
-writes, and is forgiving about the small formatting differences between a
+parser (`read_edge_list`) accepts the same 2-column edge list the reference
+writes[^at2], and is forgiving about the small formatting differences between a
 hand-written file and one produced by R's `write.csv`.
 
 The rules for each line:
@@ -110,8 +110,8 @@ that is not in the f2 set, or fewer than three leaves.
 ## 4. Fit options and their defaults
 
 The fit options are taken from the parsed command-line configuration and handed to
-the fit engine. The defaults are chosen to reproduce ADMIXTOOLS 2's `qpgraph()`
-results, so a run with no extra flags matches the reference.
+the fit engine. The defaults are chosen to reproduce the `qpgraph()`
+results[^at2], so a run with no extra flags matches the reference.
 
 For **`steppe qpgraph`** (`QpGraphOptions`):
 
@@ -133,7 +133,7 @@ For **`steppe qpgraph-search`** (`QpGraphSearchOptions`):
 
 The concrete default numbers live with the configuration and the option structs, not
 in this file; this file only copies them across. The point that matters here is that
-they are wired to line up with the ADMIXTOOLS 2 `qpgraph()` golden.
+they are wired to line up with the `qpgraph()` golden.
 
 ---
 
@@ -284,3 +284,7 @@ happened without parsing text:
 The emit step can itself fail (for example, the output file cannot be opened or
 written); that failure short-circuits with the emit helper's own exit code before the
 status-based code is returned.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

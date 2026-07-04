@@ -12,7 +12,7 @@ cut-down copy of qpAdm. It reuses the exact same two building blocks those
 routines use and adds no new math of its own:
 
 1. **`assemble_f4_quartets`** — the routine that turns f2 blocks into the
-   per-quartet f4 point estimate (the same four-term identity ADMIXTOOLS 2 uses).
+   per-quartet f4 point estimate (the same four-term identity used for parity[^at2]).
 2. The **block jackknife** — the routine that estimates uncertainty by repeatedly
    dropping one genome block at a time.
 
@@ -115,7 +115,7 @@ a caller can see which arithmetic mode was really used.
 ## 6. The z-to-p conversion (`f4_two_sided_p`)
 
 `f4_two_sided_p` turns a z-score into a two-sided normal-tail p-value, matching
-ADMIXTOOLS 2's convention for f4. The value it returns is
+the parity convention for f4[^at2]. The value it returns is
 `2 × (1 − Φ(|z|))`, where `Φ` is the standard normal cumulative distribution.
 
 Rather than compute that through the normal CDF, it uses the identity that this
@@ -177,3 +177,5 @@ templated on the f2 source type so the two paths share a single implementation a
 cannot drift apart — the same deduplication pattern the qpWave routine uses.
 
 ---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

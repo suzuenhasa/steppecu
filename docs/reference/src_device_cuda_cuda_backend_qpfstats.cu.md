@@ -19,7 +19,7 @@ There are four functions:
 - `qpfstats_blocks_smooth_device` — the shared engine both overloads call once the
   genotype and variance data are resident on the GPU.
 
-The whole file reproduces the math of ADMIXTOOLS 2's qpfstats regression, but
+The whole file reproduces the qpfstats regression math[^at2], but
 reshaped so it runs as a handful of large GPU operations instead of the
 CPU-bound, one-block-at-a-time loop the reference uses. That reshaping — solving
 every jackknife block's column at once through a single shared factorization — is
@@ -248,3 +248,7 @@ than as locals, and this file is a reader of most of it:
 
 Keeping these on the class is what lets the workspace persist across calls and lets
 the precision setting be configured once and read by every solve.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

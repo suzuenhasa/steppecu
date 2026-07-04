@@ -85,11 +85,11 @@ which chromosomes count.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kDefaultBlockSizeCm` | `5.0` | The default jackknife block size, in centimorgans. This matches ADMIXTOOLS 2's default of 0.05 Morgans (which is the same as 5 centimorgans). The config surface speaks in centimorgans, while the internal block math works in Morgans, and the conversion happens in exactly one place. |
+| `kDefaultBlockSizeCm` | `5.0` | The default jackknife block size, in centimorgans. This matches the parity default of 0.05 Morgans[^at2] (which is the same as 5 centimorgans). The config surface speaks in centimorgans, while the internal block math works in Morgans, and the conversion happens in exactly one place. |
 | `kCentimorgansPerMorgan` | `100.0` | The conversion factor between the two units above — 100 centimorgans per Morgan. Kept as a single named constant so the centimorgan-facing config and the Morgan-based block rule always convert consistently. |
-| `kBpFallbackWindow` | `2,000,000` (2e6) | The fallback block window, in base pairs, used when a dataset ships with no genetic linkage map (that is, the genetic-position column in the `.snp`/`.bim` file is all zeros, which is common for modern data derived from VCF or PLINK). In that case steppe partitions blocks by a hardcoded 2-megabase span of physical position instead. This exactly reproduces what ADMIXTOOLS 2 does in the same situation. It is a distinct physical-distance rule — not the 5-centimorgan genetic default. |
+| `kBpFallbackWindow` | `2,000,000` (2e6) | The fallback block window, in base pairs, used when a dataset ships with no genetic linkage map (that is, the genetic-position column in the `.snp`/`.bim` file is all zeros, which is common for modern data derived from VCF or PLINK). In that case steppe partitions blocks by a hardcoded 2-megabase span of physical position instead. This exactly reproduces the reference behavior in the same situation[^at2]. It is a distinct physical-distance rule — not the 5-centimorgan genetic default. |
 | `kAutosomeChromMin` | `1` | The lowest chromosome number counted as an autosome. |
-| `kAutosomeChromMax` | `22` | The highest chromosome number counted as an autosome. Together with the min above, this defines "autosomes only" as chromosomes 1 through 22, which matches ADMIXTOOLS 2's default of keeping only chromosomes 1–22 and dropping the sex chromosomes (X, Y) and mitochondrial/other codes. Named here rather than typing a bare `22`, so the definition of "autosome" lives in exactly one place. |
+| `kAutosomeChromMax` | `22` | The highest chromosome number counted as an autosome. Together with the min above, this defines "autosomes only" as chromosomes 1 through 22, which matches the parity default of keeping only chromosomes 1–22[^at2] and dropping the sex chromosomes (X, Y) and mitochondrial/other codes. Named here rather than typing a bare `22`, so the definition of "autosome" lives in exactly one place. |
 
 ### The `--mind` filter's off switch
 
@@ -176,7 +176,7 @@ on how numerically delicate an operation is, not on its size.
 |---|---|---|
 | `Fp64` | Native double precision. | The gold-standard reference that everything else is validated against, and the fallback. It is also always used for the numerically delicate parts regardless of the selected mode: the small, cancellation-prone f2 numerator/divide and the ill-conditioned linear-solve and singular-value-decomposition steps. It produces bit-for-bit identical results run to run when run on a single stream. |
 | `EmulatedFp64` | Emulated double precision built from fixed-size slices. | **The default** for all the matrix-multiply-heavy stages, including the f2 computations. Measured at 7 to 17 times faster than native double precision on real data, at essentially the same accuracy. It is accuracy-*approximate*, not bit-identical to native double precision and not fully standards-compliant on special values like infinities — which is exactly why native `Fp64` remains the reference oracle. |
-| `Tf32` | TF32 tensor-core arithmetic (lower precision). | Opt-in, and only for quickly screening or ranking a space of models. Its results are flagged as approximate and are held to a loose tolerance. They are never bit-compared against ADMIXTOOLS 2 reference values, and are never reported as a final estimate/standard-error/z-score/p-value without being recomputed in one of the higher-precision modes first. |
+| `Tf32` | TF32 tensor-core arithmetic (lower precision). | Opt-in, and only for quickly screening or ranking a space of models. Its results are flagged as approximate and are held to a loose tolerance. They are never bit-compared against the reference values[^at2], and are never reported as a final estimate/standard-error/z-score/p-value without being recomputed in one of the higher-precision modes first. |
 
 A build-time subtlety worth knowing: the fixed-mantissa emulation is only actually
 engaged when the GPU code is built with a specific capability enabled (on by
@@ -232,7 +232,7 @@ state that lives elsewhere, in the results metadata.
 | `prefer_p2p_combine` | `bool` | `true` | The "which path?" knob for multi-GPU, and distinct from `enable_peer_access`. When peer access *is* available, this says to prefer the direct device-to-device combine (GPU 0 pulls each other GPU's partial result over a direct copy and sums them in the fixed device order) over gathering all partials to the host and summing there. Both combine paths sum in the same fixed order, so they produce bit-for-bit identical results to each other and to a single-GPU run — the choice only affects how bytes move, so it is parity-neutral. If peer access turns out to be unavailable, the backend quietly and safely falls back to the host-staged path. |
 | `deterministic` | `bool` | `true` | The intent to hold the run to the reproducibility contract. When true, `build()` enforces the rules that make results bit-reproducible: deterministic reductions, deterministic mode for the linear-algebra library, `stream_count` forced to 1, the emulated mode required to use its explicit workspace, and multi-GPU partials combined in the fixed device order rather than a nondeterministic all-reduce. Set false only for throughput-only work whose results are recomputed in a higher-precision mode before anything is reported. |
 | `force_tier` | `ForceTier` | `Auto` | Overrides the automatic memory-tier choice. `Auto` lets the policy decide; setting `Resident`, `HostRam`, or `Disk` pins that tier regardless of how much memory is free. This mainly lets tests exercise the disk or host-RAM path even on a small problem that would otherwise stay in GPU memory. It takes precedence over the `STEPPE_FORCE_TIER` environment variable. Parity-neutral — it moves bytes to a different tier, never a reported number. |
-| `disk_cache_path` | `string` | empty | Where to put the on-disk f2 cache when the resolved tier is Disk. If empty, steppe uses the `STEPPE_F2_CACHE_PATH` environment variable, and if that too is empty, the frozen default `./steppe_f2_blocks.cache`. This is the "compute once, fit many times" cache artifact — the same kind of thing ADMIXTOOLS 2 keeps. Parity-neutral. |
+| `disk_cache_path` | `string` | empty | Where to put the on-disk f2 cache when the resolved tier is Disk. If empty, steppe uses the `STEPPE_F2_CACHE_PATH` environment variable, and if that too is empty, the frozen default `./steppe_f2_blocks.cache`. This is the "compute once, fit many times" cache artifact — the same kind of cache the reference implementation keeps[^at2]. Parity-neutral. |
 
 ### `DeviceConfig::ForceTier`
 
@@ -254,7 +254,7 @@ makes them a classic source of corruption when merging data from different sourc
 | Value | Meaning |
 |---|---|
 | `Drop` | **The default.** Drop all strand-ambiguous SNPs. This is the merge-safety choice and reproduces steppe's original, pre-flag behavior bit-for-bit. |
-| `Keep` | Keep strand-ambiguous SNPs (as long as they are otherwise clean biallelic A/C/G/T SNPs). This reproduces ADMIXTOOLS 2's default behavior, which keeps ambiguous SNPs — so use this for an exact ADMIXTOOLS 2 match on a panel that still contains palindromes. |
+| `Keep` | Keep strand-ambiguous SNPs (as long as they are otherwise clean biallelic A/C/G/T SNPs). This reproduces the reference default behavior, which keeps ambiguous SNPs — so use this for an exact parity match[^at2] on a panel that still contains palindromes. |
 | `Flip` | Not yet implemented. It is accepted as a documented token but currently behaves exactly like `Keep`: it does not drop palindromes, but it also performs no frequency-based strand correction. A future frequency-based reorientation pass will go here. |
 
 Multiallelic SNPs are always dropped regardless of this setting; even `Keep` and
@@ -273,7 +273,7 @@ the standard path is untouched unless you explicitly ask for a filter.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `maf_min` | `double` | `0.0` | Minimum minor-allele frequency to keep a SNP. `0.0` means no filter. The frequency used is the *pooled folded* minor allele frequency — the minor-allele frequency computed by pooling reference and allele counts across all kept samples together (not a per-population frequency). |
-| `geno_max_missing` | `double` | `1.0` | Maximum per-SNP missing-data fraction (the "geno" filter): drop a SNP whose missing fraction exceeds this. `1.0` means keep every SNP. The fraction is measured over the *individuals* axis — the fraction of kept individuals with missing data at that SNP (the PLINK `--geno` convention). Note that ADMIXTOOLS 2's similar `maxmiss` uses a different denominator (fraction over populations). |
+| `geno_max_missing` | `double` | `1.0` | Maximum per-SNP missing-data fraction (the "geno" filter): drop a SNP whose missing fraction exceeds this. `1.0` means keep every SNP. The fraction is measured over the *individuals* axis — the fraction of kept individuals with missing data at that SNP (the PLINK `--geno` convention[^plink]). Note that the reference's similar `maxmiss` uses a different denominator[^at2] (fraction over populations). |
 | `mind_max_missing` | `double` | `1.0` (`kMindFilterInactiveThreshold`) | Maximum per-sample missing-data fraction (the "mind" filter): drop a *sample* whose missing fraction across all SNPs exceeds this. `1.0` means keep every sample. This one requires a streaming pre-pass over all SNPs to decide, because per-sample missingness can't be computed from a single tile of data. |
 
 ### Flag-gated filters
@@ -283,7 +283,7 @@ flag is explicitly set.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `autosomes_only` | `bool` | `false` | Keep only SNPs on autosomes (chromosomes 1–22). `false` keeps every chromosome. ADMIXTOOLS 2's default is autosomes-only, so set this true to match ADMIXTOOLS 2; it is off here so the default keeps the sex chromosomes too. |
+| `autosomes_only` | `bool` | `false` | Keep only SNPs on autosomes (chromosomes 1–22). `false` keeps every chromosome. The parity default is autosomes-only[^at2], so set this true to match it; it is off here so the default keeps the sex chromosomes too. |
 | `drop_monomorphic` | `bool` | `false` | Drop SNPs with no variation (pooled minor-allele frequency of exactly 0). `false` keeps them. This is effectively the strict-positive boundary of `maf_min`, but kept as its own named flag. |
 | `transversions_only` | `bool` | `false` | Keep only transversion SNPs (a purine↔pyrimidine change) and drop transitions (A↔G, C↔T). `false` keeps transitions too. |
 | `strand_mode` | `StrandMode` | `Drop` | The strand-ambiguous-SNP policy (see `StrandMode`). |
@@ -299,3 +299,8 @@ never computes linkage disequilibrium itself.
 | `include_snp_ids` | `vector<string>` | empty | An explicit keep-set of SNP IDs (like `--extract`). If non-empty, keep only these IDs (intersected with whatever else passes the other filters). These are SNP IDs from the first column of the `.snp` file, not row indices. |
 | `exclude_snp_ids` | `vector<string>` | empty | An explicit drop-set of SNP IDs (like `--exclude`). Any ID listed here is dropped even if it would otherwise pass. |
 | `prune_in_path` | `string` | empty | Path to an external `prune.in` file — one SNP ID per line — listing LD-pruned SNPs to keep. It is read, never computed. When set, it acts as an additional keep-set that composes with `include_snp_ids`. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^plink]: **PLINK** — the PLINK / PACKEDPED (`.bed`/`.bim`/`.fam`) genotype format and toolset. Chang CC, Chow CC, Tellier LCAM, Vattikuti S, Purcell SM, Lee JJ. *Second-generation PLINK: rising to the challenge of larger and richer datasets.* GigaScience 2015;4:7.

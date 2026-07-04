@@ -3,8 +3,8 @@
 ## 1. Purpose
 
 `include/steppe/qpgraph.hpp` is the public interface for fitting a single
-admixture graph to observed genetic statistics — the operation ADMIXTOOLS 2
-calls `qpgraph`. It defines the value types a caller passes in and gets back,
+admixture graph to observed genetic statistics — the operation called
+`qpgraph`[^at2]. It defines the value types a caller passes in and gets back,
 plus the two entry-point functions that run the fit.
 
 The problem it solves: an admixture graph is a family tree of populations in
@@ -65,17 +65,17 @@ The labels follow a simple rule:
 ## 3. QpGraphOptions
 
 `QpGraphOptions` holds the per-call settings. Its defaults are chosen to match
-ADMIXTOOLS 2's `qpgraph()` defaults exactly, so a steppe fit reproduces an
-ADMIXTOOLS 2 fit on the same graph and data. Each parity value is a named field
+the `qpgraph()` parity defaults exactly, so a steppe fit reproduces the
+reference fit on the same graph and data[^at2]. Each parity value is a named field
 rather than a bare number typed into the code, and the reference results steppe
 validates against were generated with exactly these defaults.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `fudge` | `double` | `1e-4` | A tiny ridge term added to the branch-length solve to keep it numerically stable. It nudges the diagonal of that solve by this fraction of the average diagonal value before solving, which prevents a near-singular system from producing wild branch lengths. Matches ADMIXTOOLS 2's `diag` option. |
-| `diag_f3` | `double` | `1e-5` | A small regularization added to the statistics' covariance before it is inverted, so the inversion stays well-behaved. It bumps the covariance diagonal by this fraction of its total diagonal. Matches ADMIXTOOLS 2's `diag_f3` option. |
-| `numstart` | `int` | `10` | How many independent restarts the optimizer runs from different starting points. Because the fit runs many restarts in parallel on the GPU (one per GPU thread), and because the restarts agreeing on the same answer is the evidence that the answer is trustworthy, this is a meaningful knob. Matches ADMIXTOOLS 2's `numstart`, and `10` is the value the reference results were generated with. |
-| `constrained` | `bool` | `true` | Whether drift branch lengths are held at or above zero (a branch can't have negative length). `true` is both the ADMIXTOOLS 2 default and the mode the reference results use. Setting it `false` allows the unconstrained solve, which can return negative branch lengths. |
+| `fudge` | `double` | `1e-4` | A tiny ridge term added to the branch-length solve to keep it numerically stable. It nudges the diagonal of that solve by this fraction of the average diagonal value before solving, which prevents a near-singular system from producing wild branch lengths. Matches the reference `diag` option[^at2]. |
+| `diag_f3` | `double` | `1e-5` | A small regularization added to the statistics' covariance before it is inverted, so the inversion stays well-behaved. It bumps the covariance diagonal by this fraction of its total diagonal. Matches the reference `diag_f3` option[^at2]. |
+| `numstart` | `int` | `10` | How many independent restarts the optimizer runs from different starting points. Because the fit runs many restarts in parallel on the GPU (one per GPU thread), and because the restarts agreeing on the same answer is the evidence that the answer is trustworthy, this is a meaningful knob. Matches the reference `numstart`, and `10` is the value the reference results were generated with[^at2]. |
+| `constrained` | `bool` | `true` | Whether drift branch lengths are held at or above zero (a branch can't have negative length). `true` is both the parity default and the mode the reference results use[^at2]. Setting it `false` allows the unconstrained solve, which can return negative branch lengths. |
 | `maxit` | `int` | `200` | The most iterations any single restart of the optimizer will run before stopping. The objective being minimized is cheap and well-behaved and converges in far fewer iterations than this, so the cap is deliberately generous. |
 | `tol` | `double` | `1e-9` | The convergence tolerance. A restart stops once its step size and its improvement in the fit score both fall below this. |
 
@@ -126,7 +126,7 @@ These three arrays run in the input edge order, with the admixture edges removed
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `score` | `double` | `0.0` | The overall goodness-of-fit score at the best solution — the weighted residual between what the graph predicts and what the data shows. Lower is better. This is the same number ADMIXTOOLS 2 reports as the fit score. |
+| `score` | `double` | `0.0` | The overall goodness-of-fit score at the best solution — the weighted residual between what the graph predicts and what the data shows. Lower is better. This is the same number reported as the reference fit score[^at2]. |
 | `restart_spread` | `double` | `0.0` | How much the score varied across the restarts (the largest minus the smallest). A near-zero spread means every restart found the same optimum, which is the sign the fit converged. |
 | `worst_residual_z` | `double` | `0.0` | The single worst-fitting statistic, expressed as a signed z-score (how many standard errors the prediction is off by). The sign is kept; the magnitude is what matters as a diagnostic — a large magnitude flags a part of the graph the data disagrees with. |
 | `worst_pop2` | `string` | empty | One of the two populations naming the worst-fitting statistic. |
@@ -186,3 +186,7 @@ reference implementation, which reads host memory directly, can run the same fit
 and serve as the correctness oracle the GPU path is checked against. Everything
 else is identical, and `leaf_names` again gives the population order of the
 host tensor.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -86,8 +86,8 @@ How it works:
 The output is a plain list of surviving block indices. When that list is shorter
 than the full block count, a real drop occurred; when it is the same length, the
 survivor list is just the identity and every downstream kernel takes its
-bit-identical no-drop arm. This mirrors ADMIXTOOLS 2's behavior of removing
-blocks with missing data before computing statistics.
+bit-identical no-drop arm. This mirrors the behavior of removing
+blocks with missing data before computing statistics[^at2].
 
 ---
 
@@ -344,3 +344,7 @@ These two public functions are one-line dispatchers. `f4_sweep` calls
 combination size 3. All of the real work — sizing, the chunk pipeline, the
 reservoir — lives in the shared engine, so the two sweep sizes cannot diverge in
 behavior.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

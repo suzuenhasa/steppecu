@@ -17,7 +17,7 @@ The "smoothed" part is what makes this command distinct from plain
 `extract-f2`. Rather than just estimating each pairwise f2 value on its own,
 `qpfstats` fits all of the related statistics jointly and stabilizes them
 against each other before writing them out. The numbers it produces are meant to
-match what ADMIXTOOLS 2's `qpfstats()` produces for the same population set.
+match what the `qpfstats()` function produces for the same population set[^at2].
 
 The header itself is tiny — one function declaration plus its contract. The
 substance is what that command does and the rules around it, described below.
@@ -44,7 +44,7 @@ directory), with a joint-smoothing stage in the middle:
 4. **Scatter the smoothed results into an f2 block tensor.** The smoothed
    coefficients are written into a `P × P × n_block` tensor — `P` populations
    by `P` populations by the number of jackknife blocks — which is exactly the
-   shape and meaning of ADMIXTOOLS 2's `qpfstats()` output.
+   shape and meaning of the reference `qpfstats()` output[^at2].
 5. **Write the f2 directory.** That tensor is written to `--out-dir` through the
    same directory-writer the `extract-f2` command uses, so the result is a
    normal, reusable f2 cache.
@@ -62,9 +62,9 @@ The command takes the following inputs:
 | Flag | Meaning |
 |---|---|
 | `--prefix PATH` | The genotype file-triple prefix — the shared path stem for the `.geno`, `.snp`, and `.ind` files to read. This is the raw data the smoothed cache is built from. |
-| `--pops A,B,C,...` | The set of populations to smooth over. Internally the list is **sorted into ascending order**, which is what fixes the row/column ordering (the dimension names) of the output tensor to match ADMIXTOOLS 2's ordering. |
+| `--pops A,B,C,...` | The set of populations to smooth over. Internally the list is **sorted into ascending order**, which is what fixes the row/column ordering (the dimension names) of the output tensor to match the reference ordering[^at2]. |
 | `--out-dir DIR` | Where to write the smoothed f2 directory. This becomes the reusable cache that later commands read. |
-| `--blgsize` | The jackknife block size, in Morgans. Default `0.05` Morgans (equivalently 5 centimorgans), which matches ADMIXTOOLS 2's default block size. |
+| `--blgsize` | The jackknife block size, in Morgans. Default `0.05` Morgans (equivalently 5 centimorgans), which matches the parity default block size[^at2]. |
 | `--precision` | Which arithmetic mode the heavy matrix-multiply sub-steps run in. Default is emulated double precision at 40 mantissa bits — steppe's standard precision policy, fast and about as accurate as native double precision. |
 
 The reason the population list is sorted rather than left in the order the user
@@ -119,3 +119,7 @@ already-frozen `RunConfig` and returns the process exit code.
 The practical rule for a caller: a nonzero exit means the smoothed cache was not
 written and should not be relied on, while a zero exit means `--out-dir` now
 holds a complete, reusable f2 cache.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

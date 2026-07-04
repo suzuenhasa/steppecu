@@ -66,16 +66,16 @@ they always compute the standard error. Only the batched search
 ## 3. QpAdmOptions
 
 `QpAdmOptions` is the per-call configuration. The constants that must match
-ADMIXTOOLS 2 are named fields here (and recorded in the reference metadata)
-rather than bare numbers buried in the code.
+the reference for parity are named fields here[^at2] (and recorded in the reference
+metadata) rather than bare numbers buried in the code.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `fudge` | `double` | `1e-4` | A tiny ridge constant added for numerical stability. It is applied in the same places ADMIXTOOLS 2 applies it: both alternating-least-squares systems of the weight solve, the final constrained weight normal equations, and the regularization of a matrix inversion. Chosen to match ADMIXTOOLS 2 exactly. |
-| `als_iterations` | `int` | `20` | The number of iterations of the alternating-least-squares loop that fits the weights. The weight fit is this iterative loop, not a single solve. Matches ADMIXTOOLS 2's default. |
+| `fudge` | `double` | `1e-4` | A tiny ridge constant added for numerical stability. It is applied in the same places the reference applies it[^at2]: both alternating-least-squares systems of the weight solve, the final constrained weight normal equations, and the regularization of a matrix inversion. Chosen for exact parity. |
+| `als_iterations` | `int` | `20` | The number of iterations of the alternating-least-squares loop that fits the weights. The weight fit is this iterative loop, not a single solve. Matches the parity default[^at2]. |
 | `rank` | `int` | `-1` | The rank to fit at. `-1` means "use the default best rank," which is one less than the number of left populations. |
-| `allow_negative_weights` | `bool` | `true` | Whether weights are allowed to leave the range `[0,1]`. `true` (the default) matches ADMIXTOOLS 2, which does not clip: a model whose weights fall outside `[0,1]` is "infeasible," and that is a legitimate finding about the data, not an error. |
-| `rank_alpha` | `double` | `0.05` | The significance level for the rank decision. The reported best rank is the smallest candidate rank whose model is *not* rejected at this level (its p-value exceeds `rank_alpha`). Matches ADMIXTOOLS 2's default of 0.05. |
+| `allow_negative_weights` | `bool` | `true` | Whether weights are allowed to leave the range `[0,1]`. `true` (the default) matches the reference[^at2], which does not clip: a model whose weights fall outside `[0,1]` is "infeasible," and that is a legitimate finding about the data, not an error. |
+| `rank_alpha` | `double` | `0.05` | The significance level for the rank decision. The reported best rank is the smallest candidate rank whose model is *not* rejected at this level (its p-value exceeds `rank_alpha`). Matches the parity default of 0.05[^at2]. |
 | `jackknife` | `JackknifePolicy` | `All` | The standard-error policy for a model-space search (see section 2). Ignored by the single-model entry points, which always compute the standard error. |
 | `p_se_threshold` | `double` | `0.05` | Used only in `FeasibleOnly` mode together with the flag below: to earn a standard error, a survivor must have a p-value at least this large. |
 | `se_require_p` | `bool` | `false` | Selects the survivor test for `FeasibleOnly` mode. `false` (the default) means feasibility alone decides who gets a standard error; `true` means a model must be *both* feasible *and* have a p-value at least `p_se_threshold`. The default is `false` on purpose: feasibility is the firm qpAdm screen, whereas the p-value boundary is statistically noisy, so a default p-gate would strip standard errors from exactly the feasible-but-marginal models a researcher most needs them for. Turn it on only for an aggressive first-pass survey. |
@@ -90,7 +90,7 @@ batched search can pass a whole array of them.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `target` | `int` | `-1` | The target population's index. Internally it is prepended to the `left` list to form ADMIXTOOLS 2's convention, where the left set begins with the target followed by the sources. |
+| `target` | `int` | `-1` | The target population's index. Internally it is prepended to the `left` list to form the parity convention[^at2], where the left set begins with the target followed by the sources. |
 | `left` | `vector<int>` | empty | The source population indices. The number of sources is the length of this list. |
 | `right` | `vector<int>` | empty | The outgroup population indices. The first entry is the fixed reference outgroup; the remaining entries are the other outgroups. |
 | `model_index` | `int` | `-1` | A stable identifier the caller assigns. The search echoes it back on the result, so the caller can match results to inputs regardless of the order they come back in. |
@@ -133,19 +133,19 @@ and each step of dropping to a lower rank.
 |---|---|---|
 | `rank_chisq` | `vector<double>` | Chi-squared at each candidate rank. |
 | `rank_dof` | `vector<int>` | Degrees of freedom at each candidate rank. |
-| `f4rank` | `int` | The smallest rank not rejected — the chosen rank (matches ADMIXTOOLS 2's `f4rank`). |
+| `f4rank` | `int` | The smallest rank not rejected — the chosen rank (matches the parity `f4rank`[^at2]). |
 | `rankdrop_f4rank`, `rankdrop_dof`, `rankdrop_dofdiff` | `vector<int>` | The integer columns of the nested rank-drop table: for each row, the rank, its degrees of freedom, and the change in degrees of freedom from the previous step. |
-| `rankdrop_chisq`, `rankdrop_p`, `rankdrop_chisqdiff`, `rankdrop_p_nested` | `vector<double>` | The floating-point columns of that table: the chi-squared, its p-value, the change in chi-squared, and the nested-test p-value. Together these mirror ADMIXTOOLS 2's rank-drop table row for row. |
+| `rankdrop_chisq`, `rankdrop_p`, `rankdrop_chisqdiff`, `rankdrop_p_nested` | `vector<double>` | The floating-point columns of that table: the chi-squared, its p-value, the change in chi-squared, and the nested-test p-value. Together these mirror the reference rank-drop table row for row[^at2]. |
 
 ### Pop-drop table
 
 The result of refitting with each subset of sources removed, mirroring
-ADMIXTOOLS 2's `popdrop` table.
+the reference `popdrop` table[^at2].
 
 | Field | Type | Meaning |
 |---|---|---|
 | `popdrop_pat` | `vector<string>` | The pattern string naming which sources are present in each row. |
-| `popdrop_wt`, `popdrop_dof`, `popdrop_f4rank` | `vector<int>` | The integer columns of the pop-drop table, matching ADMIXTOOLS 2's `popdrop`. |
+| `popdrop_wt`, `popdrop_dof`, `popdrop_f4rank` | `vector<int>` | The integer columns of the pop-drop table, matching the `popdrop` table above. |
 | `popdrop_chisq`, `popdrop_p` | `vector<double>` | The chi-squared and p-value for each row. |
 | `popdrop_feasible` | `vector<char>` | A per-row feasibility flag stored as `0`/`1`. It is a `char` rather than a `bool` on purpose, to keep the whole struct CUDA-free and avoid the packed `vector<bool>`. |
 
@@ -233,3 +233,7 @@ GPU-resident statistics (the primary), and one over a host-memory tensor for the
 CPU reference. Its `left` argument is the *full* set of left populations with no
 target prepended — its first entry is the reference row — and `right` is the
 outgroup set, starting with the fixed reference outgroup.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

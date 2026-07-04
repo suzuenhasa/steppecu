@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 `src/device/cuda/dates_kernel.cuh` declares the GPU launch wrappers for the DATES
-engine — the part of steppe that dates an admixture event by measuring how a
+engine[^dates] — the part of steppe that dates an admixture event by measuring how a
 weighted linkage-disequilibrium (LD) signal decays with genetic distance and
 fitting an exponential to that decay curve. The decay rate is read out as the
 number of generations since admixture.
@@ -54,7 +54,7 @@ Every wrapper follows the same calling convention:
 The covariance curve steppe needs is, in principle, a sum over **pairs** of SNPs
 at every genetic-distance lag. For a real dataset that is on the order of a trillion
 (10^12) SNP pairs, which can never be formed directly. DATES avoids this with the
-classic ALDER trick: the covariance-at-each-lag curve is exactly the
+classic ALDER trick[^alder]: the covariance-at-each-lag curve is exactly the
 **autocorrelation** of a signal laid out along the genetic map, and an
 autocorrelation can be computed with a Fast Fourier Transform (FFT) instead of an
 explicit double loop over pairs.
@@ -307,3 +307,8 @@ GPU has no `long double`, so the normal-equation accumulators — which are the
 cancellation-sensitive part — are deliberately left in native FP64 rather than the
 emulated-double math used elsewhere in steppe. The date result is validated against
 its reference at a loose (about 2%) tolerance, which this native-FP64 path meets.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.
+[^alder]: **ALDER** — admixture-induced linkage-disequilibrium decay. Loh P-R, Lipson M, Patterson N, Moorjani P, Pickrell JK, Reich D, Berger B. *Inferring admixture histories of human populations using linkage disequilibrium.* Genetics 2013;193(4):1233–1254.

@@ -37,7 +37,7 @@ tuning knobs.
 - **Drop by default, flag-gated.** Multiallelic SNPs are *always* dropped.
   Strand-ambiguous SNPs (an A/T or C/G pair) are dropped by default — the
   merge-safety choice — but can be retained by choosing a different strand mode,
-  which is the path that reproduces ADMIXTOOLS 2. No filter ever changes a
+  which is the parity path[^at2]. No filter ever changes a
   genotype value; even when strand-ambiguous SNPs are kept, steppe does not try to
   infer the correct strand. (The frequency-based reorientation that a "flip" mode
   would do is an accepted-but-not-yet-implemented option.) The actual gating
@@ -83,7 +83,7 @@ Two things make this specific:
   minus it — so MAF always lands in `[0, 0.5]`. The allele that happens to be
   labelled "reference" does not matter; the minor allele is whichever is rarer.
 
-ADMIXTOOLS 2's minimum/maximum-MAF documentation does not say whether it pools or
+The parity minimum/maximum-MAF documentation[^at2] does not say whether it pools or
 averages. The pooled reading is the one that matches steppe's reference pipeline
 and is the documented best interpretation.
 
@@ -122,9 +122,9 @@ Notes on each:
   `maf_min`.
 - **Geno filter (`snp_passes_geno`).** The missing fraction here is measured over
   the *sample/individual axis* — the fraction of kept individuals that have missing
-  data at that SNP. This follows the PLINK `--geno` convention. (ADMIXTOOLS 2's
-  similar filter uses a different denominator, over populations rather than
-  individuals.)
+  data at that SNP. This follows the PLINK `--geno` convention[^plink]. (The
+  reference implementation's similar filter[^at2] uses a different denominator, over
+  populations rather than individuals.)
 - **Mind filter (`sample_passes_mind`).** Drops a *sample* whose missing fraction
   across all SNPs exceeds the cap. This one cannot be decided from a single tile of
   data, so it is evaluated in a separate streaming pre-pass over all SNPs.
@@ -234,6 +234,11 @@ can never disagree on a clean pair.
 
 `is_autosome(chrom)` is true when the chromosome code is in the range 1 through
 22. The bounds come from named constants in the config header rather than a bare
-`22` in this file. This is the ADMIXTOOLS-2-parity autosome set: extract_f2's
+`22` in this file. This is the parity autosome set[^at2]: extract_f2's
 default keeps only chromosomes 1–22, so the sex chromosomes (X as 23, Y as 24) and
 mitochondrial or other codes are not autosomes. It backs the autosomes-only flag.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^plink]: **PLINK** — the PLINK / PACKEDPED (`.bed`/`.bim`/`.fam`) genotype format and toolset. Chang CC, Chow CC, Tellier LCAM, Vattikuti S, Purcell SM, Lee JJ. *Second-generation PLINK: rising to the challenge of larger and richer datasets.* GigaScience 2015;4:7.

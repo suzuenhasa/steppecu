@@ -42,8 +42,8 @@ treat the individual as pseudo-haploid.
 
 The default when in doubt is **pseudo-haploid** (ploidy `1`). Every individual starts
 out labeled pseudo-haploid and is only ever *promoted* to diploid by the discovery of
-a heterozygous call. This "default pseudo-haploid, promote on first het" rule matches
-ADMIXTOOLS 2's behavior, which is what steppe is reproducing.
+a heterozygous call. This "default pseudo-haploid, promote on first het" rule is the
+parity behavior steppe reproduces[^at2].
 
 ---
 
@@ -128,7 +128,7 @@ the individual pseudo-haploid:
 window = min(kPloidyDetectSnps, n_snp)
 ```
 
-`kPloidyDetectSnps` is `1000` — the number of leading SNPs ADMIXTOOLS 2 tests. If the
+`kPloidyDetectSnps` is `1000` — the parity number of leading SNPs tested[^at2]. If the
 tile actually carries fewer SNPs than that (`n_snp < 1000`), the window shrinks to
 `n_snp`, so a short record scans its whole available prefix rather than reading past
 its end. This is exactly what the host loop does in the same situation.
@@ -178,8 +178,12 @@ and are reused here so the host and device detectors reference the same numbers;
 | Name | Value | What it means |
 |---|---|---|
 | `kPloidyBlock` | `256` | Threads per block for the kernel launch. Defined in this file. |
-| `kPloidyDetectSnps` | `1000` | How many leading SNPs to scan before defaulting to pseudo-haploid. Matches ADMIXTOOLS 2's tested count. Caps the scan window (section 6). |
+| `kPloidyDetectSnps` | `1000` | How many leading SNPs to scan before defaulting to pseudo-haploid. The parity tested count. Caps the scan window (section 6). |
 | `kPloidyPseudoHaploid` | `1` | The label written for a pseudo-haploid individual — and the default every individual starts with. |
 | `kPloidyDiploid` | `2` | The label written once a heterozygous call is found. |
 | `kHeterozygousGenotypeCode` | `1` | The unpacked 2-bit code that means "heterozygous." Finding one promotes the individual to diploid. |
 | `kCodesPerByte` | `4` | How many 2-bit genotype calls are packed into each byte; drives the `s/4` byte index and `s%4` slot index. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -57,8 +57,8 @@ The f2 value that comes out for populations `i` and `j` is, per SNP that is vali
 in both, `(p_i − p_j)² − hc_i − hc_j`, averaged over those jointly-valid SNPs.
 Here `p` is the allele frequency and `hc` is the per-population heterozygosity
 correction, `q(1−q)/max(N−1, 1)`, which removes the upward bias that sampling
-noise would otherwise add. This matches the unbiased estimator used by
-ADMIXTOOLS 2.
+noise would otherwise add. This is the unbiased estimator used for
+parity[^at2].
 
 ---
 
@@ -224,7 +224,11 @@ Both result types carry a `vpair` (Vpair) matrix alongside the f2 values. Elemen
 `(i, j)` is the number of SNPs valid in **both** population `i` and population
 `j`. This is retained — not discarded after computing f2 — because it is the
 **weight** the block jackknife needs later. The per-pair averaging done here and
-the jackknife weighting done downstream must compose to exactly ADMIXTOOLS 2's
-definition; carrying Vpair forward is what lets the later stage weight each block
+the jackknife weighting done downstream must compose to exactly the parity
+definition[^at2]; carrying Vpair forward is what lets the later stage weight each block
 correctly instead of double-normalizing. The Vpair diagonal, like the f2 diagonal,
 is filled (it is population `i`'s own valid-SNP count) and agrees across backends.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

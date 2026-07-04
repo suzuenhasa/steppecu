@@ -191,7 +191,7 @@ exercised by plain host tests that link a fake backend and never touch a real de
   is a separate header-only oracle shared by the CPU backend and the parity test.)
 
 - **`qpadm/qpgraph_enumerate.cpp`** — the topology-search enumerator. It reproduces
-  the reference tool's tree- and graph-generation exactly (both the count and the set
+  the reference tree- and graph-generation exactly[^at2] (both the count and the set
   of canonical graph hashes), so its enumeration can be checked one-to-one against the
   reference.
 
@@ -224,7 +224,7 @@ decoded data. None of them read the precomputed f2 cache.
   combinations, then runs an on-device shared-factor smoothing solve and scatters the
   result back into a smoothed f2 block tensor.
 
-- **`stats/dates.cpp`** — the DATES admixture-dating tool. It reuses the genotype
+- **`stats/dates.cpp`** — the DATES admixture-dating tool[^dates]. It reuses the genotype
   front-end (including a per-SNP genetic-position step), then diverges into an FFT-
   based autocorrelation engine that builds the weighted linkage-disequilibrium decay
   curve, fits an exponential-plus-offset model to it, and runs a leave-one-chromosome
@@ -309,3 +309,8 @@ With the setting off, the consuming executable device-links the GPU library dire
 which is the same path the existing CUDA tests already use successfully. In short:
 the core library is a host archive that happens to depend on GPU code, so it must not
 try to own the device-link step — the final executable owns it.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

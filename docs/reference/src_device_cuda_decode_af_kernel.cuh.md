@@ -113,11 +113,11 @@ There are two modes, chosen by whether `d_sample_ploidy` is null:
 - **Per-sample mode (`d_sample_ploidy` is non-null).** This is a device array of
   length `n_individuals`, running in lockstep with the sample axis, holding each
   sample's ploidy (2 for diploid, 1 for pseudo-haploid). It is auto-detected from
-  the data upstream, the same way ADMIXTOOLS 2 detects it. Each non-missing sample
-  is folded in using the ADMIXTOOLS 2 `adjust_pseudohaploid` accumulation:
+  the data upstream[^at2]. Each non-missing sample
+  is folded in using the `adjust_pseudohaploid` accumulation:
   `AC += code / (3 − ploidy)` and `N += ploidy`. For a diploid sample `3 − ploidy`
   is `1`, so its raw allele code adds in unchanged; for a pseudo-haploid sample
-  `3 − ploidy` is `2`, so its contribution is halved. This reproduces ADMIXTOOLS 2's
+  `3 − ploidy` is `2`, so its contribution is halved. This reproduces the
   handling of mixed-ploidy panels exactly.
 
 - **Uniform fallback mode (`d_sample_ploidy` is null).** Every sample is treated as
@@ -142,3 +142,7 @@ backend and the decode kernel's translation unit, not part of the CUDA-free publ
 surface. Keeping the declaration here — rather than in a public header — is what
 lets the rest of the project stay CUDA-free while the device layer alone deals with
 streams and kernel launches.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

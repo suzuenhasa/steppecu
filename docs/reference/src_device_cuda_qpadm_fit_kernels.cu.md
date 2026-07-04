@@ -360,7 +360,7 @@ arena and writes its own slice of the outputs. Its stages, in order:
 4. **Popdrop**: refit the model with each single left source removed in turn (plus the
    full model), each at its own reduced rank, and store the resulting chi-squares and
    the full model's weights. This is the "does dropping this source hurt the fit?" test.
-   The ordering of the drops matches ADMIXTOOLS 2's ordering. A rank-deficient reduced
+   The ordering of the drops is the parity ordering[^at2]. A rank-deficient reduced
    fit stores NaN, matching the weights' not-a-number-on-singular contract.
 
 Two design notes on this kernel:
@@ -538,3 +538,7 @@ a grid-stride loop (each thread strides forward by the whole grid until the work
 exhausted), a clamped grid still covers the full range. The result is identical to what a
 hypothetical non-overflowing launch would produce. Every wrapper also guards against a
 non-positive work count before launching, and checks for launch errors afterward.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

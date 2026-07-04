@@ -99,7 +99,7 @@ overflow to `±inf` rather than to an out-of-range error.
 
 The reason correctly-rounded decimal-to-double parsing matters here (and is why
 `from_chars` is the right tool): the parsed value has to match the reference
-implementation bit-for-bit so that block boundaries land in exactly the same
+implementation bit-for-bit[^at2] so that block boundaries land in exactly the same
 places. The library's floating-point `from_chars` backend is correctly rounded,
 which gives that exact match.
 
@@ -172,7 +172,7 @@ This token-count decision is what keeps a malformed line from silently
 mis-aligning the SNP axis.
 
 `split_ws` uses stream extraction, which skips any run of whitespace between
-tokens. This matches how the reference implementation splits a line (on
+tokens. This matches how the reference implementation[^at2] splits a line (on
 any-whitespace), so the two agree on where the field boundaries are.
 
 The field-count rules, using the named thresholds from the format-constants
@@ -209,8 +209,8 @@ re-orientation.
 
 The loop stops as soon as it has collected `max_snps` records. Passing the
 maximum possible size value reads every SNP in the file. This cap reads a prefix
-of the file — the same leading records the reference oracle decodes when a cap is
-in effect.
+of the file — the same leading records the reference oracle[^at2] decodes when a
+cap is in effect.
 
 ---
 
@@ -250,3 +250,7 @@ an unrecognized or overflowing chromosome label (which maps to a stable sentinel
 or for a single trailing blank line at end of file (which is tolerated). Every
 thrown message that refers to a location uses the 1-based line number so the
 source of a bad file is easy to locate.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

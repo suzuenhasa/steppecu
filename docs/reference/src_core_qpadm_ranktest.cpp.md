@@ -19,8 +19,8 @@ raw genotype data, never recomputes the f4 statistics, and never re-runs the blo
 jackknife. Everything it needs — the full table of f4 estimates and the full inverse
 covariance matrix — was already computed once by an earlier stage. Each dropped-source
 model is produced purely by **selecting a subset of those already-computed numbers**
-and refitting. This is a deliberate, exact reproduction of what ADMIXTOOLS 2 does in
-its `drop_pops` routine, and it is the reason the table is cheap to produce.
+and refitting. This is a deliberate, exact reproduction of the `drop_pops`
+routine[^at2], and it is the reason the table is cheap to produce.
 
 The file is host-only C++ (no GPU code of its own). It hands the actual fitting math
 to a compute backend through a narrow seam, so the CPU reference implementation and
@@ -30,7 +30,7 @@ the GPU implementation run through the very same code here.
 
 ## 2. What "popdrop" reproduces (the drop_pops contract)
 
-ADMIXTOOLS 2's popdrop procedure follows three rules, and this file follows them
+The reference popdrop procedure[^at2] follows three rules, and this file follows them
 exactly:
 
 1. **Keep rows, do not re-gather.** The f4 estimates are laid out as a grid with one
@@ -43,7 +43,7 @@ exactly:
    dropped-source model, the code carves out the sub-block of that existing matrix
    corresponding to the surviving cells. It does **not** build a smaller covariance
    from scratch and invert that — carving the sub-block of the already-inverted matrix
-   is what ADMIXTOOLS 2 does, and it gives a different (and matching) answer.
+   is the parity behavior, and it gives a different (and matching) answer.
 3. **Fit at the sub-model's full rank.** Each dropped-source model is fit at a rank of
    *(number of surviving sources − 1)*. See section 5 for why this specific rank
    matters and how it differs from the rank the top-level model reports.
@@ -70,8 +70,8 @@ The rules, in order:
 - If, after skipping the NaN slots, no real weight was seen at all, the model also
   fails (returns `false`) — there is nothing to accept.
 
-This matches ADMIXTOOLS 2's feasibility predicate for the "weights must be
-non-negative" setting. A model where only a single source survives (its one weight
+This matches the parity feasibility predicate for the "weights must be
+non-negative" setting[^at2]. A model where only a single source survives (its one weight
 equal to 1) is trivially feasible.
 
 ---
@@ -141,7 +141,7 @@ the result.
   characters, with a `'1'` at the position of the dropped source. The full model, where
   nothing is dropped, is the all-zeros string.
 - **`wt`** is the count of dropped sources — 0 for the full model, 1 for a
-  single-source drop. This mirrors ADMIXTOOLS 2's popdrop "weight" column, which is a
+  single-source drop. This mirrors the parity popdrop "weight" column[^at2], which is a
   *count of dropped populations*, **not** a mixture weight. This is a common point of
   confusion: the mixture weights live in the separate `weight` field described below.
 
@@ -157,7 +157,7 @@ play and they must not be mixed up:
 | **Fitted rank** = survivors − 1 | The default rank a qpAdm fit uses to actually solve for the weights. | The popdrop table's `f4rank` column, and the rank at which each popdrop row's weights, chi-squared, and p-value are computed. |
 | **Rank decision** | The smallest rank the sweep could *not* reject as too simple — a model-selection outcome. | The top-level result's `f4rank`, reported once for the whole run — **not** the popdrop column. |
 
-ADMIXTOOLS 2's popdrop table reports the fitted rank, not the rank decision. An earlier
+The parity popdrop table reports the fitted rank, not the rank decision[^at2]. An earlier
 version of this code mistakenly used the rank-decision value from the sweep. On the
 small two-source reference datasets the two happened to be equal, so the bug was
 invisible. On models with three or more sources they diverged (a rank decision of 0 or
@@ -188,20 +188,24 @@ and it must stay that way.
 ## 6. `run_popdrop` — the whole table and its row order
 
 `run_popdrop` is the public entry point. It emits the rows in a fixed order that
-matches ADMIXTOOLS 2:
+matches the reference[^at2]:
 
 1. **The full model first** — all sources kept, pattern all-zeros.
 2. **Then one row per single-source drop**, iterating the dropped source from the
    *highest* index down to the lowest. For a two-source model this yields the pattern
    `"01"` (drop source 1) before `"10"` (drop source 0). Matching this ordering is what
-   makes steppe's table line up row-for-row with ADMIXTOOLS 2's.
+   makes steppe's table line up row-for-row with the reference.
 
 Two edge cases are handled explicitly:
 
 - **A single-source model** (`nl_full == 1`) emits only the full row and no drops.
   Dropping the one and only source would leave zero rows, which cannot be fit —
-  ADMIXTOOLS 2 likewise does not treat the empty set as a fittable model.
+  the reference likewise does not treat the empty set as a fittable model.
 - **A model with no sources** (`nl_full <= 0`) returns an empty table.
 
 Every row is produced by `popdrop_one`, so the full model and the dropped-source models
 share one code path and one set of rules.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -138,8 +138,8 @@ across tiers. This is what the parity test calls before its byte comparison.
 The on-disk cache file starts with a fixed **64-byte header**, followed by the f2
 region (every block's slab, back to back), then the vpair region (same shape),
 then a small trailer listing the block sizes. Storage is always 64-bit doubles.
-The per-block, block-major ordering of that layout matches ADMIXTOOLS 2's on-disk
-f2_blocks ordering; steppe's own 64-byte header is a fixed prefix that a separate
+The per-block, block-major ordering of that layout is the parity on-disk
+f2_blocks ordering[^at2]; steppe's own 64-byte header is a fixed prefix that a separate
 stand-alone reader strips off. The 64-byte header size and the double-precision
 storage type are frozen properties of the format.
 
@@ -188,3 +188,7 @@ teardown warning. Two details are worth knowing:
   were folded into the macro it would be dropped entirely. The status value the
   close returns is consumed only by the (release-stripped) warning, so it is
   marked as possibly-unused to keep release builds warning-clean.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

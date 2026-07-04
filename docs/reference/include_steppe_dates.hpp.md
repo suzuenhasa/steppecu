@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 `include/steppe/dates.hpp` is the public entry point for admixture *dating* — the
-DATES tool. Admixture dating answers the question "how many generations ago did two
+DATES method[^dates]. Admixture dating answers the question "how many generations ago did two
 populations mix to produce a third?" Given a target (admixed) population and two
 reference source populations, `run_dates` estimates the number of generations since
 that admixture happened, along with a standard error and the raw decay curve the
@@ -110,7 +110,7 @@ their weights are surfaced in the result for inspection.
 ### Reference and validation
 
 The engine is pinned to the reference DATES C source (the Moorjani-lab DATES tool,
-version 750). The frozen validation case is the AADR packed dataset dating the
+version 750). The frozen validation case is the AADR packed dataset[^aadr] dating the
 Puerto Rican population as a mix of European (CEU) and West African (YRI) sources,
 which produces **9.742 generations with a standard error of 0.317**. The engine
 implements the default population-delta weighting; there is no per-individual
@@ -253,3 +253,8 @@ The same seam also provides a pure-CPU reference implementation (an FFT-free
 version) that the GPU path is validated against. The command-line tool and the
 language bindings reach the GPU exclusively through this seam — they never see GPU
 code directly, exactly the same arrangement the other statistics tools use.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.
+[^aadr]: **AADR** — the Allen Ancient DNA Resource, the ancient-genome dataset steppe validates against. Mallick S, Micco A, Mah M, et al. *The Allen Ancient DNA Resource (AADR): a curated compendium of ancient human genomes.* Scientific Data 2024;11:182.

@@ -34,10 +34,10 @@ against — is `matrix_jackknife_est_col` and `f2blocks_pair_est` in
 
 ## 2. What the two kernels compute
 
-Each kernel reproduces a specific ADMIXTOOLS 2 routine, and each has a host
+Each kernel reproduces a specific reference routine[^at2], and each has a host
 counterpart it is diffed against.
 
-| Launch function | Reproduces (ADMIXTOOLS 2) | Host reference | Produces |
+| Launch function | Reproduces | Host reference | Produces |
 |---|---|---|---|
 | `launch_qpfstats_numer_jackknife` | `matrix_jackknife_est_full`, one column | `matrix_jackknife_est_col` | per-block means and the global per-combination jackknife estimate |
 | `launch_qpfstats_recenter_shift` | `f2(array)$est`, one pair series | `f2blocks_pair_est` | the per-pair recentering shift |
@@ -232,3 +232,7 @@ what lets the public API stay free of any CUDA dependency. A caller who only wan
 a qpfstats result never has to pull in `<cuda_runtime.h>`. The kernel bodies and
 their launch syntax stay in the `.cu` file, and the backend reaches them only
 through the two wrappers declared here.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

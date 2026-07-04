@@ -67,8 +67,8 @@ special case in the solve — is a property of the shared-factor solve itself.
 Solving `A·b = 0` gives `b = 0`. So if a whole column of `ymat` is non-finite and
 therefore becomes all zeros, that column flows through the exact same shared
 factorization as every other column and naturally comes out as a zero result. No
-branch, no separate code path. This exactly reproduces ADMIXTOOLS 2's rule that an
-all-missing block yields a zero estimate: ADMIXTOOLS 2 sets `ymat_chunk[nan] = 0`
+branch, no separate code path. This exactly reproduces the rule that an
+all-missing block yields a zero estimate[^at2]: the reference sets `ymat_chunk[nan] = 0`
 and records a per-block missing count `k_i = sum(nan_i)`, and this kernel produces
 the same zeroed matrix and the same per-block counts.
 
@@ -97,7 +97,7 @@ solve. For a block whose count is `k` out of `npopcomb` rows:
 
 | Count `k` | Meaning | How the solve handles it |
 |---|---|---|
-| `k == npopcomb` | Every row is missing (all-NaN block). | Its `ymat` column is now all zeros, so the shared solve returns exactly zero for it — the ADMIXTOOLS 2 all-missing rule, realized for free by the zeroed column (section 3). |
+| `k == npopcomb` | Every row is missing (all-NaN block). | Its `ymat` column is now all zeros, so the shared solve returns exactly zero for it — the all-missing rule, realized for free by the zeroed column (section 3). |
 | `k == 0` | No row is missing. | The block takes the plain shared-factor path with no adjustment to the coefficient matrix. |
 | `0 < k < npopcomb` | Some but not all rows are missing. | The block needs a genuine correction: the missing rows must be removed from the coefficient matrix (a downdate) and the block re-solved with that adjusted matrix. Because these blocks are few, that downdate-and-re-solve is done on the host side for just those blocks. |
 
@@ -149,3 +149,7 @@ the only symbols the rest of steppe can see from this file.
 Both wrappers check for launch errors immediately after issuing the kernel, and
 both take the CUDA stream to run on, so the prep stays ordered with the solve that
 consumes it.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

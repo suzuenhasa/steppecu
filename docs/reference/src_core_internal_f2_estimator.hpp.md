@@ -26,7 +26,7 @@ calculation as three large matrix multiplications (described in sections 5 and 6
 The functions here are the per-element numerics that get invoked inside that fast
 path and inside the CPU oracle alike.
 
-The formulas match ADMIXTOOLS 2's bias-correction conventions and are pinned to
+The formulas match the parity bias-correction conventions[^at2] and are pinned to
 saved reference values (goldens), so they are effectively frozen: you may rename
 things, but changing a formula would change a reported result.
 
@@ -95,7 +95,7 @@ hc = q * (1 - q) / max(n - 1, kHetCorrDenomFloor)
 - `valid` is the caller's validity bit for this entry.
 
 `kHetCorrDenomFloor` is the value `1.0` (defined in `config.hpp`). It is the floor in
-the `max(n - 1, 1)` denominator, matching ADMIXTOOLS 2's convention. Its job is to
+the `max(n - 1, 1)` denominator, matching the parity convention[^at2]. Its job is to
 prevent a divide-by-zero when a population has only a single non-missing haploid
 sample, where `n - 1` would be 0.
 
@@ -189,12 +189,12 @@ f2 = (vpair > 0) ? (numerator / vpair) : 0
 
 `vpair` is that joint-valid count. It is a whole number but is carried as a double.
 When `vpair` is 0 the numerator is also 0, so returning 0 avoids a 0-divided-by-0.
-This matches ADMIXTOOLS 2's guard for the same situation. (`vpair > 0.0` is used
+This matches the parity guard for the same situation[^at2]. (`vpair > 0.0` is used
 rather than an integer test purely so the exact-zero case is caught exactly.)
 
 Two normalizations must be kept straight so they don't get applied twice: the divide
 by `vpair` here, and a later jackknife weighting that also uses `vpair`. Together
-they must reproduce ADMIXTOOLS 2's definition, not double-normalize.
+they must reproduce the parity definition[^at2], not double-normalize.
 
 Important subtlety: because a pair with no shared data returns f2 = 0 (not a special
 "no data" marker), the f2 **value alone cannot tell apart "no data" from a genuine
@@ -220,8 +220,8 @@ steppe estimates uncertainty with a block jackknife, which splits the genome int
 blocks. A block is missing for a pair (i, j) when no SNP inside it is valid in both
 populations at once — that is, when `vpair` for that pair in that block is 0.
 
-This matters because ADMIXTOOLS 2 drops any block in which *any* loaded pair has no
-data; it never fills such a gap in. If steppe instead used the zero produced by
+This matters because steppe drops any block in which *any* loaded pair has no
+data[^at2]; it never fills such a gap in. If steppe instead used the zero produced by
 `finalize_f2` as if it were a real value, it would bias downstream statistics toward
 zero and inflate the jackknife's variance estimate. So the drop decision must be
 made on `vpair` itself, exactly as this predicate does, and not on the finalized f2.
@@ -241,3 +241,7 @@ are re-exported here only as a convenience, so that a file which includes
 `f2_estimator.hpp` for the numerics above gets the launch math too without a second
 include — used by the f2 feeder kernels and by the host unit test that exercises
 both the numerics and the grid math.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

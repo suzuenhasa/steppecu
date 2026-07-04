@@ -59,7 +59,7 @@ order over the pool's own ordering — that is, all subsets of size `min_sources
 first (each in lexicographic order), then all subsets of size `min_sources + 1`,
 and so on. Each model is given a dense, zero-based `model_index` counter in exactly
 this order. This ordering is a fixed part of the contract: it is the same order the
-reference (golden) generator uses, so the row `model_index` values line up
+reference (golden) generator uses[^at2], so the row `model_index` values line up
 one-to-one with the reference rows and can be compared directly.
 
 ---
@@ -164,3 +164,7 @@ f2-directory loader, the same population-name resolver, the same
 build-resources-then-upload chain, and the same result-formatting primitives. The
 only genuinely new logic in the rotation is the pool-subset enumerator (§2) and the
 per-model table emit (§4). No fit math and no output formatting is duplicated.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

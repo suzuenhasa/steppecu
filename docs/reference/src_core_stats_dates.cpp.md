@@ -26,7 +26,7 @@ roughly thousand-point curve, and a weighted jackknife. There is deliberately **
 host loop over position pairs** — that would be the central performance trap, and
 it is designed out.
 
-The engine is pinned for parity to the reference DATES tool (the Moorjani-lab C
+The engine is pinned for parity to the reference DATES[^dates] tool (the Moorjani-lab C
 source, version 750). Where a constant or a formula matches that reference exactly,
 it is called out below.
 
@@ -53,7 +53,7 @@ it is, and each matches the reference DATES tool.
 `weight_jack` turns the per-chromosome leave-one-out dates into a single point
 estimate and its standard error. It is the standard weighted block jackknife, the
 same family used by the D-statistic tool, and it mirrors the reference DATES
-`weightjack`/`weightjackx` routine.
+`weightjack`/`weightjackx` routine[^dates].
 
 **Inputs.** A list of leave-one-out dates (one per chromosome, each computed with
 that chromosome held out), the paired weights (each the number of positions on all
@@ -110,7 +110,7 @@ invalid-config status.
 **Keeping the autosomes (stage 2).** Positions are processed in file order, which
 is sorted by chromosome and then by genetic position. Only autosomes are kept —
 chromosomes 1 through 22, using the shared `kAutosomeChromMin`/`kAutosomeChromMax`
-bounds, matching ADMIXTOOLS 2's autosomes-only default. For each kept position the
+bounds, matching the parity autosomes-only default[^at2]. For each kept position the
 code records, in lockstep:
 
 - the two source allele frequencies (the frequency difference between them is the
@@ -249,3 +249,8 @@ the batched exponential fit (section 9). Each has a GPU implementation and a
 bit-exact CPU reference the GPU path is validated against. Everything the host
 itself does — the grid construction, the leave-one-chromosome subtraction, and the
 weighted jackknife — is small, exact arithmetic, never a loop over position pairs.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

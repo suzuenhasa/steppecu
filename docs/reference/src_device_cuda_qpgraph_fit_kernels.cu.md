@@ -44,7 +44,7 @@ finish, by itself. With `numstart` restarts the launch is simply `numstart` thre
 
 This is a deliberate choice over the more obvious "parallelize the linear algebra of
 one fit across many threads" design. The reason: the classic way to write this
-optimizer (the approach ADMIXTOOLS 2 uses) is a host loop that calls the objective,
+optimizer (the approach the reference uses[^at2]) is a host loop that calls the objective,
 looks at the result on the CPU, decides the next step, and calls the objective
 again. That per-iteration CPU round trip is a throughput trap — the GPU sits idle
 waiting for the host between every evaluation. Here the host launches the kernel
@@ -155,10 +155,10 @@ intermediate arrays. The pipeline is:
    statistics. This is the generalized-least-squares weighting.
 4. **Normal equations** — form the edge-by-edge matrix `cc = ppwts' · Wm` and the
    right-hand side `q = ppwts' · qf`.
-5. **Ridge regularization** (matches ADMIXTOOLS 2) — add `fudge · mean(diag(cc))` to
+5. **Ridge regularization**[^at2] — add `fudge · mean(diag(cc))` to
    the diagonal of `cc`. This trace-scaled ridge (the topology's `fudge` field, the
-   equivalent of ADMIXTOOLS 2's `diag`) keeps the solve stable.
-6. **Diagonal scaling** (matches ADMIXTOOLS 2) — rescale the system by the square
+   parity equivalent of the `diag` term) keeps the solve stable.
+6. **Diagonal scaling**[^at2] — rescale the system by the square
    roots of the diagonal of `cc`, so the solve operates on a well-conditioned matrix;
    the solution is un-scaled afterward.
 7. **The edge-length solve** — solve for the edge lengths `bl`, either box-constrained
@@ -206,7 +206,7 @@ topology's `constrained` flag selects between two solvers:
 
 - **Box-constrained (non-negative) solve** — a non-negative least squares (NNLS)
   solver, `d_nnls`, which finds the edge lengths that best fit the data *subject to
-  every edge length being ≥ 0*. This is the ADMIXTOOLS 2 behavior and it is required
+  every edge length being ≥ 0*. This is the parity behavior[^at2] and it is required
   for correctness: real fits have edges that sit exactly at the zero boundary, and an
   unconstrained solve cannot represent that — it would hand back a negative length. The
   solver is the Lawson-Hanson active-set method and mirrors the CPU reference
@@ -324,3 +324,7 @@ kernel strides the scratch with exactly the stride the host allocated.
 The kernel writes one score per `(topology, restart)`. Turning that into a per-topology
 best fit and the single global best graph is a reduction (an argument-minimum over the
 score array), done on the host — it is a reduction over results, not another fit.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

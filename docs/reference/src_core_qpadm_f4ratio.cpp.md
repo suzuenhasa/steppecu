@@ -30,7 +30,7 @@ caller supplies a five-population tuple `(p1, p2, p3, p4, p5)`, and the result i
 alpha = f4(p1, p2; p3, p4) / f4(p1, p2; p5, p4)
 ```
 
-This matches ADMIXTOOLS 2's `qpf4ratio` (admixtools 4.3.3). Three of the five
+This matches the `qpf4ratio` convention[^at2] (admixtools 4.3.3). Three of the five
 populations — `p1`, `p2`, `p4` — appear in both the numerator and the
 denominator. Only the third slot changes: it is `p3` in the numerator and `p5`
 in the denominator. Everything else is identical. Concretely, each tuple produces
@@ -55,8 +55,8 @@ optimization for its own sake — it is required for correctness.
 
 The block jackknife works by partitioning the genome into blocks and computing the
 statistic with each block left out in turn. Blocks can drop out of a computation
-(become "missing") when the data does not support them. ADMIXTOOLS 2's handling of
-missing data forces the numerator and denominator of a ratio to go missing
+(become "missing") when the data does not support them. The parity handling of
+missing data[^at2] forces the numerator and denominator of a ratio to go missing
 *together*: a block that is unusable for one is treated as unusable for the other.
 For the ratio's per-block values to line up correctly, the numerator and
 denominator must therefore agree on exactly which blocks survived and how much
@@ -147,7 +147,7 @@ sibling f4 and f3 entry points.
 | Constant | Value | What it's for |
 |---|---|---|
 | `kPrimaryGpu` | `0` | The GPU index this single entry point runs on. Batching a model space across multiple GPUs is handled one layer above this file — a higher-level rotation drives the other GPUs — so at this level the work always targets GPU 0. Matches the same constant in `f4.cpp` and `f3.cpp`. |
-| `kSetmissThresh` | `1e-6` | The near-zero-denominator threshold. Inside the jackknife, a per-block numerator or denominator whose absolute value is smaller than this is treated as missing for that block, so a vanishing denominator cannot produce a meaningless blown-up ratio. This matches ADMIXTOOLS 2's `qpf4ratio` `setmiss` threshold of `1e-6`. |
+| `kSetmissThresh` | `1e-6` | The near-zero-denominator threshold. Inside the jackknife, a per-block numerator or denominator whose absolute value is smaller than this is treated as missing for that block, so a vanishing denominator cannot produce a meaningless blown-up ratio. This matches the `qpf4ratio` `setmiss` threshold of `1e-6`[^at2]. |
 
 ---
 
@@ -204,3 +204,7 @@ a single shared implementation, `run_f4ratio_impl`, which is templated on the f2
 source type so the numerator/denominator packing and the jackknife call are written
 once and not duplicated between the two overloads. This mirrors how `run_f4` and
 `run_f3` share their bodies.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

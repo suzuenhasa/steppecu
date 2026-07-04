@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 `include/steppe/f4ratio.hpp` is the public entry point for computing **f4-ratios** —
-the admixture-proportion statistic that ADMIXTOOLS 2 calls `qpf4ratio`. It is the
+the admixture-proportion statistic `qpf4ratio`[^at2]. It is the
 sibling of the f4 entry point (`f4.hpp`) and the f3 entry point (`f3.hpp`), and it
 follows the same shape: a small result struct and two `run_...` functions.
 
@@ -34,7 +34,7 @@ GPU stack.
 
 ---
 
-## 2. What an f4-ratio measures (the ADMIXTOOLS 2 convention)
+## 2. What an f4-ratio measures (the parity convention)
 
 The input for one f4-ratio is a **5-tuple** of populations, `(p1, p2, p3, p4, p5)`.
 From that 5-tuple steppe forms two f4 statistics:
@@ -45,7 +45,7 @@ From that 5-tuple steppe forms two f4 statistics:
   `d=p4`.
 
 Only the third population differs between them. This convention was verified against
-the ADMIXTOOLS 2 R source (version 4.3.3), where the input is a five-column matrix
+the reference R source (version 4.3.3)[^at2], where the input is a five-column matrix
 `c(p1, p2, p3, p4, p5)`.
 
 ### How `alpha` is reported
@@ -59,7 +59,7 @@ per-block ratios into the final estimate. (The ratio-of-totals value still exist
 internally, but only as the centering term inside the jackknife variance, not as the
 reported answer.) The standard error `se` is the square root of that
 jackknife-of-the-ratio variance, and `z = alpha / se`. This matches exactly what
-ADMIXTOOLS 2 reports: it emits only `alpha`, `se`, and `z` — there is no per-block
+the reference reports[^at2]: it emits only `alpha`, `se`, and `z` — there is no per-block
 "p" column.
 
 ---
@@ -74,7 +74,7 @@ it is a correctness requirement.
 Here is why it matters. Before the f4 values are computed, steppe drops any genome
 block that has no usable data and compacts the survivors. If the numerator and the
 denominator were assembled separately, they could end up with *different* sets of
-surviving blocks. ADMIXTOOLS 2 does not allow that: when it marks data as missing, it
+surviving blocks. The reference does not allow that[^at2]: when it marks data as missing, it
 marks the numerator and the denominator missing **together**. Assembling both in one
 call guarantees a single shared set of surviving blocks and a single shared set of
 per-block sizes (the jackknife weights) — exactly the inputs the ratio jackknife
@@ -106,7 +106,7 @@ in each array refers to the same input tuple. Rows are returned in **input order
 | `status` | `Status` | The **per-call** outcome. `Status::Ok` for a populated result. A degenerate batch — empty input, or blocks that are all missing — is reported as a status value with the affected rows filled by a NaN sentinel, **never** by throwing an exception. Domain outcomes like these are always values, not exceptions. |
 | `precision_tag` | `Precision::Kind` | Which arithmetic produced the result. This is always `Fp64` (native double precision): the quartet assembly is the cancellation-prone step that stays in native double precision, so `alpha` is always computed natively. |
 
-There is deliberately no per-row `p` column, because ADMIXTOOLS 2's `qpf4ratio`
+There is deliberately no per-row `p` column, because the `qpf4ratio`
 output has none.
 
 ---
@@ -147,3 +147,7 @@ parity checking against the reference implementation: a test stages the known-go
 ("golden") f2 values as a host tensor and calls this overload, and the CPU reference
 backend reads directly from that host memory. On a real GPU the device overload above
 is used instead.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

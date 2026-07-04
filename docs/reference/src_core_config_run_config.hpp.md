@@ -194,8 +194,8 @@ names directly.
 
 | Accessor | Type | Default | Meaning |
 |---|---|---|---|
-| `blgsize_cm()` | `double` | `5.0` (`kDefaultBlockSizeCm`) | The jackknife block size in centimorgans. 5 cM matches ADMIXTOOLS 2's default of 0.05 Morgans. |
-| `ploidy()` | `PloidyMode` | `Auto` | The ploidy policy. `Auto` matches ADMIXTOOLS 2's per-sample auto-detection (a heterozygous call means diploid; none means pseudo-haploid). `--ploidy 2` and `--ploidy 1` force a uniform ploidy for every sample. |
+| `blgsize_cm()` | `double` | `5.0` (`kDefaultBlockSizeCm`) | The jackknife block size in centimorgans. 5 cM matches the parity default of 0.05 Morgans[^at2]. |
+| `ploidy()` | `PloidyMode` | `Auto` | The ploidy policy. `Auto` matches the per-sample auto-detection[^at2] (a heterozygous call means diploid; none means pseudo-haploid). `--ploidy 2` and `--ploidy 1` force a uniform ploidy for every sample. |
 | `min_sources()` | `int` | `1` | The smallest source-set size the rotation considers. |
 | `max_sources()` | `int` | `-1` | The largest source-set size; `-1` means "up to the whole pool." |
 | `dry_run()` | `bool` | `false` | When true, report the planned memory tiers, sizes, and precision and then exit without doing any compute. A planning aid; the default is a real run. |
@@ -229,6 +229,10 @@ These carry the settings for the single-graph qpGraph fit and the bounded topolo
 |---|---|---|---|
 | `graph_file()` | `string` | empty | The admixture-graph edge-list file path (`--graph`). Empty means unset. |
 | `qpgraph_numstart()` | `int` | `10` | The number of random restarts for the fit (`--numstart`); matches the qpGraph option default. |
-| `qpgraph_diag_f3()` | `double` | `1e-5` | The diagonal value added to the f3 covariance for stability (`--diag-f3`); matches the ADMIXTOOLS 2 default. |
-| `qpgraph_constrained()` | `bool` | `true` | Whether the fit constrains admixture weights (`--constrained`); matches the ADMIXTOOLS 2 default. |
+| `qpgraph_diag_f3()` | `double` | `1e-5` | The diagonal value added to the f3 covariance for stability (`--diag-f3`); matches the parity default[^at2]. |
+| `qpgraph_constrained()` | `bool` | `true` | Whether the fit constrains admixture weights (`--constrained`); matches the parity default[^at2]. |
 | `qpgraph_max_nadmix()` | `int` | `1` | The ceiling on admixture nodes for the topology search (`--max-nadmix`); the first version supports 0 or 1. |
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

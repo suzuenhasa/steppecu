@@ -78,7 +78,7 @@ The `tot_mode` argument selects between them:
 
 | `tot_mode` | Statistic | What the inputs mean | Survivor test |
 |---|---|---|---|
-| `0` | f4-ratio | `num` / `den` are already the per-block leave-one-out replicates; `xblk_num` / `xblk_den` are the per-block raw sums used to form the centering ratio; `weight` is the per-block block size. | A block survives if `\|xblk_den\| >= setmiss_thresh`. A block whose denominator is essentially zero is treated as missing. This matches ADMIXTOOLS 2's "setmiss" rule. |
+| `0` | f4-ratio | `num` / `den` are already the per-block leave-one-out replicates; `xblk_num` / `xblk_den` are the per-block raw sums used to form the centering ratio; `weight` is the per-block block size. | A block survives if `\|xblk_den\| >= setmiss_thresh`. A block whose denominator is essentially zero is treated as missing. This matches the reference "setmiss" rule[^at2]. |
 | `1` | D-statistic | `num` / `den` are the per-block sums; `weight` is the per-block count. The leave-one-out replicates are rebuilt inside the thread. The `xblk_num` / `xblk_den` arrays are unused (passed as absent). | A block survives if its count `weight > 0`. |
 
 The survivor test is not computed once and stored; it is re-evaluated inline on
@@ -208,5 +208,9 @@ p = erfc(|z| / sqrt(2))
 ```
 
 The constant `kInvSqrt2 = 0.7071067811865475244` is `1 / sqrt(2)`, written out to
-full precision. This p-value formula matches ADMIXTOOLS 2's two-sided tail
-conversion used for both statistics.
+full precision. This p-value formula matches the reference two-sided tail
+conversion[^at2] used for both statistics.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

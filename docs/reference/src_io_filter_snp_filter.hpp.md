@@ -90,8 +90,8 @@ per-population frequencies. This matches how the reference genotype-summary pipe
 pools its per-population sums.
 
 The missing fraction here is measured over *individuals* (the PLINK `--geno`
-convention). Note that ADMIXTOOLS 2's similar option measures its fraction over
-*populations* instead, which is a different denominator.
+convention[^plink]). Note that the reference implementation's similar option[^at2]
+measures its fraction over *populations* instead, which is a different denominator.
 
 ---
 
@@ -223,3 +223,8 @@ dropped the tail of the tile (or altered membership). A mismatched SNP-metadata 
 decode length is a wiring or data bug, so it must abort with context rather than return a
 plausible-looking wrong mask. The function also propagates the Section 4 preconditions
 (bad ploidy, mismatched `pop_individuals`, null `q`/`n`) via `derive_per_snp_summary`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^plink]: **PLINK** — the PLINK / PACKEDPED (`.bed`/`.bim`/`.fam`) genotype format and toolset. Chang CC, Chow CC, Tellier LCAM, Vattikuti S, Purcell SM, Lee JJ. *Second-generation PLINK: rising to the challenge of larger and richer datasets.* GigaScience 2015;4:7.

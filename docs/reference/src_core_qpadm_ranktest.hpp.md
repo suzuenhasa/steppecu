@@ -69,7 +69,7 @@ of reaching into the backend directly.
 
 `alpha` is the significance level for the rank decision — the threshold below which a
 rank is considered rejected. It comes from `QpAdmOptions::rank_alpha`, whose default
-is `0.05`, matching ADMIXTOOLS 2.
+is the parity value `0.05`[^at2].
 
 The decision rule itself — which rank the sweep chooses — lives inside the backend's
 `rank_sweep`, not here. This function only routes the call.
@@ -78,7 +78,7 @@ The decision rule itself — which rank the sweep chooses — lives inside the b
 
 ## 4. The popdrop contract
 
-The popdrop table follows exactly what ADMIXTOOLS 2's `drop_pops` routine does, and
+The popdrop table follows exactly what the `drop_pops` routine does[^at2], and
 the precise mechanics matter because they are easy to get subtly wrong.
 
 The key point: **popdrop does not re-gather f4 statistics and does not re-run the
@@ -156,8 +156,8 @@ delegated to the backend. No GPU code is issued from here.
 bool popdrop_feasible(const std::vector<double>& weights)
 ```
 
-This decides whether a fitted model's weights are admissible, matching ADMIXTOOLS 2's
-`feasible` flag under the setting that forbids negative weights.
+This decides whether a fitted model's weights are admissible, matching the
+`feasible` flag[^at2] under the setting that forbids negative weights.
 
 The rule: **every surviving weight must lie in the closed interval `[0, 1]`.** A
 weight outside that range would mean a source contributes a negative fraction or more
@@ -189,3 +189,7 @@ production backend interchangeable: the same rank sweep and weight-solve calls d
 both, for the full model and for every dropped-source model, so their results are
 held to one shared contract instead of two parallel implementations that could
 diverge.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

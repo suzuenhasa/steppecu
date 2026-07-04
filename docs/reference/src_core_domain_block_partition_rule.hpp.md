@@ -34,8 +34,8 @@ frozen rule of this file.
 
 - The **configuration surface speaks centimorgans**. A user sets the block size as
   `RunConfig::block_size_cm`, default `5.0` (five centimorgans).
-- The **internal block math is done in Morgans**, because that is what ADMIXTOOLS 2
-  does. ADMIXTOOLS 2's block-size parameter (`blgsize`) defaults to `0.05` Morgans,
+- The **internal block math is done in Morgans**, to match the reference
+  convention[^at2]. The `blgsize` block-size parameter defaults to `0.05` Morgans,
   which is the same distance as five centimorgans.
 
 `block_size_cm_to_morgans(double cm)` is the **only** place the conversion is
@@ -59,8 +59,8 @@ zero-based index of the fixed grid cell that position falls into.
 This is the deterministic, pure function that fixes block membership: the same
 arithmetic runs on the host and on the device, so no SNP's block is ever computed
 two different ways. It is still a valid, shareable primitive, but note that the
-whole-genome pass (`assign_blocks`) **no longer calls it** — the ADMIXTOOLS 2 rule
-does not bin SNPs onto a fixed grid (see section 4 for why). `block_of` remains for
+whole-genome pass (`assign_blocks`) **no longer calls it** — the parity rule
+does not bin SNPs onto a fixed grid[^at2] (see section 4 for why). `block_of` remains for
 callers that genuinely want the plain floor-to-grid mapping.
 
 **Precondition:** `block_size_morgans` must be greater than zero, because it is the
@@ -75,7 +75,7 @@ Parameters:
 - `genpos_morgans` — the SNP's genetic position in Morgans, expected to be
   non-negative within a chromosome. Callers supply per-chromosome positions and
   handle the chromosome boundaries themselves.
-- `block_size_morgans` — the block width in Morgans (ADMIXTOOLS 2's `blgsize`),
+- `block_size_morgans` — the block width in Morgans (`blgsize`),
   which must be positive.
 
 Returns the zero-based block index (non-negative for a non-negative position).
@@ -91,7 +91,7 @@ here and nowhere else.
 
 ### The rule: a SNP-anchored cumulative walk
 
-The rule reproduces ADMIXTOOLS 2's block-building convention (its `setblocks()`
+The rule reproduces the reference block-building convention[^at2] (its `setblocks()`
 routine). It is **not** a floor-onto-a-fixed-grid rule. Instead it is a *cumulative
 walk anchored at real SNP positions*:
 
@@ -117,7 +117,7 @@ Each of these is a property that is relied upon downstream and pinned by tests:
 - **A block spans at least the block width** — and may be *wider*, because the SNP
   that trips the threshold can overshoot it. The one exception is the trailing
   remnant at the end of a chromosome (or a very short chromosome), which is kept as
-  it is. This matches ADMIXTOOLS 2's small chromosome-end blocks.
+  it is. This matches the reference's small chromosome-end blocks.
 - **The block count is the walk's count, not an occupied-grid count.** A wide stretch
   of genome with few SNPs is a *single* block, not one block per empty grid cell that
   a fixed grid would have produced.
@@ -165,7 +165,7 @@ whole genome would collapse to **one block per chromosome**. That breaks the blo
 jackknife: a single-chromosome subset would have just one block, which yields an
 undefined standard error and a non-invertible covariance.
 
-ADMIXTOOLS 2 handles exactly this case: it detects the missing map, prints a notice,
+The reference handles exactly this case[^at2]: it detects the missing map, prints a notice,
 and partitions blocks by a **hardcoded two-megabase window of physical position**
 instead. That two-million-base-pair window is fixed and independent of the genetic
 block-size setting.
@@ -174,9 +174,9 @@ block-size setting.
 a usable physical-position axis (`physpos`, at least as long as the SNP count and not
 all zero) is supplied, it runs the identical SNP-anchored walk over `physpos` with
 the window `bp_window` (default two million), and it warns on standard error the way
-ADMIXTOOLS 2 does. Walking raw base-pair values with a two-million window keeps the
+the reference does. Walking raw base-pair values with a two-million window keeps the
 arithmetic in exact integers (base-pair counts are well within the range of exactly
-representable doubles), so the partition is robust, and it reproduces ADMIXTOOLS 2's
+representable doubles), so the partition is robust, and it reproduces the reference
 block count on the same data.
 
 The fallback fires **only** on an all-zero map. A dataset that has a real genetic map
@@ -279,3 +279,7 @@ exists to write that widening cast once instead of repeating the
 `assign_blocks` and `block_ranges`. Callers always pass a non-negative index (SNP
 columns run from zero up to the count), so the cast is value-preserving and never
 changes a result.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

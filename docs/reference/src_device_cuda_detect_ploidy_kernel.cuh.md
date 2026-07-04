@@ -54,7 +54,7 @@ bounds the scan. A handful of SNPs is more than enough to catch a heterozygous
 call in a truly diploid sample, so scanning the whole genome would be wasted
 work.
 
-This matches how ADMIXTOOLS 2 detects pseudo-haploid samples, and it is a literal
+This is the parity pseudo-haploid detection[^at2], and it is a literal
 port of the equivalent host-side loop, so it produces the same diploid/pseudo-haploid
 verdict as that reference. See section 5 for the exact sense in which the two agree.
 
@@ -132,3 +132,7 @@ The header includes only `<cstddef>`, `<cstdint>`, and `<cuda_runtime.h>`, and i
 guarded by `STEPPE_DEVICE_CUDA_DETECT_PLOIDY_KERNEL_CUH`. Everything else about
 the kernel — its body and its launch configuration — lives in the paired `.cu`
 file.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

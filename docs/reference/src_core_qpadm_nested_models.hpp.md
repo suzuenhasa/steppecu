@@ -22,8 +22,7 @@ backend. No GPU code, and no math beyond the final divide, lives here.
 ## 2. How the standard errors are computed (the block jackknife)
 
 steppe measures how uncertain each admixture weight is with a **block
-jackknife**, the same procedure ADMIXTOOLS 2 uses in its
-`get_weights_covariance` routine.
+jackknife**, the `get_weights_covariance` routine[^at2].
 
 The idea in plain terms:
 
@@ -40,17 +39,17 @@ The idea in plain terms:
    covariance** of that stacked matrix, and the SE is the square root of that
    variance.
 
-Two details matter for matching ADMIXTOOLS 2 exactly:
+Two details matter for exact parity:
 
 - **The full-data inverse is reused, not recomputed.** Each leave-one-out
   re-fit reuses the matrix inverse computed from the *full* dataset
-  (`cov.Qinv`) rather than re-inverting the matrix for every replicate.
-  ADMIXTOOLS 2 does the same — it does **not** re-invert per replicate. This is
-  a deliberate parity pin, not an approximation to "fix" later.
+  (`cov.Qinv`) rather than re-inverting the matrix for every replicate — no
+  per-replicate re-inversion. This is a deliberate parity pin[^at2], not an
+  approximation to "fix" later.
 - **The delete-one scale factor.** Before the covariance is taken, the stacked
   weight matrix is scaled by `(nb − 1) / sqrt(nb)`. This is the standard
-  delete-one jackknife scaling, and it is applied to reproduce ADMIXTOOLS 2's
-  result.
+  delete-one jackknife scaling, and it is applied to reproduce the parity
+  result[^at2].
 
 The full-data weight vector itself is **not** changed by any of this. The
 jackknife only supplies the SE; the reported weight stays the weight estimated
@@ -122,7 +121,7 @@ estimated weight.
 ```
 
 Computes the per-weight standard errors over the `nb` leave-one-out replicates
-(the ADMIXTOOLS 2 `get_weights_covariance` procedure) and returns them together
+(the `get_weights_covariance` procedure[^at2]) and returns them together
 with the z-scores. It delegates the re-fits, the `(nb − 1) / sqrt(nb)` scale,
 and the variance reduction to `be.se_from_wmat`, then computes `z = weight / se`
 from the returned SE array. It is marked `[[nodiscard]]` because the whole point
@@ -144,3 +143,7 @@ of calling it is the value it returns.
 
 A `SeResult` whose `se` and `z` vectors each have one entry per weight (see
 section 5).
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

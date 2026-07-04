@@ -23,10 +23,9 @@ values that also live in the `io` reader. They are kept identical by constructio
 and a cross-layer test pins them equal, so the core decoder stays self-contained
 without depending on the reader.
 
-The term "AT2" throughout means ADMIXTOOLS 2 — the established tool steppe
-reproduces. Any constant or formula marked as matching AT2 is a parity value: you
-may rename it, but you must not change what it computes, or results stop matching
-ADMIXTOOLS 2.
+Values marked a *parity* value are pinned to match the reference implementation
+these statistics were validated against[^at2]: you may rename them, but you must
+not change what they compute, or the numbers stop matching.
 
 ---
 
@@ -56,18 +55,17 @@ diverge.
 
 A sample's **ploidy** is how many haploid genomes it contributes: modern samples
 are diploid (2), while many ancient-DNA samples are treated as pseudo-haploid (1).
-ADMIXTOOLS 2 can auto-detect this per sample, and steppe reproduces that. The
-constants here support that path.
+steppe auto-detects this per sample[^at2]; the constants here support that path.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPloidyDetectSnps` | `1000` | The detection window. To classify a sample, its **first** 1000 SNPs are scanned for any heterozygous call. A sample with at least one het in that window is diploid; one with none is pseudo-haploid (a truly haploid genome can never be heterozygous). This matches ADMIXTOOLS 2's default detection count. If a record has fewer than 1000 SNPs, the whole record is scanned. |
+| `kPloidyDetectSnps` | `1000` | The detection window. To classify a sample, its **first** 1000 SNPs are scanned for any heterozygous call. A sample with at least one het in that window is diploid; one with none is pseudo-haploid (a truly haploid genome can never be heterozygous). `1000` is the parity default detection count[^at2]. If a record has fewer than 1000 SNPs, the whole record is scanned. |
 | `kPloidyPseudoHaploid` | `1` | Pseudo-haploid ploidy (ancient DNA): each non-missing sample contributes 1 to the haploid count. |
 | `kPloidyDiploid` | `2` | Diploid ploidy (modern, or any sample that carried a het in the detection window): each non-missing sample contributes 2. |
-| `kPloidyDivisorBase` | `3.0` | The base of ADMIXTOOLS 2's haploidization divisor `value / (3.0 - ploidy)`. This is a frozen ADMIXTOOLS 2 literal — you may rename it, but the value must stay `3.0`. It **must** stay a floating-point `3.0`, not an integer: see section 5 for why the float is load-bearing. |
+| `kPloidyDivisorBase` | `3.0` | The base of the haploidization divisor `value / (3.0 - ploidy)`. This is a frozen parity literal[^at2] — you may rename it, but the value must stay `3.0`. It **must** stay a floating-point `3.0`, not an integer: see section 5 for why the float is load-bearing. |
 
-Only `1` and `2` are ever meaningful ploidy values; ADMIXTOOLS 2 only emits those
-two. Ploidy is a per-sample piece of metadata, never inferred from the genotypes
+Only `1` and `2` are ever meaningful ploidy values. Ploidy is a per-sample piece
+of metadata, never inferred from the genotypes
 during finalize — the detection-window scan above is the only place a genotype
 influences it.
 
@@ -101,7 +99,7 @@ gates on.
 
 Decoding walks over every sample at a SNP and folds each one's code into running
 totals. There are two folds: a simple one for a fixed, uniform ploidy, and a
-per-sample one that reproduces ADMIXTOOLS 2's auto-ploidy accumulation. Both are
+per-sample one for the auto-ploidy accumulation[^at2]. Both are
 single-homed here so the GPU kernel's reduction and the CPU reference's scalar
 loop can never disagree on the arithmetic.
 
@@ -118,10 +116,10 @@ exactly.
 
 ### `accumulate_genotype_ploidy(code, ploidy, ac, n)` — per-sample ploidy
 
-The auto-ploidy fold, byte-faithful to ADMIXTOOLS 2. For each non-missing sample
+The auto-ploidy fold. For each non-missing sample
 whose ploidy is a legal `1` or `2` it does:
 
-- `ac` (a **double**) `+= code / (3.0 - ploidy)` — the ADMIXTOOLS-2-weighted
+- `ac` (a **double**) `+= code / (3.0 - ploidy)` — the parity-weighted
   reference-allele count.
 - `n` (an integer) `+= ploidy` — the running haploid count summed per sample.
 
@@ -133,9 +131,9 @@ This fail-soft behavior mirrors the finalize guard in section 7.
 **Why the `3.0` must be a float.** A sample can be *classified* pseudo-haploid
 (no het in its first 1000 SNPs) yet still carry a het call — code `1` — at some
 SNP outside that detection window. For such a SNP the sample's ploidy is `1`, so
-`3.0 - 1 == 2.0`, and `1 / 2.0 == 0.5`: ADMIXTOOLS 2 adds half a reference allele.
+`3.0 - 1 == 2.0`, and `1 / 2.0 == 0.5`: half a reference allele is added.
 If `3.0` were an integer, `1 / 2` would truncate to `0` and silently drop that
-half-allele, diverging from ADMIXTOOLS 2 by exactly 0.5 (this was a measured
+half-allele, diverging by exactly 0.5 (this was a measured
 frequency error of `0.004`, i.e. `1/250`, before the float fix). Because halves
 are exact in floating point, the sum stays exact and the final frequency is still
 a single exact divide.
@@ -201,3 +199,7 @@ divide: `q = ac / n` (with `n` the summed haploid count), `v = 1.0` when `n > 0`
 and the masked-out `{0, 0, 0}` otherwise. On all-diploid data this returns exactly
 what `finalize_af(ac, an, 2)` would, so the modern-data path is bit-identical
 whichever fold produced the totals.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

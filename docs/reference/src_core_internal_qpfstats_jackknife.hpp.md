@@ -19,7 +19,7 @@ qpfstats needs:
 - `f2blocks_pair_est` — the **per-pair recentering estimate** (the value used to
   recenter one f2 pair series).
 
-Both reproduce a specific ADMIXTOOLS 2 routine exactly, and both accumulate in
+Both reproduce a specific reference routine exactly[^at2], and both accumulate in
 `long double` on purpose (see section 3). The file lives in `core/internal`
 because it has no GPU dependency and is shared by two callers that must never
 disagree (see section 2).
@@ -43,9 +43,9 @@ GPU, and its output is diffed against these functions. So a single edit here
 moves the reference for every path at once, and there is no second copy that
 could quietly drift out of sync.
 
-Each function corresponds to a named ADMIXTOOLS 2 routine:
+Each function corresponds to a named reference routine:
 
-| This function | ADMIXTOOLS 2 equivalent | What it produces |
+| This function | Reference equivalent | What it produces |
 |---|---|---|
 | `matrix_jackknife_est_col` | `matrix_jackknife_est_full`, one population-combination column | the global per-combination estimate (the target the results are centered on) |
 | `f2blocks_pair_est` | `f2(array)$est` for one pair series | the recentering value for one f2 pair |
@@ -134,7 +134,7 @@ For the chosen column, over the blocks where `numer` is finite and `cnt > 0`:
    y = n_finite · tot2 − Σloo + weighted_loo_mean
    ```
 
-   This is the ADMIXTOOLS 2 `matrix_jackknife_est_full` formula for the column.
+   This is the `matrix_jackknife_est_full` formula for the column[^at2].
 
 ### The deliberate narrow-to-`double` finiteness gate
 
@@ -144,8 +144,8 @@ The finiteness check on `loo` is done by narrowing it to `double` first:
 if (!std::isfinite(static_cast<double>(loo))) continue;
 ```
 
-This is intentional and load-bearing for parity. ADMIXTOOLS 2 holds `loo` as an
-R double, so a value that is finite as a `long double` but overflows to infinity
+This is intentional and load-bearing for parity. The parity reference holds `loo`
+as an R double[^at2], so a value that is finite as a `long double` but overflows to infinity
 when stored as a `double` must be treated as non-finite here too — otherwise a
 *different set of blocks* would survive and the result could diverge from the
 oracle. The test therefore runs in `double`, not the `long double`
@@ -162,7 +162,7 @@ double f2blocks_pair_est(const std::vector<double>& arr,
 ```
 
 Computes the jackknife estimate for one f2 pair series — the value used to
-recenter that pair. This reproduces ADMIXTOOLS 2's `f2(array)$est`.
+recenter that pair. This reproduces the `f2(array)$est` estimate[^at2].
 
 ### Inputs
 
@@ -214,3 +214,7 @@ Both are marked `[[nodiscard]]`, so a caller cannot accidentally drop the
 returned estimate. Both are pure functions of their inputs — no global state, no
 allocation of persistent buffers, no CUDA — which is what lets them serve as the
 single trusted reference for the GPU path.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

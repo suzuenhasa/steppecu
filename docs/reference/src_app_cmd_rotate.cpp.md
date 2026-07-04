@@ -85,9 +85,9 @@ over the pool's index order (the subset made of the earliest pool positions come
 first). For a pool `[A, B, C]` enumerated over sizes 2 then 3, the emitted order is
 `{A,B}, {A,C}, {B,C}, {A,B,C}` — indices 0, 1, 2, 3.
 
-This exact order reproduces the order used by the reference result generator (which
-builds the expected "golden" outputs using R's `combn` function: all pairs, then all
-triples, each in lexicographic order). Because both sides walk the subsets the same
+This exact order reproduces the order used by the reference result generator[^at2]
+(which builds the expected "golden" outputs using R's `combn` function: all pairs,
+then all triples, each in lexicographic order). Because both sides walk the subsets the same
 way, `model_index` N always refers to the same subset on both sides, so a steppe
 result row can be lined up directly against the corresponding reference row. Changing
 the enumeration order would silently break that alignment even though every
@@ -188,3 +188,7 @@ The first population in the right list is treated as a distinguished base outgro
 so the number of right populations reported in the table is the size of the right
 list **minus one**. This matches the count recorded in the engine's own metadata, so
 the table's reported right count and the engine's internal count always agree.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

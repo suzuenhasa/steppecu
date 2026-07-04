@@ -78,7 +78,7 @@ keep the GPU aligned with the FP64 oracle.
 ### Survivor-block compaction (`d_surv`)
 
 A jackknife block is treated as *missing* when any population pair has zero valid SNP
-overlap in that block (this mirrors ADMIXTOOLS 2 reading f2 with `remove_na = TRUE`).
+overlap in that block (this mirrors the parity f2 read with `remove_na = TRUE`[^at2]).
 Missing blocks are dropped from the analysis. The mechanism is:
 
 - A keep-mask kernel (section 4) flags which resident blocks survive.
@@ -577,3 +577,7 @@ Raises the rising threshold to the new K-th-largest `|z|`:
 `d_tau[0] = max(d_tau[0], d_sorted_absz[K-1])` when the mode is `1` (top-K) and `K > 0`.
 It is monotone — it never lowers the threshold — and it is a no-op in minimum-z mode
 (mode `0`, where `tau` stays pinned at the `min_z` floor). A single device thread.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -46,14 +46,14 @@ the joint fit: instead of computing each f2 in isolation, it regresses the whole
 f2/f3/f4 family onto a common basis so the numbers are internally consistent, and
 the resulting f2 tensor is the smoothed result of that fit.
 
-This matches ADMIXTOOLS 2's `qpfstats` (its R ridge-regression path). The
+This reproduces the `qpfstats` R ridge-regression path[^at2]. The
 implementation is pinned to that reference so the numbers agree.
 
 ---
 
 ## 3. The smoothing algorithm
 
-The computation follows ADMIXTOOLS 2's `qpfstats` in five steps. Concrete counts
+The computation follows the `qpfstats` smoothing in five steps[^at2]. Concrete counts
 below are for a run over N = 9 populations.
 
 ### Step 1 — Enumerate the population combinations
@@ -107,29 +107,29 @@ global coefficient vector.
 Scatter each block's pairwise coefficients back into a symmetric P × P matrix (the
 off-diagonal entries; the diagonal stays zero). Then recenter every block by
 subtracting its own f2 estimate and adding back the global coefficients — the
-recentering step that ADMIXTOOLS 2 applies. The recentered, per-block, symmetric,
+recentering step[^at2]. The recentered, per-block, symmetric,
 zero-diagonal tensor is the **smoothed f2 result**.
 
 ---
 
 ## 4. Parity pins
 
-Several choices are fixed so that qpfstats reproduces ADMIXTOOLS 2 exactly. These
+Several choices are fixed so that qpfstats reproduces the reference exactly[^at2]. These
 are inherited from the D-statistic path and are proven against the reference.
 
 - **Allele frequency.** Frequencies use the plain reference-count / allele-count / 2
   formula, forced to treat every sample as **diploid**. This is *not* the per-sample
-  ploidy auto-detection that f2-extraction can do; it is the fixed diploid rule that
-  matches ADMIXTOOLS 2.
-- **Jackknife blocks.** The block assignment is byte-for-byte identical to
-  ADMIXTOOLS 2's block-length computation.
+  ploidy auto-detection that f2-extraction can do; it is the fixed diploid parity
+  rule[^at2].
+- **Jackknife blocks.** The block assignment is byte-for-byte identical to the
+  reference block-length computation.
 - **SNP mask.** The "all SNPs" rule applies per (combination, block): a SNP counts
   only where all four populations of that combination have data. There is **no**
   per-SNP missing-fraction filter, no minor-allele-frequency filter, and no
   drop-monomorphic filter. Autosomes-only filtering is **on**.
 
 Every one of the three statistic families (f2, f3, f4) is always included — the full
-basis, matching the ADMIXTOOLS 2 default.
+basis, the parity default[^at2].
 
 ---
 
@@ -138,8 +138,8 @@ basis, matching the ADMIXTOOLS 2 default.
 The smoothed result is stored as steppe's per-block f2 tensor type
 (`F2BlockTensor`), laid out as `f2[i + P·j + P·P·b]` for population indices `i`, `j`
 and block index `b`, where `P` is the number of populations and there are `n_block`
-blocks. Each block's slice is symmetric with a **zero diagonal** — the ADMIXTOOLS 2
-convention, since the tensor is built purely from the off-diagonal pair basis.
+blocks. Each block's slice is symmetric with a **zero diagonal** — the parity
+convention[^at2], since the tensor is built purely from the off-diagonal pair basis.
 
 The tensor drops straight into steppe's `write_f2_dir` writer, so the smoothed f2
 can be saved to disk and later read by qpAdm, f4, or qpGraph like any ordinary
@@ -181,7 +181,7 @@ used.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `f2` | `F2BlockTensor` | — | The smoothed per-block f2 tensor (layout and conventions described in section 5). Its per-pair variance slot carries the replicated per-block kept-SNP counts, and its block-sizes carry the per-block SNP counts. |
-| `pop_labels` | `vector<string>` | — | The population labels in index order along the P axis — sorted ascending, which is the order ADMIXTOOLS 2 uses for the tensor's dimension names. |
+| `pop_labels` | `vector<string>` | — | The population labels in index order along the P axis — sorted ascending, which is the order used for the tensor's dimension names[^at2]. |
 | `status` | `Status` | `Status::Ok` | The per-call outcome. `Ok` means the result is populated. A structural domain problem (such as a non-invertible factor) is reported here as a value rather than thrown. |
 | `precision_tag` | `Precision::Kind` | `Fp64` | Which arithmetic actually drove the smoothing solve, recorded for provenance and the run's metadata. By the landed precision policy the solve's Cholesky factor and triangular solve run in native double precision, while the matrix-multiply sub-steps run emulated-FP64; this tag records the engaged mode. |
 
@@ -206,8 +206,8 @@ QpfstatsResult run_qpfstats(const std::string& geno,
 | Parameter | Meaning |
 |---|---|
 | `geno`, `snp`, `ind` | Paths to the EIGENSTRAT / TGENO genotype triple (the genotype matrix, the SNP list, and the individual list). |
-| `pops` | The set of population names to smooth over. The function **sorts them ascending** (the ADMIXTOOLS 2 dimension-name order) and reads **only** these populations from the dataset — not the whole file. |
-| `blgsize_morgans` | The jackknife block size, in **Morgans**. ADMIXTOOLS 2's default is 0.05 Morgans (5 centimorgans). |
+| `pops` | The set of population names to smooth over. The function **sorts them ascending** (the parity dimension-name order[^at2]) and reads **only** these populations from the dataset — not the whole file. |
+| `blgsize_morgans` | The jackknife block size, in **Morgans**. The parity default is 0.05 Morgans (5 centimorgans)[^at2]. |
 | `precision` | Governs **only** the matrix-multiply sub-steps of the solve (the `xᵀx` and `xᵀ·numerator` products). The Cholesky factor and the triangular solve stay in native double precision regardless — the numerically delicate carve-out. |
 | `resources` | The GPU resources. The per-SNP numerator reduction and the smoothing solve are routed through this handle's first GPU backend, device-resident. |
 
@@ -215,3 +215,7 @@ Fixed behaviors, not parameters: ploidy is forced diploid, the "all SNPs" mask i
 used, autosomes-only is on, and all of f2 / f3 / f4 are included (the full basis).
 An I/O fault propagates out as an exception rather than being folded into the result
 status.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

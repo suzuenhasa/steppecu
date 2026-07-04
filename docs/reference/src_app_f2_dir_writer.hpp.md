@@ -14,8 +14,8 @@ directory round-trips by construction. Earlier work shipped only the reader; thi
 header is the writer that finally lets steppe produce the directories the reader
 consumes.
 
-The on-disk format is shaped to match ADMIXTOOLS 2's f2-blocks directories, so the
-two tools speak the same interchange format.
+The on-disk format is shaped to match the reference implementation's f2-blocks
+directories[^at2], so the two tools speak the same interchange format.
 
 The header is plain C++20 with no CUDA code. It reaches only into a small,
 CUDA-free description of the binary file's header layout (the shared home for the
@@ -105,7 +105,7 @@ These echo the resolved filter settings so a run can be reproduced exactly.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `maf_min` | `double` | `0.0` | Minimum minor-allele frequency applied. |
-| `geno_max_missing` | `double` | `1.0` | Maximum per-SNP missing fraction (the ADMIXTOOLS 2 `maxmiss` filter). |
+| `geno_max_missing` | `double` | `1.0` | Maximum per-SNP missing fraction (the `maxmiss` filter[^at2]). |
 | `mind_max_missing` | `double` | `1.0` | Maximum per-sample missing fraction. |
 | `autosomes_only` | `bool` | `false` | Whether only autosomes were kept. |
 | `drop_monomorphic` | `bool` | `false` | Whether no-variation SNPs were dropped. |
@@ -205,3 +205,7 @@ large source genotype file on a **background thread**, overlapping the tens-of-
 seconds whole-file hash with the GPU decode-and-f2 pipeline, then pre-fill
 `F2DirMeta.geno_sha256` before calling `write_f2_dir` (which then skips re-hashing
 it — see the opt-in in section 5).
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

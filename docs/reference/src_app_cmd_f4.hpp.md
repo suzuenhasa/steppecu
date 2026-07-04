@@ -21,8 +21,8 @@ uncertainty method the rest of steppe uses, where the genome is cut into
 blocks, the statistic is recomputed leaving each block out in turn, and the
 spread of those recomputations gives the standard error. The standard error
 here comes specifically from the diagonal of that jackknife (the per-quartet
-variance), not a full cross-quartet covariance. The numbers are meant to match
-what ADMIXTOOLS 2 produces for the same statistic.
+variance), not a full cross-quartet covariance. The numbers match the reference
+for the same statistic[^at2].
 
 The header itself is tiny — one function declaration plus its contract. The
 substance is the contract and the surrounding rules, described below.
@@ -67,8 +67,8 @@ command accepts exactly one of them per run:
 
 - **Row-aligned columns** — four parallel lists given as `--pop1`, `--pop2`,
   `--pop3`, and `--pop4`. Row *i* of each list forms one quartet, so the four
-  lists must be the same length. This mirrors ADMIXTOOLS 2's `f4` call with
-  `comb = FALSE`, where the four population columns are lined up row by row
+  lists must be the same length. This mirrors the `f4` call with
+  `comb = FALSE`[^at2], where the four population columns are lined up row by row
   rather than combined into every possible grouping.
 - **A single quartet convenience form** — `--pops A,B,C,D`, exactly four names,
   which is just shorthand for one quartet. This exists so a quick one-off f4
@@ -139,3 +139,7 @@ two categories:
 The practical rule for a caller: a nonzero exit means the command couldn't run,
 while a zero exit means it ran and you should read the per-row `status` (and the
 estimate/standard error) to learn what actually happened for each quartet.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

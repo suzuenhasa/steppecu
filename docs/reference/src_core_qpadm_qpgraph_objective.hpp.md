@@ -24,9 +24,9 @@ headers. It serves two roles:
    mirrors these same steps; this header is the readable, authoritative statement of
    what that math is.
 
-The whole calculation matches the corresponding routine in ADMIXTOOLS 2 (the
-function it calls `optimweightsfun`), step for step, so that steppe's qpGraph fit
-lands on the same numbers.
+The whole calculation reproduces the corresponding reference routine (the
+`optimweightsfun` function), step for step, so that steppe's qpGraph fit
+lands on the same numbers[^at2].
 
 Four functions build up the objective, smallest to largest: `build_ppwts_2d`
 (section 3) assembles a matrix of edge-weight products; `nnls_active_set`
@@ -170,7 +170,7 @@ solve. On success `bl` holds the non-negative solution.
 
 | Name | Value | What it's for |
 |---|---|---|
-| `nnls_eps` | `1e-12` | The single tolerance used for three related jobs: the threshold for deciding a gradient is "positive enough" to free a variable (the KKT test), the floor below which a solved variable counts as non-positive, and the guard in the ratio-test denominator. **This value is frozen for exact agreement with ADMIXTOOLS 2's constrained solve. Do not change its magnitude** — the name may be kept or renamed, but `1e-12` is what reproduces the reference results. |
+| `nnls_eps` | `1e-12` | The single tolerance used for three related jobs: the threshold for deciding a gradient is "positive enough" to free a variable (the KKT test), the floor below which a solved variable counts as non-positive, and the guard in the ratio-test denominator. **This value is a frozen parity literal for exact agreement with the constrained solve[^at2]. Do not change its magnitude** — the name may be kept or renamed, but `1e-12` is what reproduces the reference results. |
 | `max_iter` | `3·n + 30` | The iteration cap, shared by the outer KKT loop and the inner passive re-solve loop. It scales with the number of variables (`n`) so larger systems get proportionally more steps, plus a fixed cushion of 30 for very small systems. It bounds the work so a pathological case cannot loop forever. |
 
 ---
@@ -203,18 +203,18 @@ singular.
    `diag(cc) += fudge · mean(diag(cc))`. This is proportional to the average diagonal
    magnitude, so it scales with the problem and nudges a nearly-singular system toward
    being solvable without materially changing a well-conditioned one. The `fudge`
-   factor is passed in by the caller. This matches ADMIXTOOLS 2's ridge term.
+   factor is passed in by the caller. This is the parity ridge term[^at2].
 
 3. **Symmetric scaling to a unit diagonal.** Compute `sc = sqrt(diag(cc))` and rescale
    the system so its diagonal becomes all ones: divide `q` by `sc`, and divide each
    `cc[i,j]` by `sc[i]·sc[j]`. Solving the scaled system and then dividing the answer
    back by `sc` improves numerical conditioning. This is a Jacobi (diagonal)
-   preconditioner and again mirrors ADMIXTOOLS 2.
+   preconditioner and again mirrors the reference.
 
 4. **Solve.** If `constrained` is true, solve the scaled system with the non-negative
    solver from section 4 (edge lengths held ≥ 0). Otherwise solve it with a plain LU
-   solve, which permits negative lengths. steppe's default matches ADMIXTOOLS 2's
-   golden case, which is the constrained mode.
+   solve, which permits negative lengths. steppe's default is the constrained mode,
+   matching the parity golden case[^at2].
 
 5. **Unscale.** Divide the scaled solution back by `sc` to recover the true edge
    lengths and write them into `bl`.
@@ -241,7 +241,7 @@ double qpgraph_score(const QpGraphModel& m, const double* theta,
 
 This is the function an outer search calls. Given a graph `m` and mixture proportions
 `theta`, it runs all five stages from section 2 and returns the single score. It is
-ADMIXTOOLS 2's `optimweightsfun`.
+the `optimweightsfun` objective[^at2].
 
 Internally it: fills the centered per-edge weights for `theta`, builds `ppwts_2d`,
 fits the edge lengths with `opt_edge_lengths`, forms the model-predicted statistics
@@ -271,3 +271,7 @@ pre-size it to `m.npair` before the call.** It is written element by element
 (`(*out_fit)[k] = …`) and never resized inside the function. Passing a non-null but
 too-small `out_fit` is undefined behavior. If you do not want the predicted
 statistics, pass `nullptr`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 `src/device/cuda/dates_kernel.cu` holds the GPU kernels for **DATES admixture
-dating** — the method that estimates *how many generations ago* two ancestral
+dating**[^dates] — the method that estimates *how many generations ago* two ancestral
 populations mixed by measuring how the correlation between ancestry-informative
 markers decays with genetic distance along the chromosome.
 
@@ -315,3 +315,7 @@ Shared conventions:
   launching.
 - The curve-fit wrapper marks a coarse profiling range around itself; the marker
   compiles to nothing unless profiling is explicitly enabled at build time.
+
+---
+
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

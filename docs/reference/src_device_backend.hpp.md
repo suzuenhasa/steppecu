@@ -115,11 +115,11 @@ the `m = nl·nr` entries of a per-block f4 matrix are laid out **row-major** ove
 `(i, j)` as `k = j + nr·i`, where `i` runs over the left sources and `j` over the
 right populations.
 
-This is not an arbitrary choice — it is the same order ADMIXTOOLS 2 uses to build
-its equivalent quantities, and the covariance matrix, the jackknife, and the
+This is not an arbitrary choice — it is the parity order for the equivalent
+quantities[^at2], and the covariance matrix, the jackknife, and the
 weight solve all index into these flattened vectors assuming exactly this order.
 Using the transposed order `i + nl·j` instead would silently mismatch the f4
-vector against the covariance matrix and break agreement with ADMIXTOOLS 2. Any
+vector against the covariance matrix and break parity. Any
 code touching these flattened arrays must honor `k = j + nr·i`.
 
 ---
@@ -149,7 +149,7 @@ single SNP for that individual (most-significant-bit first within a byte).
 | `ploidy` | Uniform fallback ploidy used only when `sample_ploidy` is null (default 2). |
 | `detect_ploidy_on_device` | Ask the backend to derive per-sample ploidy itself. |
 
-Ploidy handling deserves a note. ADMIXTOOLS 2's pseudo-haploid auto-detection
+Ploidy handling deserves a note. The pseudo-haploid auto-detection[^at2]
 works *per sample* — a sample that ever shows a heterozygous call is diploid,
 otherwise it is pseudo-haploid — so mixed-ploidy populations (real for ancient
 DNA) are handled correctly. `sample_ploidy`, when non-null, gives that per-sample
@@ -222,7 +222,7 @@ the diagonal identically by construction, so that a full-matrix comparison
 
 **Vpair is retained, not discarded.** `vpair` is kept because it is the weight the
 block jackknife needs later. The per-pair divide and the later weighting must
-compose to ADMIXTOOLS 2's definition without double-normalizing. The diagonal
+compose to the parity definition without double-normalizing[^at2]. The diagonal
 `vpair(i, i)` is population `i`'s own valid-SNP count and is likewise filled, not
 zeroed.
 
@@ -246,8 +246,8 @@ fit across the seam. They all use the flatten order from section 4.
 | `block_sizes` | `[n_block]` per-surviving-block SNP count — the jackknife weight. |
 
 The block count is the *survivor* count for a reason. A jackknife block in which
-any population pair has zero jointly-valid SNPs is a missing block; ADMIXTOOLS 2
-drops such blocks entirely before the jackknife (rather than imputing zero, which
+any population pair has zero jointly-valid SNPs is a missing block; such
+blocks are dropped entirely before the jackknife[^at2] (rather than imputing zero, which
 would bias f4 toward zero and inflate variance). So the f4 block arrays are
 compacted to the survivors, and the survivor SNP counts are carried here directly.
 When there are no missing blocks — the common case — this equals the full block
@@ -292,8 +292,8 @@ move.
 ### `RankSweep` — the rank test over all candidate ranks
 
 The qpWave/qpAdm rank test over ranks `0 … rmax`. It carries both the per-rank
-chi-squared/degrees-of-freedom/p-value and the nested "rankdrop" table that
-ADMIXTOOLS 2 produces (rows ordered by descending rank, each row compared to the
+chi-squared/degrees-of-freedom/p-value and the nested "rankdrop" table[^at2]
+(rows ordered by descending rank, each row compared to the
 next), plus the chosen rank and the numerical rank of the covariance.
 
 | Field | Meaning |
@@ -610,7 +610,7 @@ precision.
 | `rank_sweep` | The rank test over all candidate ranks, the nested rankdrop table, and the chosen rank. Native double. |
 | `provides_rank_sweep` | Capability query: does this backend really implement `rank_sweep`? |
 | `gls_weights` | The generalized-least-squares admixture weights via alternating refinement, then the constrained solve, then normalization. Native double. |
-| `gls_weights_loo_batched` | All leave-one-block-out weight re-fits as one batched device solve (reusing the same inverse, matching ADMIXTOOLS 2). Native double. |
+| `gls_weights_loo_batched` | All leave-one-block-out weight re-fits as one batched device solve (reusing the same inverse, for parity[^at2]). Native double. |
 | `se_from_wmat` | The full leave-one-block-out standard-error reduction folded into one call so it stays on the device that produced the replicate matrix. Native double. |
 
 ### Model search
@@ -682,3 +682,7 @@ so the host orchestrator can use them without naming the CUDA backend.
   single source-of-truth predicate the device path uses to size its per-thread
   arrays, so this gate can never drift wider than those arrays (a wider gate would
   overflow them).
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

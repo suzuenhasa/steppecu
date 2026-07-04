@@ -204,7 +204,7 @@ check that rejects a nonsensical value up front:
 
 ---
 
-## 10. Genotype filters and the ADMIXTOOLS 2 parity defaults
+## 10. Genotype filters and the parity defaults
 
 The read-time genotype filters are copied into the filter struct, again with range
 checks:
@@ -216,17 +216,17 @@ checks:
 | `--mind-max-miss` | must lie between 0 and 1 |
 
 Two flags get special default treatment for the `extract-f2` command specifically,
-to match ADMIXTOOLS 2:
+to match the parity behavior[^at2]:
 
 - **Autosomes only.** For `extract-f2`, restricting to autosomes (chromosomes 1–22)
-  is turned on by default, because ADMIXTOOLS 2's f2 extraction restricts to
+  is turned on by default, because the f2 extraction restricts to
   autosomes by default. Every other command keeps the struct default (off).
 - **Drop monomorphic SNPs.** For `extract-f2`, dropping SNPs with no variation is
-  also on by default, because ADMIXTOOLS 2 builds f2 on the polymorphic subset only,
+  also on by default, because f2 is built on the polymorphic subset only,
   dropping every SNP that is monomorphic across the analysis populations before it
   partitions the blocks. Matching this changes the kept-SNP count and the per-block
   SNP counts — which in turn changes the jackknife standard errors — to line up with
-  ADMIXTOOLS 2. It never moves the f2 point estimates, because a monomorphic SNP
+  the parity SNP set. It never moves the f2 point estimates, because a monomorphic SNP
   contributes nothing to any f2 difference; it only aligns the SNP set and the block
   partition. Every other command keeps the struct default (off).
 
@@ -241,7 +241,7 @@ SNPs:
 | Token | Behavior |
 |---|---|
 | `drop` | drop palindromic SNPs — the default and the frozen, bit-identical original behavior |
-| `keep` | keep them (this matches ADMIXTOOLS 2's default) |
+| `keep` | keep them (this matches the parity default[^at2]) |
 | `flip` | accepted as a documented, not-yet-implemented token; it is stored as `Flip` but currently behaves like `keep` — it does not drop palindromes and performs no frequency-based reorientation yet |
 
 An unknown token is rejected. When the option is absent the mode stays at `drop`, so
@@ -271,9 +271,9 @@ selection.
 `--blgsize` sets the jackknife block width, and it is worth understanding the units
 carefully.
 
-ADMIXTOOLS 2's `blgsize` is expressed in **Morgans** (its default of `0.05` Morgans
-is the same as 5 centimorgans). To make a bare `--blgsize 0.05` reproduce ADMIXTOOLS
-2's block partition exactly, steppe's flag also speaks Morgans. But `RunConfig`
+The `blgsize` block width is expressed in **Morgans**[^at2] (its default of `0.05` Morgans
+is the same as 5 centimorgans). To make a bare `--blgsize 0.05` reproduce the reference
+block partition exactly, steppe's flag also speaks Morgans. But `RunConfig`
 stores the block width in **centimorgans**, so the Morgans-to-centimorgans
 conversion happens right here at the command-line seam, using a single named
 conversion constant. The stored field is never reinterpreted as Morgans — only the
@@ -286,7 +286,7 @@ flag's input unit is Morgans. The value must be strictly greater than 0.
 ### Ploidy policy
 
 `--ploidy` controls the pseudo-haploid handling in f2 extraction. The default is
-automatic, matching ADMIXTOOLS 2's per-sample pseudo-haploid detection; passing `1`
+automatic, matching the per-sample pseudo-haploid detection[^at2]; passing `1`
 or `2` forces a uniform pseudo-haploid or diploid ploidy for every sample. The
 actual detection or forcing happens later, against the gathered genotypes.
 
@@ -337,3 +337,7 @@ Two path behaviors are worth calling out:
   range-checked: `--numstart` (the number of random restarts) must be at least 1,
   and `--max-nadmix` (the ceiling on admixture nodes, which this version supports at
   0 or 1) must be at least 0. `--diag-f3` and `--constrained` are plain copies.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

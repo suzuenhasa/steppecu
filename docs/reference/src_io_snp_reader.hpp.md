@@ -43,7 +43,7 @@ Column 3 is the position of the SNP along the genetic linkage map, expressed in
 as read, with no unit conversion. It is consumed directly by the shared
 block-partitioning rule, which also speaks in Morgans. Because the reader hands the
 value through unchanged, block boundaries computed downstream line up exactly with
-the reference tooling.
+the reference tooling[^at2].
 
 ### Column 5 — the reference allele, which fixes allele-frequency polarity
 
@@ -91,7 +91,7 @@ entire point of calling it.
 records in file order and stops. Passing `SIZE_MAX` reads every SNP. Reading a
 prefix this way is used, for example, to read the first 100,000 SNPs for a smaller
 run — and because it is always the *first* N records in file order, it reads exactly
-the same prefix that the reference decoder does, so the two stay aligned.
+the same prefix that the reference decoder[^at2] does, so the two stay aligned.
 
 ### Chromosome codes
 
@@ -127,7 +127,7 @@ Each record is classified by how many whitespace-separated tokens it has:
 The genetic position (column 3) is parsed with the same locale-free,
 correctly-rounded decimal-to-`double` conversion used for chromosomes, consuming the
 whole token. Using a correctly-rounded parser is what makes downstream block
-boundaries match the reference tooling exactly.
+boundaries match the reference tooling[^at2] exactly.
 
 There is one extra guard that is easy to overlook. That parser will happily accept
 the text `"inf"` and `"nan"` as valid floating-point values. If such a value slipped
@@ -159,3 +159,7 @@ Every diagnostic message includes the **1-based line number** where the problem
 occurred, so a bad record is easy to locate. As a practical convenience, a single
 trailing blank line at end-of-file is tolerated (many editors add one), and does not
 count as an interior blank line.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

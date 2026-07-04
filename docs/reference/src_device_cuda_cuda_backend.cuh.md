@@ -217,8 +217,8 @@ order, which is what the downstream block assignment depends on.
 
 ### Ploidy detection and transpose
 
-- `detect_sample_ploidy_device` runs, on the GPU, the per-sample ploidy pre-pass
-  that ADMIXTOOLS 2 does — one thread per individual over the same bytes the decode
+- `detect_sample_ploidy_device` runs, on the GPU, the per-sample ploidy pre-pass[^at2]
+  — one thread per individual over the same bytes the decode
   reads. It is a direct port of the host detector and is bit-identical by
   construction because it is all integer and bit operations.
 - `transpose_to_canonical` performs, on the GPU, the transpose-plus-gather-plus-repack
@@ -305,8 +305,8 @@ above and re-checked here.
 ### Survivor blocks
 
 `device_survivor_blocks` returns, for a resident f2, the ascending list of block
-ids that survive missing-data removal (matching ADMIXTOOLS 2's read-with-remove-NA
-behavior). It runs an on-device keep kernel over the paired-variance tensor and
+ids that survive missing-data removal (matching the read-with-remove-NA
+behavior[^at2]). It runs an on-device keep kernel over the paired-variance tensor and
 returns the indices that pass. If the handle carries no paired-variance tensor (an
 upload path that guarantees no missing blocks), every block survives and no kernel
 runs. The result depends only on the loaded f2, not on any model, so callers
@@ -352,7 +352,7 @@ It comes in the usual pair of overloads plus a shared core:
 ## 10. The DATES weighted-LD engine
 
 DATES estimates admixture dates from the decay of weighted linkage-disequilibrium
-correlation with genetic distance. The whole per-sample pipeline runs on the GPU and
+correlation with genetic distance[^dates]. The whole per-sample pipeline runs on the GPU and
 is flat in the number of SNPs because it never forms the ~10^12 SNP-pair object;
 instead it computes the correlation at each lag as an inverse FFT of a power
 spectrum (the standard FFT trick), using cuFFT.
@@ -665,3 +665,8 @@ are on the hot path or needed during construction.
   `static` so it can run while the first member is still being initialized, when no
   `this` and no other member is available yet. It throws on an invalid device number
   — a backend cannot be bound to a device that does not exist.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
+[^dates]: **DATES** — admixture dating by ancestry-covariance decay. Chintalapati M, Patterson N, Moorjani P. *The spatiotemporal patterns of major human admixture events during the European Holocene.* eLife 2022;11:e77625.

@@ -24,8 +24,8 @@ Two concepts recur throughout:
   `nadmix = 1` adds exactly one admixed population. This file covers the bounded
   space of `nadmix ≤ 1`.
 
-Everything is generated to exactly reproduce ADMIXTOOLS 2's own enumeration. The
-counts this file produces match ADMIXTOOLS 2's `numtrees` / `numtreesadmix`
+Everything is generated to exactly reproduce the reference enumeration[^at2]. The
+counts this file produces match the `numtrees` / `numtreesadmix`
 functions one-for-one, and each generated topology is an edge list that the existing
 single-graph parser can consume directly, with no special-case handling.
 
@@ -71,7 +71,7 @@ one leaf.
 - **Order.** A canonical depth-first traversal, so the sequence — and therefore each
   topology's `id` — is identical on every run.
 - **How many.** Exactly `(2n − 3)!!` trees for `n` leaves (the double factorial:
-  `1 × 3 × 5 × …`). This equals ADMIXTOOLS 2's `numtrees(n)`. As a checked example,
+  `1 × 3 × 5 × …`). This equals `numtrees(n)`[^at2]. As a checked example,
   5 leaves produce 105 trees.
 
 ---
@@ -89,14 +89,14 @@ complete, de-duplicated `nadmix = 1` set.
   node so that it draws from an unordered pair of two distinct edges. The two edges
   must be *incomparable* — neither lies on the path from the root to the other (one
   is not an ancestor of the other) — because an admixture node genuinely mixes two
-  separate lineages. This mirrors ADMIXTOOLS 2's labeled construction of choosing 2
-  of the `2n − 2` edges.
+  separate lineages. This mirrors the labeled construction of choosing 2
+  of the `2n − 2` edges[^at2].
 - **Why de-duplication is needed.** That labeled construction generates the same
   underlying shape more than once (different edge labelings, one real graph). The
   function collapses these to distinct shapes using the canonical hash from section
   6, keeping one representative of each.
-- **How many.** Exactly the count of non-isomorphic graphs ADMIXTOOLS 2's
-  `generate_all_graphs(n, 1)` yields. As a checked example, 5 leaves produce 1485
+- **How many.** Exactly the count of non-isomorphic graphs
+  `generate_all_graphs(n, 1)` yields[^at2]. As a checked example, 5 leaves produce 1485
   distinct one-admixture graphs.
 
 ---
@@ -171,3 +171,7 @@ filtered to stay inside the bounded space (`nadmix ≤ max_nadmix`).
 Unlike the whole-space enumerators of sections 3–5, where `id` is a genuine, stable
 enumeration index, neighbor results are **not** indexed. Identify, de-duplicate, and
 compare neighbors by their `hash` (their shape identity), never by `id`.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

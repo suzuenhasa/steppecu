@@ -19,7 +19,7 @@ For every quadruple, `run_dstat` returns four numbers:
 D is a *ratio* of two per-SNP sums accumulated across the genome: a numerator
 and a denominator. Reading it directly from genotypes (rather than from a
 precomputed f2 cache) is what makes this the "genotype path." The whole routine
-is written to reproduce ADMIXTOOLS 2's `qpDstat` in genotype mode — specifically
+reproduces `qpDstat` in genotype mode[^at2] — specifically
 its `allsnps=TRUE`, `f4mode=FALSE`, `blgsize=0.05` configuration — number for
 number.
 
@@ -58,14 +58,14 @@ its own.
 
 ## 3. The three parity pins
 
-Matching ADMIXTOOLS 2 exactly requires three specific choices, each verified
+Matching the reference exactly requires three specific choices[^at2], each verified
 against the reference on real data. Getting any one of them wrong changes the
 reported D. They are described here as "pins" because they are frozen: they are
 what makes the output byte-identical to the reference, and they must not drift.
 
 ### Pin 1 — allele frequency uses forced diploid counts
 
-ADMIXTOOLS 2 computes each population's allele frequency as the plain ratio
+The reference computes each population's allele frequency as the plain ratio
 `(sum of reference-allele counts) / (2 × number of observed alleles)` — with **no
 pseudo-haploid adjustment**. To reproduce that, `run_dstat` forces every sample
 to be treated as diploid (ploidy = 2) when it decodes allele frequencies.
@@ -82,7 +82,7 @@ sits near zero. Forcing diploid makes the frequencies match the reference's
 The jackknife blocks are built by walking the kept SNPs in order and cutting a
 new block whenever the genetic distance since the last cut exceeds the block
 size, resetting at each chromosome boundary. This block assignment is
-byte-identical to ADMIXTOOLS 2's block-length routine, computed over the
+byte-identical to the reference block-length routine, computed over the
 autosome-filtered SNP set. The block size default is `0.05` Morgans (5
 centimorgans), matching the reference.
 
@@ -109,7 +109,7 @@ Two small constants are defined at the top of the file.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPloidyDiploid` | `2` | The forced-diploid ploidy that implements Pin 1. Every sample is decoded as diploid so that allele frequencies are the plain reference-count / (2 × observed) ratio, with no pseudo-haploid adjustment. This is the value that makes the frequencies match ADMIXTOOLS 2. |
+| `kPloidyDiploid` | `2` | The forced-diploid ploidy that implements Pin 1. Every sample is decoded as diploid so that allele frequencies are the plain reference-count / (2 × observed) ratio, with no pseudo-haploid adjustment. This is the value that makes the frequencies match for parity[^at2]. |
 | `kPrimaryGpu` | `0` | The index of the single GPU this entry point uses. `run_dstat` is a single-GPU routine; it always uses the primary device. This mirrors the same choice in `f4.cpp` and `f4ratio.cpp`. |
 
 ---
@@ -270,3 +270,7 @@ The contract, restated: a *domain* outcome (nothing to compute, or a single
 degenerate quadruple) is a not-a-number sentinel with an OK status — never a
 thrown exception. Only a genuine *file* fault (missing or unreadable input)
 throws, and that is handled one level up as an I/O error.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

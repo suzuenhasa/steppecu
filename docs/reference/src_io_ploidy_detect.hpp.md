@@ -4,14 +4,14 @@
 
 `src/io/ploidy_detect.hpp` declares one small function that classifies each
 sample in a genotype tile as either **diploid** (ploidy 2) or **pseudo-haploid**
-(ploidy 1). This is the step that reproduces ADMIXTOOLS 2's automatic
-pseudo-haploid handling (its `adjust_pseudohaploid = TRUE` behavior).
+(ploidy 1). This is the step that performs the automatic pseudo-haploid
+handling[^at2] (the `adjust_pseudohaploid = TRUE` behavior).
 
 Why this matters: pseudo-haploid samples — common in ancient DNA, where a single
 read is used to represent a genotype — use a different per-sample counting
 convention than true diploid samples in the downstream f2 statistic. Getting the
-ploidy label right per sample is what makes steppe's f2 estimates match
-ADMIXTOOLS 2 on datasets that mix the two.
+ploidy label right per sample is what keeps steppe's f2 estimates at parity
+on datasets that mix the two.
 
 The whole header is a single function declaration plus the reasoning behind it.
 It sits at the front of the decode path: after the reader has gathered the
@@ -23,8 +23,8 @@ carried alongside the tile so the decode uses the correct per-sample convention.
 
 ## 2. The detection rule
 
-The rule is deliberately simple and is copied exactly from ADMIXTOOLS 2 (verified
-against admixtools version 2.0.10, its `cpp_readgeno.cpp` ploidy routines):
+The rule is deliberately simple and reproduces the parity ploidy rule[^at2]
+(verified against admixtools version 2.0.10, its `cpp_readgeno.cpp` ploidy routines):
 
 1. Start every sample at ploidy **1** (pseudo-haploid). That is the default
    assumption.
@@ -85,11 +85,11 @@ Detection scans a bounded prefix of each sample's SNPs rather than the whole
 genome.
 
 - **The window length** is `min(kPloidyDetectSnps, tile.n_snp)` SNPs.
-- `kPloidyDetectSnps` is **1000** (defined in `eigenstrat_format.hpp`). This
-  matches ADMIXTOOLS 2's `ntest` default of 1000 SNPs.
+- `kPloidyDetectSnps` is **1000** (defined in `eigenstrat_format.hpp`). This is
+  the parity `ntest` default of 1000 SNPs[^at2].
 - When the tile happens to cover fewer than 1000 SNPs, the window is simply the
-  whole record. ADMIXTOOLS 2 behaves the same way — its window caps at however
-  many SNPs are actually available.
+  whole record, capping at however many SNPs are actually available — the same
+  parity behavior.
 
 ### It scans the tile, not the disk
 
@@ -123,7 +123,7 @@ primitive from the format header.
   ignoring it is almost certainly a mistake, and the compiler will warn.
 
 The two ploidy values, 1 (pseudo-haploid) and 2 (diploid), are the only values
-ADMIXTOOLS 2 uses, so they are the only values this function returns.
+in the parity convention[^at2], so they are the only values this function returns.
 
 ---
 
@@ -142,3 +142,7 @@ reader front-end can classify ploidy without pulling in any of the GPU code. The
 same rule is mirrored on the device side (there is an equivalent GPU kernel and a
 CPU-backend version), and all of them scan the same window with the same
 heterozygous test so they agree by construction.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

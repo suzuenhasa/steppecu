@@ -18,8 +18,8 @@ Two properties drive almost every decision in the file:
    against a stored reference file. The column names, the section markers, the
    quoting, and the way "not computed" is written are all chosen to match those
    golden files exactly.
-2. **Readability by ADMIXTOOLS 2 downstream scripts.** The column names mirror
-   the field names ADMIXTOOLS 2 uses, so an existing analysis script can read
+2. **Readability by downstream analysis scripts.** The column names mirror
+   the parity field names[^at2], so an existing analysis script can read
    steppe's output unchanged.
 
 The file serializes six different result types: a single qpAdm fit, a qpAdm
@@ -131,7 +131,7 @@ output paths.
 
 ### Whole-model feasibility (`model_feasible`)
 
-The canonical rule, matching ADMIXTOOLS 2: a model is feasible when **every**
+The canonical rule[^at2]: a model is feasible when **every**
 weight lies in the closed interval from 0 to 1. A model with no weights (a
 domain-failed model) is not feasible. This drives the `feasible` field of the
 single-model summary and JSON summary.
@@ -253,7 +253,7 @@ section prefix. Each matches a regenerated fixture golden:
 
 f3 is the three-population form of the f4 table (drop the fourth population).
 f4-ratio adds a fifth population and reports `alpha`, `se`, and `z` — note it has
-**no** `est` or `p` column, matching ADMIXTOOLS 2's f4-ratio output, which
+**no** `est` or `p` column, matching the f4-ratio output[^at2], which
 reports only those three value columns. The JSON forms wrap the rows in a named
 array (`quartets`, `triples`, or `tuples`) alongside a top-level `status` and
 `precision`.
@@ -265,11 +265,11 @@ array (`quartets`, `triples`, or `tuples`) alongside a top-level `status` and
 In the rotation output — both CSV and JSON — there is a column named `f4rank`,
 and it does **not** carry the value most readers would assume.
 
-The column is named `f4rank` only to mirror the golden file and ADMIXTOOLS 2's
-field name, so a byte-for-byte diff lines up. But the value written into it is
+The column is named `f4rank` only to mirror the golden file and the parity
+field name[^at2], so a byte-for-byte diff lines up. But the value written into it is
 the per-model **fitted** rank (`est_rank`), not the rank **decision** (`f4rank`).
 
-The reason: ADMIXTOOLS 2's rotation output has no meaningful rank-decision field
+The reason: the reference rotation output has no meaningful rank-decision field
 (it is null there), and its per-model `f4rank` value equals the fitted rank
 recorded on the full-model population-drop row. The rank-decision value is
 meaningless for the rotation path and is deliberately not emitted. Keeping the
@@ -312,3 +312,7 @@ Each one switches on the format: **CSV and TSV share the same emitter**, called
 with a different separator character (a comma for CSV, a tab for TSV), while JSON
 has its own dedicated emitter. This is why the CSV and TSV outputs are structurally
 identical apart from the delimiter.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

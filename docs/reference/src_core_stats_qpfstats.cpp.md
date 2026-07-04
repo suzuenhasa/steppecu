@@ -16,8 +16,8 @@ regression, and reads back a clean, mutually consistent set of per-pair f2 value
 respects the identities exactly. The result is more accurate than estimating each f2 in
 isolation.
 
-The implementation reproduces ADMIXTOOLS 2's `qpfstats()` (its R ridge-regression path)
-and is pinned bit-for-bit to that tool's reference output. It is a *genotype-path* tool:
+The implementation reproduces the `qpfstats()` R ridge-regression path[^at2]
+and is pinned bit-for-bit to that reference output. It is a *genotype-path* tool:
 it does not build or read an f2 cache. Instead it reuses, unchanged, the same genotype
 decoding and D-statistic numerator machinery that the D-statistic tool uses, and adds
 only the regression on top.
@@ -36,9 +36,9 @@ output tensor.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPloidyDiploid` | `2` | The forced ploidy. Every sample is treated as diploid (allele frequency computed as reference-count over allele-count over 2), which is what ADMIXTOOLS 2 does on this path. This is deliberately *not* the per-sample auto-detected ploidy that the f2-cache extraction path uses — qpfstats runs through the D-statistic numerator engine, which assumes plain diploid frequencies. |
+| `kPloidyDiploid` | `2` | The forced ploidy. Every sample is treated as diploid (allele frequency computed as reference-count over allele-count over 2), which is the parity behavior on this path[^at2]. This is deliberately *not* the per-sample auto-detected ploidy that the f2-cache extraction path uses — qpfstats runs through the D-statistic numerator engine, which assumes plain diploid frequencies. |
 | `kPrimaryGpu` | `0` | The index of the single GPU this tool runs on. qpfstats is a single-GPU tool; it always uses device 0. |
-| `kRidge` | `1e-5` | The ridge (Tikhonov) regularization added to the regression normal-matrix diagonal. Matches ADMIXTOOLS 2's `qpfstats_regression` default of `ridge = 1e-5`. It keeps the least-squares system well-conditioned and invertible even when the design matrix is rank-deficient. |
+| `kRidge` | `1e-5` | The ridge (Tikhonov) regularization added to the regression normal-matrix diagonal. The `qpfstats_regression` default of `ridge = 1e-5`[^at2]. It keeps the least-squares system well-conditioned and invertible even when the design matrix is rank-deficient. |
 
 ---
 
@@ -62,7 +62,7 @@ which is "the number of pairs in all the earlier rows (`0` through `i-1`), plus 
 offset of `j` within row `i`."
 
 This ordering is not arbitrary: it was verified numerically to match, exactly, the
-symmetric pair ordering that ADMIXTOOLS 2's `construct_fstat_matrix` uses internally
+symmetric pair ordering that `construct_fstat_matrix` uses internally[^at2]
 (its `indmat[i,j]` for `i<j`, zero-based). Because the design matrix and its column
 meanings must line up with the reference tool, this index and that ordering must stay
 in agreement.
@@ -91,10 +91,10 @@ mixed set in a single batched pass.
 ### Building the combination set
 
 `build_popcomb_and_design` builds the full set of combinations over the `npop` **sorted**
-populations, in exactly the order ADMIXTOOLS 2 produces them. Reproducing that order
+populations, in exactly the parity order[^at2]. Reproducing that order
 precisely matters, because the combinations become the rows of the design matrix and the
 per-row jackknife estimates must correspond to the reference tool's rows. For `npop = 9`
-the counts are `36 + 252 + 378 = 666` combinations, verified against ADMIXTOOLS 2 source.
+the counts are `36 + 252 + 378 = 666` combinations, verified against the reference source[^at2].
 
 **f2** — one combination `(i, j, i, j)` for every pair `i < j`. This is `C(npop, 2)`
 combinations, in ascending pair order.
@@ -104,15 +104,15 @@ combinations, in ascending pair order.
 `{0,1,2}`, `{1,2,0}`, `{2,0,1}`, and then each rotation `(P1, P2, P3)` is remapped to the
 combination `(P1, P2, P1, P3)`. The ordering here is **block-wise**: all triples in
 rotation 0, then all triples in rotation 1, then all triples in rotation 2. This
-reproduces ADMIXTOOLS 2 stacking the three rotation blocks on top of each other. The
+stacks the three rotation blocks on top of each other[^at2]. The
 result is `C(npop, 3)·3` combinations.
 
 **f4** — starts from every quad `i < j < k < l` (`C(npop, 4)` of them, in ascending
 order). Each quad is expanded into three rotations `{0,1,2,3}`, `{0,2,1,3}`, `{0,3,1,2}`.
 The ordering here is **interleaved**, not block-wise: quad-0 rotation-0, quad-0
 rotation-1, quad-0 rotation-2, quad-1 rotation-0, and so on. This is the one subtle
-difference from the f3 layout — ADMIXTOOLS 2 interleaves the f4 rotations per quad
-(via its `slice(rep(...))`) rather than stacking them in blocks. The result is
+difference from the f3 layout — the f4 rotations are interleaved per quad[^at2]
+(via a `slice(rep(...))`) rather than stacked in blocks. The result is
 `C(npop, 4)·3` combinations.
 
 Getting the block-vs-interleaved distinction wrong would produce the right *set* of
@@ -126,7 +126,7 @@ The design matrix `x` encodes each combination's f-statistic as a linear express
 the per-pair f2 values — the exact linear identities the regression fits against. It has
 one row per combination (`npopcomb` rows) and one column per population pair (`npairs`
 columns), and it is stored **column-major**, indexed as `x[c + npopcomb·p]`. This
-reproduces ADMIXTOOLS 2's `construct_fstat_matrix` exactly.
+reproduces `construct_fstat_matrix` exactly[^at2].
 
 ### The four coefficient writes
 
@@ -144,14 +144,14 @@ This is the standard expansion of an f4 statistic into f2 terms:
 
 ### Two subtle rules — assignment, not accumulation
 
-The four writes are **assignments** (`out[col] = ±1`), not additions. This exactly
-mirrors ADMIXTOOLS 2, and it matters in two cases:
+The four writes are **assignments** (`out[col] = ±1`), not additions. This is the
+parity behavior[^at2], and it matters in two cases:
 
 - **Colliding columns.** When two of the four pairs land on the *same* column, the later
   assignment overwrites the earlier one — the value stays `1`, it does not become `1+1=2`.
   This happens for a pure-f2 row, where `pair(p1,p4)` and `pair(p2,p3)` are the same pair.
 - **Diagonal pairs.** A "pair" `(i, i)` of a population with itself is not a real column
-  (ADMIXTOOLS 2 marks it not-available in its `indmat`). The write is simply skipped — a
+  (it is marked not-available in the `indmat`[^at2]). The write is simply skipped — a
   no-op. This drops the `−1` writes on `pair(p1,p3)` and `pair(p2,p4)` for f2 and f3 rows
   where those indices coincide.
 
@@ -191,8 +191,8 @@ tensor and the sorted population labels. It runs the following steps.
 ### Step 0 — the sorted population set
 
 The input population list is sorted and de-duplicated. Sorting matters because the sorted
-order is the population axis order for everything downstream (it is what ADMIXTOOLS 2 uses
-for its dimension names), so the output tensor's rows and columns are always in sorted
+order is the population axis order for everything downstream (it is the parity
+dimension-name order[^at2]), so the output tensor's rows and columns are always in sorted
 label order. At least **four** distinct populations are required — fewer cannot form a
 non-degenerate f4 basis — and fewer returns an `InvalidConfig` status.
 
@@ -225,7 +225,7 @@ map it is ignored.
 ### Step 2 — assign jackknife blocks
 
 The kept autosomal SNPs are partitioned into contiguous jackknife blocks by genetic
-position, reproducing ADMIXTOOLS 2's block-length assignment. If the dataset has no
+position, reproducing the block-length assignment[^at2]. If the dataset has no
 genetic map, the partition falls back to fixed-width windows of physical position. From
 the partition, a per-block SNP count (`block_lengths`) is computed. That count serves two
 purposes later: it is the weight for the recentering jackknife, and it is the block-size
@@ -257,8 +257,8 @@ the whole computation. It performs, in order:
    global smoothed pair values solve `A · bglob = xᵀ · y`; the per-block smoothed pair
    values solve the corresponding per-block systems `A_blk · b[:,blk] = xᵀ · ymat[:,blk]`,
    where combinations whose block estimate is not-a-number are downdated out of that
-   block's system, and an all-not-a-number case collapses to zero. This is ADMIXTOOLS 2's
-   `qpfstats_regression`, reformulated to run as batched matrix operations rather than a
+   block's system, and an all-not-a-number case collapses to zero. This is the
+   `qpfstats_regression` computation[^at2], reformulated to run as batched matrix operations rather than a
    host loop over blocks and combinations.
 4. **The per-pair recentering shift.** For each pair, a block jackknife over the smoothed
    per-block pair values gives a jackknife estimate of the smoothed tensor; the
@@ -298,13 +298,13 @@ to work correctly.
 ## 7. The three parity pins
 
 Three specific choices, inherited from the D-statistic genotype engine and verified
-against real data, are what make this tool's output match ADMIXTOOLS 2 bit-for-bit. They
+against real data, are what make this tool's output match the reference bit-for-bit[^at2]. They
 are load-bearing and must not drift:
 
 1. **Forced diploid frequencies.** Allele frequency is reference-count over allele-count
    over 2 for every sample — not per-sample auto-detected ploidy.
-2. **Block assignment matches ADMIXTOOLS 2.** The jackknife block partition reproduces
-   ADMIXTOOLS 2's block-length rule exactly, including the physical-position fallback for
+2. **Block assignment parity.** The jackknife block partition reproduces
+   the block-length rule exactly[^at2], including the physical-position fallback for
    map-less data.
 3. **All-SNPs finiteness, per combination per block.** A SNP contributes to a given
    combination-and-block if and only if it is finite for that combination there — computed
@@ -335,3 +335,7 @@ and the per-pair recenter estimate — live in a shared internal header so the C
 reference oracle and the production path stay in agreement, but on the production path
 they run on the device inside the fused seam and the host never loops over combinations or
 pairs.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

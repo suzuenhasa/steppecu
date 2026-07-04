@@ -23,9 +23,9 @@ the GPU layer.
 
 ## 2. The D statistic it computes
 
-`run_dstat` reproduces ADMIXTOOLS 2's genotype-path D statistic (its
-`qpdstat_geno` in its "all SNPs" mode, reporting D rather than f4). The output
-has been pinned empirically against the ADMIXTOOLS 2 reference values, agreeing
+`run_dstat` computes the genotype-path D statistic[^at2] (the `qpdstat_geno`
+behavior in its "all SNPs" mode, reporting D rather than f4). The output
+has been pinned empirically against the reference values, agreeing
 to roughly 15 significant digits on the per-block components.
 
 ### The per-SNP formula
@@ -75,30 +75,30 @@ z-scores that track each other closely.
 
 ## 3. Parity pins
 
-Three choices are frozen so that `run_dstat` matches the ADMIXTOOLS 2 reference
-exactly. These were verified against the reference on real data.
+Three choices are frozen so that `run_dstat` matches the reference
+exactly[^at2]. These were verified against the reference on real data.
 
 ### Allele frequency: forced diploid
 
-ADMIXTOOLS 2 computes each population's reference-allele frequency as the plain
+For parity, each population's reference-allele frequency is the plain
 ratio (reference-allele count) / (allele count) / 2, with **no** pseudo-haploid
-adjustment. To match it, `run_dstat` forces the diploid ploidy mode. It does
+adjustment[^at2]. To match that, `run_dstat` forces the diploid ploidy mode. It does
 **not** use the automatic per-sample ploidy detection that the f2-extraction
 path uses — that automatic detection can flip the sign of a near-zero D, which
 would break parity.
 
 ### Blocks: identical to the reference
 
-The way SNPs are assigned to jackknife blocks matches ADMIXTOOLS 2's
-block-length routine byte-for-byte.
+The way SNPs are assigned to jackknife blocks matches the reference
+block-length routine byte-for-byte[^at2].
 
 ### SNP mask: all SNPs, per quadruple
 
 In "all SNPs" mode the only per-SNP test is whether a SNP is valid (finite) for
 a given block and quadruple. There is **no** maximum-missingness filter, **no**
 minor-allele-frequency filter, and **no** dropping of monomorphic SNPs.
-Autosomes-only filtering **is** on, which matches ADMIXTOOLS 2's default of
-keeping only the autosomes.
+Autosomes-only filtering **is** on, which matches the parity default of
+keeping only the autosomes[^at2].
 
 ---
 
@@ -126,7 +126,7 @@ the arrays at a given index gives you the full result for that one quadruple.
 The struct is intentionally shaped to mirror the f4 result struct (the same
 `p1..p4, est, se, z, p` columns), so that the existing f4 output emitter and the
 existing binding marshalling code are reused verbatim. The `est`, `se`, `z`, and
-`p` values already follow ADMIXTOOLS 2's D sign, Z, and p conventions.
+`p` values already follow the reference D sign, Z, and p conventions[^at2].
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -175,9 +175,13 @@ quadruple, in the input order.
 | `geno`, `snp`, `ind` | Paths to the EIGENSTRAT/TGENO genotype triple. |
 | `pop_union` | The set of population names referenced by the quadruples. Only these populations are decoded — not every individual in the file (a full file can hold tens of thousands). The **population axis** is exactly this set, sorted ascending by label. |
 | `quadruples` | A span of `(p1, p2, p3, p4)` index tuples. Each index points into the sorted `pop_union` partition described above. The caller is responsible for resolving quadruple names against that same sorted order before calling. |
-| `blgsize_morgans` | The jackknife block size, expressed in Morgans (ADMIXTOOLS 2's default is 0.05). |
+| `blgsize_morgans` | The jackknife block size, expressed in Morgans (the parity default is 0.05[^at2]). |
 | `resources` | The GPU resources. The per-SNP D reduction is routed through the first GPU's backend (`resources.gpus[0].backend`), GPU-first and device-resident. |
 
 Behavior that is fixed for this call, as covered in section 3: ploidy is forced
 diploid, the "all SNPs" mask is used (no max-missingness, no minor-allele-
 frequency, no monomorphic-dropping filters), and autosomes-only is on.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

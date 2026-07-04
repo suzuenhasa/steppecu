@@ -38,7 +38,7 @@ flag. It has three values:
 
 ### How CSV and TSV are laid out
 
-The CSV/TSV output is shaped like the tables the ADMIXTOOLS 2 R package produces,
+The CSV/TSV output is shaped like the reference R package's tables[^at2],
 so its downstream scripts can read a steppe run unchanged. A single result can
 contain several logically distinct tables — for a qpAdm fit, for example, a
 weights table, a one-line summary, and two diagnostic tables. Rather than write
@@ -139,9 +139,9 @@ layout:
   `NA`.
 - **`summary`** — a single row of scalars: `p`, `chisq`, `dof`, `f4rank`,
   `est_rank`, `feasible`, `status`, `precision`.
-- **`rankdrop`** — the rank-drop diagnostic table, in the same order the
-  ADMIXTOOLS 2 result uses.
-- **`popdrop`** — the population-drop diagnostic table, in ADMIXTOOLS 2 order.
+- **`rankdrop`** — the rank-drop diagnostic table, in the parity result
+  order[^at2].
+- **`popdrop`** — the population-drop diagnostic table, in the same order.
 
 The JSON form is one object with `weights`, `rankdrop`, and `popdrop` blocks (each
 a set of parallel arrays) plus a scalar `summary` block, so a run diffs directly
@@ -280,6 +280,10 @@ void emit_f4ratio_result(std::ostream& os, OutputFormat fmt,
 
 The `steppe f4-ratio` command. One row per five-population tuple, with columns
 `pop1` … `pop5`, `alpha`, `se`, `z`. Note there is **no `p` column** here —
-ADMIXTOOLS 2's f4-ratio reports only the ratio estimate `alpha`, its standard
+the f4-ratio reports only the ratio estimate `alpha`[^at2], its standard
 error, and the z-score. `p1_labels` … `p5_labels` are the resolved names of each
 five-tuple's populations.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

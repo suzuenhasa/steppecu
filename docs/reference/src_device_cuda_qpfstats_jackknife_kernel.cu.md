@@ -56,16 +56,16 @@ A few pieces of vocabulary used throughout both kernels:
   reason.
 
 The two kernels use the same jackknife machinery but combine the leave-one-out
-values with different final formulas, because each reproduces a different ADMIXTOOLS
-2 routine (see sections 3 and 4).
+values with different final formulas, because each reproduces a different reference
+routine (see sections 3 and 4).
 
 ---
 
 ## 3. The per-combination global-estimate kernel
 
 `qpfstats_numer_jackknife_kernel` assigns **one thread to one population
-combination** `c`. It reproduces the ADMIXTOOLS 2 `matrix_jackknife_est_col`
-routine exactly — the same missing-data masks, the same skip when a block's `rel`
+combination** `c`. It reproduces the `matrix_jackknife_est_col` routine
+exactly[^at2] — the same missing-data masks, the same skip when a block's `rel`
 reaches 1, the same guard that a leave-one-out value must be finite, the same
 ascending-block accumulation order, and the same final formula.
 
@@ -120,7 +120,7 @@ loosened — they are part of matching the reference routine bit-for-bit.
 ## 4. The per-pair recenter-shift kernel
 
 `qpfstats_recenter_shift_kernel` assigns **one thread to one population pair** `p`.
-It reproduces the ADMIXTOOLS 2 `f2blocks_pair_est` routine (the per-pair estimate of
+It reproduces the `f2blocks_pair_est` routine[^at2] (the per-pair estimate of
 an `f2` block array) exactly, then subtracts that estimate from the global value to
 produce a recentering constant.
 
@@ -230,3 +230,7 @@ Both follow the same shape:
 
 The wrappers are the only surface the device backend is allowed to call; the kernel
 bodies and their launch syntax stay private to this translation unit.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

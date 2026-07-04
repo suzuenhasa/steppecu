@@ -45,8 +45,8 @@ apart two populations' allele frequencies are). The formula, per genome block, i
 f3(C; A, B) = 0.5 * ( f2(C, A) + f2(C, B) - f2(A, B) )
 ```
 
-This is the same formula ADMIXTOOLS 2 uses, and steppe's result is checked
-bit-for-bit against an ADMIXTOOLS 2 reference computed on matching data. Read it
+This is the identity steppe computes, and its result is checked
+bit-for-bit against a parity reference[^at2] computed on matching data. Read it
 as: the two "distances" from C out to A and out to B, minus the distance between A
 and B — which isolates the shared history that A and B have in common relative to
 C. Because the formula is symmetric in A and B, swapping A and B gives the same
@@ -105,7 +105,7 @@ From the estimate and standard error:
 - **z-score** is simply `z = est / se`.
 - **p-value** is the two-sided normal p-value, `p = 2 * pnorm_upper(|z|)`. This is
   computed by reusing the exact same z-to-p routine the f4 path uses
-  (`f4_two_sided_p`), which is the same as ADMIXTOOLS 2's convention
+  (`f4_two_sided_p`), which is the same as the parity convention[^at2]
   (`erfc(|z| / sqrt(2))`), so f3 and f4 p-values are produced identically.
 
 ---
@@ -171,7 +171,7 @@ F3Result run_f3(const F2BlockTensor& f2_host,
 - The **`F2BlockTensor`** (host) overload is the parity/testing path. It takes the
   f2 values from ordinary host memory, which is how the reference-comparison test
   stages a known-good ("golden") f2 tensor and checks steppe's f3 output against
-  ADMIXTOOLS 2.
+  the reference.
 
 ### What `triples` is
 
@@ -189,3 +189,7 @@ only standard C++, and the two GPU-specific types it mentions
 declarations — names promised to exist, with their real definitions pulled in only
 by the `.cpp` file that actually does the GPU work. That is what lets the public
 API, the command-line tool, and the bindings all include `f3.hpp` cheaply.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -111,8 +111,8 @@ until the decode kernel has consumed them.
 
 Some samples are genuinely diploid; others (typically low-coverage ancient samples)
 are "pseudo-haploid" and must be treated as a single allele call. The decode has to
-know which is which per individual, matching the reference tool's pseudo-haploid
-adjustment. `decode_af_resident` resolves this with a strict three-way precedence:
+know which is which per individual, matching the pseudo-haploid
+adjustment[^at2]. `decode_af_resident` resolves this with a strict three-way precedence:
 
 1. **Explicit per-sample vector.** If the tile carries a non-null `sample_ploidy`
    array, it is uploaded and used directly. This wins over everything else.
@@ -291,3 +291,7 @@ double compaction silently under-sizes it and corrupts the output — the observ
 symptom was an all-zero genetic-position array. Sizing to the larger (double) query is
 what fixes it. The physical-position array is also a double, so the double query
 already covers it and it needs no separate size query.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -31,7 +31,7 @@ The methods here fall into a few groups:
   used by both the single-model sweep and the batched assemble.
 
 A recurring goal across the file is **bit-for-bit reproducibility** and an exact
-match to ADMIXTOOLS 2's numbers. Many comments in the source explain why a
+match to the reference numbers[^at2]. Many comments in the source explain why a
 particular rearrangement (pooling scratch, running blocks in parallel, tiling by
 chunk) does *not* change any reported value. Those "moves no bits" guarantees are
 load-bearing: they are what let the GPU path claim it matches the reference.
@@ -333,8 +333,8 @@ path no longer needs the host copy.
 **`se_from_wmat`** calls the producer and reduces the resident weight matrix on the
 *device* with the same standard-error kernel the batched path uses (treating it as
 a single model), copying back only the `nl`-length standard-error vector — the
-sum-of-squares reduction never leaves the GPU. It then reapplies the ADMIXTOOLS 2
-scale factor `(nb − 1) / √nb` that the unscaled weight matrix lacks (an exact,
+sum-of-squares reduction never leaves the GPU. It then reapplies the parity
+scale factor `(nb − 1) / √nb`[^at2] that the unscaled weight matrix lacks (an exact,
 linear rescale). This requires at least two blocks; with fewer it returns zeros.
 
 ---
@@ -359,8 +359,8 @@ caller's fixed rank when given, otherwise `nl − 1`.
 
 It computes the **survivor block set once**, since which blocks are usable is a
 property of the resident f2 shared by every model. A block that is missing for any
-pair is dropped, exactly as the single-model path does (matching ADMIXTOOLS 2's
-"remove missing" read behavior). When nothing is missing — the usual case — the
+pair is dropped, exactly as the single-model path does (matching the
+"remove missing" read behavior[^at2]). When nothing is missing — the usual case — the
 survivor set is the identity and the survivor-index pointer stays null, which makes
 the gather take its bit-identical no-drop branch. The survivor block sizes and the
 resident survivor map are threaded down into every bucket and chunk.
@@ -519,3 +519,7 @@ difference and a quiet NaN for the chi-square difference and its p-value. The
 callers differ only in which destination fields and which source arrays they pass;
 the loop order and every arithmetic step are shared, which is what keeps the result
 byte-identical to the two former inline copies.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

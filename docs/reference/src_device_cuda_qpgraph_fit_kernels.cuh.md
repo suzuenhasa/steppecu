@@ -125,7 +125,7 @@ launchers and re-checked by the kernel.
 | `n_pe` | `int` | Length of the path-edge index tables (`pe_edge`, `pe_leaf`, `pe_path`). |
 | `n_pae` | `int` | Length of the path-admixedge index tables (`pae_path`, `pae_admixedge`). |
 | `constrained` | `int` | `1` selects the box-constrained (non-negative least squares) edge solve, which forbids negative edge lengths; otherwise an unconstrained solve is used. |
-| `fudge` | `double` | A small ridge regularizer added to the solve, scaled by the trace of the coefficient matrix. This matches ADMIXTOOLS 2's `diag` term and keeps the solve stable when the matrix is near-singular. |
+| `fudge` | `double` | A small ridge regularizer added to the solve, scaled by the trace of the coefficient matrix. This matches the reference `diag` term[^at2] and keeps the solve stable when the matrix is near-singular. |
 
 ### Device pointers (the topology's index tables)
 
@@ -377,3 +377,7 @@ there is no separate host special case for it.
 The launcher only produces raw scores. Reducing them to each topology's best restart,
 and then to the single best topology across the whole batch (the global argmin), is a
 plain reduction done afterward on the host — not part of the fit.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

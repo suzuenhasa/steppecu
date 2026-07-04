@@ -67,7 +67,7 @@ standard error are assembled downstream from those sums.
 A SNP contributes to a quadruple only if all four of its populations are valid
 at that SNP — that is, `V != 0` for `p1`, `p2`, `p3`, and `p4`. If any one of
 the four is missing, the SNP is skipped for that quadruple. This is the
-per-(block, quadruple) "all SNPs" finiteness convention, matching ADMIXTOOLS 2.
+per-(block, quadruple) "all SNPs" finiteness convention[^at2].
 
 ### Outputs
 
@@ -96,7 +96,7 @@ sense that the pair itself is unordered, so the caller is responsible for
 ordering them.
 
 This exact formula is shared with the host `pair_index` in
-`src/core/stats/qpfstats.cpp` and reproduces ADMIXTOOLS 2's `indmat` ordering,
+`src/core/stats/qpfstats.cpp` and reproduces the `indmat` ordering[^at2],
 so the flat pair tables the GPU builds line up one-for-one with the host's
 expectations.
 
@@ -282,3 +282,7 @@ the operations carved out to always use true FP64. Because the accumulation orde
 is fixed (ascending SNP within a block, one grid block per block) and the
 arithmetic is native FP64, the result is reproducible run to run and matches the
 reference exactly.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

@@ -50,8 +50,8 @@ explicitly passes `--sure` to lift the cap.
 Two survivor rules are available, both driven off the frozen configuration:
 
 - **Minimum z-score** (the default) — keep every combination whose `|z|` is at
-  least a threshold. The default threshold matches the significance cut
-  ADMIXTOOLS 2 uses.
+  least a threshold. The default threshold matches the reference significance
+  cut[^at2].
 - **Top-K** — keep the K combinations with the largest `|z|`.
 
 The command reads these knobs (`--min-z` / `--top-k` / `--sure`, an optional
@@ -144,3 +144,7 @@ It hands off to `run_fstat_sweep`, which mines the combinations over the explici
 sweep. The result is that there is exactly one all-combinations sweep
 implementation, shared by five different command entry points, with no duplicated
 enumeration or filtering logic.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

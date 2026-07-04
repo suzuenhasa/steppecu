@@ -19,11 +19,11 @@ that form the statistical basis. All of that is packed into a `QpGraphModel` str
 The whole file is plain host C++ with no GPU code. It builds flat integer arrays
 that the GPU fitting kernels later upload once into device memory, and the
 CPU reference path reads the same struct directly. The math it computes is a
-faithful reproduction of the corresponding functions in ADMIXTOOLS 2 (version
-2.0.10), checked line by line against that source. Where ADMIXTOOLS 2 leaves a
+faithful reproduction of the corresponding reference functions (version
+2.0.10), checked line by line against that source[^at2]. Where the reference leaves a
 choice up to an internal implementation detail, steppe pins down one deterministic
 convention — described in section 2 — chosen so the final fitted numbers still
-match ADMIXTOOLS 2 exactly.
+match for parity.
 
 ---
 
@@ -34,12 +34,13 @@ contributes a fraction called *theta* of the node's ancestry; the other contribu
 the remaining `1 - theta`. Nothing in the graph itself says which parent is "the
 theta one," so a convention is needed.
 
-ADMIXTOOLS 2 uses a graph library (igraph) that stores an admixture node's two
-in-edges sorted by the internal numeric id of their source vertex. That ordering is
-an implementation detail of the library, not something a user controls, so treating
-"the first stored parent" as the theta parent is not portable.
+The reference implementation uses a graph library (igraph)[^at2] that stores an
+admixture node's two in-edges sorted by the internal numeric id of their source
+vertex. That ordering is an implementation detail of the library, not something a
+user controls, so treating "the first stored parent" as the theta parent is not
+portable.
 
-The key fact that makes this safe: ADMIXTOOLS 2's fit score does not change if you
+The key fact that makes this safe: the fit score does not change if you
 swap the two parents. Swapping them simply replaces `theta` with `1 - theta`, which
 describes the exact same mixture. Because the score is invariant to the swap, steppe
 is free to pick its own rule.
@@ -49,8 +50,7 @@ edges appears first in the caller's edge list becomes the theta parent, and the
 second becomes the `1 - theta` parent. To make the reported result independent of
 this choice, the fitted mixture weight is reported keyed by the **parent's name**,
 not by "first" or "second." So no matter which internal ordering either tool used,
-the fit score and the per-named-parent weight steppe reports both match ADMIXTOOLS 2
-exactly.
+the fit score and the per-named-parent weight steppe reports both match for parity.
 
 ---
 
@@ -78,8 +78,8 @@ is built.
 The graph is given by name (strings like `"Root"`, `"Mbuti"`), so the first step
 assigns every distinct node name a small integer id. A helper registry (`NodeReg`)
 hands out ids in **first-seen order** — the first new name encountered becomes node
-0, the next new name node 1, and so on. This first-seen order is the same node
-ordering ADMIXTOOLS 2 uses, and it becomes the leaf ordering later, so it must be
+0, the next new name node 1, and so on. This first-seen order is the parity node
+ordering[^at2], and it becomes the leaf ordering later, so it must be
 preserved exactly.
 
 Each edge is then recorded as a pair of node ids (`parent`, `child`) in the same
@@ -104,7 +104,7 @@ node:
   is rejected, because a mixture of more than two sources is not a valid admixture
   node in this model.
 - **Leaf** — a node with out-degree 0 (no children). Leaves are collected in node
-  (first-seen) order, matching ADMIXTOOLS 2's leaf-name routine. There must be at
+  (first-seen) order, matching the parity leaf-name routine[^at2]. There must be at
   least one.
 
 The number of leaves becomes `npop`, and the number of leaf pairs becomes
@@ -138,7 +138,7 @@ The edges are split into two kinds:
   given a **1-based id**. For admixture node `j` (0-based), its first parent edge
   gets id `2j + 1` and its second gets id `2j + 2`. The rule tying an id back to a
   proportion is: an **odd** id means `theta` of that admixture node, an **even** id
-  means `1 - theta`. This is the same "wts2" index scheme ADMIXTOOLS 2 uses. For
+  means `1 - theta`. This is the "wts2" index scheme[^at2]. For
   each admixture node the code also records the name of its first parent
   (`admix_from`) and the node itself (`admix_to`), so the fitted weight can be
   reported by parent name.
@@ -192,8 +192,8 @@ part of how much each drift edge contributes to each leaf's ancestry.
 
 It is filled by walking each root-to-leaf path: the path's leaf gets an increment of
 `1 / pathcount[leaf]` added to every normedge that path traverses. Splitting the
-weight evenly across a leaf's paths this way is the direct reproduction of ADMIXTOOLS
-2's `graph_to_pwts`. Admixedges are skipped here (they have no row); their
+weight evenly across a leaf's paths this way is the `graph_to_pwts`
+computation[^at2]. Admixedges are skipped here (they have no row); their
 contribution is folded in later as a theta-dependent multiplier.
 
 The name "base" matters: `pwts0` is the starting matrix that the theta-dependent step
@@ -240,7 +240,7 @@ The pairs enumerated are every `(a, b)` with `a <= b` over the `npop - 1` center
 columns, including the diagonal `a == b`. Counting pairs over `npop - 1` columns *with*
 the diagonal gives exactly `choose(npop, 2)` pairs, which is `npair`. The diagonal
 case `a == b` corresponds to the statistic f3(base; i, i), which is just f2(base, i).
-This reproduces ADMIXTOOLS 2's pair construction (its `combn(0:npop-1, 2)` with the
+This is the parity pair construction[^at2] (its `combn(0:npop-1, 2)` with the
 `+(1:0)` offset), but stored directly as 0-based centered-column indices in the range
 `0 .. npop-2`, so each entry is already the exact column index the later math uses —
 no further remapping needed. A sanity check confirms the generated pair count equals
@@ -274,3 +274,7 @@ error outcome. The cases that set an error, in the order they are checked:
 The first eight are user-facing "your graph is malformed" conditions; the cycle case
 is the second half of the two-place cycle detection from section 8; and the last is an
 internal consistency assertion that should never fire.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>

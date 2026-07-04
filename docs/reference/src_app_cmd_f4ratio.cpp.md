@@ -36,7 +36,7 @@ alpha = f4(p1, p2; p3, p4) / f4(p1, p2; p5, p4)
 
 The result is the admixture proportion alpha, plus a standard error obtained by
 jackknifing the ratio itself (not the two f4 values separately), plus the z-score
-`alpha / se`. This reproduces the behavior of ADMIXTOOLS 2's `qpf4ratio` function.
+`alpha / se`. This reproduces the behavior of the `qpf4ratio` function[^at2].
 
 The output table has exactly these columns, one row per tuple:
 
@@ -60,8 +60,8 @@ number of population columns, the group size and divisibility check for the
 `--pops` form, the stride used to slice a flat name list into tuples, the
 per-tuple loop bounds, and the fixed-size arrays that hold a tuple.
 
-The value is frozen for parity — five is the tuple shape ADMIXTOOLS 2's
-`qpf4ratio` expects, and it must not change. The constant is kept local to this
+The value is frozen for parity — five is the tuple shape the
+`qpf4ratio` function expects[^at2], and it must not change. The constant is kept local to this
 file because the arity is private knowledge of this one command rather than a
 setting other code needs to see.
 
@@ -207,3 +207,7 @@ and JSON layouts stay consistent and no formatting logic is duplicated here. The
 emitter is given the resolved, canonical population labels recorded in step 2 of
 the pipeline, so the printed names match the spelling in `pops.txt`. The column
 set is the one described in section 2.
+
+---
+
+[^at2]: **ADMIXTOOLS 2** — the reference implementation steppe reproduces for numerical parity. Maier R, Flegontov P, Flegontova O, Changmai P, Vyazov LA, Kim AKM, Reich D. *On the limits of fitting complex models of population history to f-statistics.* eLife 2023;12:e85492. <https://elifesciences.org/articles/85492>
