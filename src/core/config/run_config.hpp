@@ -68,6 +68,8 @@ public:
     [[nodiscard]] const std::vector<std::string>& scan_base() const noexcept { return scan_base_; }
     [[nodiscard]] bool scan_prerank()            const noexcept { return scan_prerank_; }
     [[nodiscard]] bool scan_suggest_swaps()      const noexcept { return scan_suggest_swaps_; }
+    [[nodiscard]] const std::string& scan_right_search() const noexcept { return scan_right_search_; }
+    [[nodiscard]] const std::vector<std::string>& scan_right_pool() const noexcept { return scan_right_pool_; }
 
     // f-statistic sweep controls — reference §10
     [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
@@ -126,6 +128,8 @@ private:
     std::vector<std::string> scan_base_;
     bool scan_prerank_ = false;
     bool scan_suggest_swaps_ = false;
+    std::string scan_right_search_ = "none";
+    std::vector<std::string> scan_right_pool_;
     double sweep_min_z_ = 3.0;
     int sweep_top_k_ = -1;
     bool sweep_sure_ = false;

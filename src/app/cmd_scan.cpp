@@ -570,6 +570,81 @@ void emit_prerank(std::ostream& os, OutputFormat fmt, const std::string& target_
     }
 }
 
+// ---- Phase 3: right-set (outgroup) admissibility + optimization ---------------------
+
+// Sources-only qpWave admissibility — the §1a anti-circularity gate. A right set R distinguishes
+// the `sources` iff qpWave(sources, R) REJECTS every tested lower rank: the sources then span full
+// rank (nsource-1), i.e. R has the power to tell them apart. Target-fit-BLIND by construction (the
+// target never enters the block, so the fit p cannot leak in). Reads the explicit rank_p vector,
+// NEVER est_rank (which is a thresholded first-accepted rank and would re-import the fit). Needs
+// |R| >= nsource outgroups. `accepted_rank` >= 0 names the first non-rejected rank (why it failed).
+struct Admissibility {
+    bool   ok = false;
+    int    accepted_rank = -1;       // first rank NOT rejected (>=0 => inadmissible); -1 if admissible
+    bool   enough_outgroups = true;  // |R| >= nsource
+    Status status = Status::Ok;
+};
+
+[[nodiscard]] Admissibility qpwave_admissible(
+    const device::DeviceF2Blocks& dev_f2, const QpAdmOptions& opts, device::Resources& resources,
+    const std::vector<int>& sources, const std::vector<int>& right, double rank_alpha) {
+    Admissibility a;
+    if (right.size() < sources.size()) { a.enough_outgroups = false; return a; }
+    const QpWaveResult w = run_qpwave(dev_f2, std::span<const int>(sources),
+                                      std::span<const int>(right), opts, resources);
+    a.status = w.status;
+    if (w.status != Status::Ok || w.rank_p.empty()) return a;   // fail-closed on non-Ok / empty
+    for (std::size_t r = 0; r < w.rank_p.size(); ++r) {
+        if (!(w.rank_p[r] < rank_alpha)) {   // this lower rank is ACCEPTED -> sources not fully distinct
+            a.accepted_rank = static_cast<int>(r);
+            return a;
+        }
+    }
+    a.ok = true;                             // every tested rank rejected -> sources span full rank
+    return a;
+}
+
+// Minimal sufficient right set by ADD-DROP: R0 pinned; test the whole {R0} ∪ curated-pool universe,
+// then greedily drop non-R0 outgroups while the set stays admissible AND keeps at least `min_size`
+// outgroups. Returns the minimal sufficient right set (R0 first), or empty if the universe is not
+// admissible or has fewer than `min_size` outgroups. `universe_out` reports WHY it is empty (status /
+// enough_outgroups / accepted_rank) so the caller can give an accurate diagnostic. "Sufficient" =
+// distinguishes the sources (sources-only qpWave) AND has enough outgroups to power a non-degenerate
+// fit (min_size = nsource+1, so nr >= nsource, dof > 0). fit-p / feasibility NEVER enter this —
+// admissibility + a size floor only (§1a Gap-3 contract: outgroups are never chosen to make the
+// model pass; the floor is a dof requirement, not a p threshold).
+//   NOTE: "a superset is at least as distinguishing" is exact for the deterministic matrix rank but a
+//   HEURISTIC for the finite-sample chi-square rank test (a noisy outgroup can raise the dof faster
+//   than the signal), so the early-bail below can rarely miss an admissible subset. Every set actually
+//   RETURNED is re-verified admissible, so soundness and anti-circularity always hold regardless.
+[[nodiscard]] std::vector<int> minimal_admissible_right(
+    const device::DeviceF2Blocks& dev_f2, const QpAdmOptions& opts, device::Resources& resources,
+    const std::vector<int>& sources, int r0, const std::vector<int>& right_pool, double rank_alpha,
+    std::size_t min_size, Admissibility& universe_out) {
+    std::vector<int> universe{r0};                       // R0 pinned + dedup the curated pool
+    for (int x : right_pool)
+        if (x != r0 && std::find(universe.begin(), universe.end(), x) == universe.end())
+            universe.push_back(x);
+    universe_out = qpwave_admissible(dev_f2, opts, resources, sources, universe, rank_alpha);
+    if (!universe_out.ok) return {};                     // inadmissible / qpWave-failed / too-few
+    if (universe.size() < min_size) return {};           // admissible, but below the powered-fit floor
+    std::vector<int> cur = universe;
+    for (bool dropped = true; dropped;) {
+        dropped = false;
+        for (std::size_t i = 1; i < cur.size(); ++i) {   // i>=1: never drop R0
+            if (cur.size() <= min_size) break;           // keep enough outgroups to power the fit
+            std::vector<int> trial = cur;
+            trial.erase(trial.begin() + static_cast<std::ptrdiff_t>(i));
+            if (qpwave_admissible(dev_f2, opts, resources, sources, trial, rank_alpha).ok) {
+                cur = std::move(trial);
+                dropped = true;
+                break;                                   // restart the sweep after a successful drop
+            }
+        }
+    }
+    return cur;
+}
+
 }  // namespace
 
 // The scan command pipeline — Phase 0.
@@ -831,6 +906,124 @@ int run_scan_command(const cfg::RunConfig& config) {
                      "feasible model reachable only by a non-greedy step — rerun --strategy "
                      "exhaustive to rule that out.\n",
                      search.strategy_used.c_str(), search.rounds);
+    }
+
+    // Phase 3: right-set admissibility (--right-search) on the SELECTED model. The gate is the
+    // target-fit-blind sources-only qpWave (§1a); fit-p never chooses outgroups.
+    if (config.scan_right_search() != "none") {
+        if (selected_rank >= rows.size()) {
+            std::fprintf(stderr, "steppe scan --right-search: no model passed the gate, so there is "
+                                 "no selected model to check outgroups for.\n");
+        } else {
+            const std::vector<int>& sel_sources = models[order[selected_rank]].left;
+            const std::string sel_label = rows[selected_rank].left;
+            const double ra = config.qpadm_options().rank_alpha;
+            const int k = static_cast<int>(sel_sources.size());
+            std::vector<int> right_pool_idx;
+            bool pool_ok = true;
+            if (k < 2) {
+                std::fprintf(stderr, "steppe scan --right-search: selected model %s = %s has a single "
+                    "source — outgroup admissibility is vacuous (nothing to distinguish).\n",
+                    target_label.c_str(), sel_label.c_str());
+                pool_ok = false;
+            }
+            if (pool_ok && !config.scan_right_pool().empty()) {
+                const ResolveListResult rp = resolver.resolve_all(config.scan_right_pool());
+                if (!rp.ok) {
+                    std::fprintf(stderr, "steppe scan --right-search: %s\n", rp.error.c_str());
+                    pool_ok = false;
+                } else {
+                    right_pool_idx = rp.indices;
+                }
+            }
+            if (pool_ok) try {
+                device::Resources resources = device::build_resources(config.device());
+                if (resources.gpus.empty()) {
+                    std::fprintf(stderr, "steppe scan --right-search: no CUDA device available\n");
+                } else {
+                    const int device_id = resources.gpus.front().device_id;
+                    device::DeviceF2Blocks dev_f2 =
+                        device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
+                    if (config.scan_right_search() == "check") {
+                        const Admissibility a =
+                            qpwave_admissible(dev_f2, opts, resources, sel_sources, right_idx, ra);
+                        if (!a.enough_outgroups) {
+                            std::fprintf(stderr, "steppe scan --right-search check: %s = %s — too few "
+                                "outgroups (|right|=%zu < nsource=%d) to distinguish the sources.\n",
+                                target_label.c_str(), sel_label.c_str(), right_idx.size(), k);
+                        } else if (a.status != Status::Ok) {
+                            std::fprintf(stderr, "steppe scan --right-search check: qpWave failed (%s) "
+                                "on the source set.\n", scan_status_label(a.status));
+                        } else if (a.ok) {
+                            std::fprintf(stderr, "steppe scan --right-search check: %s = %s — right set "
+                                "is ADMISSIBLE: the outgroups distinguish all %d sources (sources-only "
+                                "qpWave rejects every lower rank).\n",
+                                target_label.c_str(), sel_label.c_str(), k);
+                        } else {
+                            std::fprintf(stderr, "steppe scan --right-search check: %s = %s — right set "
+                                "is NOT ADMISSIBLE: rank %d is not rejected, so the outgroups cannot "
+                                "tell the sources apart at that level. The qpAdm fit is not "
+                                "identifiable here — treat the model as unproven.\n",
+                                target_label.c_str(), sel_label.c_str(), a.accepted_rank);
+                        }
+                    } else {   // add-drop
+                        std::vector<int> uni_pool = right_pool_idx;
+                        for (std::size_t j = 1; j < right_idx.size(); ++j)   // seed non-R0 outgroups too
+                            uni_pool.push_back(right_idx[j]);
+                        Admissibility uadm;
+                        const std::vector<int> minr = minimal_admissible_right(
+                            dev_f2, opts, resources, sel_sources, right_idx.front(), uni_pool, ra,
+                            static_cast<std::size_t>(k) + 1, uadm);   // floor: nsource+1 for a powered fit
+                        if (!minr.empty()) {
+                            std::string ml;
+                            for (std::size_t j = 0; j < minr.size(); ++j) {
+                                if (j) ml += ",";
+                                ml += resolver.label_at(minr[j]);
+                            }
+                            QpAdmModel m;   // robustness: refit under the minimal set — REPORTED only
+                            m.target = target_idx;
+                            m.left = sel_sources;
+                            m.right = minr;
+                            m.model_index = 0;
+                            const std::vector<QpAdmModel> one{m};
+                            const std::vector<QpAdmResult> rr = run_qpadm_search(
+                                dev_f2, std::span<const QpAdmModel>(one), opts, resources);
+                            const bool feas =
+                                !rr.empty() && rr[0].status == Status::Ok && scan_feasible(rr[0]);
+                            const double pp =
+                                rr.empty() ? std::numeric_limits<double>::quiet_NaN() : rr[0].p;
+                            std::fprintf(stderr, "steppe scan --right-search add-drop: %s = %s — minimal "
+                                "sufficient right set (%zu outgroups, R0 pinned): %s\n  robustness under "
+                                "it: feasible=%s, p=%.4g (reported, NOT used to pick outgroups).\n",
+                                target_label.c_str(), sel_label.c_str(), minr.size(), ml.c_str(),
+                                feas ? "TRUE" : "FALSE", pp);
+                        } else if (!uadm.enough_outgroups) {
+                            std::fprintf(stderr, "steppe scan --right-search add-drop: %s = %s — the "
+                                "candidate outgroups ({R0} + --right-pool) are too few to distinguish "
+                                "%d sources; add more to --right-pool.\n",
+                                target_label.c_str(), sel_label.c_str(), k);
+                        } else if (uadm.status != Status::Ok) {
+                            std::fprintf(stderr, "steppe scan --right-search add-drop: %s = %s — qpWave "
+                                "failed (%s) on the source set; cannot assess outgroups.\n",
+                                target_label.c_str(), sel_label.c_str(), scan_status_label(uadm.status));
+                        } else if (!uadm.ok) {
+                            std::fprintf(stderr, "steppe scan --right-search add-drop: %s = %s — no "
+                                "admissible outgroup set: rank %d is not rejected even with all "
+                                "candidates, so these outgroups cannot separate the sources.\n",
+                                target_label.c_str(), sel_label.c_str(), uadm.accepted_rank);
+                        } else {
+                            std::fprintf(stderr, "steppe scan --right-search add-drop: %s = %s — the "
+                                "outgroups distinguish the sources, but there are fewer than the "
+                                "nsource+1 (%d) outgroups needed to power a non-degenerate fit; add "
+                                "more to --right-pool.\n",
+                                target_label.c_str(), sel_label.c_str(), k + 1);
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "steppe scan --right-search: device error: %s\n", e.what());
+            }
+        }
     }
 
     if (const auto rc = emit_to_destination(

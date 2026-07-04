@@ -156,6 +156,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     if (!args.scan_base.empty()) merged_.scan_base = args.scan_base;
     take_b(merged_.scan_prerank, args.scan_prerank);
     take_b(merged_.scan_suggest_swaps, args.scan_suggest_swaps);
+    take(merged_.scan_right_search, args.scan_right_search);
+    if (!args.scan_right_pool.empty()) merged_.scan_right_pool = args.scan_right_pool;
     take_d(merged_.sweep_min_z, args.sweep_min_z);
     take_i(merged_.sweep_top_k, args.sweep_top_k);
     take_b(merged_.sweep_sure, args.sweep_sure);
@@ -417,6 +419,14 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     cfg.scan_base_ = merged_.scan_base;
     if (merged_.scan_prerank.has_value()) cfg.scan_prerank_ = *merged_.scan_prerank;
     if (merged_.scan_suggest_swaps.has_value()) cfg.scan_suggest_swaps_ = *merged_.scan_suggest_swaps;
+    if (merged_.scan_right_search.has_value()) {
+        const std::string& s = *merged_.scan_right_search;
+        if (s != "none" && s != "check" && s != "add-drop") {
+            return fail("--right-search must be none | check | add-drop");
+        }
+        cfg.scan_right_search_ = s;
+    }
+    cfg.scan_right_pool_ = merged_.scan_right_pool;
     if (cfg.max_sources_ != -1 && cfg.max_sources_ < cfg.min_sources_) {
         return fail("--max-sources must be >= --min-sources");
     }

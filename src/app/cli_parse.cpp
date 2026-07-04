@@ -574,6 +574,12 @@ int run_cli(int argc, char** argv) {
         sub->add_flag_function(
             "--suggest-swaps", [&](std::int64_t) { scan_args.scan_suggest_swaps = true; },
             "For infeasible models, suggest dropping the culprit source and adding a related one");
+        sub->add_option_function<std::string>(
+            "--right-search", [&](const std::string& v) { scan_args.scan_right_search = v; },
+            "Outgroup admissibility: none | check | add-drop (sources-only qpWave gate; R0 pinned)");
+        sub->add_option_function<std::vector<std::string>>(
+            "--right-pool", [&](const std::vector<std::string>& v) { scan_args.scan_right_pool = v; },
+            "Curated outgroup pool that add-drop may draw from (R0 = --right[0] stays pinned)")->delimiter(',');
         add_qpadm_option_flags(sub, scan_args);
         add_output_flags(sub, scan_args);
         add_common_flags(sub, scan_args);

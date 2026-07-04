@@ -98,6 +98,9 @@ struct CliArgs {
     // steppe scan Phase-2: relatedness shortlist mode, and drop/replace swap suggestions
     std::optional<bool> scan_prerank;
     std::optional<bool> scan_suggest_swaps;
+    // steppe scan Phase-3: right-set (outgroup) optimization mode + the curated right-pool
+    std::optional<std::string> scan_right_search;   // none | check | add-drop
+    std::vector<std::string>   scan_right_pool;
 
     // f4-sweep and f3-sweep controls — reference §11
     std::optional<bool>   sweep_all_combinations;
