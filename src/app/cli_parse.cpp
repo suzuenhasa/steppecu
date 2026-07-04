@@ -568,6 +568,12 @@ int run_cli(int argc, char** argv) {
         sub->add_flag_function(
             "--sure", [&](std::int64_t) { scan_args.sweep_sure = true; },
             "Proceed with a huge explicit --strategy exhaustive enumeration (lifts the safety cap)");
+        sub->add_flag_function(
+            "--prerank", [&](std::int64_t) { scan_args.scan_prerank = true; },
+            "Rank the pool by mean outgroup-f3 relatedness to the target (over the right set), then exit");
+        sub->add_flag_function(
+            "--suggest-swaps", [&](std::int64_t) { scan_args.scan_suggest_swaps = true; },
+            "For infeasible models, suggest dropping the culprit source and adding a related one");
         add_qpadm_option_flags(sub, scan_args);
         add_output_flags(sub, scan_args);
         add_common_flags(sub, scan_args);

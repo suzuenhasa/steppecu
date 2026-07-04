@@ -95,6 +95,9 @@ struct CliArgs {
     std::optional<std::string> scan_strategy;
     std::optional<int>         scan_beam_width;
     std::vector<std::string>   scan_base;
+    // steppe scan Phase-2: relatedness shortlist mode, and drop/replace swap suggestions
+    std::optional<bool> scan_prerank;
+    std::optional<bool> scan_suggest_swaps;
 
     // f4-sweep and f3-sweep controls — reference §11
     std::optional<bool>   sweep_all_combinations;

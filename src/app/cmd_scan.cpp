@@ -21,6 +21,7 @@
 #include "app/cmd_scan.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -30,6 +31,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "app/cmd_emit.hpp"
@@ -41,6 +43,7 @@
 #include "device/device_f2_blocks.hpp"
 #include "device/resources.hpp"
 #include "steppe/error.hpp"
+#include "steppe/f3.hpp"
 #include "steppe/qpadm.hpp"
 
 namespace steppe::app {
@@ -166,30 +169,43 @@ struct ScanRow {
     int         popdrop_feas = 0;
     int         f4rank = 0;        // data-driven first-accepted rank (NOT the vacuous est_rank)
     const char* status = "error";
+    // --suggest-swaps (populated only for infeasible models that have a suggestion)
+    bool        swap_has = false;
+    std::string swap_drop, swap_add;
+    bool        swap_feasible = false;
+    double      swap_p = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Column semantics (kept distinct on purpose): `feasible` = weights in [0,1] only; `passes` =
 // the full hard gate (status Ok AND feasible AND p>=alpha); the header census counts `passes`.
 void emit_scan_csv(std::ostream& os, const std::vector<ScanRow>& rows,
-                   std::size_t n_tested, std::size_t n_pass, char sep) {
+                   std::size_t n_tested, std::size_t n_pass, bool show_swaps, char sep) {
     os << "# steppe scan: " << n_tested << " models tested, " << n_pass
        << " pass the gate; best is SELECTED (not confirmed)\n";
     os << "rank" << sep << "target" << sep << "left" << sep << "nsource" << sep << "p"
        << sep << "feasible" << sep << "passes" << sep << "selected" << sep << "over_param"
-       << sep << "min_abs_z" << sep << "popdrop_feasible" << sep << "f4rank" << sep << "status"
-       << '\n';
+       << sep << "min_abs_z" << sep << "popdrop_feasible" << sep << "f4rank" << sep << "status";
+    if (show_swaps)
+        os << sep << "swap_drop" << sep << "swap_add" << sep << "swap_feasible" << sep << "swap_p";
+    os << '\n';
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const ScanRow& r = rows[i];
         os << i << sep << csv_field(r.target, sep) << sep << csv_field(r.left, sep) << sep
            << r.nsource << sep << fmt_double(r.p) << sep << (r.feasible ? "TRUE" : "FALSE") << sep
            << (r.passes ? "TRUE" : "FALSE") << sep << (r.selected ? "TRUE" : "FALSE") << sep
            << (r.over_param ? "TRUE" : "FALSE") << sep << fmt_double(r.min_z) << sep
-           << r.popdrop_feas << sep << r.f4rank << sep << r.status << '\n';
+           << r.popdrop_feas << sep << r.f4rank << sep << r.status;
+        if (show_swaps) {
+            os << sep << csv_field(r.swap_drop, sep) << sep << csv_field(r.swap_add, sep) << sep
+               << (r.swap_has ? (r.swap_feasible ? "TRUE" : "FALSE") : "") << sep
+               << (r.swap_has ? fmt_double(r.swap_p) : std::string());
+        }
+        os << '\n';
     }
 }
 
 void emit_scan_json(std::ostream& os, const std::vector<ScanRow>& rows,
-                    std::size_t n_tested, std::size_t n_pass) {
+                    std::size_t n_tested, std::size_t n_pass, bool show_swaps) {
     os << "{\n";
     os << "  \"n_tested\": " << n_tested << ",\n";
     os << "  \"n_pass\": " << n_pass << ",\n";
@@ -205,8 +221,18 @@ void emit_scan_json(std::ostream& os, const std::vector<ScanRow>& rows,
            << ", \"over_param\": " << (r.over_param ? "true" : "false")
            << ", \"min_abs_z\": " << json_double(r.min_z)
            << ", \"popdrop_feasible\": " << r.popdrop_feas
-           << ", \"f4rank\": " << r.f4rank << ", \"status\": " << json_quote(r.status)
-           << "}" << (i + 1 < rows.size() ? "," : "") << '\n';
+           << ", \"f4rank\": " << r.f4rank << ", \"status\": " << json_quote(r.status);
+        if (show_swaps) {
+            os << ", \"swap\": ";
+            if (r.swap_has)
+                os << "{\"drop\": " << json_quote(r.swap_drop) << ", \"add\": "
+                   << json_quote(r.swap_add) << ", \"feasible\": "
+                   << (r.swap_feasible ? "true" : "false") << ", \"p\": " << json_double(r.swap_p)
+                   << "}";
+            else
+                os << "null";
+        }
+        os << "}" << (i + 1 < rows.size() ? "," : "") << '\n';
     }
     os << "  ]\n}\n";
 }
@@ -374,6 +400,176 @@ struct SearchOutcome {
     return out;
 }
 
+// ---- Phase 2: relatedness pre-rank + swap suggestions -------------------------------
+
+// Per-pool-source relatedness to the target, aligned to pool_idx.
+struct Relatedness { std::vector<double> est, se, z; };
+
+// Outgroup-f3 relatedness of each pool source X to the target, AVERAGED over the whole right set:
+// mean_k f3(R_k; target, X). Higher = more shared drift with the target = a better proxy candidate.
+// Averaging over ALL outgroups (not just right[0]) makes the ranking independent of --right ordering
+// and consistent with the fits, which use the full right set. (se is the mean per-outgroup se — a
+// directional noise indicator, not a rigorous SE of the mean.)
+[[nodiscard]] Relatedness relatedness_f3(
+    const device::DeviceF2Blocks& dev_f2, const QpAdmOptions& opts, device::Resources& resources,
+    int target_idx, const std::vector<int>& pool_idx, const std::vector<int>& right_idx) {
+    const std::size_t np = pool_idx.size();
+    const std::size_t nr = right_idx.size();
+    std::vector<std::array<int, 3>> triples;
+    triples.reserve(np * nr);
+    for (std::size_t j = 0; j < np; ++j)              // triple t = j*nr + k  ->  f3(R_k; target, X_j)
+        for (int rk : right_idx) triples.push_back({rk, target_idx, pool_idx[j]});
+    const F3Result f3 = run_f3(dev_f2, std::span<const std::array<int, 3>>(triples), opts, resources);
+
+    const double kNaN = std::numeric_limits<double>::quiet_NaN();
+    Relatedness rel;
+    rel.est.assign(np, kNaN);
+    rel.se.assign(np, kNaN);
+    rel.z.assign(np, kNaN);
+    for (std::size_t j = 0; j < np; ++j) {
+        double sum_est = 0.0, sum_se = 0.0;
+        int n_est = 0, n_se = 0;
+        for (std::size_t k = 0; k < nr; ++k) {
+            const std::size_t t = j * nr + k;
+            if (t < f3.est.size() && std::isfinite(f3.est[t])) { sum_est += f3.est[t]; ++n_est; }
+            if (t < f3.se.size() && std::isfinite(f3.se[t]))   { sum_se += f3.se[t];   ++n_se; }
+        }
+        if (n_est) rel.est[j] = sum_est / n_est;
+        if (n_se)  rel.se[j] = sum_se / n_se;
+        if (std::isfinite(rel.est[j]) && std::isfinite(rel.se[j]) && rel.se[j] > 0.0)
+            rel.z[j] = rel.est[j] / rel.se[j];
+    }
+    return rel;
+}
+
+// Pool positions sorted by DESCENDING relatedness (NaN sinks to the end).
+[[nodiscard]] std::vector<std::size_t> relatedness_order(const Relatedness& rel) {
+    std::vector<std::size_t> ord(rel.est.size());
+    for (std::size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+    std::stable_sort(ord.begin(), ord.end(), [&](std::size_t a, std::size_t b) {
+        const double ea = rel.est[a], eb = rel.est[b];
+        const bool fa = std::isfinite(ea), fb = std::isfinite(eb);
+        if (fa != fb) return fa;                 // finite relatedness before NaN
+        if (fa && fb && ea != eb) return ea > eb;
+        return a < b;
+    });
+    return ord;
+}
+
+// Swap culprit: the position (in `left`) of the LEAST-related source to the target — the likeliest
+// one to drop. Uses the per-source outgroup-f3 relatedness; a source absent from the map (e.g. an
+// off-pool --base source) is treated as maximally suspect. It is a heuristic — the swap refit is
+// what verifies whether the suggestion actually helps. Only meaningful for nl >= 2.
+[[nodiscard]] int swap_culprit(const std::vector<int>& left,
+                               const std::unordered_map<int, double>& est_by_source) {
+    if (left.size() < 2) return -1;
+    int pos = -1;
+    double worst = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        const auto it = est_by_source.find(left[i]);
+        const double e = (it != est_by_source.end() && std::isfinite(it->second))
+                             ? it->second : -std::numeric_limits<double>::infinity();
+        if (e < worst) { worst = e; pos = static_cast<int>(i); }
+    }
+    return pos;
+}
+
+// Highest-relatedness pool source not already in `left` (the swap replacement). -1 if none.
+[[nodiscard]] int swap_replacement(const std::vector<std::size_t>& rel_order,
+                                   const std::vector<int>& pool_idx,
+                                   const std::vector<int>& left) {
+    for (std::size_t pos : rel_order) {
+        const int cand = pool_idx[pos];
+        if (std::find(left.begin(), left.end(), cand) == left.end()) return cand;
+    }
+    return -1;
+}
+
+// Per-output-model swap suggestion (drop the culprit, add a related source, refit).
+struct SwapInfo {
+    bool        has = false;
+    std::string drop, add;
+    bool        feasible = false;
+    double      p = std::numeric_limits<double>::quiet_NaN();
+};
+
+// For every model that FAILS the gate, propose "drop the least-related source / add the most-related
+// unused source", then refit all the swapped models in ONE batched call against the resident dev_f2.
+// Aligned to `models`.
+[[nodiscard]] std::vector<SwapInfo> compute_swaps(
+    const device::DeviceF2Blocks& dev_f2, const QpAdmOptions& opts, device::Resources& resources,
+    const std::vector<QpAdmModel>& models, const std::vector<QpAdmResult>& results,
+    const PopResolver& resolver, const Relatedness& rel, const std::vector<std::size_t>& rel_order,
+    const std::vector<int>& pool_idx, const std::vector<int>& right_idx, double alpha) {
+
+    std::unordered_map<int, double> est_by_source;   // pool source index -> outgroup-f3 relatedness
+    for (std::size_t j = 0; j < pool_idx.size() && j < rel.est.size(); ++j)
+        est_by_source[pool_idx[j]] = rel.est[j];
+
+    std::vector<SwapInfo> swaps(models.size());
+    std::vector<QpAdmModel> batch;
+    std::vector<std::size_t> batch_to_model;
+    for (std::size_t i = 0; i < models.size(); ++i) {
+        const QpAdmResult& r = results[i];
+        // Suggest a swap for any model that FAILS the gate (weight-infeasible OR p-rejected);
+        // skip the ones that already pass.
+        if (r.status == Status::Ok && scan_feasible(r) && r.p >= alpha) continue;
+        const int culprit_pos = swap_culprit(models[i].left, est_by_source);
+        if (culprit_pos < 0) continue;
+        const int repl_idx = swap_replacement(rel_order, pool_idx, models[i].left);
+        if (repl_idx < 0) continue;
+        swaps[i].has = true;
+        swaps[i].drop = resolver.label_at(models[i].left[static_cast<std::size_t>(culprit_pos)]);
+        swaps[i].add = resolver.label_at(repl_idx);
+        QpAdmModel sm;
+        sm.target = models[i].target;
+        sm.left = models[i].left;
+        sm.left[static_cast<std::size_t>(culprit_pos)] = repl_idx;       // drop culprit, add replacement
+        std::sort(sm.left.begin(), sm.left.end());
+        sm.right = right_idx;
+        sm.model_index = static_cast<int>(batch.size());                 // batch-local (0..n-1)
+        batch_to_model.push_back(i);
+        batch.push_back(std::move(sm));
+    }
+    if (!batch.empty()) {
+        const std::vector<QpAdmResult> sr =
+            run_qpadm_search(dev_f2, std::span<const QpAdmModel>(batch), opts, resources);
+        for (std::size_t k = 0; k < sr.size() && k < batch_to_model.size(); ++k) {
+            SwapInfo& s = swaps[batch_to_model[k]];
+            s.feasible = sr[k].status == Status::Ok && scan_feasible(sr[k]);
+            s.p = sr[k].p;
+        }
+    }
+    return swaps;
+}
+
+// The --prerank shortlist emitter (per-source, best-first).
+struct RelatedRow { std::string source; double est, se, z; };
+
+void emit_prerank(std::ostream& os, OutputFormat fmt, const std::string& target_label,
+                  const std::vector<RelatedRow>& rows) {
+    if (fmt == OutputFormat::Json) {
+        os << "{\n  \"target\": " << json_quote(target_label) << ",\n  \"related\": [\n";
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            const RelatedRow& r = rows[i];
+            os << "    {\"rank\": " << i << ", \"source\": " << json_quote(r.source)
+               << ", \"f3\": " << json_double(r.est) << ", \"se\": " << json_double(r.se)
+               << ", \"z\": " << json_double(r.z) << "}" << (i + 1 < rows.size() ? "," : "") << '\n';
+        }
+        os << "  ]\n}\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "# steppe scan --prerank: pool by mean outgroup-f3 relatedness to " << target_label
+       << " (mean_k f3(right_k; target, X) over the full right set; higher = more related)\n";
+    os << "rank" << sep << "source" << sep << "f3" << sep << "se" << sep << "z" << '\n';
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const RelatedRow& r = rows[i];
+        os << i << sep << csv_field(r.source, sep) << sep << fmt_double(r.est) << sep
+           << fmt_double(r.se) << sep << fmt_double(r.z) << '\n';
+    }
+}
+
 }  // namespace
 
 // The scan command pipeline — Phase 0.
@@ -416,6 +612,47 @@ int run_scan_command(const cfg::RunConfig& config) {
     const int target_idx = t.index;
     const std::vector<int>& right_idx = rt.indices;
     const std::vector<int>& pool_idx = pl.indices;
+
+    // --prerank: emit the pool ranked by outgroup-f3 relatedness to the target, then exit.
+    if (config.scan_prerank()) {
+        const QpAdmOptions popts = config.qpadm_options();
+        Relatedness rel;
+        try {
+            device::Resources resources = device::build_resources(config.device());
+            if (resources.gpus.empty()) {
+                std::fprintf(stderr, "steppe scan: no CUDA device available (steppe is a GPU "
+                                     "product; a CUDA-capable GPU is required)\n");
+                return cfg::kExitRuntimeError;
+            }
+            const int device_id = resources.gpus.front().device_id;
+            device::DeviceF2Blocks dev_f2 =
+                device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
+            rel = relatedness_f3(dev_f2, popts, resources, target_idx, pool_idx, right_idx);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe scan: device error: %s\n", e.what());
+            return exit_code_for_caught(e);
+        }
+        const std::string target_label = resolver.label_at(target_idx);
+        const std::vector<std::size_t> ord = relatedness_order(rel);
+        const double kNaN = std::numeric_limits<double>::quiet_NaN();
+        std::vector<RelatedRow> rrows;
+        rrows.reserve(ord.size());
+        for (std::size_t pos : ord) {
+            RelatedRow rr;
+            rr.source = resolver.label_at(pool_idx[pos]);
+            rr.est = pos < rel.est.size() ? rel.est[pos] : kNaN;
+            rr.se  = pos < rel.se.size()  ? rel.se[pos]  : kNaN;
+            rr.z   = pos < rel.z.size()   ? rel.z[pos]   : kNaN;
+            rrows.push_back(std::move(rr));
+        }
+        std::fprintf(stderr, "steppe scan --prerank: %zu pool sources ranked by relatedness to %s\n",
+                     rrows.size(), target_label.c_str());
+        if (const auto rc = emit_to_destination(config, "scan",
+                [&](std::ostream& os, OutputFormat fmt) { emit_prerank(os, fmt, target_label, rrows); })) {
+            return *rc;
+        }
+        return cfg::kExitOk;
+    }
 
     const int pool_n = static_cast<int>(pool_idx.size());
     const int lo = config.min_sources();
@@ -464,6 +701,7 @@ int run_scan_command(const cfg::RunConfig& config) {
 
     const QpAdmOptions opts = config.qpadm_options();
     SearchOutcome search;
+    std::vector<SwapInfo> swaps;
     try {
         device::Resources resources = device::build_resources(config.device());
         if (resources.gpus.empty()) {
@@ -478,6 +716,13 @@ int run_scan_command(const cfg::RunConfig& config) {
         search = guided_search(dev_f2, opts, resources, target_idx, pool_idx, right_idx,
                                lo, hi, config.scan_strategy(), config.scan_beam_width(),
                                base_idx, alpha, allow_clade);
+        if (config.scan_suggest_swaps()) {   // Phase 2: drop-culprit/add-related refits (batched)
+            const Relatedness rel =
+                relatedness_f3(dev_f2, opts, resources, target_idx, pool_idx, right_idx);
+            const std::vector<std::size_t> rel_ord = relatedness_order(rel);
+            swaps = compute_swaps(dev_f2, opts, resources, search.models, search.results, resolver,
+                                  rel, rel_ord, pool_idx, right_idx, alpha);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe scan: device error: %s\n", e.what());
         return exit_code_for_caught(e);
@@ -556,6 +801,13 @@ int run_scan_command(const cfg::RunConfig& config) {
         row.popdrop_feas = popdrop_feasible_count(r);
         row.f4rank = r.f4rank;
         row.status = scan_status_label(r.status);
+        if (mi < swaps.size() && swaps[mi].has) {
+            row.swap_has = true;
+            row.swap_drop = swaps[mi].drop;
+            row.swap_add = swaps[mi].add;
+            row.swap_feasible = swaps[mi].feasible;
+            row.swap_p = swaps[mi].p;
+        }
         rows.push_back(std::move(row));
     }
 
@@ -583,10 +835,11 @@ int run_scan_command(const cfg::RunConfig& config) {
 
     if (const auto rc = emit_to_destination(
             config, "scan", [&](std::ostream& os, OutputFormat fmt) {
+                const bool sw = config.scan_suggest_swaps();
                 switch (fmt) {
-                    case OutputFormat::Csv: emit_scan_csv(os, rows, results.size(), n_pass, ','); break;
-                    case OutputFormat::Tsv: emit_scan_csv(os, rows, results.size(), n_pass, '\t'); break;
-                    case OutputFormat::Json: emit_scan_json(os, rows, results.size(), n_pass); break;
+                    case OutputFormat::Csv: emit_scan_csv(os, rows, results.size(), n_pass, sw, ','); break;
+                    case OutputFormat::Tsv: emit_scan_csv(os, rows, results.size(), n_pass, sw, '\t'); break;
+                    case OutputFormat::Json: emit_scan_json(os, rows, results.size(), n_pass, sw); break;
                 }
             })) {
         return *rc;

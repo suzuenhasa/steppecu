@@ -66,6 +66,8 @@ public:
     [[nodiscard]] const std::string& scan_strategy() const noexcept { return scan_strategy_; }
     [[nodiscard]] int scan_beam_width()          const noexcept { return scan_beam_width_; }
     [[nodiscard]] const std::vector<std::string>& scan_base() const noexcept { return scan_base_; }
+    [[nodiscard]] bool scan_prerank()            const noexcept { return scan_prerank_; }
+    [[nodiscard]] bool scan_suggest_swaps()      const noexcept { return scan_suggest_swaps_; }
 
     // f-statistic sweep controls — reference §10
     [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
@@ -122,6 +124,8 @@ private:
     std::string scan_strategy_ = "beam";
     int scan_beam_width_ = 3;
     std::vector<std::string> scan_base_;
+    bool scan_prerank_ = false;
+    bool scan_suggest_swaps_ = false;
     double sweep_min_z_ = 3.0;
     int sweep_top_k_ = -1;
     bool sweep_sure_ = false;

@@ -154,6 +154,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.scan_strategy, args.scan_strategy);
     take_i(merged_.scan_beam_width, args.scan_beam_width);
     if (!args.scan_base.empty()) merged_.scan_base = args.scan_base;
+    take_b(merged_.scan_prerank, args.scan_prerank);
+    take_b(merged_.scan_suggest_swaps, args.scan_suggest_swaps);
     take_d(merged_.sweep_min_z, args.sweep_min_z);
     take_i(merged_.sweep_top_k, args.sweep_top_k);
     take_b(merged_.sweep_sure, args.sweep_sure);
@@ -413,6 +415,8 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         cfg.scan_beam_width_ = *merged_.scan_beam_width;
     }
     cfg.scan_base_ = merged_.scan_base;
+    if (merged_.scan_prerank.has_value()) cfg.scan_prerank_ = *merged_.scan_prerank;
+    if (merged_.scan_suggest_swaps.has_value()) cfg.scan_suggest_swaps_ = *merged_.scan_suggest_swaps;
     if (cfg.max_sources_ != -1 && cfg.max_sources_ < cfg.min_sources_) {
         return fail("--max-sources must be >= --min-sources");
     }
