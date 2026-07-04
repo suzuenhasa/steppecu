@@ -571,7 +571,7 @@ method that takes a `Precision` follows the policy in section 3.
 | `compute_f2_blocks_device` | Same computation, but leave the result resident in GPU memory and hand back an opaque handle — the primary output, no forced copy to host. GPU-only. |
 | `compute_f2_blocks_resident` | Like the device variant, tagged with a global block offset, for the direct device-to-device combine. GPU-only. |
 | `compute_f2_blocks_into` | Copy each device's slice of the result directly into a shared pinned host buffer at its disjoint block offset — for concurrent race-free multi-GPU output. GPU-only. |
-| `compute_f2_blocks_streamed` | Spill the per-block result block-by-block to host RAM or disk for out-of-core problems. GPU-only. |
+| `compute_f2_blocks_streamed` | Spill the per-block result block-by-block to host RAM or disk for out-of-core problems. Takes an optional trailing `redecode` descriptor (a `steppe::device::RedecodeSource*`, default null): when set, the streamed engine fills each per-chunk SNP-tile by re-decoding it on the device instead of copying from the dense host `Q`/`V`/`N` views (which are left null on that path, so the full `[P × M]` host input is never materialized); the null default preserves every existing caller, which keeps feeding a dense host buffer unchanged. Only the per-chunk tile *source* differs — the f2 GEMM, feeder, gather, assemble, ring, and spill are byte-for-byte the same — so the re-decode output is bit-identical to the dense-fed path. GPU-only. |
 
 The device, resident, host-staged, and streamed variants all produce
 bit-identical per-block numbers to `compute_f2_blocks`; the only difference is

@@ -229,6 +229,34 @@ The per-block sizes (needed later for the jackknife uncertainty estimate) are
 derived once, up front, from the partition itself, so the result describes itself
 completely in every tier.
 
+### The optional re-decode input path (streamed tiers)
+
+The tiered entry accepts an optional re-decode descriptor (a `RedecodeSource*`)
+that changes *where the streamed tiers get their per-tile input from*, without
+touching what they compute. It is threaded straight through the shared streaming
+helper into the streamed engine, so both the HostRam and Disk arms honor it.
+
+- **When the pointer is null (the ordinary path)**, behavior is unchanged: the
+  three input matrices carry real data, and the streamed engine sources each SNP
+  tile by copying from the dense host `Q`/`V`/`N` buffers.
+- **When the pointer is set (the large-model extract-f2 path)**, the three input
+  matrices are empty shells — they carry only the population count `P` and the kept
+  SNP count `M`, with no data behind them (their data pointers are null). Instead
+  of copying from a dense host buffer that was never built, the streamed engine
+  re-decodes each per-chunk SNP tile on-device from the descriptor as it needs it.
+  This is what lets a model whose full dense `Q`/`V`/`N` would not fit in host RAM
+  still be computed through the streamed tiers.
+
+Because the empty-shell inputs have no data to cross-check, the entry skips its
+input-validation guard (section 9) whenever the re-decode descriptor is set; the
+population and SNP counts it needs still come from the matrix shape either way, and
+the caller's tier clamp keeps the re-decode path out of the Resident tier (which
+still re-decodes a dense host `Q`/`V`/`N` and runs the resident engine unchanged).
+
+Only the per-tile input *source* differs between the two paths — the streamed f2
+computation, feeding, gather, assembly, and spill are identical — so the re-decoded
+streamed result is bit-for-bit identical to the dense-fed result.
+
 ---
 
 ## 8. Operator override environment variables
@@ -257,7 +285,9 @@ so the three entries cannot drift apart:
   disappears on release, all of the check's parameters are marked as possibly-unused
   so the release build does not warn about them. The name of the calling function is
   baked into the assertion message text rather than passed as a runtime string,
-  because the assertion mechanism needs a compile-time string literal.
+  because the assertion mechanism needs a compile-time string literal. The tiered
+  entry skips this check when it is running in re-decode mode (section 7), because
+  its input matrices are deliberately empty shells with no data to cross-check.
 
 - **At-least-one-device check** — a real runtime check (it throws, so it is *not*
   compiled away on release) that the resources bundle actually has a GPU, returning

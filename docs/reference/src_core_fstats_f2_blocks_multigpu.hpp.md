@@ -177,6 +177,39 @@ byte-identical answer across all three tiers, and identical to the single-GPU
 device-resident reference. The tier changes only **where and when** a slab of the
 result lands — never its bits.
 
+### The optional re-decode source
+
+The function takes a trailing, defaulted parameter
+`const steppe::device::RedecodeSource* redecode = nullptr`. It exists for one
+caller — `extract-f2` at high population count — and every other caller can ignore
+it: the default `nullptr` leaves the behavior described above completely unchanged.
+
+The problem it solves is a host-RAM wall. Normally the streamed HostRam and Disk
+tiers read their per-chunk SNP tile out of the dense host-side `Q`/`V`/`N` arrays,
+which are `[P × M_kept]` doubles. At a large population count on a large panel
+those three arrays are enormous (tens of gigabytes), and materializing them purely
+to feed the streamed engine can exhaust host memory before f2 is ever computed.
+
+When `redecode` is **non-null**, the streamed tiers skip the dense host arrays
+entirely and instead **re-decode each SNP tile on the device** directly from the
+packed genotypes, one chunk at a time, through the `RedecodeSource` descriptor. In
+this mode the caller never builds the dense `Q`/`V`/`N`; it passes `Q`, `V`, and
+`N` as null-data `MatView`s that carry only the shape (`P` and `M_kept`) the tier
+selector needs, and the actual per-SNP values come from re-decoding. Host memory is
+then `O(M_kept)` bookkeeping rather than `O(P × M_kept)` dense input.
+
+Only the **source** of each per-chunk tile changes — a device re-decode instead of
+a copy out of a dense host buffer. Everything downstream (the f2 GEMM, the feeder,
+the gather, the assemble, the streaming ring, and the disk spill) is unchanged, so
+the streamed re-decode output is **bit-for-bit identical** to the dense-fed path;
+the parity-neutral guarantee above holds with `redecode` set exactly as it does
+without it.
+
+Because re-decode is a strategy for data that is too large to hold densely in host
+RAM, it is only meaningful for the streamed tiers: a non-null `redecode` **never
+resolves to the Resident tier**. Small models that do fit stay on the resident
+path and re-decode a dense host `Q`/`V`/`N` as before.
+
 One current scope note: the tiered path always drives device 0 regardless of how
 many GPUs exist. It fails fast only if there are zero devices, and it selects its
 tier from device 0's free memory. Spreading the streamed computation across

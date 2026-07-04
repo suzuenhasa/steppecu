@@ -117,3 +117,68 @@ a Resident value is rejected outright — before it builds the concrete sink and
 the block loop. Because `StreamTarget` only ever borrows pointers into the result
 object the orchestrator already owns, it carries no memory of its own and needs no
 special lifetime handling beyond outliving the single compute call it is passed to.
+
+---
+
+## 6. The `RedecodeSource` re-decode input override
+
+`StreamTarget` says *where* the streamed blocks go. `RedecodeSource` is a second,
+independent descriptor in this header that says *where each per-chunk tile of input
+comes from* — and it exists to close a memory wall in `extract-f2` at high
+population count.
+
+The streamed f2 engine works its way across the SNP axis one chunk at a time. In its
+original form it filled each chunk's tile `[s_lo, s_hi)` by copying that slice out of
+a dense host-side Q/V/N input: three `[P × M_kept]` `double` arrays of allele counts,
+valid-allele totals, and non-missing counts. At small P that dense buffer is cheap.
+At high P it is not — three `P × M_kept` `double` arrays are an `O(P × M)` host cost
+that, at something like top-2000 populations on the 2-million-SNP panel, runs to tens
+of gigabytes and can OOM the process before any f2 arithmetic starts.
+
+`RedecodeSource` removes that dense buffer from the streamed path entirely. When it
+is supplied, the engine no longer copies each tile out of a materialized Q/V/N;
+instead, for each chunk it **re-decodes** the packed genotypes for exactly the kept
+columns in `[s_lo, s_hi)` directly on the GPU, producing that tile's `dQ_raw` /
+`dV_raw` / `dN_raw` on the fly. The dense host input is never built, so the streamed
+tiers' host cost drops from `O(P × M_kept)` to `O(M_kept)`. This is the seam that
+lets a high-P `extract-f2` run route to the HostRam/Disk tiers and finish instead of
+being OOM-killed at the input stage.
+
+Because `RedecodeSource` holds only plain host pointers — no `DecodeTileView`
+definition, no CUDA type, and nothing from the `io` layer — this header stays
+CUDA-free and free of the decode/io interfaces, exactly as it must for the
+orchestrator to construct one. The `DecodeTileView` it points at is only
+forward-declared here; its full definition lives in `device/backend.hpp`.
+
+**Correctness.** Only the *source* of each per-chunk tile changes: a deterministic
+on-device re-decode in place of a copy from a dense host buffer. The decode is
+reproducible, so the engine sees byte-identical `dQ_raw`/`dV_raw`/`dN_raw` either
+way, and every step downstream — the f2 GEMM, the feeder, the gather, the assemble,
+the ring, and the spill — is untouched. The streamed re-decode path therefore
+produces bit-identical f2 bytes to the resident/dense-fed path.
+
+### 6a. The `RedecodeSource` struct
+
+`RedecodeSource` is a plain struct of host pointers plus a few scalars. It bundles
+everything the on-device re-decode needs to reconstruct a kept-column tile: the base
+decode view, the raw per-SNP `.snp` metadata arrays, the filter configuration, the
+population layout, and the kept→raw column map.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `base_view` | `const DecodeTileView*` | `nullptr` | The base decode view describing the packed genotype source the tiles are re-decoded from. Forward-declared here and defined in `device/backend.hpp`, so this header carries only the pointer, not the decode interface. |
+| `ref` | `const char*` | `nullptr` | The raw `.snp` reference-allele array, indexed by raw row. |
+| `alt` | `const char*` | `nullptr` | The raw `.snp` alternate-allele array, indexed by raw row. |
+| `chrom` | `const int*` | `nullptr` | The raw `.snp` chromosome array, indexed by raw row. |
+| `genpos` | `const double*` | `nullptr` | The raw `.snp` genetic-position array, indexed by raw row. |
+| `physpos` | `const double*` | `nullptr` | The raw `.snp` physical-position array, indexed by raw row. |
+| `filter` | `const FilterConfig*` | `nullptr` | The SNP filter configuration applied during decode, so the re-decode reproduces exactly the same keep/skip decisions as the original decode. |
+| `pop_individuals` | `const std::size_t*` | `nullptr` | The per-population individual-index layout the decode groups samples by. |
+| `n_pop` | `std::size_t` | `0` | The number of populations (`P`) — the length of the population layout. |
+| `maxmiss` | `double` | `1.0` | The maximum per-SNP missingness fraction; a SNP over this threshold is treated as missing for a population. |
+| `kept_to_raw` | `const long*` | `nullptr` | The kept-column → raw `.snp` row-index map: strictly increasing, length `M_kept`. It tells the re-decode which raw rows the kept columns in a chunk correspond to. |
+| `M_kept` | `long` | `0` | The number of kept columns — the SNP-axis length of the streamed f2 result. |
+
+The struct owns none of the arrays it points at; like `StreamTarget`, it only borrows
+pointers into buffers the caller already holds, and it needs to outlive only the
+single streamed compute call it is passed to.

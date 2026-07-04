@@ -156,7 +156,7 @@ this same body; they differ only in what they do with the result afterward.
 | `compute_f2_blocks_device` | Runs the shared body and moves the resident tensors into a `DeviceF2Blocks` handle. No copy back — the full result escapes into a handle that stays in GPU memory. This is the production producer for the fit engine. |
 | `compute_f2_blocks_resident` | Like the above but wraps the result in a `DevicePartial` (a per-GPU partial result for the multi-GPU combine). The buffers survive the worker thread's exit and are freed only after the combine has consumed them. |
 | `compute_f2_blocks_into` | Runs the shared body, then D2H copies the compact result slabs into persistent per-backend pinned staging buffers, and a plain host copy places the bytes at the caller's block offset in a shared result. |
-| `compute_f2_blocks_streamed` | The out-of-core path: spills each block to host RAM or to disk instead of holding the whole tensor in GPU memory. |
+| `compute_f2_blocks_streamed` | The out-of-core path: spills each block to host RAM or to disk instead of holding the whole tensor in GPU memory. Takes an optional trailing `const RedecodeSource* redecode` (default `nullptr`): when non-null it selects the extract-f2 re-decode tile source described below; `nullptr` keeps the original dense-host-copy path. |
 
 The `compute_f2_blocks_into` path exists to make two GPUs' copies-back run
 concurrently. An earlier design pinned the caller's roughly-3-GB result slice on
@@ -181,6 +181,23 @@ values are bit-identical to the resident path, but differs in two ways:
    a small ring of per-chunk buffers, computing each chunk into the next ring slot
    and spilling that chunk's blocks through a sink that triple-buffers the
    copy-back-and-write.
+
+It also takes an optional trailing `const RedecodeSource* redecode` (default
+`nullptr`) that selects where each chunk's per-tile input comes from:
+
+- `nullptr` — the original path: each chunk's SNP-column tile is copied out of a
+  dense host Q/V/N buffer the caller already holds.
+- non-null — the extract-f2 path: each chunk's tile is *re-decoded* on-device from
+  the packed genotypes in kept-column space, instead of being copied from a dense
+  host buffer that extract-f2 deliberately never materializes at high population
+  counts (that dense O(P × M) input is what used to OOM the process). The
+  `RedecodeSource` descriptor carries the host-side pointers the decode needs (the
+  base tile view, the reference/alternate alleles, chromosome and position arrays,
+  the filter and per-population layout, and the strictly-increasing
+  kept-column-to-raw-row map). The re-decode is deterministic, so the engine sees
+  byte-identical decoded arrays and the emitted f2 bytes stay bit-identical to the
+  dense-fed resident path — only the per-chunk tile *source* changes, never the f2
+  arithmetic.
 
 The resident path never routes here; it calls `compute_f2_blocks_device` directly.
 `BlockSink` (the spill target) is forward-declared at the top of the header because

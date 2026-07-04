@@ -33,29 +33,117 @@ Two things shape how the function reports problems and where it can live:
 
 ## 2. The pipeline at a glance
 
-The function is a straight-line pipeline of five stages. Each stage feeds the
-next; there are no branches other than the GPU-versus-CPU split inside the
-filter stage.
+The function is a pipeline of five stages. Most stages feed the next in a
+straight line; the branches are the GPU-versus-CPU split in the filter stage
+and, on the GPU path, the output-tier choice in the compute stage — the
+resident dense path versus the streamed re-decode path (section 2a) — and the
+move-versus-copy of the finished result.
 
 1. **Open and read.** Open the genotype file (which pins the on-disk format),
    read the individual/population table for the requested selection, read the
    SNP table, and read one canonical individual-major tile of packed genotypes.
-2. **Decode, filter, compact.** Decode packed genotypes into per-population
-   allele-frequency quantities, decide which SNPs to keep, and compact the kept
-   columns into dense arrays. This stage has two implementations that produce
-   bit-identical output — a GPU path and a CPU reference path.
+2. **Decode and filter.** Decode packed genotypes into per-population
+   allele-frequency quantities and decide which SNPs to keep. This stage has two
+   implementations that agree on a bit-identical kept set — a GPU path and a CPU
+   reference path. On the GPU path this is a *metadata-only* pass: it records the
+   kept SNPs' identity, order, and count but **discards** the decoded
+   `Q`/`V`/`N` per tile (see section 2a). The CPU reference path still compacts
+   the kept columns into dense host arrays.
 3. **Assign blocks.** Partition the kept SNPs into jackknife blocks along the
    genome.
 4. **Compute f2 blocks.** Run the GPU f2 computation over the kept, blocked
-   data.
-5. **Materialize the result.** Copy the f2 tensor to host memory and fill in the
+   data — either from a dense host buffer (Resident tier) or by re-decoding each
+   chunk on-device (streamed tiers). See section 2a.
+5. **Materialize the result.** Move or copy the f2 tensor to host memory
+   (whichever avoids doubling host RAM for the chosen tier) and fill in the
    result struct (labels, SNP counts, ploidy counts, precision tag, memory
    tier).
 
-The three quantities carried between the filter stage and the f2 stage are
-named `Q`, `V`, and `N` throughout: a per-population allele-frequency-style
-value, its paired variance term, and a per-population sample-count. They travel
-together and must stay aligned on the SNP axis.
+The three per-population quantities the f2 stage consumes are named `Q`, `V`,
+and `N` throughout: a per-population allele-frequency-style value, its paired
+variance term, and a per-population sample-count. They must stay aligned on the
+SNP axis. On the GPU path for large models they are never carried as a dense
+`P × M_kept` host buffer at all — they are re-decoded on demand (section 2a).
+
+---
+
+## 2a. The two-phase decode and how f2 is fed (GPU path)
+
+The GPU path does not build the full dense `P × M_kept` host `Q`/`V`/`N` input
+before computing f2. Building it was the memory wall: three `P × M_kept` double
+arrays are roughly 96 GB at `--auto-top-k 2000` on the ~2.14M-SNP 2M panel, and
+materializing them got the process OOM-killed (exit 137) before any f2 work ran.
+The current flow is two phases with a tier decision between them.
+
+### Phase A — metadata pass
+
+Phase A decodes **every** SNP-tile in file order, but only to learn the kept
+set: for each tile it takes that tile's kept-SNP `chromosome`, `genetic
+position`, and `physical position`, appends them in file order, and adds the
+tile's kept count to `M_kept`. Each tile's decoded `Q`/`V`/`N` is **discarded**
+when the tile's device buffers are released at the end of the loop body. Host
+RAM after Phase A is therefore `O(M_kept)` metadata — three short per-kept-SNP
+arrays — not the old `O(P × M_kept)` dense wall. If nothing survived, the
+function throws. The tiling mechanics of this pass (tile width, ploidy hoisting,
+what runs on-device) are described in section 7.
+
+### The tier decision (now host-input aware)
+
+With `M_kept` known, `resolve_output_tier` picks the output tier — the f2 result
+kept all-in-GPU-memory (Resident), spilled to host RAM (HostRam), or spilled to
+disk (Disk). This decision is now aware of the *dense-input* host cost: the
+Resident output engine needs the full dense `P × M_kept` host `Q`/`V`/`N`, so the
+tier selector reserves that cost (three stacks of `P × M_kept × sizeof(double)`)
+before it will choose Resident. A model whose dense `Q`/`V`/`N` would not fit in
+host RAM is routed to the streamed HostRam/Disk path instead of blowing up. The
+free-host-RAM figure this budget is measured against is container-aware: it
+clamps the whole-host free figure to the cgroup memory headroom, so a
+memory-capped box is not over-budgeted.
+
+### Phase B, Resident tier — re-decode the dense buffer
+
+For small and mid-size models that fit, Phase B re-runs the Phase-A tile loop,
+but this time keeps each tile's `Q`/`V`/`N` and appends them into the dense
+`P × M_kept` host buffer, then hands that buffer to the **unchanged** resident f2
+engine. The decode is deterministic, so this rebuilds exactly the `Q`/`V`/`N` a
+single non-tiled pass would have produced; this tier is byte-identical to the
+pre-fix behavior.
+
+### Phase B, HostRam/Disk tiers — re-decode per chunk on-device
+
+For large models, Phase B feeds the **unchanged** streamed f2 engine without ever
+building the dense host buffer. It does two things:
+
+- **Build `kept_to_raw`.** This maps each kept column back to its raw `.snp` row.
+  Because the kept set is a monotone subset of the file-order raw rows, a single
+  forward two-pointer scan matches each kept SNP (by chromosome and physical
+  position) to its raw row in order; a mismatch on the final count throws.
+- **Construct a `RedecodeSource`.** This descriptor bundles the base decode view,
+  the SNP-table columns, the filter, the per-population individual counts, the
+  `maxmiss` value, and `kept_to_raw`. It is passed to the streamed engine, which
+  supplies each per-chunk tile by **re-decoding** those kept columns on-device
+  instead of copying them out of a dense host buffer that is never built.
+
+Only the per-chunk tile *source* changed here — a re-decode in place of a
+dense-buffer copy. The f2 GEMM, feeder, gather, assemble, ring, and spill are
+byte-for-byte unchanged, so the streamed re-decode output is bit-identical to the
+resident/dense-fed path[^at2] (verified: same `f2.bin` sha256, and the CordedWare
+qpAdm weights matched the pre-fix run to all 17 digits).
+
+### Moving, not copying, the HostRam result
+
+For the HostRam tier the streamed f2 result already lives in a host tensor inside
+the engine's sink, so the extract function **moves** it out rather than calling
+`to_host()`. A `to_host()` copy would allocate a second full `P² × n_block × 2`
+host tensor (f2 plus its paired variance term) — roughly 46 GB for a top-2000 2M
+model — doubling host RAM and re-triggering the OOM. The Resident and Disk tiers
+still materialize via `to_host()` (from VRAM and the on-disk cache respectively).
+
+### Payoff
+
+`--auto-top-k 2000` on the 2M panel, which was OOM-killed at exit 137 before the
+change, now completes via `auto` tier=host in about 88 seconds with peak host RAM
+around 54 GiB, under the box's ~90 GiB cap.
 
 ---
 
@@ -173,11 +261,13 @@ individual-axis predicate is disabled.
 
 ---
 
-## 7. The SNP-tiled decode and filter
+## 7. The SNP-tiled decode and filter (Phase A)
 
 This is the load-bearing algorithm in the file. When a CUDA device is present,
-the decode-filter-compact stage runs on the GPU, and it processes the SNP axis
-in tiles rather than all at once.
+the decode-and-filter stage runs on the GPU, and it processes the SNP axis in
+tiles rather than all at once. On the GPU path this is the Phase-A metadata pass
+of section 2a: it establishes the kept set and its metadata, and discards each
+tile's decoded `Q`/`V`/`N`.
 
 ### Why tile
 
@@ -208,29 +298,31 @@ is bit-identical to running a single non-tiled on-device detection, and for the
 explicit modes it is just the uniform vector that was already in place — nothing
 actually moves.
 
-### Why the tiled output is bit-identical to a single pass
+### Why the tiled kept set is bit-identical to a single pass
 
 For each tile the backend returns that tile's compacted `Q`/`V`/`N` plus the
-kept SNP metadata (chromosome, genetic position, physical position). The host
-appends each tile's arrays in file order and then frees that tile's device
-buffers before the next iteration, so a full-size `P × M_kept` tensor is never
-held resident — that would defeat the whole point and reintroduce the `O(P × M)`
-footprint.
+kept-SNP metadata (chromosome, genetic position, physical position). In Phase A
+the host keeps only the metadata: it appends each tile's `chromosome`, `genetic
+position`, and `physical position` arrays in file order, adds the tile's kept
+count to `M_kept`, and then frees that tile's device buffers — the tile's
+`Q`/`V`/`N` is discarded with them. A full-size `P × M_kept` `Q`/`V`/`N` tensor
+is never held resident; that was the OOM wall the two-phase design removed
+(section 2a).
 
-The compacted host layout is column-major `P × mk`: the value for population `i`
-at kept SNP `d` sits at index `i + P·d`, so the P values for one SNP are
-contiguous and consecutive SNPs are P apart. Appending each tile's arrays in
-tile order therefore reconstructs exactly the same contiguous
-`P × M_kept` layout a single non-tiled pass would have produced — byte for byte.
+Appending each tile's kept metadata in tile order reconstructs exactly the same
+kept set, in the same order, that a single non-tiled pass would have produced.
 Three properties make this hold:
 
 - each SNP's keep decision is independent of the others;
 - the per-tile scan visits SNPs in monotone order;
 - tiles are appended in file order.
 
-Tiles that keep no SNPs are simply skipped. If, after all tiles, nothing
-survived, the function throws — every SNP was filtered out and the filters need
-relaxing.
+Because the kept set, its file order, and its metadata are reproduced exactly,
+the block partition and every downstream f2 value are reproduced bit-for-bit —
+whether the f2 stage later re-decodes into a dense buffer (Resident) or per chunk
+(streamed). Tiles that keep no SNPs are simply skipped. If, after all tiles,
+nothing survived, the function throws — every SNP was filtered out and the
+filters need relaxing.
 
 ### What runs on the device
 
@@ -238,8 +330,10 @@ The GPU path computes the keep decision and the compaction on-device: the
 pooled minor-allele-frequency accumulation across populations, the shared
 keep decision, and the separate population-axis `maxmiss` coverage test. The old
 approach of copying the whole decoded tile back to the host and running a
-per-SNP filter loop there is gone; only the small compacted `Q`/`V`/`N` and the
-kept-SNP metadata cross back to the host.
+per-SNP filter loop there is gone. In Phase A only the small kept-SNP metadata
+crosses back to the host; the compacted `Q`/`V`/`N` stays on the device and is
+released with the tile. The Phase-B feeds that actually consume `Q`/`V`/`N`
+re-run this same decode (section 2a).
 
 ---
 
@@ -281,16 +375,31 @@ function throws if the partition comes out empty.
 
 ### Computing the f2 blocks
 
-The compacted `Q`, `V`, and `N` are wrapped as matrix views over the
-`P × M_kept` data and handed to the unified, adaptive f2 entry point along with
-the block partition and the precision policy. That call chooses the memory tier
-(all-in-GPU-memory, spill to host RAM, or spill to disk) on its own and returns
-the per-block f2 output.
+How the f2 stage is fed depends on the path and, on the GPU path, on the tier
+chosen by `resolve_output_tier` (section 2a):
+
+- **GPU, Resident tier.** The dense `P × M_kept` host `Q`/`V`/`N` (rebuilt by the
+  Phase-B re-decode) are wrapped as matrix views and handed to the f2 entry
+  point along with the block partition and the precision policy.
+- **GPU, HostRam/Disk tiers.** No dense buffer exists. The f2 entry point is
+  called with null `Q`/`V`/`N` views plus a `RedecodeSource`, and the streamed
+  engine re-decodes each per-chunk tile on-device. The f2 math is byte-for-byte
+  the same as the Resident path (section 2a).
+- **CPU reference path.** The compacted `Q`/`V`/`N` built by the host oracle
+  (section 8) are wrapped as views and handed to the f2 entry point.
+
+In every case the entry point returns the per-block f2 output along with the tier
+it actually used.
 
 ### Building the result
 
 Finally the f2 output is materialized to a host tensor and packaged into the
-result:
+result. For the **HostRam** tier the streamed result already lives in a host
+tensor inside the engine's sink, so it is **moved** out rather than copied via
+`to_host()` — a copy would allocate a second full host tensor and, for a large
+model, double host RAM and re-trigger the OOM (section 2a). The **Resident** and
+**Disk** tiers still materialize via `to_host()` (from VRAM and the on-disk cache
+respectively). The packaged result carries:
 
 - the f2 tensor and the population labels;
 - `n_snp_total` (the SNPs read, `M`) and `n_snp_kept` (the SNPs that survived

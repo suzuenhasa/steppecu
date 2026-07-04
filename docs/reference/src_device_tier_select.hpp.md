@@ -133,12 +133,35 @@ The parameters:
 
 This function reports how much host RAM is free **right now**, in bytes, read at
 runtime. It is never hardcoded, because the machines this runs on vary widely (cloud
-instances in particular). On Linux it uses the `sysinfo` system call and returns
-`(free RAM + buffer RAM) × memory unit` — a deliberately conservative proxy for
-"RAM the operating system can hand back without swapping." It does not try to count
-reclaimable page cache beyond the buffer figure. If the system call fails it returns
-`0`, which safely pushes the caller toward the disk tier. It is only declared here;
-the body lives in `host_ram.cpp`.
+instances in particular). It returns the **minimum** of two figures: the operating
+system's free RAM and the container's cgroup memory headroom. It is only declared
+here; the body lives in `host_ram.cpp`.
+
+The first figure comes from the Linux `sysinfo` system call:
+`(free RAM + buffer RAM) × memory unit` — a deliberately conservative proxy for "RAM
+the operating system can hand back without swapping." It does not try to count
+reclaimable page cache beyond the buffer figure. If the system call fails this figure
+is treated as `0`.
+
+The second figure is the cgroup memory headroom: the container's memory limit minus
+its current usage. `host_ram.cpp` reads the cgroup v2 unified-hierarchy files first
+(`/sys/fs/cgroup/memory.max` and `/sys/fs/cgroup/memory.current`), then falls back to
+cgroup v1 (`/sys/fs/cgroup/memory/memory.limit_in_bytes` and `.../memory.usage_in_bytes`). A
+limit of `"max"`, an unlimited/sentinel value, or a file it cannot open or parse means
+"no cap," so the headroom does not constrain the result. If a valid limit is found, the
+headroom is `limit − current` (clamped to `0` when usage already meets or exceeds the
+limit, or when the current-usage file cannot be read).
+
+Clamping to the cgroup headroom is the fix for a real OOM. Inside a memory-capped
+container — for example a 90 GiB vast.ai instance — `sysinfo` reports the whole
+**host's** free RAM, which can be hundreds of gigabytes and has nothing to do with
+what the container is actually allowed to allocate. Without the clamp the tier
+selector over-commits, chooses the Resident (or Host) tier for a model that cannot
+possibly fit inside the cap, and the process is OOM-killed by the kernel. Taking the
+minimum with the cgroup headroom makes the selector see the true ceiling and correctly
+fall through to the streamed HostRam or Disk path. Both figures failing (system call
+fails *and* no cgroup cap can be read) yields `0`, which safely pushes the caller
+toward the disk tier.
 
 ---
 
@@ -152,11 +175,27 @@ The rule, in order:
 
 1. Compute the result size: `2 · P² · n_block · 8` bytes (the f2 tensor plus its
    paired-variance tensor, from `resident_tensor_bytes` in `vram_budget.hpp`).
-2. **Resident** if the result plus the resident working set (section 4) fits within
-   **70%** of free GPU memory (`kResidentTierVramFraction`).
+2. **Resident** if **both** of these hold:
+   - the result plus the resident working set (section 4) fits within **70%** of free
+     GPU memory (`kResidentTierVramFraction`); **and**
+   - the dense decode input also fits within **60%** of free host RAM
+     (`kHostTierRamFraction`). The Resident output engine reads its whole dense
+     `P × M` Q/V/N from **one** host buffer, so this cost is
+     `kResidentHostInputStacks · P · M · sizeof(double)` — three dense `P × M` host
+     arrays (the Q, V, and N stacks), where `kResidentHostInputStacks` is `3`. If that
+     host input would not fit, the model is routed to a streamed tier instead of the
+     Resident engine, even when the GPU side alone would have fit.
 3. Otherwise **HostRam** if the result alone fits within **60%** of free host RAM
    (`kHostTierRamFraction`).
 4. Otherwise **Disk**.
+
+The second half of the Resident test is the extract-f2 host-RAM-wall clamp: a large
+model's dense `P × M` Q/V/N input can be far bigger than the `P²` result, so checking
+only the result would let the selector pick Resident, build the dense host input, and
+OOM. Reserving `kResidentHostInputStacks · P · M · sizeof(double)` up front keeps such
+models on the bounded, block-source streamed path. The streamed tiers never build the
+dense host input — they re-decode one SNP-tile at a time — so the HostRam and Disk
+decisions still turn only on the result size.
 
 The two fraction-of-free-memory thresholds are computed with the shared
 `budget_bytes` helper (floor of `fraction × free`, in `std::size_t`), the same
@@ -171,7 +210,7 @@ The parameters:
 | Parameter | Meaning |
 |---|---|
 | `P` | number of populations |
-| `M` | total SNP count — feeds the working-set term, and matters only for the Resident check |
+| `M` | total SNP count — feeds both the GPU resident working-set term and the dense host-input reservation, so it matters only for the Resident check |
 | `n_block` | number of jackknife blocks |
 | `free_vram` | free GPU memory, in bytes (from the device's reported free-VRAM figure) |
 | `free_host_ram` | free host RAM, in bytes (from `free_host_ram_bytes`) |

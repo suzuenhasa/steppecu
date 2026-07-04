@@ -138,7 +138,10 @@ then packages the result differently.
   persistent pinned staging buffer.
 - `compute_f2_blocks_streamed` — runs the streaming engine, writing into either a
   host-RAM destination or a disk file, depending on the requested tier. It
-  rejects the resident tier (that tier is supposed to bypass this seam).
+  rejects the resident tier (that tier is supposed to bypass this seam). It also
+  carries an optional re-decode source (`const RedecodeSource*`) straight through
+  to the streaming engine unchanged — null for every ordinary caller, non-null
+  only on the extract-f2 host-RAM-wall path (sections 6 and 6a).
 
 ### Buffer escape and late free
 
@@ -236,19 +239,84 @@ each block out through a sink (host RAM or disk) as the block is computed. Two
 mechanisms make this possible: SNP-column tiling of the input, and a small device
 ring that overlaps compute with the spill.
 
-### SNP-tile input streaming
+The engine takes one extra argument, `const RedecodeSource* redecode`, which
+selects where each per-chunk SNP tile comes from — a dense host copy or an
+on-device re-decode. That is the *only* thing this argument changes; everything
+past the tile fill (the feeder, gather, the batched matrix-multiply group,
+assemble, the ring, and the spill) is byte-for-byte identical in both modes.
+
+### SNP-tile input streaming (two tile sources)
 
 The resident engine's "upload all of Q/V/N and feed all M" prologue is gone.
-Instead each chunk uploads only the columns its blocks actually span — the range
-`[s_lo, s_hi)` — from the host matrices, which stay in host RAM. Because the
-layout is column-major, that span is one contiguous run per matrix, so it is a
-single copy each. The per-tile buffers are sized once to the widest tile over all
-chunks and reused, mirroring the resident engine's slab pre-sizing, so there is
-no per-chunk allocate/free. The result: the GPU footprint is proportional to
-P × (widest tile), independent of the total SNP count M. This is value-preserving
-because the feeder works one column at a time with no cross-column dependency, so
-feeding a column in isolation produces the same bits as feeding it inside the
-all-SNP sweep — only *when* the column is uploaded changes.
+Instead each chunk fills its per-chunk tile — the raw device buffers
+`dQ_raw`/`dV_raw`/`dN_raw`, holding only the columns its blocks actually span, the
+range `[s_lo, s_hi)`. Where those columns come from depends on `redecode`:
+
+- **`redecode == null` — the dense-host-copy tile source (every ordinary
+  caller).** The tile is copied host-to-device straight out of the dense host
+  Q/V/N. Because the layout is column-major, the span `[s_lo, s_hi)` is one
+  contiguous run per matrix, so it is a single copy each. This is the original,
+  unchanged streaming path used by every non-extract caller; the dense host
+  matrices stay in host RAM and are pinned once in the prologue.
+
+- **`redecode != null` — the on-device re-decode tile source (the extract-f2
+  HostRam/Disk path).** No dense host tensor exists to copy from — it was never
+  built. The *same* tile `[s_lo, s_hi)` is instead produced on-device by
+  re-decoding those kept columns straight from the packed genotypes. Because the
+  dense host Q/V/N is never materialized, the prologue's pinning step is skipped
+  in this mode (the host pointers are null). The mechanics are in section 6a.
+
+Either way the per-tile buffers are sized once to the widest tile over all chunks
+and reused, mirroring the resident engine's slab pre-sizing, so there is no
+per-chunk allocate/free. The result: the GPU footprint is proportional to
+P × (widest tile), independent of the total SNP count M. Both tile sources are
+value-preserving because the feeder works one column at a time with no
+cross-column dependency, so feeding a column in isolation produces the same bits
+as feeding it inside the all-SNP sweep — only *when*, and in re-decode mode *from
+where*, the column arrives on the device changes, never the bits.
+
+### 6a. The re-decode tile source (extract-f2 host-RAM-wall fix)
+
+This is the mechanism behind the high-population extract-f2 fix. At large P the
+dense O(P × M_kept) host Q/V/N input no longer fits in host RAM, so extract-f2
+never builds it; instead it hands the streaming engine a `RedecodeSource`
+descriptor (the packed genotypes, the kept-column filter, the pop layout, and a
+`kept_to_raw` map from kept-column index to raw SNP index) and lets each chunk
+re-decode its own tile on the device. The steps, per chunk:
+
+1. **Map the tile back to raw SNP indices.** The kept span `[s_lo, s_hi)` maps to
+   the raw range `[raw_lo, raw_hi)` via `kept_to_raw`, where `raw_lo =
+   kept_to_raw[s_lo]` and `raw_hi = kept_to_raw[s_hi − 1] + 1`.
+
+2. **Align the decode window.** The decoder (`decode_af_compact_filter`) requires
+   a 4-aligned raw start, so the window begins at `aligned_lo = raw_lo & ~3` and
+   runs `n_snp = raw_hi − aligned_lo` columns. Rounding the start down can pull in
+   up to three *kept* columns that sit ahead of `s_lo`; `head = s_lo − first_kept`
+   (0–3) records how many, where `first_kept` is the first kept column at or after
+   `aligned_lo` (found by binary search in `kept_to_raw`).
+
+3. **Decode the window on the device.** `decode_af_compact_filter` decodes
+   `[aligned_lo, aligned_lo + n_snp)` under the same filter and pop layout,
+   producing a `DeviceDecodeResult` whose device Q/V/N hold only that window's
+   kept columns. A debug assertion checks the re-decoded kept count equals
+   `s_hi − first_kept`, i.e. that this pass sees exactly the kept set the counting
+   pass (Phase A) saw — a guard against decode desync across passes.
+
+4. **Copy the tile into place.** A device-to-device copy takes the kept columns
+   `[head, head + tile)` of the decode result — read from the decode buffer at
+   source offset `head · P`, which drops the 0–3 head columns the 4-alignment
+   pulled in — and writes them into `dQ_raw`/`dV_raw`/`dN_raw` from offset 0.
+
+5. **Synchronize before the transient buffers free.** The decode result's device
+   buffers are freed at the end of the chunk's scope; the async device-to-device
+   copies must complete first, so the chunk does one stream synchronize here to
+   avoid a use-after-free of the decode result's Q/V/N.
+
+After this the tile is indistinguishable from the dense-copy tile: the decode is
+deterministic, so the re-decoded bytes are identical to what a host-to-device copy
+of a materialized dense Q/V/N would have delivered, and every downstream stage is
+the same code. That is why the streamed re-decode output is bit-identical to the
+resident/dense-fed path (section 7).
 
 ### The streamed memory budget
 
@@ -321,7 +389,14 @@ A few rules hold across all of the paths above.
   path all produce bit-for-bit identical f2 and pairwise-variance numbers. The
   tile streaming and local-id rebasing are value-preserving for the same reason:
   they change only where a column is uploaded or where a slab is written, not what
-  is computed.
+  is computed. The re-decode tile source (section 6a) is parity-neutral for the
+  same reason: it changes only *where the tile comes from* (an on-device decode
+  versus a host-to-device copy of a dense buffer), never a computed value.
+  Everything past the tile fill is byte-for-byte the same code, so the streamed
+  re-decode result is bit-identical to the resident/dense-fed result — verified by
+  matching `f2.bin` SHA-256 (and, downstream, qpAdm weights that matched to all 17
+  digits). This is what lets extract-f2 route very large models through the
+  streamed tiers without ever materializing the dense O(P × M_kept) host input.
 
 - **Amortized input pinning.** The host input matrices are pinned once and reused
   across calls, because pinning a multi-gigabyte region is itself a 50–360 ms page
