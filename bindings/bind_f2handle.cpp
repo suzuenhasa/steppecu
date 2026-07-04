@@ -1,28 +1,22 @@
 // bindings/bind_f2handle.cpp — the F2Handle opaque type + read_f2 loader (steppe._core).
 //
-// register_f2handle() runs FIRST in module.cpp's NB_MODULE shell so the F2Handle nanobind
-// type is registered before any fit entry (bind_qpadm/bind_qpgraph/bind_fstats) that takes
-// or returns it. Marshalling only (cli-bindings.md §5); CUDA-FREE seams (§6.2).
+// register_f2handle() must run first in module.cpp's NB_MODULE shell, so F2Handle is
+// registered before the fit bindings that take or return it.
 #include <string>
 
 #include "internal/bind_common.hpp"
 
-#include "app/f2_dir_io.hpp"  // steppe::app::read_f2_dir / F2Dir (CUDA-FREE)
+#include "app/f2_dir_io.hpp"
 
 namespace steppe::pybind {
 namespace {
 
-// ---- read_f2: the f2-dir loader -> the opaque F2Handle ----------------------------
-// Returns a raw heap pointer; the binding uses rv_policy::take_ownership so Python owns
-// the F2Handle and frees it (with its cached Resources) at GC. (F2Handle is move-only via
-// the unique_ptr<Resources> member, so a by-value return is not nb-convertible; a pointer
-// with take_ownership is the nanobind-idiomatic transfer for an opaque, non-copyable type.)
 F2Handle* read_f2(const std::string& dir, int device) {
     const sa::F2DirResult res = sa::read_f2_dir(dir);
     if (!res.ok) raise_value(res.error);
     auto* h = new F2Handle();
-    h->tensor = res.dir.f2;          // host FP64 tensor (the to_numpy source; no D2H).
-    h->pops = res.dir.pop_labels;    // the name<->index map.
+    h->tensor = res.dir.f2;
+    h->pops = res.dir.pop_labels;
     h->device = device;
     return h;
 }

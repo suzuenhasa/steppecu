@@ -1,11 +1,7 @@
-// bindings/bind_qpadm.cpp — the qpAdm / qpWave fit entries (steppe._core).
+// bindings/bind_qpadm.cpp — the qpAdm / qpWave fit entries for the steppe._core module.
 //
-// run_qpadm (single model), run_qpwave (rank-sufficiency sweep), run_qpadm_search (batched
-// over a list of left-source sets). Each mirrors cmd_qpadm.cpp:88-117: resolve names against
-// pops.txt, build (cached) resources, upload the host tensor INSIDE the call (the
-// DeviceF2Blocks frees in its destructor — spike #1), run the CUDA-free seam, marshal.
-// Faults raise; per-model domain outcomes ride on the result's `status` (cli-bindings.md
-// §1.3 / §5.2).
+// Each entry resolves names, builds resources, uploads the host f2 tensor inside the call,
+// and runs the CUDA-free fit seam; faults raise, per-model domain outcomes ride on `status`.
 #include <span>
 #include <string>
 #include <utility>
@@ -60,7 +56,7 @@ nb::dict run_qpwave_py(F2Handle& h, const std::vector<std::string>& left,
     const std::vector<int> left_idx = resolve_names(resolver, left, "left");
     const std::vector<int> right_idx = resolve_names(resolver, right, "right");
 
-    steppe::QpAdmOptions opts;  // qpWave consults only fudge / rank_alpha.
+    steppe::QpAdmOptions opts;
     opts.fudge = fudge;
     opts.rank_alpha = rank_alpha;
 
@@ -72,9 +68,6 @@ nb::dict run_qpwave_py(F2Handle& h, const std::vector<std::string>& left,
     return qpwave_to_dict(result);
 }
 
-// qpadm_search: a list of explicit (left, right) models against the SAME resident f2,
-// fit BATCHED (run_qpadm_search). Returns one dict per model in INPUT order
-// (results[k].model_index resolves the k-th input; qpadm.hpp:190-191).
 nb::list run_qpadm_search_py(F2Handle& h, const std::string& target,
                              const std::vector<std::vector<std::string>>& lefts,
                              const std::vector<std::string>& right, int rank, double fudge,

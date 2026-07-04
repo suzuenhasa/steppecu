@@ -1,10 +1,11 @@
-// bindings/bind_fstats.cpp — the f-statistic / extract / smoother entries (steppe._core).
+// bindings/bind_fstats.cpp
 //
-// run_f4 / run_qpdstat (the f2-path D == f4) / run_f3 / run_f4ratio over the SAME resident
-// f2; run_dstat (the genotype-path NORMALIZED-D, NO F2Handle); run_extract_f2 (genotype->f2
-// EXTRACT) and run_qpfstats (genotype-path JOINT f2 SMOOTHER), both the dual capsule/path
-// return idiom. Faults raise; per-item domain outcomes ride on the result's `status`
-// (cli-bindings.md §1.3 / §5.2).
+// Registers the f-statistic / extract / smoother entries into steppe._core: a thin
+// marshalling layer that resolves pop names to indices and calls the CUDA-free library
+// seam. Every statistic reads from one of two data paths — a pre-computed f2 cache or the
+// raw genotype triple.
+//
+// Reference: docs/reference/bindings_bind_fstats.cpp.md
 #include <algorithm>
 #include <array>
 #include <optional>
@@ -15,21 +16,17 @@
 
 #include "internal/bind_common.hpp"
 
-#include "app/f2_dir_writer.hpp"  // steppe::app::write_f2_dir / F2DirMeta (CUDA-FREE; the extract out= path)
-#include "steppe/extract.hpp"     // run_extract_f2 + F2ExtractResult (M(py-2) genotype->f2 extract)
-#include "steppe/qpfstats.hpp"    // run_qpfstats + QpfstatsResult (the genotype-path joint f2 smoother)
+#include "app/f2_dir_writer.hpp"
+#include "steppe/extract.hpp"
+#include "steppe/qpfstats.hpp"
 
-#include "io/geno_reader.hpp"  // io::GenoReader (qpDstat Part B P-axis order)
-#include "io/ind_reader.hpp"   // io::read_ind / PopSelection / IndPartition
+#include "io/geno_reader.hpp"
+#include "io/ind_reader.hpp"
 
 namespace steppe::pybind {
 namespace {
 
-// run_f4: a list of (p1,p2,p3,p4) quartet NAME tuples against the SAME resident f2,
-// computed BATCHED (run_f4). Returns ONE dict of parallel arrays {pop1..pop4,est,se,z,p}
-// in input order. Mirrors run_qpwave_py exactly: resolve names against pops.txt, build
-// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives
-// only here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+// run_f4 — standalone f4 (f2-cache path) — reference §3
 nb::dict run_f4_py(F2Handle& h,
                    const std::vector<std::array<std::string, 4>>& quartets) {
     if (quartets.empty()) raise_value("f4: needs at least one (p1,p2,p3,p4) quartet");
@@ -42,7 +39,7 @@ nb::dict run_f4_py(F2Handle& h,
     for (const std::array<std::string, 4>& q : quartets)
         idx_quartets.push_back(resolve_tuple<4>(resolver, q, "quartet pop"));
 
-    steppe::QpAdmOptions opts;  // f4 uses fudge=0 internally (run_f4); opts is the default.
+    steppe::QpAdmOptions opts;
 
     const steppe::F4Result result =
         with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
@@ -52,13 +49,7 @@ nb::dict run_f4_py(F2Handle& h,
     return f4_to_dict(result, h.pops);
 }
 
-// run_qpdstat: the qpDstat Part-A binding — D-statistic / f4 over the f2-data path. A THIN
-// clone of run_f4_py (the qpdstat f2-path == f4: admixtools::qpdstat(f2dir,f4mode=TRUE) is
-// byte-identical to f4mode=FALSE and to f4, since f4mode is a no-op without per-SNP
-// genotypes). Returns the SAME dict {pop1..pop4,est,se,z,p,status,precision} as run_f4 (z =
-// est/se, p = 2*(1-Phi(|z|)) ARE the AT2 D-stat sign/Z/p convention). The normalized-D
-// MAGNITUDE (per-SNP genotypes) is Part B, a separate later binding. NO new compute, NO new
-// emitter, NO new result type — it REUSES run_f4 + f4_to_dict verbatim.
+// run_qpdstat — the f2-path D (== f4) — reference §3
 nb::dict run_qpdstat_py(F2Handle& h,
                         const std::vector<std::array<std::string, 4>>& quartets) {
     if (quartets.empty()) raise_value("qpdstat: needs at least one (p1,p2,p3,p4) quartet");
@@ -71,7 +62,7 @@ nb::dict run_qpdstat_py(F2Handle& h,
     for (const std::array<std::string, 4>& q : quartets)
         idx_quartets.push_back(resolve_tuple<4>(resolver, q, "quartet pop"));
 
-    steppe::QpAdmOptions opts;  // qpdstat==f4 uses fudge=0 internally (run_f4); opts default.
+    steppe::QpAdmOptions opts;
 
     const steppe::F4Result result =
         with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
@@ -81,14 +72,7 @@ nb::dict run_qpdstat_py(F2Handle& h,
     return f4_to_dict(result, h.pops);
 }
 
-// run_dstat: the qpDstat Part-B genotype-path NORMALIZED-D. UNLIKE run_qpdstat (which reads
-// the f2 cache and reports f4), this reads the GENOTYPE TRIPLE prefix.{geno,snp,ind} directly
-// (the extract-f2 decode front-end + the per-SNP D kernel + the num/den block-jackknife), so
-// it does NOT take an F2Handle. It builds the P-axis from read_ind(MinN,1) (every population,
-// sorted ASC by label — IDENTICAL to run_dstat's internal decode), resolves the quadruple
-// names to that axis, builds resources for `device`, and runs the CUDA-free seam. Returns the
-// SAME dict {pop1..pop4,est,se,z,p} as run_qpdstat (the D convention). `blgsize` is MORGANS
-// (AT2 default 0.05). Faults (no device, missing files, CUDA runtime) raise (§1.3 / §5.2).
+// run_dstat — the genotype-path normalized D — reference §4
 nb::dict run_dstat_py(const std::string& prefix,
                       const std::vector<std::array<std::string, 4>>& quadruples,
                       double blgsize, int device) {
@@ -97,10 +81,6 @@ nb::dict run_dstat_py(const std::string& prefix,
     const std::string snp = prefix + ".snp";
     const std::string ind = prefix + ".ind";
 
-    // The pop UNION (the AT2 indvec): the DISTINCT names across every quadruple. run_dstat
-    // reads ONLY these (read_ind(Explicit{union}), NOT the whole prefix). The P axis is that
-    // Explicit partition (sorted ASC by label); the resolver below is built over the SAME
-    // read_ind(Explicit{union}) so its indices match run_dstat's decode exactly.
     std::vector<std::string> pop_union;
     for (const std::array<std::string, 4>& q : quadruples) {
         for (const std::string& nm : q) {
@@ -109,7 +89,7 @@ nb::dict run_dstat_py(const std::string& prefix,
         }
     }
 
-    std::vector<std::string> pops;  // the SORTED Explicit partition (the P axis order).
+    std::vector<std::string> pops;
     try {
         steppe::io::GenoReader reader(geno);
         const std::size_t n_present = reader.records_present();
@@ -132,7 +112,7 @@ nb::dict run_dstat_py(const std::string& prefix,
         idx_quads.push_back(resolve_tuple<4>(resolver, q, "quadruple pop"));
 
     steppe::DeviceConfig cfg;
-    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    cfg.devices = {device};
     steppe::DstatResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
@@ -147,26 +127,7 @@ nb::dict run_dstat_py(const std::string& prefix,
     return dstat_to_dict(result, pops);
 }
 
-// run_extract_f2: the M(py-2) genotype->f2 EXTRACT binding. Reads the genotype TRIPLE
-// prefix.{geno,snp,ind} directly and builds the f2_blocks tensor (decode->filter->
-// assign_blocks->tiered f2 compute->to_host) through the CUDA-free steppe::run_extract_f2
-// seam (extract.hpp) — the SAME chain the CLI extract-f2 command runs (DRY). GPU-only:
-// builds Resources for `device`, fail-fasts on no-GPU with the same message as the CLI.
-//
-// TWO RETURN MODES (capsule/path idiom, NOT a giant disk round-trip): if `out` is given,
-// SERIALIZE the result to an STPF2BK1 dir via write_f2_dir and return the path STRING (the
-// user can then read_f2(path)); if `out` is empty, wrap the host F2BlockTensor + labels in
-// a NEW F2Handle and return it (rv_policy::take_ownership, like read_f2 — NO disk round-
-// trip). The F2Handle pointer return reuses read_f2's exact ownership transfer. Faults (no
-// device, unknown Explicit pop, missing file, every SNP filtered, an unwritable out dir)
-// raise (the library THROWS; the binding re-raises as a Python error — §1.3 / §5.2).
-//
-// `pops` -> PopSelection::Explicit{pops} (the named-subset case; the P axis is that
-// selection sorted ASC by label). `precision`: nullopt -> the EmulatedFp64 default (the
-// f2-GEMM default, matching the CLI); "fp64"/"native" -> native FP64 oracle; "emulated_fp64"
-// -> EmulatedFp64. `ploidy`: "auto" (AT2 adjust_pseudohaploid; the default), "1"/"pseudo"
-// -> pseudo-haploid, "2"/"diploid" -> diploid. Defaults match the CLI/AT2 extract_f2 so a
-// bare extract reproduces the golden (autosomes_only ON, maxmiss as the pop-axis semantic).
+// run_extract_f2 — build an f2 tensor from genotypes — reference §5
 nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::string>& pops,
                              const std::string& out, int device, double blgsize,
                              double maf, double maxmiss, bool autosomes_only,
@@ -178,24 +139,17 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     const std::string snp = prefix + ".snp";
     const std::string ind = prefix + ".ind";
 
-    // pops -> the Explicit selection (the P axis is read_ind(Explicit{pops}) sorted ASC).
     steppe::io::PopSelection sel;
     sel.mode = steppe::io::PopSelection::Mode::Explicit;
     sel.labels = pops;
 
-    // The on-the-fly QC filter (the AT2 extract_f2 defaults; maxmiss is the POP-axis
-    // coverage semantic, reproduced inside run_extract_f2 — NOT the sample-axis predicate).
     steppe::FilterConfig filter;
     filter.maf_min = maf;
-    filter.geno_max_missing = maxmiss;      // AT2 pop-axis maxmiss (0 = global intersection).
-    filter.autosomes_only = autosomes_only; // AT2 extract_f2 default auto_only=TRUE.
+    filter.geno_max_missing = maxmiss;
+    filter.autosomes_only = autosomes_only;
     filter.drop_monomorphic = drop_monomorphic;
     filter.transversions_only = transversions_only;
 
-    // --strand-mode drop|keep|flip: the strand-ambiguous (palindromic A/T, C/G) SNP
-    // policy. "drop" (DEFAULT) reproduces the frozen behavior bit-identically (merge-safe);
-    // "keep" retains ambiguous SNPs (reproduces AT2's default); "flip" is a documented
-    // not-yet-implemented token (currently == keep, no freq-based reorientation).
     if (strand_mode == "drop") {
         filter.strand_mode = steppe::StrandMode::Drop;
     } else if (strand_mode == "keep") {
@@ -207,7 +161,6 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
                     "(got '" + strand_mode + "')");
     }
 
-    // The precision policy (default EmulatedFp64 40-bit, the f2-GEMM default = the CLI).
     const steppe::Precision prec = parse_precision(precision, "extract_f2");
 
     steppe::ExtractPloidy ep = steppe::ExtractPloidy::Auto;
@@ -223,7 +176,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     }
 
     steppe::DeviceConfig cfg;
-    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    cfg.devices = {device};
     cfg.precision = prec;
 
     steppe::F2ExtractResult result;
@@ -236,7 +189,6 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
         raise_value(std::string("extract_f2: ") + e.what());
     }
 
-    // MODE A: out= given -> serialize an STPF2BK1 dir + return the path STRING.
     if (!out.empty()) {
         sa::F2DirMeta meta;
         meta.precision_mantissa_bits = prec.mantissa_bits;
@@ -244,7 +196,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
             (result.precision_tag == steppe::Precision::Kind::EmulatedFp64) ? "emu"
           : (result.precision_tag == steppe::Precision::Kind::Tf32)         ? "tf32"
                                                                             : "fp64";
-        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;  // Morgans -> centimorgans (meta records cM).
+        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;
         meta.n_block = result.f2.n_block;
         meta.P = result.f2.P;
         meta.n_snp_total = result.n_snp_total;
@@ -257,15 +209,13 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
         meta.geno_path = geno;
         meta.snp_path = snp;
         meta.ind_path = ind;
-        meta.hash_source_files = false;  // the Python extract does not hash the big .geno.
+        meta.hash_source_files = false;
         const sa::F2DirWriteResult wr =
             sa::write_f2_dir(out, result.f2, result.pop_labels, meta);
         if (!wr.ok) raise_value("extract_f2: " + wr.error);
         return nb::cast(out);
     }
 
-    // MODE B: out= empty -> wrap the host tensor + labels in a new F2Handle (no disk
-    // round-trip). The pointer return uses rv_policy::take_ownership at the def site.
     auto* h = new F2Handle();
     h->tensor = std::move(result.f2);
     h->pops = std::move(result.pop_labels);
@@ -273,15 +223,7 @@ nb::object run_extract_f2_py(const std::string& prefix, const std::vector<std::s
     return nb::cast(h, nb::rv_policy::take_ownership);
 }
 
-// run_qpfstats: the genotype-path JOINT f2 SMOOTHER (include/steppe/qpfstats.hpp). Reads the
-// GENOTYPE TRIPLE prefix.{geno,snp,ind} directly, drives the qpDstat-B numerator engine over
-// the FULL f2/f3/f4 popcomb set, runs the on-device shared-factor smoothing solve, and
-// returns a SMOOTHED f2 — the SAME dual-return idiom as run_extract_f2: out= given ->
-// serialize an STPF2BK1 dir + return the path STRING; out= empty -> wrap the smoothed
-// F2BlockTensor + labels in a NEW F2Handle (so read_f2/run_f4/run_qpadm consume it). `pops`
-// is the smoothing pop set (sorted ASC internally = the AT2 dimnames order). `precision`:
-// nullopt -> EmulatedFp64 default (the matmul sub-steps); "fp64"/"native" -> native FP64.
-// Faults (no device, missing files, unknown pop, CUDA runtime) raise (§1.3 / §5.2).
+// run_qpfstats — the genotype-path joint f2 smoother — reference §6
 nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::string>& pops,
                            const std::string& out, int device, double blgsize,
                            std::optional<std::string> precision) {
@@ -293,7 +235,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
     const steppe::Precision prec = parse_precision(precision, "qpfstats");
 
     steppe::DeviceConfig cfg;
-    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
+    cfg.devices = {device};
     cfg.precision = prec;
 
     steppe::QpfstatsResult result;
@@ -308,7 +250,6 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
     if (result.status != steppe::Status::Ok)
         raise_value("qpfstats: could not build the smoothed f2 (check pops are all present)");
 
-    // MODE A: out= given -> serialize an STPF2BK1 dir + return the path STRING.
     if (!out.empty()) {
         sa::F2DirMeta meta;
         meta.precision_mantissa_bits = prec.mantissa_bits;
@@ -316,7 +257,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
             (prec.kind == steppe::Precision::Kind::EmulatedFp64) ? "emu"
           : (prec.kind == steppe::Precision::Kind::Tf32)         ? "tf32"
                                                                  : "fp64";
-        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;  // Morgans -> centimorgans (meta records cM).
+        meta.blgsize_cm = blgsize * steppe::kCentimorgansPerMorgan;
         meta.n_block = result.f2.n_block;
         meta.P = result.f2.P;
         meta.autosomes_only = true;
@@ -328,7 +269,6 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
         return nb::cast(out);
     }
 
-    // MODE B: out= empty -> wrap the smoothed tensor + labels in a new F2Handle.
     auto* h = new F2Handle();
     h->tensor = std::move(result.f2);
     h->pops = std::move(result.pop_labels);
@@ -336,11 +276,7 @@ nb::object run_qpfstats_py(const std::string& prefix, const std::vector<std::str
     return nb::cast(h, nb::rv_policy::take_ownership);
 }
 
-// run_f3: a list of (C,A,B) triple NAME tuples against the SAME resident f2, computed
-// BATCHED (run_f3). Returns ONE dict of parallel arrays {pop1,pop2,pop3,est,se,z,p} in
-// input order. The THREE-slab clone of run_f4_py: resolve names against pops.txt, build
-// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives only
-// here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+// run_f3 — standalone f3 (f2-cache path) — reference §3
 nb::dict run_f3_py(F2Handle& h,
                    const std::vector<std::array<std::string, 3>>& triples) {
     if (triples.empty()) raise_value("f3: needs at least one (C,A,B) triple");
@@ -353,7 +289,7 @@ nb::dict run_f3_py(F2Handle& h,
     for (const std::array<std::string, 3>& t : triples)
         idx_triples.push_back(resolve_tuple<3>(resolver, t, "triple pop"));
 
-    steppe::QpAdmOptions opts;  // f3 uses fudge=0 internally (run_f3); opts is the default.
+    steppe::QpAdmOptions opts;
 
     const steppe::F3Result result =
         with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
@@ -363,11 +299,7 @@ nb::dict run_f3_py(F2Handle& h,
     return f3_to_dict(result, h.pops);
 }
 
-// run_f4ratio: a list of (p1,p2,p3,p4,p5) 5-tuple NAME tuples against the SAME resident f2,
-// computed BATCHED (run_f4ratio). Returns ONE dict of parallel arrays {pop1..pop5,alpha,se,z}
-// in input order. The FIVE-column clone of run_f4_py: resolve names against pops.txt, build
-// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks lives only
-// here and frees in its destructor — spike #1), run the CUDA-free seam, marshal.
+// run_f4ratio — standalone f4-ratio (f2-cache path) — reference §3
 nb::dict run_f4ratio_py(F2Handle& h,
                         const std::vector<std::array<std::string, 5>>& tuples) {
     if (tuples.empty()) raise_value("f4-ratio: needs at least one (p1,p2,p3,p4,p5) tuple");
@@ -380,7 +312,7 @@ nb::dict run_f4ratio_py(F2Handle& h,
     for (const std::array<std::string, 5>& t : tuples)
         idx_tuples.push_back(resolve_tuple<5>(resolver, t, "f4-ratio pop"));
 
-    steppe::QpAdmOptions opts;  // f4-ratio uses fudge=0 internally (run_f4ratio); opts default.
+    steppe::QpAdmOptions opts;
 
     const steppe::F4RatioResult result =
         with_device_f2(h, [&](sd::DeviceF2Blocks& dev_f2, sd::Resources& resources) {
@@ -392,6 +324,7 @@ nb::dict run_f4ratio_py(F2Handle& h,
 
 }  // namespace
 
+// register_fstats — the registered Python entries + defaults — reference §9
 void register_fstats(nb::module_& m) {
     m.def("run_f4", &run_f4_py, "f2"_a, "quartets"_a,
           "Standalone f4(p1,p2;p3,p4) (GPU). `quartets` is a list of (p1,p2,p3,p4) name "

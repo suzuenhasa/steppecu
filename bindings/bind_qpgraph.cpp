@@ -1,10 +1,7 @@
-// bindings/bind_qpgraph.cpp — the qpGraph single-fit + topology-search entries (steppe._core).
+// bindings/bind_qpgraph.cpp — the qpGraph Python bindings (steppe._core).
 //
-// run_qpgraph (fit a FIXED admixture graph) and run_qpgraph_search (the topology SEARCH v1,
-// one heterogeneous-fleet launch fits ALL candidates). Both mirror run_qpwave_py: build
-// (cached) resources, upload the host tensor INSIDE the call (the DeviceF2Blocks frees in its
-// destructor — spike #1), run the CUDA-free seam, marshal. NOTE: qpGraph uses the AT2
-// afprod=FALSE f2 (DIFFERENT from qpadm's afprod=TRUE).
+// Registers run_qpgraph (fit a fixed admixture graph) and run_qpgraph_search (the
+// topology search). Both use the afprod=FALSE f2, unlike qpadm's afprod=TRUE.
 #include <array>
 #include <cstdint>
 #include <string>
@@ -12,16 +9,11 @@
 
 #include "internal/bind_common.hpp"
 
-#include "steppe/qpgraph_search.hpp"  // run_qpgraph_search (the topology SEARCH v1 binding)
+#include "steppe/qpgraph_search.hpp"
 
 namespace steppe::pybind {
 namespace {
 
-// run_qpgraph: fit a FIXED admixture graph (an edge list of (parent, child) name pairs)
-// to the resident f2. The leaves must be f2 populations. Mirrors run_qpwave_py: build
-// (cached) resources, upload the host tensor INSIDE the call, run the CUDA-free seam,
-// marshal. NOTE: qpGraph uses the AT2 afprod=FALSE f2 (DIFFERENT from qpadm's afprod=TRUE);
-// the f2 dir handed to read_f2 must be the afprod=FALSE one (the facade documents this).
 nb::dict run_qpgraph_py(F2Handle& h,
                         const std::vector<std::array<std::string, 2>>& edges,
                         int numstart, double fudge, double diag_f3, bool constrained) {
@@ -46,10 +38,6 @@ nb::dict run_qpgraph_py(F2Handle& h,
     return qpgraph_to_dict(result);
 }
 
-// run_qpgraph_search: the topology SEARCH v1 (oracle C). Enumerate every rooted topology on
-// the bounded `pops` leaf set (nadmix in {0..max_nadmix}), fit ALL in one heterogeneous-fleet
-// launch, return the deterministic global-best + the exhaustive-coverage count + the heuristic
-// recovery + the wall-clock. The host does only the cheap enumeration + the argmin.
 nb::dict run_qpgraph_search_py(F2Handle& h, const std::vector<std::string>& pops, int max_nadmix,
                                int numstart, double fudge, double diag_f3, bool constrained,
                                bool run_heuristic) {
@@ -85,12 +73,6 @@ nb::dict run_qpgraph_search_py(F2Handle& h, const std::vector<std::string>& pops
     for (const auto& e : r.best.edges) be.append(nb::make_tuple(e.from, e.to));
     d["best_edges"] = be;
 
-    // The FULL per-candidate scored vector (additive marshalling of the already-computed
-    // QpGraphSearchResult::candidates — the same per-topology data the global-best argmin
-    // reduces over, in deterministic enumeration order; trees then admix1). Parallel arrays
-    // {nadmix, hash, score, restart_spread} so the facade can look a candidate up by its
-    // canonical graph_hash + the score the argmin chose. NO compute change (the score vector
-    // is already in the result; this only exposes it).
     std::vector<int> cand_nadmix;
     std::vector<std::uint64_t> cand_hash;
     std::vector<double> cand_score;

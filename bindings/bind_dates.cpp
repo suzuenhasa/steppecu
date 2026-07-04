@@ -1,25 +1,16 @@
-// bindings/bind_dates.cpp — the DATES admixture-dating entry (steppe._core).
+// bindings/bind_dates.cpp — the DATES admixture-dating binding (steppe._core).
 //
-// run_dates reads the genotype TRIPLE prefix.{geno,snp,ind} directly (the cuFFT
-// autocorrelation LD engine; NEVER the f2 cache, NEVER a host O(M^2) SNP-pair loop) and
-// returns the date in generations + the leave-one-chromosome block-jackknife SE. Faults (no
-// device, missing files) raise (cli-bindings.md §1.3 / §5.2).
+// run_dates reads the genotype triple prefix.{geno,snp,ind} directly (never the f2 cache)
+// and returns the date in generations plus the block-jackknife SE.
 #include <string>
 
 #include "internal/bind_common.hpp"
 
-#include "steppe/dates.hpp"  // run_dates + DatesResult/DatesOptions (the DATES dating tool)
+#include "steppe/dates.hpp"
 
 namespace steppe::pybind {
 namespace {
 
-// run_dates: the DATES admixture-dating binding. Reads the genotype TRIPLE prefix.{geno,snp,ind}
-// directly (the cuFFT autocorrelation LD engine; NEVER the f2 cache, NEVER a host O(M²) SNP-pair
-// loop) and returns the date in generations + the leave-one-chromosome block-jackknife SE.
-// `target` is the admixed population; `source1`/`source2` are the two reference sources (the
-// weight is wt = freq(source1) - freq(source2)). The .snp MUST carry a real genetic map (cM).
-// Returns a dict {target, source1, source2, date_gen, se, fit_error_sd, curve_cm, curve_corr,
-// status}. Faults (no device, missing files) raise (§1.3 / §5.2).
 nb::dict run_dates_py(const std::string& prefix, const std::string& target,
                       const std::string& source1, const std::string& source2, int device) {
     const std::string geno = prefix + ".geno";
@@ -27,8 +18,8 @@ nb::dict run_dates_py(const std::string& prefix, const std::string& target,
     const std::string ind = prefix + ".ind";
 
     steppe::DeviceConfig cfg;
-    cfg.devices = {device};  // single-GPU (multi-gpu PARKED).
-    steppe::DatesOptions opts;  // defaults == the DATES reference par.dates.
+    cfg.devices = {device};
+    steppe::DatesOptions opts;
     steppe::DatesResult result;
     try {
         sd::Resources resources = sd::build_resources(cfg);
