@@ -85,11 +85,12 @@ handoff-*.md
 docs/commentdump/*
 !docs/commentdump/extract_comments.py
 
-# docs: publish ONLY docs/reference/ + docs/examples/ to the remote; everything else under
-# docs/ is LOCAL-ONLY (untracked here, kept on disk).
+# docs: publish docs/reference/ + docs/examples/ + docs/userguide/ to the remote; everything
+# else under docs/ is LOCAL-ONLY (untracked here, kept on disk).
 docs/*
 !docs/reference/
 !docs/examples/
+!docs/userguide/
 
 # generated marimo render (keep the .py, not the html)
 docs/examples/notebooks/*.html
