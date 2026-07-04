@@ -21,8 +21,8 @@ steppe qpadm --f2-dir docs/examples/f2_9pop \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
 ```
 
-(The one-liner installer stages the same cache to `~/.local/share/steppe/example_9pop`, and it's
-also a release asset: `example_9pop_f2.tar.gz`.) The two scripts below are instead **living API
+(The one-liner installer stages the same cache to `~/.local/share/steppe/example`, and it's
+also a release asset: `example_f2.tar.gz`.) The two scripts below are instead **living API
 canaries** for the *built bindings* — read on for those.
 
 ## The model — real-AADR `golden_fit0`

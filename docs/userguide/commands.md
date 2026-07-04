@@ -3,13 +3,14 @@
 Copy-paste one-liners for every steppe subcommand. They assume `steppe` is installed and on your
 PATH — see [getting started](./README.md).
 
-The **f2-based** examples run against the bundled 9-population example that the installer stages at
-`~/.local/share/steppe/example_9pop`, so they work the moment you've installed steppe. The
+The **f2-based** examples run against the bundled 10-population example that the installer stages at
+`~/.local/share/steppe/example`, so they work the moment you've installed steppe. The
 **genotype-based** ones (`extract-f2`, `qpfstats`, `dates`) need your own data — see
 [data and formats](./data-and-formats.md).
 
-> The bundled example contains: `England_BellBeaker`, `Czechia_EBA_CordedWare`, `Turkey_N`,
-> `Mbuti`, `Han`, `Papuan`, `Karitiana`, `Iran_GanjDareh_N`, `Israel_Natufian`.
+> The bundled example contains: `Czechia_EBA_CordedWare`, `England_BellBeaker`,
+> `Russia_Samara_EBA_Yamnaya`, `Turkey_N`, `Mbuti`, `Han`, `Papuan`, `Karitiana`,
+> `Iran_GanjDareh_N`, `Israel_Natufian`.
 
 Every command takes `--device <n>` (default `0`) and, where it produces a result,
 `--format csv|tsv|json` (default `csv`) and `--out FILE`. They're omitted below for brevity.
@@ -21,9 +22,10 @@ Every command takes `--device <n>` (default `0`) and, where it produces a result
 Target as a mixture of `--left` sources, tested against the `--right` outgroups. See [qpadm](./qpadm.md).
 
 ```bash
-steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
-  --target England_BellBeaker \
-  --left  Czechia_EBA_CordedWare,Turkey_N \
+# Corded Ware = Yamnaya (steppe) + Anatolian farmer — the Haak 2015 steppe migration (~73% / 27%)
+steppe qpadm --f2-dir ~/.local/share/steppe/example \
+  --target Czechia_EBA_CordedWare \
+  --left  Russia_Samara_EBA_Yamnaya,Turkey_N \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian \
   --jackknife 2 --format json
 ```
@@ -34,7 +36,7 @@ Tests how many ancestry streams relate the `--left` set to the outgroups; `left[
 reference. See [qpwave](./qpwave.md).
 
 ```bash
-steppe qpwave --f2-dir ~/.local/share/steppe/example_9pop \
+steppe qpwave --f2-dir ~/.local/share/steppe/example \
   --left  Czechia_EBA_CordedWare,Turkey_N,England_BellBeaker \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
 ```
@@ -45,7 +47,7 @@ Enumerates source subsets of `--pool` for one target in a single batched GPU run
 [qpadm-rotate](./qpadm-rotate.md).
 
 ```bash
-steppe qpadm-rotate --f2-dir ~/.local/share/steppe/example_9pop \
+steppe qpadm-rotate --f2-dir ~/.local/share/steppe/example \
   --target England_BellBeaker \
   --pool   Czechia_EBA_CordedWare,Turkey_N,Iran_GanjDareh_N,Israel_Natufian \
   --right  Mbuti,Han,Papuan,Karitiana \
@@ -60,19 +62,19 @@ See [f-statistics](./f-statistics.md).
 
 ```bash
 # f4(p1,p2 ; p3,p4)
-steppe f4 --f2-dir ~/.local/share/steppe/example_9pop \
+steppe f4 --f2-dir ~/.local/share/steppe/example \
   --pop1 England_BellBeaker --pop2 Czechia_EBA_CordedWare --pop3 Han --pop4 Iran_GanjDareh_N
 
 # f3(C ; A, B)
-steppe f3 --f2-dir ~/.local/share/steppe/example_9pop \
+steppe f3 --f2-dir ~/.local/share/steppe/example \
   --pop1 Czechia_EBA_CordedWare --pop2 England_BellBeaker --pop3 Turkey_N
 
 # f4-ratio  alpha = f4(p1,p2;p3,p4) / f4(p1,p2;p5,p4)
-steppe f4-ratio --f2-dir ~/.local/share/steppe/example_9pop \
+steppe f4-ratio --f2-dir ~/.local/share/steppe/example \
   --pops Czechia_EBA_CordedWare,Mbuti,Turkey_N,Han,England_BellBeaker
 
 # D-statistic (f2-path: reports f4 with Z / p)
-steppe qpdstat --f2-dir ~/.local/share/steppe/example_9pop \
+steppe qpdstat --f2-dir ~/.local/share/steppe/example \
   --pop1 Mbuti --pop2 Han --pop3 Czechia_EBA_CordedWare --pop4 Turkey_N
 ```
 
@@ -85,13 +87,13 @@ Enumerate every quartet / triple over a pop set, keep only survivors (`--top-k` 
 
 ```bash
 # every f4 quartet over the example (C(9,4) = 126), keep the top 50 by |z|
-steppe f4-sweep --f2-dir ~/.local/share/steppe/example_9pop --top-k 50
+steppe f4-sweep --f2-dir ~/.local/share/steppe/example --top-k 50
 
 # every f3 triple, keep |z| >= 3
-steppe f3-sweep --f2-dir ~/.local/share/steppe/example_9pop --min-z 3
+steppe f3-sweep --f2-dir ~/.local/share/steppe/example --min-z 3
 
 # the same sweep via f4/f3 with --all-quartets/--all-triples + sharded CSV output
-steppe f4 --all-quartets --f2-dir ~/.local/share/steppe/example_9pop \
+steppe f4 --all-quartets --f2-dir ~/.local/share/steppe/example \
   --top-k 50 --shard-dir ./sweep_out
 ```
 
@@ -107,10 +109,10 @@ Fit a graph you provide, or search topologies over a leaf set. See [qpgraph](./q
 
 ```bash
 # fit a single graph topology (edge-list: "parent child" per line)
-steppe qpgraph --f2-dir ~/.local/share/steppe/example_9pop --graph mygraph.txt --format json
+steppe qpgraph --f2-dir ~/.local/share/steppe/example --graph mygraph.txt --format json
 
 # search topologies over a bounded leaf set (>= 3 pops)
-steppe qpgraph-search --f2-dir ~/.local/share/steppe/example_9pop \
+steppe qpgraph-search --f2-dir ~/.local/share/steppe/example \
   --pops England_BellBeaker,Czechia_EBA_CordedWare,Turkey_N,Mbuti,Han,Karitiana \
   --max-nadmix 1 --numstart 10 --format json
 ```
@@ -153,7 +155,7 @@ ADMIXTOOLS 2's `read_f2()` `.rds` format, so you can cross-check a fit in R. Imp
 
 ```bash
 # steppe f2 dir  ->  an AT2 read_f2() .rds dir you can open in R
-steppe-rds export ~/.local/share/steppe/example_9pop ./exported_rds
+steppe-rds export ~/.local/share/steppe/example ./exported_rds
 
 # an AT2 .rds dir  ->  a steppe f2 cache
 steppe-rds import ./some_at2_rds_dir ./imported_f2_dir

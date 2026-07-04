@@ -37,32 +37,45 @@ duplicate them.
 
 ## Your first run
 
-The installer stages a tiny but **real** 9-population AADR f2 cache, so you can fit a model
-immediately — no data download, no cache to build:
+The installer stages a tiny but **real** 10-population AADR f2 cache, so you can fit a model
+immediately — no data download, no cache to build. Let's reproduce the result this tool is named
+for: the steppe migration (Haak et al. 2015).
 
 ```bash
-steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
-  --target England_BellBeaker \
-  --left Czechia_EBA_CordedWare,Turkey_N \
+steppe qpadm --f2-dir ~/.local/share/steppe/example \
+  --target Czechia_EBA_CordedWare \
+  --left Russia_Samara_EBA_Yamnaya,Turkey_N \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
 ```
 
-This models the target `England_BellBeaker` as a mixture of two sources
-(`Czechia_EBA_CordedWare` and `Turkey_N`), using the six right-hand populations as outgroups.
-You should get weights close to:
+This models `Czechia_EBA_CordedWare` (Corded Ware) as a mixture of two sources —
+`Russia_Samara_EBA_Yamnaya` (Yamnaya steppe herders) and `Turkey_N` (Anatolian farmers) — using
+the six right-hand populations as outgroups. You should get weights close to:
 
 ```
-Czechia_EBA_CordedWare  ~0.87
-Turkey_N                ~0.13
-tail p                  ~0.41
+Russia_Samara_EBA_Yamnaya  ~0.73
+Turkey_N                   ~0.27
+tail p                     ~0.11
 ```
 
-**How to read it.** The **weights** are the estimated ancestry proportions of the target from
-each source — here, Bell Beaker ancestry that is mostly steppe-related (à la Olalde et al.
-2018). The **p-value** (tail probability) tests whether the model fits: a larger p means the
-data are consistent with this many sources, and a very small p means the model is rejected. A
-run is marked **feasible** when the fit is acceptable and every weight is a sensible proportion
-(none negative). So `p ~0.41` with two positive weights is a clean, feasible two-way fit.
+**How to read it.** The **weights** are the estimated ancestry proportions of the target from each
+source — here, **Corded Ware ≈ 73% steppe ancestry (Yamnaya) + 27% Anatolian farmer**, the "massive
+migration from the steppe" of Haak et al. 2015 that gave this tool its name. The **p-value** (tail
+probability) tests whether the model fits: a larger p means the data are consistent with this many
+sources, and a very small p means the model is rejected. A run is marked **feasible** when the fit
+is acceptable and every weight is a sensible proportion (none negative). So `p ~0.11` with two
+positive weights is a clean, feasible two-way fit.
+
+**Then follow the ancestry forward.** That steppe ancestry flows on into the Bell Beaker people —
+just swap the target:
+
+```bash
+steppe qpadm --f2-dir ~/.local/share/steppe/example \
+  --target England_BellBeaker \
+  --left Czechia_EBA_CordedWare,Turkey_N \
+  --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
+#  -> England Bell Beaker ≈ 83% Corded Ware + 17% Anatolian, p ~0.06 (Olalde et al. 2018).
+```
 
 ## A typical real workflow
 

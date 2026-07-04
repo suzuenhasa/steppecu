@@ -93,11 +93,11 @@ exec "$self/steppe.bin" "$@"
 WRAP
 chmod +x "$DIR/steppe"
 
-# --- stage the tiny quickstart example (a real 9-pop AADR f2 cache) --------------------
-EXAMPLE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/steppe/example_9pop"
+# --- stage the tiny quickstart example (a real 10-pop AADR f2 cache) -------------------
+EXAMPLE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/steppe/example"
 if [ "${STEPPE_NO_EXAMPLE:-}" != "1" ] \
    && curl -fL -s -o "/tmp/steppe_example.$$.tgz" \
-        "https://github.com/$REPO/releases/download/$TAG/example_9pop_f2.tar.gz" 2>/dev/null; then
+        "https://github.com/$REPO/releases/download/$TAG/example_f2.tar.gz" 2>/dev/null; then
   rm -rf "$EXAMPLE_DIR" && mkdir -p "$EXAMPLE_DIR"
   if tar xzf "/tmp/steppe_example.$$.tgz" -C "$EXAMPLE_DIR" 2>/dev/null; then
     say "✓ example f2 cache → $EXAMPLE_DIR"
@@ -143,7 +143,7 @@ say ""
 if [ -n "$EXAMPLE_DIR" ] && [ -f "$EXAMPLE_DIR/f2.bin" ]; then
   say "try it now — a real qpAdm fit on the bundled example (no data to download):"
   say "  steppe qpadm --f2-dir \"$EXAMPLE_DIR\" \\"
-  say "    --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \\"
+  say "    --target Czechia_EBA_CordedWare --left Russia_Samara_EBA_Yamnaya,Turkey_N \\"
   say "    --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian"
   say ""
 fi

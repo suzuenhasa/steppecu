@@ -105,22 +105,23 @@ Build the **Python wheel**: `pip wheel . --no-deps` (add `--config-settings=cmak
 
 ## Quick start
 
-**First result in seconds.** The installer stages a tiny **real** 9-population AADR f2 cache, so
+**First result in seconds.** The installer stages a tiny **real** 10-population AADR f2 cache, so
 you can fit a qpAdm model immediately — no data download, no build:
 
 ```bash
-steppe qpadm --f2-dir ~/.local/share/steppe/example_9pop \
-  --target England_BellBeaker --left Czechia_EBA_CordedWare,Turkey_N \
+steppe qpadm --f2-dir ~/.local/share/steppe/example \
+  --target Czechia_EBA_CordedWare --left Russia_Samara_EBA_Yamnaya,Turkey_N \
   --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian
-#  -> weights (Czechia_EBA_CordedWare ~0.87, Turkey_N ~0.13) + tail p ~0.41 — a real fit.
-#     (steppe-dominated Bell Beaker ancestry, à la Olalde et al. 2018 — see docs/examples/)
+#  -> weights (Russia_Samara_EBA_Yamnaya ~0.73, Turkey_N ~0.27) + tail p ~0.11 — a real fit.
+#     Corded Ware ≈ 73% steppe (Yamnaya) + 27% Anatolian farmer — the migration this tool is named
+#     for (Haak et al. 2015). That steppe ancestry then flows on into Bell Beaker — see docs/userguide/.
 ```
 
 Built from source, or want it by hand? Grab the same example directly:
 ```bash
-mkdir example_9pop && curl -fsSL \
-  https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/example_9pop_f2.tar.gz \
-  | tar xz -C example_9pop
+mkdir example && curl -fsSL \
+  https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/example_f2.tar.gz \
+  | tar xz -C example
 ```
 
 **Your own data?** Steppe works over an **f2-blocks directory** — a cache you build once from a

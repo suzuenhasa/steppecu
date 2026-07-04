@@ -14,7 +14,7 @@ def _(mo):
         it and see what the results are actually *for* — because every Steppe result comes back as
         a **pandas DataFrame** you can filter, sort, plot, and join.
 
-        *This runs Steppe, so it needs a CUDA-13 GPU. It defaults to the bundled 9-population
+        *This runs Steppe, so it needs a CUDA-13 GPU. It defaults to the bundled 10-population
         example; point `STEPPE_F2_DIR` at a bigger cache (and `STEPPE_GENO_PREFIX` at your own
         genotypes) for more to explore.*
         """
@@ -62,7 +62,7 @@ def _(mo):
 def _(json, os, steppe, time):
     PREFIX = os.environ.get("STEPPE_GENO_PREFIX", "/path/to/your/genotypes")
     BUILD_POPS = [
-        "England_BellBeaker", "Czechia_EBA_CordedWare", "Turkey_N",
+        "Czechia_EBA_CordedWare", "England_BellBeaker", "Russia_Samara_EBA_Yamnaya", "Turkey_N",
         "Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana",
     ]
     BUILD_DIR = os.path.expanduser("~/nb_built_f2")
@@ -108,7 +108,7 @@ def _(POPS, mo):
 @app.cell
 def _(os, steppe):
     F2DIR = os.environ.get(
-        "STEPPE_F2_DIR", os.path.expanduser("~/.local/share/steppe/example_9pop")
+        "STEPPE_F2_DIR", os.path.expanduser("~/.local/share/steppe/example")
     )
     POPS = [ln.strip() for ln in open(os.path.join(F2DIR, "pops.txt")) if ln.strip()]
     f2 = steppe.read_f2(F2DIR, device=0)
@@ -117,8 +117,8 @@ def _(os, steppe):
 
 @app.cell
 def _():
-    TARGET = "England_BellBeaker"
-    LEFT = ["Czechia_EBA_CordedWare", "Turkey_N"]
+    TARGET = "Czechia_EBA_CordedWare"
+    LEFT = ["Russia_Samara_EBA_Yamnaya", "Turkey_N"]
     RIGHT = ["Mbuti", "Han", "Papuan", "Karitiana", "Iran_GanjDareh_N", "Israel_Natufian"]
     return LEFT, RIGHT, TARGET
 
@@ -129,9 +129,11 @@ def _(mo):
         r"""
         ## 2. Fit a qpAdm model
 
-        Can **England_BellBeaker** be explained as a mix of **Czechia_EBA_CordedWare**
-        (steppe-rich) and **Turkey_N** (Anatolian farmer)? `res.weights` comes back as a
-        DataFrame: the ancestry proportions, each with a standard error and a z-score.
+        Can **Czechia_EBA_CordedWare** (Corded Ware) be explained as a mix of
+        **Russia_Samara_EBA_Yamnaya** (Yamnaya steppe herders) and **Turkey_N** (Anatolian
+        farmer)? This is the "massive migration from the steppe" of Haak et al. 2015 — the study
+        this tool is named for. `res.weights` comes back as a DataFrame: the ancestry proportions,
+        each with a standard error and a z-score.
         """
     )
     return
