@@ -77,7 +77,7 @@ void add_common_flags(CLI::App* sub, CliArgs& a) {
         "Matmul precision: emu40 | emu32 | fp64 | tf32 (default emu40)");
     sub->add_option_function<std::string>(
         "--config", [&a](const std::string& v) { a.config_path = v; },
-        "TOML config file (merged below CLI, above env/defaults)");
+        "TOML config file (reserved; not yet supported — passing one currently errors)");
 }
 
 void add_output_flags(CLI::App* sub, CliArgs& a) {
