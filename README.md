@@ -7,6 +7,8 @@
 > data, but install/onboarding, docs, and some APIs are still rough and may change. **Not a
 > stable release yet** — expect sharp edges, and please don't rely on it for production work.
 
+**[What it does](#what-it-does) · [Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Python](#python) · [Performance](#performance) · [Docs](#documentation)**
+
 ## About
 
 One of my favorite hobbies is finding ways to make software faster, and Steppe grew out of that
@@ -121,36 +123,17 @@ mkdir example_9pop && curl -fsSL \
   | tar xz -C example_9pop
 ```
 
-**Your own data.** Steppe works over an **f2-blocks directory** — a precomputed cache of pairwise
-f2 per genome block. Build it once from a genotype prefix, then run any number of stats/fits:
-
-```bash
-S=./steppe        # or just `steppe` if it's on your PATH
-
-# 1) build the f2 cache from a genotype prefix (reads PREFIX.{geno,snp,ind})
-$S extract-f2 --prefix /data/v66_HO --auto-top-k 200 --maxmiss 0.5 --device 0 --out-dir f2_dir
-
-# 2) qpAdm — model a target as a mixture of sources (jackknife SEs, JSON out)
-$S qpadm --f2-dir f2_dir --target England_BellBeaker \
-  --left  Czechia_EBA_CordedWare,Turkey_N \
-  --right Mbuti,Han,Papuan,Karitiana,Iran_GanjDareh_N,Israel_Natufian \
-  --jackknife 2 --format json
-
-# 3) sweep EVERY f4 quartet on the GPU, keep the top-K most extreme |z|
-$S f4 --all-quartets --f2-dir f2_dir --top-k 1000000 --sure --shard-dir sweep_out --device 0
-```
-
-If you prefer a notebook: there's a marimo walkthrough (genotypes → f2 cache → qpAdm → rotation → f4, every
-result a pandas DataFrame) in **[docs/examples/notebooks/](docs/examples/notebooks/)**. A full
-worked example with expected output is in **[docs/examples/](docs/examples/)**, and every subcommand
-prints its complete flag reference with `steppe <subcommand> --help`.
+**Your own data?** Steppe works over an **f2-blocks directory** — a cache you build once from a
+genotype prefix, then run any number of fits against. The full workflow (data → `extract-f2` →
+`qpadm` → sweeps), every command's flags with runnable examples, and a marimo notebook walkthrough
+all live in the **[user guide](docs/userguide/)** — start with **[getting started](docs/userguide/)**.
 
 ---
 
 ## Commands
 
-`steppe --help` lists the **14 subcommands**; `steppe <cmd> --help` documents each one's flags.
-All compute runs on the GPU.
+`steppe --help` lists the **14 subcommands** (all compute runs on the GPU); the
+**[user guide](docs/userguide/)** has a page per command explaining every flag with runnable examples.
 
 | Command | What it does |
 |---|---|
@@ -179,27 +162,20 @@ are **bit-identical across GPU arches**. Output: `--format csv|tsv|json`, `--out
 
 ## Python
 
-The Python facade mirrors the CLI: `read_f2` / `extract_f2` / `qpfstats` build or load an f2
-handle, then `qpadm` / `qpwave` / `qpgraph` / `qpgraph_search` / `f4` / `f3` / `f4ratio` /
-`qpdstat` / `dstat` / `dates` / `qpadm_search` consume it. Results return as pandas-friendly
-objects (`.weights`, `.table`, …) and the f2 tensor as a NumPy array.
+The Python facade mirrors the CLI: build or load an f2 handle, then run any fit against it —
+results come back as pandas-friendly objects (`.weights`, …).
 
 ```python
 import steppe
-
-f2 = steppe.read_f2("f2_dir/")           # load an STPF2BK1 f2 dir
-res = steppe.qpadm(
-    f2,
-    target="England_BellBeaker",
-    left=["Czechia_EBA_CordedWare", "Turkey_N"],
-    right=["Mbuti", "Israel_Natufian", "Iran_GanjDareh_N", "Han", "Papuan", "Karitiana"],
-)
-print(res.weights)          # DataFrame: [target, left, weight, se, z]
-print(res.p, res.chisq, res.f4rank)
+f2  = steppe.read_f2("f2_dir/")
+res = steppe.qpadm(f2, target="England_BellBeaker",
+                   left=["Czechia_EBA_CordedWare", "Turkey_N"],
+                   right=["Mbuti", "Han", "Papuan", "Karitiana", "Iran_GanjDareh_N", "Israel_Natufian"])
+print(res.weights)   # DataFrame: [target, left, weight, se, z]
 ```
 
-`steppe.extract_f2(prefix, pops=[...], out="f2_dir")` builds an f2 cache straight from a genotype
-prefix on the GPU. `pandas` is imported lazily, so `import steppe` works without it.
+The full API — every function, the result objects, the DataFrame accessors — is on the
+**[Python page](docs/userguide/python.md)** of the user guide. `pandas` is optional (imported lazily).
 
 ---
 
@@ -260,10 +236,10 @@ see [Acknowledgments](#acknowledgments) for the references.
 
 ## Documentation
 
-- **[docs/examples/](docs/examples/)** — a worked end-to-end example (install → f2 → qpAdm) with
-  expected output, runnable Python and C++ quickstarts, and a marimo notebook walkthrough.
-- **[docs/reference/](docs/reference/)** — per-module reference docs: plain-English explanations of
-  how each part of the codebase works, one file per source file.
+- **[docs/userguide/](docs/userguide/)** — **start here.** Getting started, a page per feature
+  (what every flag does + commands to run), the command cheatsheet, and the Python API.
+- **[docs/examples/](docs/examples/)** — a worked end-to-end example + a marimo notebook walkthrough.
+- **[docs/reference/](docs/reference/)** — per-module internals, one file per source file (for contributors).
 
 ---
 
