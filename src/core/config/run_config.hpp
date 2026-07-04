@@ -63,6 +63,9 @@ public:
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
     [[nodiscard]] double scan_p_min()           const noexcept { return scan_p_min_; }
     [[nodiscard]] bool scan_allow_clade()       const noexcept { return scan_allow_clade_; }
+    [[nodiscard]] const std::string& scan_strategy() const noexcept { return scan_strategy_; }
+    [[nodiscard]] int scan_beam_width()          const noexcept { return scan_beam_width_; }
+    [[nodiscard]] const std::vector<std::string>& scan_base() const noexcept { return scan_base_; }
 
     // f-statistic sweep controls — reference §10
     [[nodiscard]] double sweep_min_z()          const noexcept { return sweep_min_z_; }
@@ -116,6 +119,9 @@ private:
     int max_sources_ = -1;
     double scan_p_min_ = 0.05;
     bool scan_allow_clade_ = true;
+    std::string scan_strategy_ = "beam";
+    int scan_beam_width_ = 3;
+    std::vector<std::string> scan_base_;
     double sweep_min_z_ = 3.0;
     int sweep_top_k_ = -1;
     bool sweep_sure_ = false;

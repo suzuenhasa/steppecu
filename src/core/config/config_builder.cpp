@@ -151,6 +151,9 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.max_sources, args.max_sources);
     take_d(merged_.scan_p_min, args.scan_p_min);
     take_b(merged_.scan_allow_clade, args.scan_allow_clade);
+    take(merged_.scan_strategy, args.scan_strategy);
+    take_i(merged_.scan_beam_width, args.scan_beam_width);
+    if (!args.scan_base.empty()) merged_.scan_base = args.scan_base;
     take_d(merged_.sweep_min_z, args.sweep_min_z);
     take_i(merged_.sweep_top_k, args.sweep_top_k);
     take_b(merged_.sweep_sure, args.sweep_sure);
@@ -398,6 +401,18 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         cfg.scan_p_min_ = *merged_.scan_p_min;
     }
     if (merged_.scan_allow_clade.has_value()) cfg.scan_allow_clade_ = *merged_.scan_allow_clade;
+    if (merged_.scan_strategy.has_value()) {
+        const std::string& s = *merged_.scan_strategy;
+        if (s != "greedy" && s != "beam" && s != "exhaustive") {
+            return fail("--strategy must be greedy | beam | exhaustive");
+        }
+        cfg.scan_strategy_ = s;
+    }
+    if (merged_.scan_beam_width.has_value()) {
+        if (*merged_.scan_beam_width < 1) return fail("--beam-width must be >= 1");
+        cfg.scan_beam_width_ = *merged_.scan_beam_width;
+    }
+    cfg.scan_base_ = merged_.scan_base;
     if (cfg.max_sources_ != -1 && cfg.max_sources_ < cfg.min_sources_) {
         return fail("--max-sources must be >= --min-sources");
     }

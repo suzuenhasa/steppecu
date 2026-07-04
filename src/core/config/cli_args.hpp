@@ -91,6 +91,10 @@ struct CliArgs {
     std::optional<double> scan_p_min;
     // steppe scan: may a 1-source (clade) model be crowned the winner? default true
     std::optional<bool> scan_allow_clade;
+    // steppe scan Phase-1 search: strategy (greedy|beam|exhaustive), beam width, optional seed
+    std::optional<std::string> scan_strategy;
+    std::optional<int>         scan_beam_width;
+    std::vector<std::string>   scan_base;
 
     // f4-sweep and f3-sweep controls — reference §11
     std::optional<bool>   sweep_all_combinations;

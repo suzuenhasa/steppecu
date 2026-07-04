@@ -27,6 +27,7 @@
 #include <exception>
 #include <limits>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -87,7 +88,7 @@ namespace cfg = steppe::config;
     if (!r.popdrop_feasible.empty()) return r.popdrop_feasible[0] != 0;
     if (r.weight.empty()) return false;
     for (double w : r.weight)
-        if (w < 0.0 || w > 1.0) return false;
+        if (!std::isfinite(w) || w < 0.0 || w > 1.0) return false;   // NaN weight -> infeasible
     return true;
 }
 
@@ -210,6 +211,169 @@ void emit_scan_json(std::ostream& os, const std::vector<ScanRow>& rows,
     os << "  ]\n}\n";
 }
 
+// ---- Phase 1: guided greedy/beam search ---------------------------------------------
+
+// Infeasibility margin: how far the WORST weight sits outside [0,1] (0 == feasible). This is
+// the off-simplex direction the greedy/beam frontier descends — it is NOT tail p (a broken or
+// empty fit is +inf, i.e. maximally infeasible, so it sinks in the frontier).
+[[nodiscard]] double infeasibility_margin(const QpAdmResult& r) {
+    if (r.status != Status::Ok || r.weight.empty())
+        return std::numeric_limits<double>::infinity();
+    double m = 0.0;
+    for (double w : r.weight) {
+        if (!std::isfinite(w)) return std::numeric_limits<double>::infinity();  // degenerate: sink it
+        m = std::max(m, std::max(-w, w - 1.0));
+    }
+    return m > 0.0 ? m : 0.0;
+}
+
+// Nested rank-drop chi-square gain at the fit rank — the frontier tie-break (prefer growing the
+// branch whose last mixture dimension is most justified). Not tail p; 0 when indeterminate.
+[[nodiscard]] double chisq_gain(const QpAdmResult& r) {
+    const int fit_rank = static_cast<int>(r.weight.size()) - 1;
+    if (fit_rank < 1) return 0.0;
+    const std::size_t n = std::min(r.rankdrop_f4rank.size(), r.rankdrop_chisqdiff.size());
+    for (std::size_t i = 0; i < n; ++i)
+        if (r.rankdrop_f4rank[i] == fit_rank)
+            return std::isfinite(r.rankdrop_chisqdiff[i]) ? r.rankdrop_chisqdiff[i] : 0.0;
+    return 0.0;
+}
+
+// Count in-band models sum_{k=max(lo,1)}^{min(hi,n)} C(n,k), saturating at cap+1. Each term is
+// computed independently via the smaller side C(n,min(k,n-k)) so a large MIDDLE binomial never
+// false-triggers the cap for a genuinely small high-lo band.
+[[nodiscard]] long band_count(int n, int lo, int hi, long cap) {
+    long total = 0;
+    const int mlo = std::max(lo, 1);
+    const int mhi = std::min(hi, n);
+    for (int k = mlo; k <= mhi; ++k) {
+        long c = 1;
+        const int kk = std::min(k, n - k);
+        for (int i = 0; i < kk; ++i) {
+            if (c > cap) break;                  // saturate; keep the multiply below in range
+            c = c * (n - i) / (i + 1);           // exact: running binomial is integer-divisible
+        }
+        total += (c > cap) ? cap + 1 : c;
+        if (total > cap) return cap + 1;
+    }
+    return total;
+}
+
+// Pools whose in-band enumeration is at most this small run exhaustively regardless of
+// --strategy: greedy's blind spots vanish for free when everything can just be fit.
+constexpr long kScanExhaustiveCap = 4096;
+
+// Hard ceiling for an EXPLICIT --strategy exhaustive enumeration: bounds memory and keeps the
+// per-batch model_index (int) well in range. Lift with --sure. Reference: scope §3.6.
+constexpr long kScanMaxModels = 2'000'000;
+
+struct SearchOutcome {
+    std::vector<QpAdmModel>  models;      // every model fit, in fit order
+    std::vector<QpAdmResult> results;     // parallel to models
+    bool        truncated = false;        // greedy/beam ended with no eligible feasible in-band model
+    std::string strategy_used;            // "greedy" | "beam" | "exhaustive" (may be auto-selected)
+    int         rounds = 0;               // search levels fit (0 for exhaustive)
+};
+
+// The guided search. Every round fits ONE batch against the SAME resident dev_f2 (no re-upload),
+// exactly like qpadm-rotate. greedy/beam descend the infeasibility margin (never p) and
+// early-stop at the smallest ELIGIBLE feasible model in the band; small pools auto-run
+// exhaustively. Reference: docs/planning/proxy-scanner-scope.md §4 (Phase 1), Gap-4 surrogate.
+[[nodiscard]] SearchOutcome guided_search(
+    const device::DeviceF2Blocks& dev_f2, const QpAdmOptions& opts, device::Resources& resources,
+    int target_idx, const std::vector<int>& pool_idx, const std::vector<int>& right_idx,
+    int lo, int hi, const std::string& strategy, int beam_width,
+    const std::vector<int>& base_idx, double alpha, bool allow_clade) {
+
+    SearchOutcome out;
+    const int pool_n = static_cast<int>(pool_idx.size());
+
+    // Exhaustive: explicit, or auto when the in-band enumeration is small.
+    const bool exhaustive = (strategy == "exhaustive")
+        || (band_count(pool_n, lo, hi, kScanExhaustiveCap) <= kScanExhaustiveCap);
+    if (exhaustive) {
+        out.models = enumerate_pool_subsets(target_idx, pool_idx, right_idx, lo, hi);
+        out.results =
+            run_qpadm_search(dev_f2, std::span<const QpAdmModel>(out.models), opts, resources);
+        out.strategy_used = "exhaustive";
+        return out;
+    }
+
+    out.strategy_used = strategy;
+    const int width = (strategy == "greedy") ? 1 : beam_width;
+    const int eff_min = allow_clade ? lo : std::max(lo, 2);   // smallest ELIGIBLE winning size
+
+    std::set<std::vector<int>> seen;                          // dedup by sorted source-set
+    std::vector<std::vector<int>> level;                      // source-sets to fit this round
+    if (!base_idx.empty()) {
+        std::vector<int> b = base_idx;
+        std::sort(b.begin(), b.end());
+        level.push_back(std::move(b));
+    } else {
+        for (int s : pool_idx) level.push_back(std::vector<int>{s});   // seed: every 1-source model
+    }
+
+    bool found_eligible = false;
+    while (!level.empty() && !found_eligible) {
+        std::vector<QpAdmModel> batch;                        // this round's fits (seen-deduped)
+        for (const std::vector<int>& ss : level) {
+            if (!seen.insert(ss).second) continue;
+            QpAdmModel m;
+            m.target = target_idx;
+            m.left = ss;
+            m.right = right_idx;
+            m.model_index = static_cast<int>(batch.size());   // batch-local: engine needs 0..n-1
+            batch.push_back(std::move(m));
+        }
+        if (batch.empty()) break;
+        ++out.rounds;
+        std::vector<QpAdmResult> res =
+            run_qpadm_search(dev_f2, std::span<const QpAdmModel>(batch), opts, resources);
+
+        struct Parent { std::vector<int> ss; double margin; double gain; };
+        std::vector<Parent> parents;
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            const QpAdmResult& r = res[i];
+            const int ns = static_cast<int>(batch[i].left.size());
+            if (r.status == Status::Ok && scan_feasible(r) && r.p >= alpha
+                && ns >= eff_min && ns <= hi) {
+                found_eligible = true;
+            }
+            if (ns < hi)
+                parents.push_back({batch[i].left, infeasibility_margin(r), chisq_gain(r)});
+            // Only in-band models enter the output (matching the exhaustive path); sub-`lo`
+            // seeds/intermediates are frontier scaffolding only — never emitted or crowned.
+            if (ns >= lo && ns <= hi) {
+                out.models.push_back(std::move(batch[i]));
+                out.results.push_back(std::move(res[i]));
+            }
+        }
+        if (found_eligible) break;
+
+        // Prune the frontier: keep the top-`width` parents by smallest margin (tie: larger gain).
+        std::sort(parents.begin(), parents.end(), [](const Parent& a, const Parent& b) {
+            if (a.margin != b.margin) return a.margin < b.margin;
+            return a.gain > b.gain;
+        });
+        if (static_cast<int>(parents.size()) > width)
+            parents.resize(static_cast<std::size_t>(width));
+
+        std::vector<std::vector<int>> next;                   // expand each kept parent by one source
+        for (const Parent& p : parents) {
+            for (int s : pool_idx) {
+                if (std::find(p.ss.begin(), p.ss.end(), s) != p.ss.end()) continue;
+                std::vector<int> child = p.ss;
+                child.push_back(s);
+                std::sort(child.begin(), child.end());
+                if (seen.find(child) == seen.end()) next.push_back(std::move(child));
+            }
+        }
+        level = std::move(next);
+    }
+    out.truncated = !found_eligible;   // greedy/beam pruned without reaching an eligible feasible model
+    return out;
+}
+
 }  // namespace
 
 // The scan command pipeline — Phase 0.
@@ -264,13 +428,26 @@ int run_scan_command(const cfg::RunConfig& config) {
         return cfg::kExitInvalidConfig;
     }
 
-    const std::vector<QpAdmModel> models =
-        enumerate_pool_subsets(target_idx, pool_idx, right_idx, lo, hi);
-    if (models.empty()) {
+    // Cost guard (scope §3.6): an explicit exhaustive enumeration can be astronomically large;
+    // refuse a runaway without --sure (mirrors the f-stat sweep's cap + --sure gate).
+    if (config.scan_strategy() == "exhaustive"
+        && band_count(pool_n, lo, hi, kScanMaxModels) > kScanMaxModels && !config.sweep_sure()) {
         std::fprintf(stderr,
-                     "steppe scan: the [min,max]-sources band over the pool enumerated "
-                     "zero models\n");
+                     "steppe scan: --strategy exhaustive over this pool enumerates > %ld models "
+                     "(C(pool, %d..%d)); pass --sure to proceed, or use --strategy beam/greedy or a "
+                     "smaller --max-sources.\n", kScanMaxModels, lo, hi);
         return cfg::kExitInvalidConfig;
+    }
+
+    // Optional seed model for the guided search (--base): resolve its labels to indices.
+    std::vector<int> base_idx;
+    if (!config.scan_base().empty()) {
+        const ResolveListResult b = resolver.resolve_all(config.scan_base());
+        if (!b.ok) {
+            std::fprintf(stderr, "steppe scan: %s\n", b.error.c_str());
+            return cfg::kExitInvalidConfig;
+        }
+        base_idx = b.indices;
     }
 
     if (config.device().devices.size() >= 2) {
@@ -280,8 +457,13 @@ int run_scan_command(const cfg::RunConfig& config) {
                      config.device().devices.size());
     }
 
+    const double alpha = config.scan_p_min();
+    const double rank_alpha = config.qpadm_options().rank_alpha;
+    const bool allow_clade = config.scan_allow_clade();
+    const std::string target_label = resolver.label_at(target_idx);
+
     const QpAdmOptions opts = config.qpadm_options();
-    std::vector<QpAdmResult> results;
+    SearchOutcome search;
     try {
         device::Resources resources = device::build_resources(config.device());
         if (resources.gpus.empty()) {
@@ -293,20 +475,24 @@ int run_scan_command(const cfg::RunConfig& config) {
         const int device_id = resources.gpus.front().device_id;
         device::DeviceF2Blocks dev_f2 =
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);
-        results = run_qpadm_search(
-            dev_f2, std::span<const QpAdmModel>(models), opts, resources);
+        search = guided_search(dev_f2, opts, resources, target_idx, pool_idx, right_idx,
+                               lo, hi, config.scan_strategy(), config.scan_beam_width(),
+                               base_idx, alpha, allow_clade);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe scan: device error: %s\n", e.what());
         return exit_code_for_caught(e);
     }
 
-    // Apply the objective: gate every fit, then rank survivors-first by parsimony ->
-    // stability -> robustness. Build a parallel per-model metric view over `results`.
-    const double alpha = config.scan_p_min();
-    const double rank_alpha = config.qpadm_options().rank_alpha;
-    const bool allow_clade = config.scan_allow_clade();
-    const std::string target_label = resolver.label_at(target_idx);
+    const std::vector<QpAdmModel>& models = search.models;
+    const std::vector<QpAdmResult>& results = search.results;
+    if (results.empty()) {
+        std::fprintf(stderr, "steppe scan: the search fit zero models "
+                             "(check --min/--max-sources, --pool, --base)\n");
+        return cfg::kExitInvalidConfig;
+    }
 
+    // Apply the objective: gate every fit, then rank survivors-first by parsimony ->
+    // over-param strike -> stability -> robustness, over the models the search fit.
     std::vector<std::size_t> order(results.size());
     for (std::size_t i = 0; i < results.size(); ++i) order[i] = i;
 
@@ -334,7 +520,7 @@ int run_scan_command(const cfg::RunConfig& config) {
         if (fa && fb && za != zb) return za > zb;
         const int da = popdrop_feasible_count(ra), db = popdrop_feasible_count(rb);
         if (da != db) return da > db;                            // robustness: more LOO-feasible
-        return ra.model_index < rb.model_index;                  // stable, deterministic
+        return a < b;   // global fit-order: unique + deterministic (model_index is batch-local)
     });
 
     // Crown the best-ranked survivor eligible under --allow-clade: with --no-allow-clade a
@@ -385,6 +571,14 @@ int run_scan_command(const cfg::RunConfig& config) {
                      "in [0,1], p >= %.4g). No eligible model selected%s.\n",
                      results.size(), n_pass, alpha,
                      allow_clade ? "" : " (--no-allow-clade: no feasible >=2-source mixture)");
+    }
+
+    if (search.truncated) {
+        std::fprintf(stderr,
+                     "steppe scan: NOTE: --strategy %s explored %d level(s) and may have missed a "
+                     "feasible model reachable only by a non-greedy step — rerun --strategy "
+                     "exhaustive to rule that out.\n",
+                     search.strategy_used.c_str(), search.rounds);
     }
 
     if (const auto rc = emit_to_destination(

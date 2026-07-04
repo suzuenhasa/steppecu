@@ -557,6 +557,17 @@ int run_cli(int argc, char** argv) {
                                [&](std::int64_t v) { scan_args.scan_allow_clade = (v >= 0); },
                                "May a 1-source (clade) model be the winner? (default on; "
                                "--no-allow-clade prefers genuine >=2-source mixtures)");
+        sub->add_option_function<std::string>(
+            "--strategy", [&](const std::string& v) { scan_args.scan_strategy = v; },
+            "Search: greedy | beam | exhaustive (default beam; small pools auto-exhaustive)");
+        sub->add_option_function<int>("--beam-width", [&](int v) { scan_args.scan_beam_width = v; },
+                                      "Beam width for --strategy beam (default 3)");
+        sub->add_option_function<std::vector<std::string>>(
+            "--base", [&](const std::vector<std::string>& v) { scan_args.scan_base = v; },
+            "Optional seed model (sources) to grow the guided search from")->delimiter(',');
+        sub->add_flag_function(
+            "--sure", [&](std::int64_t) { scan_args.sweep_sure = true; },
+            "Proceed with a huge explicit --strategy exhaustive enumeration (lifts the safety cap)");
         add_qpadm_option_flags(sub, scan_args);
         add_output_flags(sub, scan_args);
         add_common_flags(sub, scan_args);
