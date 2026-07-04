@@ -57,6 +57,8 @@ if it's missing, not the opaque loader error), and installs a launcher that sets
 ```bash
 curl -fsSL https://raw.githubusercontent.com/suzuenhasa/steppecu/main/install.sh | bash
 #  -> ~/.local/bin/steppe   (override the dir:  ... | bash -s -- --dir /usr/local/bin)
+
+source ~/.bashrc   # the installer added ~/.local/bin to PATH — load it here (or open a new terminal)
 steppe --help
 ```
 
