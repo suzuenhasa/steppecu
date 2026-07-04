@@ -94,3 +94,6 @@ docs/*
 
 # generated marimo render (keep the .py, not the html)
 docs/examples/notebooks/*.html
+
+# built release artifacts (CLI binary + wheel) — local only, never commit
+/dist/
