@@ -236,8 +236,6 @@ one GPU.
 
 Steppe is checked against ADMIXTOOLS 2 (the reference implementation) on real AADR data: f4 / f3 /
 qpAdm weights, chi-square, p, and the block-jackknife standard errors match to bit/tolerance parity.
-The point of a reimplementation is to be a *faster* ADMIXTOOLS, not a different one — so correctness
-comes first, and the goldens live under `tests/`.
 
 ---
 
