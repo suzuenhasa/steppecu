@@ -4,10 +4,8 @@
 # holds all of steppe's CUDA. CUDA is linked PRIVATE, so nothing that consumes
 # this target compiles against the toolkit — the CUDA-free device/backend.hpp
 # seam is all they see.
-#
-# Reference: docs/reference/src_device_CMakeLists.txt.md
 
-# The CUDA kernel + backend + CPU-reference source files — reference §2
+# The CUDA kernel + backend + CPU-reference source files
 add_library(steppe_device STATIC
     cuda/f2_block_kernel.cu
     cuda/f2_batched_kernel.cu
@@ -43,33 +41,33 @@ add_library(steppe_device STATIC
     shard_plan.cpp)
 add_library(steppe::device ALIAS steppe_device)
 
-# Include path: the src/ root, PUBLIC for the device/backend.hpp seam — reference §4
+# Include path: the src/ root, PUBLIC for the device/backend.hpp seam
 target_include_directories(steppe_device PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-# Link libraries; CUDA linked PRIVATE seals the CUDA-free layering — reference §3, §4
+# Link libraries; CUDA linked PRIVATE seals the CUDA-free layering
 target_link_libraries(steppe_device
     PUBLIC  steppe::api steppe::core_internal
     PRIVATE steppe::warnings CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cufft)
 
 target_compile_features(steppe_device PUBLIC cxx_std_20)
 
-# STEPPE_HAVE_EMU_TUNING — the fixed-slice Ozaki engagement gate — reference §6
+# STEPPE_HAVE_EMU_TUNING — the fixed-slice Ozaki engagement gate
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(steppe_device PRIVATE STEPPE_HAVE_EMU_TUNING=1)
 endif()
 
-# STEPPE_NVTX — the profiler phase-range gate — reference §6
+# STEPPE_NVTX — the profiler phase-range gate
 if(STEPPE_NVTX)
   target_compile_definitions(steppe_device PRIVATE STEPPE_NVTX)
 endif()
 
-# Separable compilation + PIC (cross-TU kernel launch, device-LTO) — reference §7
+# Separable compilation + PIC (cross-TU kernel launch, device-LTO)
 set_target_properties(steppe_device PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE  ON)
 
-# Optional fatbin compression, Release-only opt-in — reference §7
+# Optional fatbin compression, Release-only opt-in
 if(STEPPE_COMPRESS_FATBIN)
   target_compile_options(steppe_device PRIVATE
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:--compress-mode=size>)

@@ -3,8 +3,6 @@
 // Serializes every steppe command result (qpAdm fit, rotation, qpWave, f4/f3/
 // f4-ratio) to CSV/TSV/JSON for stdout. App-only and CUDA-free; every emitter is
 // total — a domain-failed result still serializes via sentinels, never throws.
-//
-// Reference: docs/reference/src_app_result_emit.cpp.md
 #include "app/result_emit.hpp"
 
 #include <climits>
@@ -22,7 +20,7 @@ namespace steppe::app {
 
 namespace {
 
-// Status and precision labels — reference §4
+// Status and precision labels
 [[nodiscard]] const char* status_str(Status s) {
     switch (s) {
         case Status::Ok:               return "ok";
@@ -44,7 +42,7 @@ namespace {
     return "fp64";
 }
 
-// Whole-model feasibility (weights in [0,1]) — reference §5
+// Whole-model feasibility (weights in [0,1])
 [[nodiscard]] bool model_feasible(const QpAdmResult& r) {
     if (r.weight.empty()) return false;
     for (double w : r.weight) {
@@ -53,12 +51,12 @@ namespace {
     return true;
 }
 
-// "Not computed" sentinels: INT_MIN dofdiff -> NA — reference §3
+// "Not computed" sentinels: INT_MIN dofdiff -> NA
 [[nodiscard]] std::string fmt_dofdiff(int v) {
     return (v == INT_MIN) ? std::string("NA") : std::to_string(v);
 }
 
-// Always-quote CSV cell — reference §6
+// Always-quote CSV cell
 [[nodiscard]] std::string csv_quote(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
@@ -70,7 +68,7 @@ namespace {
 }
 
 
-// Shared JSON parallel-array primitives — reference §9
+// Shared JSON parallel-array primitives
 void emit_int_arr(std::ostream& os, const char* name, const std::vector<int>& v, bool last) {
     os << "    " << json_quote(name) << ": [";
     for (std::size_t k = 0; k < v.size(); ++k) os << (k ? ", " : "") << v[k];
@@ -88,7 +86,7 @@ void emit_dofdiff_arr(std::ostream& os, const char* name, const std::vector<int>
     os << "]" << (last ? "\n" : ",\n");
 }
 
-// Shared rankdrop CSV body — reference §9
+// Shared rankdrop CSV body
 template <class Rankdrop>
 void emit_rankdrop_csv(std::ostream& os, const Rankdrop& r, char sep) {
     for (std::size_t k = 0; k < r.rankdrop_f4rank.size(); ++k) {
@@ -100,7 +98,7 @@ void emit_rankdrop_csv(std::ostream& os, const Rankdrop& r, char sep) {
     }
 }
 
-// Output schemas per command: single qpAdm fit — reference §7
+// Output schemas per command: single qpAdm fit
 void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
               const std::vector<std::string>& left, char sep) {
     const bool have_se = !r.se.empty();
@@ -214,20 +212,20 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "}\n";
 }
 
-// Rotation feasibility (prefer engine's recorded flag) — reference §5
+// Rotation feasibility (prefer engine's recorded flag)
 [[nodiscard]] bool rotation_feasible(const QpAdmResult& r) {
     if (!r.popdrop_feasible.empty()) return r.popdrop_feasible[0] != 0;
     return model_feasible(r);
 }
 
-// join_left shared helper — reference §9
+// join_left shared helper
 [[nodiscard]] std::string join_left(const std::vector<std::string>& labels) {
     std::string s;
     for (std::size_t i = 0; i < labels.size(); ++i) { if (i) s += ";"; s += labels[i]; }
     return s;
 }
 
-// Rotation table emitters: the deliberately-mislabeled f4rank column — reference §8
+// Rotation table emitters: the deliberately-mislabeled f4rank column
 void emit_rotation_csv(std::ostream& os, std::span<const QpAdmResult> results,
                        const std::string& target,
                        const std::vector<std::vector<std::string>>& left_labels, int right_n,
@@ -299,7 +297,7 @@ void emit_rotation_json(std::ostream& os, std::span<const QpAdmResult> results,
     os << "}\n";
 }
 
-// Output schemas per command: qpWave rank sweep — reference §7
+// Output schemas per command: qpWave rank sweep
 
 void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
                      const std::vector<std::string>& left, int right_n, char sep) {
@@ -366,12 +364,12 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "}\n";
 }
 
-// label_at shared helper — reference §9
+// label_at shared helper
 [[nodiscard]] std::string label_at(const std::vector<std::string>& v, std::size_t k) {
     return k < v.size() ? v[k] : std::string();
 }
 
-// Output schemas per command: standalone f4 — reference §7
+// Output schemas per command: standalone f4
 void emit_f4_csv(std::ostream& os, const F4Result& r,
                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                  const std::vector<std::string>& p3, const std::vector<std::string>& p4,
@@ -408,7 +406,7 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     os << "}\n";
 }
 
-// Output schemas per command: standalone f3 — reference §7
+// Output schemas per command: standalone f3
 void emit_f3_csv(std::ostream& os, const F3Result& r,
                  const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                  const std::vector<std::string>& p3, char sep) {
@@ -443,7 +441,7 @@ void emit_f3_json(std::ostream& os, const F3Result& r,
     os << "}\n";
 }
 
-// Output schemas per command: standalone f4-ratio — reference §7
+// Output schemas per command: standalone f4-ratio
 void emit_f4ratio_csv(std::ostream& os, const F4RatioResult& r,
                       const std::vector<std::string>& p1, const std::vector<std::string>& p2,
                       const std::vector<std::string>& p3, const std::vector<std::string>& p4,
@@ -484,7 +482,7 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
 
 }  // namespace
 
-// Number formatters (17-digit exact round-trip; NaN -> "NA"/"null") — reference §3
+// Number formatters (17-digit exact round-trip; NaN -> "NA"/"null")
 std::string fmt_double(double v) {
     if (std::isnan(v)) return "NA";
     std::ostringstream o;
@@ -501,7 +499,7 @@ std::string json_double(double v) {
     return o.str();
 }
 
-// Conditional RFC-4180 CSV field (public) — reference §6
+// Conditional RFC-4180 CSV field (public)
 std::string csv_field(const std::string& s, char sep) {
     bool needs_quote = false;
     for (char c : s) {
@@ -517,7 +515,7 @@ std::string csv_field(const std::string& s, char sep) {
     return out;
 }
 
-// JSON string escaping (public) — reference §6
+// JSON string escaping (public)
 std::string json_quote(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
@@ -534,7 +532,7 @@ std::string json_quote(const std::string& s) {
     return out;
 }
 
-// Public entry points: format selector + per-command dispatchers — reference §9
+// Public entry points: format selector + per-command dispatchers
 bool parse_output_format(const std::string& token, OutputFormat& out) {
     if (token == "csv")  { out = OutputFormat::Csv;  return true; }
     if (token == "tsv")  { out = OutputFormat::Tsv;  return true; }
