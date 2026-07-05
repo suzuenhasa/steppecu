@@ -1,5 +1,3 @@
-# Project ignores (shared). Personal/local junk lives in .git/info/exclude, not here.
-
 # ── Build & CMake ─────────────────────────────────────────────────
 build/
 cmake-build-*/
