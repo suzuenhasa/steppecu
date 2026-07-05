@@ -77,14 +77,16 @@ cuda = [
 steppe-rds = "steppe._rds:main"
 
 [tool.scikit-build]
-# Build ONLY the bindings (no CLI); the importable package is bindings/steppe.
+# Build the bindings AND bundle the `steppe` CLI (steppe_app) into the wheel's scripts dir, so
+# `pip install steppe` delivers the full command-line tool (all subcommands, incl. scan / the
+# f4/f3 sweeps that have no Python binding) plus the importable `steppe` package.
 cmake.version = ">=3.28"
 # RELEASE is mandatory (memory perf-bench-release-build): scikit-build-core does NOT pass a
 # build type by default, and a Debug/unspecified build voids the precision/perf contract.
 cmake.build-type = "Release"
 cmake.args = [
     "-DSTEPPE_BUILD_PYTHON=ON",
-    "-DSTEPPE_BUILD_CLI=OFF",
+    "-DSTEPPE_BUILD_CLI=ON",
     "-DSTEPPE_BUILD_TESTS=OFF",
     # CUDA-13 arch: scikit-build-core does NOT pass STEPPE_CUDA_ARCH, so the build would
     # otherwise fall to the CUDAArch.cmake default. Pin the Blackwell box arch (sm_120; the
@@ -92,7 +94,7 @@ cmake.args = [
     # `pip wheel . --config-settings=cmake.define.STEPPE_CUDA_ARCH=<arch>` for another GPU.
     "-DSTEPPE_CUDA_ARCH=120",
 ]
-build.targets = ["_core"]
+build.targets = ["_core", "steppe_app"]
 wheel.packages = ["bindings/steppe"]
 # STABLE ABI: pair with nanobind_add_module(STABLE_ABI) so the extension links the limited API
 # and ONE wheel is tagged `cp312-abi3` — installable on Python 3.12, 3.13, 3.14+ (forward-compat,

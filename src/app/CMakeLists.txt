@@ -52,3 +52,11 @@ target_link_libraries(steppe_app
 target_compile_features(steppe_app PRIVATE cxx_std_20)
 
 target_compile_definitions(steppe_app PRIVATE STEPPE_VERSION="${PROJECT_VERSION}")
+
+# scikit-build-core wheel build: install the CLI into the wheel's scripts dir so `pip install
+# steppe` ALSO puts the full `steppe` command (every subcommand, including scan and the f4/f3
+# sweeps that have no Python binding) on PATH — the wheel becomes a complete install, not just the
+# Python API. Skipped for the standalone CLI build (SKBUILD is unset there). — reference §7
+if(SKBUILD)
+  install(TARGETS steppe_app RUNTIME DESTINATION "${SKBUILD_SCRIPTS_DIR}")
+endif()
