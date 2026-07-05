@@ -92,14 +92,19 @@ It links the system CUDA 13 runtime at load. If you see `libcudart.so.13: cannot
 shared object file`, your box has CUDA 12 (or CUDA isn't on the loader path) — Steppe needs
 CUDA 13. Point the loader at it if needed: `export LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
 
-### 2. Prebuilt wheel — the Python API
+### 2. Prebuilt wheel — the full CLI *and* the Python API
+The wheel bundles the `steppe` command-line tool (**every** subcommand, incl. `scan` and the
+f4/f3 sweeps) **and** the importable Python package — so one `pip install` gives you both:
 ```bash
 curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe-0.1.0-cp312-abi3-linux_x86_64.whl
 pip install ./steppe-0.1.0-cp312-abi3-linux_x86_64.whl
-python -c "import steppe; print(steppe.__version__)"
+steppe --version                                       # the CLI — now on your PATH
+python -c "import steppe; print(steppe.__version__)"   # and the Python API
 ```
 Needs Python 3.12+ and the CUDA 13 runtime; `numpy` is the only hard dependency. (It's a
-`cp312-abi3` stable-ABI wheel — the *same* file installs on 3.12, 3.13, 3.14+.)
+`cp312-abi3` stable-ABI wheel — the *same* file installs on 3.12, 3.13, 3.14+.) The bundled
+`steppe` links CUDA 13 at load, same as the Python module — if it can't find `libcudart.so.13`,
+`export LD_LIBRARY_PATH=/usr/local/cuda/lib64`.
 
 ### 3. Build from source — any CUDA-13 arch / Python
 Needs the full **CUDA 13 toolkit** (nvcc) + CMake ≥ 3.28 + Ninja.
