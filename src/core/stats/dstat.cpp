@@ -17,7 +17,9 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"
+#include "core/internal/decode_af.hpp"
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -34,10 +36,6 @@ namespace steppe {
 using core::idx;
 
 namespace {
-
-// Named constants — reference §4
-inline constexpr int kPloidyDiploid = 2;
-inline constexpr std::size_t kPrimaryGpu = 0;
 
 // Degenerate-outcome NaN fill — reference §9
 void fill_nan(DstatResult& res, int row_count) {
@@ -74,7 +72,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
         flat.push_back(q[0]); flat.push_back(q[1]); flat.push_back(q[2]); flat.push_back(q[3]);
     }
 
-    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    ComputeBackend& be = device::primary_backend(resources);
     const core::GenotypeFrontEnd fe =
         core::read_genotype_front_end(geno, snp, ind, pop_union, be);
     const io::SnpTable& snptab = fe.snptab;
@@ -87,7 +85,7 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
         return res;
     }
 
-    std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
+    std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
 
     DecodeTileView view;
     view.packed = tile.packed.data();
@@ -97,9 +95,9 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = kPloidyDiploid;
+    view.ploidy = core::kPloidyDiploid;
     const bool resident = (be.capabilities().device_count > 0);
-    steppe::device::DeviceDecodeResult ddr;
+    device::DeviceDecodeResult ddr;
     std::vector<double> Qk, Vk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;

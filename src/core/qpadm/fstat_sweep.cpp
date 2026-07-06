@@ -15,19 +15,16 @@
 #include "device/backend.hpp"
 #include "device/device_f2_blocks.hpp"
 #include "device/resources.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
 #include "steppe/config.hpp"
 #include "steppe/f4.hpp"
 
 namespace steppe {
 
+using device::primary_backend;
+
 namespace {
-
-inline constexpr std::size_t kPrimaryGpu = 0;
-
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
 
 // Overflow-safe combination count — reference §3
 [[nodiscard]] unsigned long long choose_saturating(int P, int k) {

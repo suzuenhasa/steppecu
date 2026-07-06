@@ -91,7 +91,7 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
 
     const int r_fit = nl_red - 1;
     const RankSweep rs = run_rank_sweep(be, x_reduced, cov_reduced, opts.rank_alpha, opts, precision);
-    const std::size_t ri = idx(r_fit < 0 ? 0 : r_fit);
+    const std::size_t ri = nonneg_count(r_fit);
     row.f4rank = r_fit;
     row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : qpadm_dof(x_reduced.nl, x_reduced.nr, r_fit);
     row.chisq = (ri < rs.chisq.size()) ? rs.chisq[ri] : 0.0;

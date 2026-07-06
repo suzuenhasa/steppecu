@@ -18,8 +18,10 @@
 #include <string>
 #include <vector>
 
+#include "core/internal/decode_af.hpp"
 #include "core/internal/host_device.hpp"
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -39,8 +41,6 @@ using core::idx;
 namespace {
 
 // Named constants — reference §2
-inline constexpr std::size_t kPrimaryGpu = 0;
-inline constexpr int kPloidyDiploid = 2;
 inline constexpr double kInterChromGapMorgans = 5.0;
 inline constexpr double kMinJackWeight = 1e-6;
 inline constexpr double kCorrDenomFloor = 1.0e-20;
@@ -102,7 +102,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     }
 
     const std::vector<std::string> dates_pops{target, source1, source2};
-    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    ComputeBackend& be = device::primary_backend(resources);
     const core::GenotypeFrontEnd fe =
         core::read_genotype_front_end(geno, snp, ind, dates_pops, be);
     const io::SnpTable& snptab = fe.snptab;
@@ -112,7 +112,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const long M = static_cast<long>(tile.n_snp);
     if (P <= 0 || M <= 0) { res.status = Status::InvalidConfig; return res; }
 
-    std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
+    std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
     DecodeTileView view;
     view.packed = tile.packed.data();
     view.bytes_per_record = tile.bytes_per_record;
@@ -121,7 +121,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = kPloidyDiploid;
+    view.ploidy = core::kPloidyDiploid;
     const DecodeResult dec = be.decode_af(view);
 
     const int p_tgt = find_pop(tile.pop_labels, target);
@@ -214,7 +214,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const int diffmax = static_cast<int>(diffmax_l);
     if (n_bin <= 0 || diffmax <= 0) { res.status = Status::InvalidConfig; return res; }
 
-    std::vector<int> tgt_ploidy(idx(n_target), kPloidyDiploid);
+    std::vector<int> tgt_ploidy(idx(n_target), core::kPloidyDiploid);
     const Precision precision;
     DatesMoments mom = be.dates_curve(
         s1_freq.data(), s2_freq.data(), s_valid.data(), tgt_packed.data(), kept_bpr, n_target,

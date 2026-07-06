@@ -12,6 +12,7 @@
 #include "core/internal/views.hpp"
 #include "core/internal/host_device.hpp"
 #include "core/internal/index_cast.hpp"
+#include "core/internal/qvn_assert.hpp"
 #include "core/domain/block_partition_rule.hpp"
 #include "steppe/fstats.hpp"
 #include "steppe/config.hpp"
@@ -21,17 +22,6 @@
 namespace steppe::core {
 
 namespace {
-
-// Q/V/N precondition — reference §4
-void validate_qvn([[maybe_unused]] const MatView& Q, [[maybe_unused]] const MatView& V,
-                  [[maybe_unused]] const MatView& N) {
-    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
-                  "compute_f2: Q/V/N disagree on P (population count)");
-    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
-                  "compute_f2: Q/V/N disagree on M (SNP count)");
-    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
-                  "compute_f2: negative P or M (uninitialized MatView)");
-}
 
 // Dense/non-decreasing block-id scan — reference §5
 [[maybe_unused]] [[nodiscard]]
@@ -48,7 +38,7 @@ bool block_ids_dense_nondecreasing(const BlockPartition& partition, long M) {
 // Block-partition contract — reference §5
 void validate_partition([[maybe_unused]] const BlockPartition& partition,
                         [[maybe_unused]] long M) {
-    STEPPE_ASSERT(partition.block_id.size() == idx(M < 0 ? 0 : M),
+    STEPPE_ASSERT(partition.block_id.size() == nonneg_count(M),
                   "compute_f2_blocks: block_id length != M (partition does not "
                   "describe exactly the SNP columns)");
     STEPPE_ASSERT(M <= 0 || partition.n_block > 0,
@@ -65,14 +55,14 @@ void validate_partition([[maybe_unused]] const BlockPartition& partition,
 // f2 entry points — reference §2
 F2Result compute_f2_block(ComputeBackend& backend, const MatView& Q, const MatView& V,
                           const MatView& N, const Precision& precision) {
-    validate_qvn(Q, V, N);
+    assert_qvn_consistent(Q, V, N);
     return backend.compute_f2(Q, V, N, precision);
 }
 
 F2BlockTensor compute_f2_blocks(ComputeBackend& backend, const MatView& Q, const MatView& V,
                                 const MatView& N, const BlockPartition& partition,
                                 const Precision& precision) {
-    validate_qvn(Q, V, N);
+    assert_qvn_consistent(Q, V, N);
     validate_partition(partition, Q.M);
     return backend.compute_f2_blocks(Q, V, N, partition.block_id.data(),
                                      partition.n_block, precision);

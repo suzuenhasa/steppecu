@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/model_search_core.hpp"
 #include "core/qpadm/qpadm_bounds.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
@@ -221,7 +222,7 @@ std::vector<QpAdmResult> run_qpadm_search(const F2BlockTensor& f2_host,
                                           std::span<const QpAdmModel> models,
                                           const QpAdmOptions& opts,
                                           device::Resources& resources) {
-    ComputeBackend& be = *resources.gpus.at(0).backend;
+    ComputeBackend& be = device::primary_backend(resources);
     const std::size_t n = models.size();
     std::vector<QpAdmResult> results(n);
     for (std::size_t i = 0; i < n; ++i) {

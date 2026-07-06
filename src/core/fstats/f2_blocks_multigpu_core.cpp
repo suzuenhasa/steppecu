@@ -57,13 +57,13 @@ void fan_out_shards(const MatView& Q, const MatView& V, const MatView& N,
                     const int  n_block_local = sh.b1 - sh.b0;
 
                     const std::size_t col_off =
-                        idx(P) * idx(s0 < 0 ? 0 : s0);
+                        idx(P) * nonneg_count(s0);
                     const MatView Qg{Q.data + col_off, P, M_local};
                     const MatView Vg{V.data + col_off, P, M_local};
                     const MatView Ng{N.data + col_off, P, M_local};
 
                     std::vector<int> block_id_local(
-                        idx(M_local < 0 ? 0 : M_local), 0);
+                        nonneg_count(M_local), 0);
                     for (long k = 0; k < M_local; ++k) {
                         block_id_local[idx(k)] =
                             partition.block_id[idx(s0 + k)] - sh.b0;
@@ -91,7 +91,7 @@ std::vector<steppe::device::DeviceShard> plan_multigpu_shards(
     const BlockPartition& partition, long M, int n_block, std::size_t G) {
     const std::vector<BlockRange> ranges = core::block_ranges(
         std::span<const int>(partition.block_id.data(),
-                             idx(M < 0 ? 0 : M)),
+                             nonneg_count(M)),
         M, n_block);
 
     return steppe::device::plan_block_shards(

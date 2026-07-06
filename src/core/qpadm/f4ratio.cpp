@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
 #include "device/backend.hpp"
 #include "device/device_f2_blocks.hpp"
@@ -26,16 +27,12 @@ namespace steppe {
 
 using core::idx;
 
+using device::primary_backend;
+
 namespace {
 
 // Named constants — reference §6
-inline constexpr std::size_t kPrimaryGpu = 0;
-
 inline constexpr double kSetmissThresh = 1e-6;
-
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
 
 // Shared implementation body — reference §9
 template <class F2Src>

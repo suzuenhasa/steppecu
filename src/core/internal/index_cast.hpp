@@ -14,6 +14,16 @@ namespace steppe::core {
     return static_cast<std::size_t>(i);
 }
 
+// nonneg_count() — idx() of a signed count, clamping a negative to 0. The size_t
+// analogue of idx() for lengths/counts that must never wrap on an uninitialized
+// (negative) shape. Host-pure, constexpr.
+[[nodiscard]] constexpr std::size_t nonneg_count(int n) noexcept {
+    return idx(n < 0 ? 0 : n);
+}
+[[nodiscard]] constexpr std::size_t nonneg_count(long n) noexcept {
+    return idx(n < 0 ? 0 : n);
+}
+
 }  // namespace steppe::core
 
 #endif  // STEPPE_CORE_INTERNAL_INDEX_CAST_HPP

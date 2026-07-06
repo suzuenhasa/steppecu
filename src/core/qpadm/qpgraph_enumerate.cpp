@@ -23,6 +23,8 @@ namespace {
 // Named constants — reference §2
 inline constexpr int kWlExtraRounds = 4;
 inline constexpr int kFreshNodeBase = 500000;
+inline constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
+inline constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
 // Integer graph representation — reference §3
 struct IEdge { int p, c; };
@@ -85,8 +87,8 @@ std::uint64_t hash_igraph(const IGraph& g, int nleaf) {
     for (const std::string& s : ncolors) { canon += s; canon += ';'; }
     canon += "E:";
     for (const std::string& s : ecolors) { canon += s; canon += ';'; }
-    std::uint64_t h = 1469598103934665603ULL;
-    for (char ch : canon) { h ^= static_cast<unsigned char>(ch); h *= 1099511628211ULL; }
+    std::uint64_t h = kFnvOffsetBasis;
+    for (char ch : canon) { h ^= static_cast<unsigned char>(ch); h *= kFnvPrime; }
     return h;
 }
 
@@ -201,12 +203,12 @@ std::uint64_t graph_hash(const std::vector<QpGraphEdge>& edges) {
 std::vector<EnumeratedTopology> enumerate_trees(const std::vector<std::string>& leaves) {
     const int nleaf = static_cast<int>(leaves.size());
     std::vector<EnumeratedTopology> out;
-    int idx = 0;
+    int id_counter = 0;
     for (const IGraph& g : enumerate_trees_int(nleaf)) {
         EnumeratedTopology et;
         et.edges = to_named(g, leaves);
         et.nadmix = 0;
-        et.id = idx++;
+        et.id = id_counter++;
         et.hash = hash_igraph(g, nleaf);
         out.push_back(std::move(et));
     }
@@ -219,8 +221,8 @@ std::vector<EnumeratedTopology> enumerate_admix1(const std::vector<std::string>&
     std::unordered_set<std::uint64_t> seen;
     for (const IGraph& tree : enumerate_trees_int(nleaf))
         admix1_children_of(tree, nleaf, leaves, seen, out);
-    int idx = 0;
-    for (EnumeratedTopology& et : out) et.id = idx++;
+    int id_counter = 0;
+    for (EnumeratedTopology& et : out) et.id = id_counter++;
     return out;
 }
 

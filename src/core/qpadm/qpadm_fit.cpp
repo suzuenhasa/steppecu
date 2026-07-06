@@ -13,6 +13,7 @@
 
 #include "core/internal/index_cast.hpp"
 #include "core/internal/pchisq.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/f4_matrix.hpp"
 #include "core/qpadm/gls_solve.hpp"
 #include "core/qpadm/jackknife.hpp"
@@ -76,22 +77,13 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
 
     res.p = pchisq_upper(res.chisq, res.dof);
 
-    auto weights_feasible = [](const std::vector<double>& w) {
-        bool any = false;
-        for (const double v : w) {
-            if (std::isnan(v)) continue;
-            any = true;
-            if (v < 0.0 || v > 1.0) return false;
-        }
-        return any;
-    };
     bool compute_se;
     switch (opts.jackknife) {
         case JackknifePolicy::None:
             compute_se = false;
             break;
         case JackknifePolicy::FeasibleOnly:
-            compute_se = weights_feasible(gw.w) &&
+            compute_se = popdrop_feasible(gw.w) &&
                          (!opts.se_require_p || res.p >= opts.p_se_threshold);
             break;
         case JackknifePolicy::All:
@@ -173,15 +165,9 @@ double pchisq_upper(double x, int dof) {
 namespace steppe {
 
 using core::idx;
+using device::primary_backend;
 
 namespace {
-
-// Primary-GPU backend selection — reference §9
-inline constexpr std::size_t kPrimaryGpu = 0;
-
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
 
 // Shared qpAdm body — reference §9
 template <class F2Src>

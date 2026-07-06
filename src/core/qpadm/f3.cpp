@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/f3_triples.hpp"
 #include "core/qpadm/jackknife.hpp"
+#include "core/qpadm/point_estimates.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
 #include "device/backend.hpp"
 #include "device/device_f2_blocks.hpp"
@@ -27,14 +29,9 @@ namespace steppe {
 
 using core::idx;
 
+using device::primary_backend;
+
 namespace {
-
-// Primary-GPU seam (kPrimaryGpu, primary_backend) — reference §8
-inline constexpr std::size_t kPrimaryGpu = 0;
-
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
 
 // Shared run_f3 body — the pipeline: flatten, assemble once, jackknife once, read out — reference §2
 template <class F2Src>
@@ -86,21 +83,7 @@ F3Result run_f3_impl(ComputeBackend& be, const F2Src& f2,
     const JackknifeDiag diag =
         core::qpadm::jackknife_diag(be, X, std::span<const int>(X.block_sizes), prec);
 
-    res.est.assign(idx(N), 0.0);
-    res.se.assign(idx(N), 0.0);
-    res.z.assign(idx(N), 0.0);
-    res.p.assign(idx(N), 0.0);
-    for (int k = 0; k < N; ++k) {
-        const std::size_t ks = idx(k);
-        const double est = X.x_total[ks];
-        const double var = diag.var[ks];
-        const double se = (var > 0.0) ? std::sqrt(var) : std::nan("");
-        const double z = est / se;
-        res.est[ks] = est;
-        res.se[ks] = se;
-        res.z[ks] = z;
-        res.p[ks] = f4_two_sided_p(z);
-    }
+    core::qpadm::fill_point_estimates(res, X.x_total, diag.var, N);
 
     res.status = Status::Ok;
     return res;

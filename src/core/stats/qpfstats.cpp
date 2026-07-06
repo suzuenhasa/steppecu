@@ -18,7 +18,9 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"
+#include "core/internal/decode_af.hpp"
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -37,8 +39,6 @@ using core::idx;
 namespace {
 
 // Named constants — reference §2
-inline constexpr int kPloidyDiploid = 2;
-inline constexpr std::size_t kPrimaryGpu = 0;
 inline constexpr double kRidge = 1e-5;
 
 // The population-pair index — reference §3
@@ -134,7 +134,7 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
         return res;
     }
 
-    ComputeBackend& be = *resources.gpus.at(kPrimaryGpu).backend;
+    ComputeBackend& be = device::primary_backend(resources);
     const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sp, be);
     const io::SnpTable& snptab = fe.snptab;
     const io::GenotypeTile& tile = fe.tile;
@@ -147,7 +147,7 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     }
     if (P <= 0 || M <= 0) { res.status = Status::Ok; return res; }
 
-    std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
+    std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
     DecodeTileView view;
     view.packed = tile.packed.data();
     view.bytes_per_record = tile.bytes_per_record;
@@ -156,10 +156,10 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     view.pop_offsets = tile.pop_offsets.data();
     view.n_pop = P;
     view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = kPloidyDiploid;
+    view.ploidy = core::kPloidyDiploid;
 
     const bool resident = (be.capabilities().device_count > 0);
-    steppe::device::DeviceDecodeResult ddr;
+    device::DeviceDecodeResult ddr;
     std::vector<double> Qk, Vk;
     std::vector<int> chrom_kept;
     std::vector<double> genpos_kept;

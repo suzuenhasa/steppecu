@@ -13,9 +13,11 @@
 #include <vector>
 
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/f3_triples.hpp"
 #include "core/qpadm/jackknife.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
+#include "core/qpadm/qpgraph_arena.hpp"
 #include "core/qpadm/qpgraph_model.hpp"
 #include "device/backend.hpp"
 #include "device/device_f2_blocks.hpp"
@@ -26,25 +28,16 @@
 namespace steppe {
 
 using core::idx;
+using device::primary_backend;
 
 namespace {
-
-inline constexpr std::size_t kPrimaryGpu = 0;
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
 
 // The fleet arena — reference §5
 QpGraphTopoArena make_arena(const core::qpadm::QpGraphModel& m, const QpGraphOptions& opts) {
     QpGraphTopoArena a;
-    a.npop = m.npop; a.nedge_norm = m.nedge_norm; a.nadmix = m.nadmix;
-    a.npair = m.npair; a.npath = m.npath; a.base_leaf = m.base_leaf;
-    a.pwts0 = m.pwts0;
-    a.pe_edge = m.pe_edge; a.pe_leaf = m.pe_leaf; a.pe_path = m.pe_path;
-    a.pae_path = m.pae_path; a.pae_admixedge = m.pae_admixedge;
+    core::qpadm::fill_topo_arena_common(a, m, opts);
+    a.npair = m.npair;
     a.cmb1 = m.cmb1; a.cmb2 = m.cmb2;
-    a.constrained = opts.constrained;
-    a.fudge = opts.fudge;
     return a;
 }
 

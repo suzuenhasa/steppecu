@@ -18,9 +18,11 @@
 #include <vector>
 
 #include "core/internal/index_cast.hpp"
+#include "core/internal/primary_backend.hpp"
 #include "core/qpadm/f3_triples.hpp"
 #include "core/qpadm/jackknife.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
+#include "core/qpadm/qpgraph_arena.hpp"
 #include "core/qpadm/qpgraph_enumerate.hpp"
 #include "core/qpadm/qpgraph_model.hpp"
 #include "device/backend.hpp"
@@ -32,17 +34,13 @@
 namespace steppe {
 
 using core::idx;
+using device::primary_backend;
 
 namespace {
 
 namespace cq = core::qpadm;
 
 // Named constants — reference §3
-inline constexpr std::size_t kPrimaryGpu = 0;
-[[nodiscard]] ComputeBackend& primary_backend(device::Resources& resources) {
-    return *resources.gpus.at(kPrimaryGpu).backend;
-}
-
 inline constexpr int kMaxHillClimbSteps = 1000;
 
 inline constexpr double kRecoveryRtol = 1e-6;
@@ -104,14 +102,9 @@ struct CanonicalBasis {
         cmb1[idx(k)] = ca;
         cmb2[idx(k)] = cb;
     }
-    out.npop = m.npop; out.nedge_norm = m.nedge_norm; out.nadmix = m.nadmix;
-    out.npair = basis.npair; out.npath = m.npath; out.base_leaf = m.base_leaf;
-    out.pwts0 = m.pwts0;
-    out.pe_edge = m.pe_edge; out.pe_leaf = m.pe_leaf; out.pe_path = m.pe_path;
-    out.pae_path = m.pae_path; out.pae_admixedge = m.pae_admixedge;
+    cq::fill_topo_arena_common(out, m, opts);
+    out.npair = basis.npair;
     out.cmb1 = std::move(cmb1); out.cmb2 = std::move(cmb2);
-    out.constrained = opts.constrained;
-    out.fudge = opts.fudge;
     return true;
 }
 

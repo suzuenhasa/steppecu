@@ -18,6 +18,7 @@
 #include "core/fstats/f2_blocks_multigpu_core.hpp"
 #include "core/domain/block_partition_rule.hpp"
 #include "core/internal/index_cast.hpp"
+#include "core/internal/qvn_assert.hpp"
 #include "core/internal/views.hpp"
 #include "core/internal/host_device.hpp"
 #include "core/internal/log.hpp"
@@ -43,13 +44,6 @@ inline constexpr char kEnvF2CachePath[] = "STEPPE_F2_CACHE_PATH";
 // Defensive non-negative clamp — reference §9
 [[nodiscard]] constexpr int clamp_nonneg(int n) noexcept { return n < 0 ? 0 : n; }
 
-[[nodiscard]] constexpr std::size_t nonneg_count(int n) noexcept {
-    return idx(n < 0 ? 0 : n);
-}
-[[nodiscard]] constexpr std::size_t nonneg_count(long n) noexcept {
-    return idx(n < 0 ? 0 : n);
-}
-
 // The combine gate — reference §4
 [[nodiscard]] bool requested_p2p_combine(const steppe::device::Resources& resources,
                                          std::size_t G) noexcept {
@@ -69,12 +63,7 @@ void validate_multigpu_inputs([[maybe_unused]] const MatView& Q,
                               [[maybe_unused]] const BlockPartition& partition,
                               [[maybe_unused]] long M,
                               [[maybe_unused]] const char* fn) {
-    STEPPE_ASSERT(Q.P == V.P && V.P == N.P,
-                  "validate_multigpu_inputs: Q/V/N disagree on P");
-    STEPPE_ASSERT(Q.M == V.M && V.M == N.M,
-                  "validate_multigpu_inputs: Q/V/N disagree on M");
-    STEPPE_ASSERT(Q.P >= 0 && Q.M >= 0,
-                  "validate_multigpu_inputs: negative P or M (uninitialized MatView)");
+    assert_qvn_consistent(Q, V, N);
     STEPPE_ASSERT(partition.block_id.size() == nonneg_count(M),
                   "validate_multigpu_inputs: block_id length != M");
 }
