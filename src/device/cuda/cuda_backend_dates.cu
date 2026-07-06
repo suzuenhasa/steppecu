@@ -78,22 +78,13 @@ DatesMoments CudaBackend::dates_curve(
     DeviceBuffer<double> dS0(cb), dS11(cb), dS12(cb), dS22(cb);
     DeviceBuffer<double> dDot12(1), dDot22(1);
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dS1.data(), src1_freq, Mu * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dS2.data(), src2_freq, Mu * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dValid.data(), src_valid, Mu * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), packed, pk,
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCell.data(), grid_cell, Mu * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCfirst.data(), chrom_first,
-                                      static_cast<std::size_t>(n_chrom) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dClast.data(), chrom_last,
-                                      static_cast<std::size_t>(n_chrom) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dS1, src1_freq, Mu, stream_.get());
+    h2d_async(dS2, src2_freq, Mu, stream_.get());
+    h2d_async(dValid, src_valid, Mu, stream_.get());
+    h2d_async(dPacked, packed, pk, stream_.get());
+    h2d_async(dCell, grid_cell, Mu, stream_.get());
+    h2d_async(dCfirst, chrom_first, static_cast<std::size_t>(n_chrom), stream_.get());
+    h2d_async(dClast, chrom_last, static_cast<std::size_t>(n_chrom), stream_.get());
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd00.data(), 0, dm * sizeof(double), stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd11.data(), 0, dm * sizeof(double), stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dDd02.data(), 0, dm * sizeof(double), stream_.get()));
@@ -115,10 +106,8 @@ DatesMoments CudaBackend::dates_curve(
                                   bytes_per_record, i, M, dDot12.data(), dDot22.data(),
                                   stream_.get());
         double h_dot12 = 0.0, h_dot22 = 0.0;
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&h_dot12, dDot12.data(), sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&h_dot22, dDot22.data(), sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        d2h_async(&h_dot12, dDot12, 1, stream_.get());
+        d2h_async(&h_dot22, dDot22, 1, stream_.get());
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         const double yreg = (h_dot22 != 0.0) ? (h_dot12 / h_dot22) : 0.0;
 
@@ -170,14 +159,10 @@ DatesMoments CudaBackend::dates_curve(
 
     out.s0.assign(cb, 0.0);  out.s1.assign(cb, 0.0);  out.s2.assign(cb, 0.0);
     out.s11.assign(cb, 0.0); out.s12.assign(cb, 0.0); out.s22.assign(cb, 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s0.data(), dS0.data(), cb * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s11.data(), dS11.data(), cb * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s12.data(), dS12.data(), cb * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.s22.data(), dS22.data(), cb * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.s0.data(), dS0, cb, stream_.get());
+    d2h_async(out.s11.data(), dS11, cb, stream_.get());
+    d2h_async(out.s12.data(), dS12, cb, stream_.get());
+    d2h_async(out.s22.data(), dS22, cb, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     out.status = Status::Ok;
@@ -197,9 +182,7 @@ void CudaBackend::dates_repack(const std::uint8_t* src, std::size_t src_bpr, con
     DeviceBuffer<std::uint8_t> dDst(dst_bytes);
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSrc.data(), src, src_bytes,
                                       cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dKept.data(), kept_src,
-                                      static_cast<std::size_t>(M_kept) * sizeof(long),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dKept, kept_src, static_cast<std::size_t>(M_kept), stream_.get());
     launch_dates_repack_target(dSrc.data(), src_bpr, dKept.data(), M_kept, n_target,
                                dst_bpr, dDst.data(), stream_.get());
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst, dDst.data(), dst_bytes,
@@ -219,18 +202,14 @@ std::vector<DatesExpFit> CudaBackend::dates_fit(const double* curves, int win_le
     DeviceBuffer<double> dCurves(total);
     DeviceBuffer<double> dDate(nc), dSd(nc);
     DeviceBuffer<int> dOk(nc);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dCurves.data(), curves, total * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dCurves, curves, total, stream_.get());
     launch_dates_fit_curves(dCurves.data(), win_len, n_curves, step, affine,
                             dDate.data(), dSd.data(), dOk.data(), stream_.get());
     std::vector<double> h_date(nc, 0.0), h_sd(nc, 0.0);
     std::vector<int> h_ok(nc, 0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_date.data(), dDate.data(), nc * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_sd.data(), dSd.data(), nc * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_ok.data(), dOk.data(), nc * sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(h_date.data(), dDate, nc, stream_.get());
+    d2h_async(h_sd.data(), dSd, nc, stream_.get());
+    d2h_async(h_ok.data(), dOk, nc, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     for (std::size_t c = 0; c < nc; ++c) {
         out[c].date_gen = h_date[c];

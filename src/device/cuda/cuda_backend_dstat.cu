@@ -49,25 +49,17 @@ void CudaBackend::dstat_block_reduce_device(const double* dQ, const double* dV, 
     DeviceBuffer<int> dSize(static_cast<std::size_t>(n_block));
     DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQuad, quadruples.data(), nq, stream_.get());
+    h2d_async(dBegin, begin.data(), static_cast<std::size_t>(n_block), stream_.get());
+    h2d_async(dSize, size.data(), static_cast<std::size_t>(n_block), stream_.get());
 
     launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
                               dBegin.data(), dSize.data(), n_block,
                               dNum.data(), dDen.data(), dCnt.data(), stream_.get());
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(numsum, dNum.data(), nb_out * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(densum, dDen.data(), nb_out * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(cnt, dCnt.data(), nb_out * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(numsum, dNum, nb_out, stream_.get());
+    d2h_async(densum, dDen, nb_out, stream_.get());
+    d2h_async(cnt, dCnt, nb_out, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 }
 
@@ -80,10 +72,8 @@ void CudaBackend::dstat_block_reduce(const double* Q, const double* V, int P, lo
     if (P <= 0 || M <= 0 || N <= 0 || n_block <= 0) return;
     const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     DeviceBuffer<double> dQ(pm), dV(pm);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQ, Q, pm, stream_.get());
+    h2d_async(dV, V, pm, stream_.get());
     dstat_block_reduce_device(dQ.data(), dV.data(), P, M, block_id, n_block,
                               quadruples, numsum, densum, cnt);
 }
@@ -141,19 +131,11 @@ RatioBlockJackknife CudaBackend::f4ratio_blocks_jackknife(
     DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
     DeviceBuffer<double> dBlockSizesD(static_cast<std::size_t>(nb_s));
     DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuartets.data(), flat.data(),
-                                      flat.size() * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizesD.data(), block_sizes_d.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQuartets, flat.data(), flat.size(), stream_.get());
+    h2d_async(dBlockSizes, block_sizes.data(), static_cast<std::size_t>(nb_s), stream_.get());
+    h2d_async(dBlockSizesD, block_sizes_d.data(), static_cast<std::size_t>(nb_s), stream_.get());
     if (dropped)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
-                                          static_cast<std::size_t>(nb_s) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSurv, surv.data(), static_cast<std::size_t>(nb_s), stream_.get());
 
     DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
     DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
@@ -188,15 +170,9 @@ RatioBlockJackknife CudaBackend::f4ratio_blocks_jackknife(
     jk.est.assign(static_cast<std::size_t>(N), 0.0);
     jk.se.assign(static_cast<std::size_t>(N), 0.0);
     jk.z.assign(static_cast<std::size_t>(N), 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.est.data(), dEst.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.se.data(), dSe.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.z.data(), dZ.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(jk.est.data(), dEst, static_cast<std::size_t>(N), stream_.get());
+    d2h_async(jk.se.data(), dSe, static_cast<std::size_t>(N), stream_.get());
+    d2h_async(jk.z.data(), dZ, static_cast<std::size_t>(N), stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     jk.status = Status::Ok;
     return jk;
@@ -239,14 +215,9 @@ RatioBlockJackknife CudaBackend::dstat_blocks_jackknife(
     DeviceBuffer<int> dBegin(static_cast<std::size_t>(n_block));
     DeviceBuffer<int> dSize(static_cast<std::size_t>(n_block));
     DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQuad, quadruples.data(), nq, stream_.get());
+    h2d_async(dBegin, begin.data(), static_cast<std::size_t>(n_block), stream_.get());
+    h2d_async(dSize, size.data(), static_cast<std::size_t>(n_block), stream_.get());
 
     launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
                               dBegin.data(), dSize.data(), n_block,
@@ -271,18 +242,10 @@ RatioBlockJackknife CudaBackend::dstat_blocks_jackknife(
     jk.se.assign(static_cast<std::size_t>(N), 0.0);
     jk.z.assign(static_cast<std::size_t>(N), 0.0);
     jk.p.assign(static_cast<std::size_t>(N), 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.est.data(), dEst.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.se.data(), dSe.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.z.data(), dZ.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(jk.p.data(), dP.data(),
-                                      static_cast<std::size_t>(N) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(jk.est.data(), dEst, static_cast<std::size_t>(N), stream_.get());
+    d2h_async(jk.se.data(), dSe, static_cast<std::size_t>(N), stream_.get());
+    d2h_async(jk.z.data(), dZ, static_cast<std::size_t>(N), stream_.get());
+    d2h_async(jk.p.data(), dP, static_cast<std::size_t>(N), stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     jk.status = Status::Ok;
     return jk;

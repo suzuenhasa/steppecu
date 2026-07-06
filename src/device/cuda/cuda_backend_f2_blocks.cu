@@ -127,11 +127,8 @@ F2Result CudaBackend::compute_f2(const core::MatView& Q,
 
     out.f2.resize(pp);
     out.vpair.resize(pp);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.f2.data(), dF2.data(), pp * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.vpair.data(), dVpair.data(),
-                                      pp * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.f2.data(), dF2, pp, stream_.get());
+    d2h_async(out.vpair.data(), dVpair, pp, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -276,12 +273,10 @@ CudaBackend::ResidentBlocks CudaBackend::run_f2_blocks_resident(const core::MatV
     DeviceBuffer<long>   dOffsets(static_cast<std::size_t>(n_block));
     DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), block_offsets.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(long),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), rb.block_sizes.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dOffsets, block_offsets.data(),
+              static_cast<std::size_t>(n_block), stream_.get());
+    h2d_async(dSizes, rb.block_sizes.data(),
+              static_cast<std::size_t>(n_block), stream_.get());
 
     {
         DeviceBuffer<double> dQ_raw(pm), dV_raw(pm), dN_raw(pm);
@@ -330,9 +325,8 @@ CudaBackend::ResidentBlocks CudaBackend::run_f2_blocks_resident(const core::MatV
         for (int start = 0; start < nb_total; start += max_blocks) {
             const int nb = std::min(max_blocks, nb_total - start);
 
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIds.data(), bk.blocks.data() + start,
-                                              static_cast<std::size_t>(nb) * sizeof(int),
-                                              cudaMemcpyHostToDevice, stream_.get()));
+            h2d_async(dIds, bk.blocks.data() + start,
+                      static_cast<std::size_t>(nb), stream_.get());
 
             launch_gather_group(dQ.data(), dV.data(), dS.data(),
                                 dIds.data(), dOffsets.data(), dSizes.data(),
@@ -379,9 +373,8 @@ void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatV
 
     const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     DeviceBuffer<int>    dSizes(static_cast<std::size_t>(n_block));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizes.data(), block_sizes.data(),
-                                      static_cast<std::size_t>(n_block) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dSizes, block_sizes.data(),
+              static_cast<std::size_t>(n_block), stream_.get());
     // In re-decode mode Q/V/N.data is null (the dense host tensor is never built), so
     // there is nothing to pin — the per-chunk tile is produced on-device instead.
     if (redecode == nullptr) {
@@ -475,9 +468,7 @@ void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatV
     for (std::size_t k = 0; k < max_nb; ++k) local_ids[k] = static_cast<int>(k);
     DeviceBuffer<int> dIdsLocal(max_nb);
     if (max_nb > 0)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dIdsLocal.data(), local_ids.data(),
-                                          max_nb * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dIdsLocal, local_ids.data(), max_nb, stream_.get());
 
     struct Ring {
         DeviceBuffer<double> f2;
@@ -581,12 +572,10 @@ void CudaBackend::stream_f2_blocks_impl(const core::MatView& Q, const core::MatV
                 h_sizes_tile[static_cast<std::size_t>(kk)] =
                     block_sizes[static_cast<std::size_t>(gid)];
             }
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsetsTile.data(), h_offsets_tile.data(),
-                                              static_cast<std::size_t>(nb) * sizeof(long),
-                                              cudaMemcpyHostToDevice, stream_.get()));
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSizesTile.data(), h_sizes_tile.data(),
-                                              static_cast<std::size_t>(nb) * sizeof(int),
-                                              cudaMemcpyHostToDevice, stream_.get()));
+            h2d_async(dOffsetsTile, h_offsets_tile.data(),
+                      static_cast<std::size_t>(nb), stream_.get());
+            h2d_async(dSizesTile, h_sizes_tile.data(),
+                      static_cast<std::size_t>(nb), stream_.get());
             launch_gather_group(dQt.data(), dVt.data(), dSt.data(),
                                 dIdsLocal.data(), dOffsetsTile.data(), dSizesTile.data(),
                                 P, s_pad, nb, dQg.data(), dVg.data(), dSg.data(), stream_.get());

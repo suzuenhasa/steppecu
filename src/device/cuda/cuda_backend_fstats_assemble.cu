@@ -38,9 +38,7 @@ std::vector<int> CudaBackend::device_survivor_blocks(
     DeviceBuffer<int> dKeep(static_cast<std::size_t>(nb));
     launch_f2_block_keep(f2.vpair_device(), P, nb, dKeep.data(), stream_.get());
     std::vector<int> keep(static_cast<std::size_t>(nb), 1);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(keep.data(), dKeep.data(),
-                                      static_cast<std::size_t>(nb) * sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(keep.data(), dKeep, static_cast<std::size_t>(nb), stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     for (int b = 0; b < nb; ++b)
         if (keep[static_cast<std::size_t>(b)] != 0) surv.push_back(b);
@@ -96,20 +94,14 @@ SweepSurvivors CudaBackend::run_fstat_sweep_device(
     const double n = static_cast<double>(n_ll);
 
     DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), surv_block_sizes.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dBlockSizes, surv_block_sizes.data(), static_cast<std::size_t>(nb_s), stream_.get());
     DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
     if (dropped)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
-                                          static_cast<std::size_t>(nb_s) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSurv, surv.data(), static_cast<std::size_t>(nb_s), stream_.get());
     const bool use_subset = !cfg.pop_subset.empty();
     DeviceBuffer<int> dSubset(static_cast<std::size_t>(use_subset ? range : 1));
     if (use_subset)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSubset.data(), cfg.pop_subset.data(),
-                                          static_cast<std::size_t>(range) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSubset, cfg.pop_subset.data(), static_cast<std::size_t>(range), stream_.get());
 
     std::size_t K_sz = (cfg.top_k > 0) ? cfg.top_k : kFstatDefaultSweepTopK;
     if (K_sz > static_cast<std::size_t>(enumerated)) K_sz = static_cast<std::size_t>(enumerated);
@@ -171,8 +163,7 @@ SweepSurvivors CudaBackend::run_fstat_sweep_device(
     DeviceBuffer<double> dGEst(CAP_sz), dGSe(CAP_sz), dGZ(CAP_sz), dGAbsZ(CAP_sz);
     DeviceBuffer<int> dGC0(CAP_sz), dGC1(CAP_sz), dGC2(CAP_sz), dGC3(CAP_sz);
     DeviceBuffer<double> dTau(1);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTau.data(), &cfg.min_z, sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dTau, &cfg.min_z, 1, stream_.get());
     int res_n = 0;
 
     std::size_t sel_bytes = 0;
@@ -280,8 +271,7 @@ SweepSurvivors CudaBackend::run_fstat_sweep_device(
                                    dC3Sel.data(), dNumSel.data(), static_cast<std::int64_t>(C), stream_.get()));
 
         int num_sel = 0;
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&num_sel, dNumSel.data(), sizeof(int),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        d2h_async(&num_sel, dNumSel, 1, stream_.get());
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         if (num_sel <= 0) continue;
 
@@ -377,19 +367,11 @@ F4Blocks CudaBackend::assemble_f4(const steppe::device::DeviceF2Blocks& f2,
     DeviceBuffer<int> dRight(right_idx.size());
     DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
     DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dLeft.data(), left_idx.data(),
-                                      left_idx.size() * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRight.data(), right_idx.data(),
-                                      right_idx.size() * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), out.block_sizes.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dLeft, left_idx.data(), left_idx.size(), stream_.get());
+    h2d_async(dRight, right_idx.data(), right_idx.size(), stream_.get());
+    h2d_async(dBlockSizes, out.block_sizes.data(), static_cast<std::size_t>(nb_s), stream_.get());
     if (dropped)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
-                                          static_cast<std::size_t>(nb_s) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSurv, surv.data(), static_cast<std::size_t>(nb_s), stream_.get());
 
     DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
     DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
@@ -408,18 +390,10 @@ F4Blocks CudaBackend::assemble_f4(const steppe::device::DeviceF2Blocks& f2,
                         static_cast<int>(m), nb_s, n,
                         dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(tot_line_.data(), dTotLine.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.x_blocks.data(), dX, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_loo.data(), dLoo, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_total.data(), dTotal, m, stream_.get());
+    d2h_async(tot_line_.data(), dTotLine, m, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -475,16 +449,10 @@ F4Blocks CudaBackend::assemble_f4_quartets(
     DeviceBuffer<int> dQuartets(quartets.size());
     DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
     DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuartets.data(), quartets.data(),
-                                      quartets.size() * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), out.block_sizes.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQuartets, quartets.data(), quartets.size(), stream_.get());
+    h2d_async(dBlockSizes, out.block_sizes.data(), static_cast<std::size_t>(nb_s), stream_.get());
     if (dropped)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
-                                          static_cast<std::size_t>(nb_s) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSurv, surv.data(), static_cast<std::size_t>(nb_s), stream_.get());
 
     DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
     DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
@@ -503,18 +471,10 @@ F4Blocks CudaBackend::assemble_f4_quartets(
                         static_cast<int>(m), nb_s, n,
                         dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(tot_line_.data(), dTotLine.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.x_blocks.data(), dX, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_loo.data(), dLoo, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_total.data(), dTotal, m, stream_.get());
+    d2h_async(tot_line_.data(), dTotLine, m, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -569,16 +529,10 @@ F4Blocks CudaBackend::assemble_f3_triples(
     DeviceBuffer<int> dTriples(triples.size());
     DeviceBuffer<int> dBlockSizes(static_cast<std::size_t>(nb_s));
     DeviceBuffer<int> dSurv(static_cast<std::size_t>(dropped ? nb_s : 1));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dTriples.data(), triples.data(),
-                                      triples.size() * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), out.block_sizes.data(),
-                                      static_cast<std::size_t>(nb_s) * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dTriples, triples.data(), triples.size(), stream_.get());
+    h2d_async(dBlockSizes, out.block_sizes.data(), static_cast<std::size_t>(nb_s), stream_.get());
     if (dropped)
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSurv.data(), surv.data(),
-                                          static_cast<std::size_t>(nb_s) * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSurv, surv.data(), static_cast<std::size_t>(nb_s), stream_.get());
 
     DeviceBuffer<double> dX(m * static_cast<std::size_t>(nb_s));
     DeviceBuffer<double> dLoo(m * static_cast<std::size_t>(nb_s));
@@ -597,18 +551,10 @@ F4Blocks CudaBackend::assemble_f3_triples(
                         static_cast<int>(m), nb_s, n,
                         dLoo.data(), dTotal.data(), dTotLine.data(), stream_.get());
 
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_blocks.data(), dX.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_loo.data(), dLoo.data(),
-                                      m * static_cast<std::size_t>(nb_s) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.x_total.data(), dTotal.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(tot_line_.data(), dTotLine.data(),
-                                      m * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.x_blocks.data(), dX, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_loo.data(), dLoo, m * static_cast<std::size_t>(nb_s), stream_.get());
+    d2h_async(out.x_total.data(), dTotal, m, stream_.get());
+    d2h_async(tot_line_.data(), dTotLine, m, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }

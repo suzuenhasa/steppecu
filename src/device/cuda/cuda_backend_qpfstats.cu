@@ -47,11 +47,9 @@ QpfstatsSmooth CudaBackend::qpfstats_smooth(std::span<const double> x,
     const std::size_t ncols_sz = static_cast<std::size_t>(ncols);
 
     DeviceBuffer<double> dX(nc * np);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dX.data(), x.data(), nc * np * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dX, x.data(), nc * np, stream_.get());
     DeviceBuffer<double> dRhsSrc(nc * ncols_sz);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRhsSrc.data(), ymat.data(), nc * nb * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dRhsSrc, ymat.data(), nc * nb, stream_.get());
     STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRhsSrc.data() + nc * nb, y.data(),
                                       nc * sizeof(double), cudaMemcpyHostToDevice,
                                       stream_.get()));
@@ -59,9 +57,7 @@ QpfstatsSmooth CudaBackend::qpfstats_smooth(std::span<const double> x,
     launch_qpfstats_zero_nan_ymat(dRhsSrc.data(), npopcomb, ncols, dNanPerCol.data(),
                                   stream_.get());
     std::vector<int> nan_per_col(ncols_sz, 0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(nan_per_col.data(), dNanPerCol.data(),
-                                      ncols_sz * sizeof(int), cudaMemcpyDeviceToHost,
-                                      stream_.get()));
+    d2h_async(nan_per_col.data(), dNanPerCol, ncols_sz, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     DeviceBuffer<double> dA(np * np);
@@ -98,8 +94,7 @@ QpfstatsSmooth CudaBackend::qpfstats_smooth(std::span<const double> x,
     CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
                                     dA.data(), npairs, solver_work_.data(), lwork, dInfo.data()));
     int info = 0;
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(&info, dInfo, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     if (info != 0) { out.status = Status::NonSpdCovariance; return out; }
 
@@ -114,8 +109,7 @@ QpfstatsSmooth CudaBackend::qpfstats_smooth(std::span<const double> x,
     }
 
     std::vector<double> sol(np * ncols_sz, 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(sol.data(), dRhs.data(), np * ncols_sz * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(sol.data(), dRhs, np * ncols_sz, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     out.b.assign(np * nb, 0.0);
     std::copy(sol.begin(), sol.begin() + static_cast<std::ptrdiff_t>(np * nb), out.b.begin());
@@ -191,10 +185,8 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth(
     }
     const std::size_t pm = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     DeviceBuffer<double> dQ(pm), dV(pm);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQ.data(), Q, pm * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dV.data(), V, pm * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQ, Q, pm, stream_.get());
+    h2d_async(dV, V, pm, stream_.get());
     return qpfstats_blocks_smooth_device(dQ.data(), dV.data(), P, M, block_id, n_block,
                                          quadruples, x, npopcomb, npairs, block_sizes,
                                          ridge, precision);
@@ -250,14 +242,10 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth_device(
 
     DeviceBuffer<int> dQuad(nq), dBegin(nbb), dSize(nbb);
     DeviceBuffer<double> dX(nc * np);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQuad.data(), quadruples.data(), nq * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBegin.data(), begin.data(), nbb * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSize.data(), size.data(), nbb * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dX.data(), x.data(), nc * np * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dQuad, quadruples.data(), nq, stream_.get());
+    h2d_async(dBegin, begin.data(), nbb, stream_.get());
+    h2d_async(dSize, size.data(), nbb, stream_.get());
+    h2d_async(dX, x.data(), nc * np, stream_.get());
 
     DeviceBuffer<double> dNum(nb_out), dDen(nb_out), dCnt(nb_out);
     launch_dstat_block_reduce(dQ, dV, P, M, dQuad.data(), N,
@@ -276,9 +264,7 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth_device(
     launch_qpfstats_zero_nan_ymat(dRhsSrc.data(), npopcomb, ncols, dNanPerCol.data(),
                                   stream_.get());
     std::vector<int> nan_per_col(ncols_sz, 0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(nan_per_col.data(), dNanPerCol.data(),
-                                      ncols_sz * sizeof(int), cudaMemcpyDeviceToHost,
-                                      stream_.get()));
+    d2h_async(nan_per_col.data(), dNanPerCol, ncols_sz, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     DeviceBuffer<double> dA(np * np);
@@ -315,8 +301,7 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth_device(
     CUSOLVER_CHECK(cusolverDnDpotrf(solver_.get(), CUBLAS_FILL_MODE_LOWER, npairs,
                                     dA.data(), npairs, solver_work_.data(), lwork, dInfo.data()));
     int info = 0;
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&info, dInfo.data(), sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(&info, dInfo, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     if (info != 0) { out.status = Status::NonSpdCovariance; return out; }
 
@@ -331,20 +316,15 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth_device(
     }
 
     DeviceBuffer<int> dBlockSizes(nbb);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dBlockSizes.data(), block_sizes.data(),
-                                      nbb * sizeof(int), cudaMemcpyHostToDevice,
-                                      stream_.get()));
+    h2d_async(dBlockSizes, block_sizes.data(), nbb, stream_.get());
     DeviceBuffer<double> dShift(np);
     launch_qpfstats_recenter_shift(dRhs.data(), dRhs.data() + np * nbb, dBlockSizes.data(),
                                    npairs, n_block, dShift.data(), stream_.get());
 
     std::vector<double> sol(np * ncols_sz, 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(sol.data(), dRhs.data(), np * ncols_sz * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(sol.data(), dRhs, np * ncols_sz, stream_.get());
     out.recenter_shift.assign(np, 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.recenter_shift.data(), dShift.data(),
-                                      np * sizeof(double), cudaMemcpyDeviceToHost,
-                                      stream_.get()));
+    d2h_async(out.recenter_shift.data(), dShift, np, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     out.b.assign(np * nbb, 0.0);
     std::copy(sol.begin(), sol.begin() + static_cast<std::ptrdiff_t>(np * nbb), out.b.begin());
@@ -358,9 +338,7 @@ QpfstatsSmooth CudaBackend::qpfstats_blocks_smooth_device(
             nan_per_col[static_cast<std::size_t>(col)] < npopcomb) { any_partial = true; break; }
     if (any_partial) {
         std::vector<double> ymat(nb_out, 0.0), yv(nc, 0.0);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(ymat.data(), dRhsSrc.data(),
-                                          nb_out * sizeof(double), cudaMemcpyDeviceToHost,
-                                          stream_.get()));
+        d2h_async(ymat.data(), dRhsSrc, nb_out, stream_.get());
         STEPPE_CUDA_CHECK(cudaMemcpyAsync(yv.data(), dRhsSrc.data() + nc * nbb,
                                           nc * sizeof(double), cudaMemcpyDeviceToHost,
                                           stream_.get()));

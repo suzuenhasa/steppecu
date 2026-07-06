@@ -35,10 +35,8 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
 
     DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
     DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), qinv.data(), qinv.size() * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dFobs, f_obs.data(), f_obs.size(), stream_.get());
+    h2d_async(dQinv, qinv.data(), qinv.size(), stream_.get());
     DeviceBuffer<double> dPwts0(topo.pwts0.size());
     DeviceBuffer<int> dPeEdge(topo.pe_edge.size() ? topo.pe_edge.size() : 1);
     DeviceBuffer<int> dPeLeaf(topo.pe_leaf.size() ? topo.pe_leaf.size() : 1);
@@ -48,12 +46,10 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
     DeviceBuffer<int> dCmb1(topo.cmb1.size());
     DeviceBuffer<int> dCmb2(topo.cmb2.size());
     auto up_d = [&](DeviceBuffer<double>& d, const std::vector<double>& h) {
-        if (!h.empty()) STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(double),
-                                                          cudaMemcpyHostToDevice, stream_.get()));
+        if (!h.empty()) h2d_async(d, h.data(), h.size(), stream_.get());
     };
     auto up_i = [&](DeviceBuffer<int>& d, const std::vector<int>& h) {
-        if (!h.empty()) STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(int),
-                                                          cudaMemcpyHostToDevice, stream_.get()));
+        if (!h.empty()) h2d_async(d, h.data(), h.size(), stream_.get());
     };
     up_d(dPwts0, topo.pwts0);
     up_i(dPeEdge, topo.pe_edge); up_i(dPeLeaf, topo.pe_leaf); up_i(dPePath, topo.pe_path);
@@ -87,14 +83,9 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
         std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
         std::vector<double> fit(static_cast<std::size_t>(npair), 0.0);
         double sc = std::numeric_limits<double>::infinity();
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(bl.data(), dBl0.data(),
-                                          static_cast<std::size_t>(ne) * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(fit.data(), dF30.data(),
-                                          static_cast<std::size_t>(npair) * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(&sc, dSc0.data(), sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        d2h_async(bl.data(), dBl0, static_cast<std::size_t>(ne), stream_.get());
+        d2h_async(fit.data(), dF30, static_cast<std::size_t>(npair), stream_.get());
+        d2h_async(&sc, dSc0, 1, stream_.get());
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
         const bool ok = std::isfinite(sc) && sc < 1e30;
         out.score = sc; out.edge_length = ok ? bl : std::vector<double>(static_cast<std::size_t>(ne), 0.0);
@@ -108,10 +99,8 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
 
     std::vector<double> h_theta(static_cast<std::size_t>(ns) * static_cast<std::size_t>(D));
     std::vector<double> h_score(static_cast<std::size_t>(ns));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_theta.data(), dTheta.data(), h_theta.size() * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_score.data(), dScore.data(), h_score.size() * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(h_theta.data(), dTheta, h_theta.size(), stream_.get());
+    d2h_async(h_score.data(), dScore, h_score.size(), stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     double best = std::numeric_limits<double>::infinity();
@@ -139,22 +128,15 @@ QpGraphFleet CudaBackend::qpgraph_fit_fleet(const QpGraphTopoArena& topo,
     DeviceBuffer<double> dBl(static_cast<std::size_t>(ne > 0 ? ne : 1));
     DeviceBuffer<double> dF3(static_cast<std::size_t>(npair > 0 ? npair : 1));
     DeviceBuffer<double> dScFinal(1);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dThetaBest.data(), out.theta.data(),
-                                      static_cast<std::size_t>(D) * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dThetaBest, out.theta.data(), static_cast<std::size_t>(D), stream_.get());
     launch_qpgraph_eval_at_theta(dt, dThetaBest.data(), dFobs.data(), dQinv.data(),
                                        dBl.data(), dF3.data(), dScFinal.data(), stream_.get());
     std::vector<double> bl(static_cast<std::size_t>(ne), 0.0);
     std::vector<double> fit(static_cast<std::size_t>(npair), 0.0);
     double sc_final = std::numeric_limits<double>::infinity();
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(bl.data(), dBl.data(),
-                                      static_cast<std::size_t>(ne) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(fit.data(), dF3.data(),
-                                      static_cast<std::size_t>(npair) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&sc_final, dScFinal.data(), sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(bl.data(), dBl, static_cast<std::size_t>(ne), stream_.get());
+    d2h_async(fit.data(), dF3, static_cast<std::size_t>(npair), stream_.get());
+    d2h_async(&sc_final, dScFinal, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     if (std::isfinite(sc_final) && sc_final < 1e30) { out.edge_length = bl; out.f3_fit = fit; out.status = Status::Ok; }
     else { out.edge_length.assign(static_cast<std::size_t>(ne), 0.0); out.f3_fit.assign(static_cast<std::size_t>(npair), 0.0); out.status = Status::NonSpdCovariance; }
@@ -176,10 +158,8 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
 
     DeviceBuffer<double> dFobs(static_cast<std::size_t>(npair));
     DeviceBuffer<double> dQinv(static_cast<std::size_t>(npair) * static_cast<std::size_t>(npair));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dFobs.data(), f_obs.data(), f_obs.size() * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dQinv.data(), qinv.data(), qinv.size() * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dFobs, f_obs.data(), f_obs.size(), stream_.get());
+    h2d_async(dQinv, qinv.data(), qinv.size(), stream_.get());
 
     std::vector<double> h_pwts0;
     std::vector<int> h_pe_edge, h_pe_leaf, h_pe_path, h_pae_path, h_pae_edge, h_cmb1, h_cmb2;
@@ -223,15 +203,13 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
     auto up_d = [&](const std::vector<double>& h) {
         DeviceBuffer<double> d(h.size() ? h.size() : 1);
         if (!h.empty())
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(double),
-                                              cudaMemcpyHostToDevice, stream_.get()));
+            h2d_async(d, h.data(), h.size(), stream_.get());
         return d;
     };
     auto up_i = [&](const std::vector<int>& h) {
         DeviceBuffer<int> d(h.size() ? h.size() : 1);
         if (!h.empty())
-            STEPPE_CUDA_CHECK(cudaMemcpyAsync(d.data(), h.data(), h.size() * sizeof(int),
-                                              cudaMemcpyHostToDevice, stream_.get()));
+            h2d_async(d, h.data(), h.size(), stream_.get());
         return d;
     };
     DeviceBuffer<double> dPwts0 = up_d(h_pwts0);
@@ -239,9 +217,7 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
     DeviceBuffer<int> dPaePath = up_i(h_pae_path), dPaeEdge = up_i(h_pae_edge);
     DeviceBuffer<int> dCmb1 = up_i(h_cmb1), dCmb2 = up_i(h_cmb2);
     DeviceBuffer<QpGraphDeviceTopoView> dViews(static_cast<std::size_t>(G));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dViews.data(), h_views.data(),
-                                      h_views.size() * sizeof(QpGraphDeviceTopoView),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dViews, h_views.data(), h_views.size(), stream_.get());
 
     const std::size_t threads = static_cast<std::size_t>(G) * static_cast<std::size_t>(ns);
     DeviceBuffer<double> dGdbl(threads * static_cast<std::size_t>(Lmax.dbl_total));
@@ -256,8 +232,7 @@ QpGraphFleetBatch CudaBackend::qpgraph_fit_fleet_batch(
         dScore.data(), stream_.get());
 
     std::vector<double> h_score(threads);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(h_score.data(), dScore.data(), threads * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(h_score.data(), dScore, threads, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
 
     out.best_score.assign(static_cast<std::size_t>(G), std::numeric_limits<double>::infinity());

@@ -157,6 +157,29 @@ private:
     std::size_t size_ = 0;
 };
 
+/// Typed host->device async copy: `n` elements of `T` into `dst`. Folds the
+/// `n * sizeof(T)` byte count and the `STEPPE_CUDA_CHECK` around one
+/// `cudaMemcpyAsync(dst, src, n*sizeof(T), cudaMemcpyHostToDevice, stream)` so
+/// the ~200 hand-rolled H2D sites converge on one helper. `src` is `void*`
+/// (mirroring the raw `cudaMemcpyAsync` prototype) so the byte count derives
+/// solely from the buffer's `T`, staying byte-identical at heterogeneous-type
+/// sites (e.g. `char` host / `std::uint8_t` buffer).
+template <class T>
+inline void h2d_async(DeviceBuffer<T>& dst, const void* src, std::size_t n,
+                      cudaStream_t stream) {
+    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst.data(), src, n * sizeof(T),
+                                      cudaMemcpyHostToDevice, stream));
+}
+
+/// Typed device->host async copy: `n` elements of `T` from `src` into `dst`.
+/// The D2H mirror of `h2d_async`; `dst` is `void*` for the same reason.
+template <class T>
+inline void d2h_async(void* dst, const DeviceBuffer<T>& src, std::size_t n,
+                      cudaStream_t stream) {
+    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dst, src.data(), n * sizeof(T),
+                                      cudaMemcpyDeviceToHost, stream));
+}
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_DEVICE_BUFFER_CUH

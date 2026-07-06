@@ -50,13 +50,10 @@ void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
         tile.packed + static_cast<std::size_t>(s_lo) / cpb, tile.bytes_per_record,
         tile_width, tile.n_individuals,
         cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dOffsets.data(), tile.pop_offsets,
-                                      n_off * sizeof(std::size_t),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dOffsets, tile.pop_offsets, n_off, stream_.get());
     if (explicit_sample_ploidy) {
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSamplePloidy.data(), tile.sample_ploidy,
-                                          tile.n_individuals * sizeof(int),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dSamplePloidy, tile.sample_ploidy, tile.n_individuals,
+                  stream_.get());
     } else if (device_detect) {
         launch_detect_ploidy(dPacked.data(), tile_width,
                              tile.n_individuals, tile.n_snp, dSamplePloidy.data(),
@@ -88,12 +85,9 @@ DecodeResult CudaBackend::decode_af(const DecodeTileView& tile) {
 
     DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
     decode_af_resident(tile, P, M, dQ, dV, dN);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.q.data(), dQ.data(), pm * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.v.data(), dV.data(), pm * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.n.data(), dN.data(), pm * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.q.data(), dQ, pm, stream_.get());
+    d2h_async(out.v.data(), dV, pm, stream_.get());
+    d2h_async(out.n.data(), dN, pm, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -107,14 +101,10 @@ std::vector<int> CudaBackend::detect_sample_ploidy_device(
     const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
     DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
     DeviceBuffer<int> dPloidy(tile.n_individuals);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPacked.data(), tile.packed,
-                                      packed_bytes * sizeof(std::uint8_t),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
     launch_detect_ploidy(dPacked.data(), tile.bytes_per_record, tile.n_individuals,
                          tile.n_snp, dPloidy.data(), stream_.get());
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.data(), dPloidy.data(),
-                                      tile.n_individuals * sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.data(), dPloidy, tile.n_individuals, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -141,12 +131,8 @@ CanonicalTile CudaBackend::transpose_to_canonical(
     DeviceBuffer<std::uint8_t> dSrc(src_total);
     DeviceBuffer<std::size_t> dSel(view.n_individuals);
     DeviceBuffer<std::uint8_t> dOut(out_total);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSrc.data(), view.snp_major,
-                                      src_total * sizeof(std::uint8_t),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dSel.data(), view.sel_rows,
-                                      view.n_individuals * sizeof(std::size_t),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dSrc, view.snp_major, src_total, stream_.get());
+    h2d_async(dSel, view.sel_rows, view.n_individuals, stream_.get());
 
     TransposeEncoding enc = TransposeEncoding::Identity;
     switch (view.encoding) {
@@ -159,9 +145,7 @@ CanonicalTile CudaBackend::transpose_to_canonical(
                                   dSel.data(), view.n_individuals, view.n_snp,
                                   out.bytes_per_record, enc, dOut.data(),
                                   stream_.get());
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.packed.data(), dOut.data(),
-                                      out_total * sizeof(std::uint8_t),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.packed.data(), dOut, out_total, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
@@ -191,14 +175,10 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     DeviceBuffer<double> dGenpos(Mz);
     DeviceBuffer<double> dPhyspos(has_physpos ? Mz : 0u);
     DeviceBuffer<std::uint8_t> dFlags(Mz);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dChrom.data(), chrom.data(), Mz * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dChrom, chrom.data(), Mz, stream_.get());
+    h2d_async(dGenpos, genpos.data(), Mz, stream_.get());
     if (has_physpos) {
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPhyspos.data(), physpos.data(),
-                                          Mz * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dPhyspos, physpos.data(), Mz, stream_.get());
     }
     launch_autosome_keep_mask(dChrom.data(), M, chrom_min, chrom_max, dFlags.data(),
                               stream_.get());
@@ -252,8 +232,7 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
     }
 
     int m_kept = 0;
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&m_kept, dNumSel.data(), sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(&m_kept, dNumSel, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     out.M_kept = static_cast<long>(m_kept);
     if (m_kept <= 0) return out;
@@ -270,17 +249,14 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_autosome(
 
     out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
     out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
-                                      static_cast<std::size_t>(m_kept) * sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
-                                      static_cast<std::size_t>(m_kept) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.chrom_kept.data(), dChromKept,
+              static_cast<std::size_t>(m_kept), stream_.get());
+    d2h_async(out.genpos_kept.data(), dGenposKept,
+              static_cast<std::size_t>(m_kept), stream_.get());
     if (has_physpos) {
         out.physpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.physpos_kept.data(), dPhysposKept.data(),
-                                          static_cast<std::size_t>(m_kept) * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        d2h_async(out.physpos_kept.data(), dPhysposKept,
+                  static_cast<std::size_t>(m_kept), stream_.get());
     }
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
@@ -330,18 +306,12 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     DeviceBuffer<double> dGenpos(Mz);
     DeviceBuffer<double> dPhyspos(has_physpos ? Mz : 0u);
     DeviceBuffer<std::uint8_t> dFlags(Mz);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dRef.data(), ref.data(), Mz * sizeof(char),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dAlt.data(), alt.data(), Mz * sizeof(char),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dChrom.data(), chrom.data(), Mz * sizeof(int),
-                                      cudaMemcpyHostToDevice, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(dGenpos.data(), genpos.data(), Mz * sizeof(double),
-                                      cudaMemcpyHostToDevice, stream_.get()));
+    h2d_async(dRef, ref.data(), Mz, stream_.get());
+    h2d_async(dAlt, alt.data(), Mz, stream_.get());
+    h2d_async(dChrom, chrom.data(), Mz, stream_.get());
+    h2d_async(dGenpos, genpos.data(), Mz, stream_.get());
     if (has_physpos) {
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(dPhyspos.data(), physpos.data(),
-                                          Mz * sizeof(double),
-                                          cudaMemcpyHostToDevice, stream_.get()));
+        h2d_async(dPhyspos, physpos.data(), Mz, stream_.get());
     }
     launch_regimeb_keep_mask(dQ.data(), dN.data(), P, M, dRef.data(), dAlt.data(),
                              dChrom.data(), kernel_cfg,
@@ -397,8 +367,7 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
     }
 
     int m_kept = 0;
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&m_kept, dNumSel.data(), sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(&m_kept, dNumSel, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     out.M_kept = static_cast<long>(m_kept);
     if (m_kept <= 0) return out;
@@ -418,17 +387,14 @@ steppe::device::DeviceDecodeResult CudaBackend::decode_af_compact_filter(
 
     out.chrom_kept.assign(static_cast<std::size_t>(m_kept), 0);
     out.genpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.chrom_kept.data(), dChromKept.data(),
-                                      static_cast<std::size_t>(m_kept) * sizeof(int),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
-    STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.genpos_kept.data(), dGenposKept.data(),
-                                      static_cast<std::size_t>(m_kept) * sizeof(double),
-                                      cudaMemcpyDeviceToHost, stream_.get()));
+    d2h_async(out.chrom_kept.data(), dChromKept,
+              static_cast<std::size_t>(m_kept), stream_.get());
+    d2h_async(out.genpos_kept.data(), dGenposKept,
+              static_cast<std::size_t>(m_kept), stream_.get());
     if (has_physpos) {
         out.physpos_kept.assign(static_cast<std::size_t>(m_kept), 0.0);
-        STEPPE_CUDA_CHECK(cudaMemcpyAsync(out.physpos_kept.data(), dPhysposKept.data(),
-                                          static_cast<std::size_t>(m_kept) * sizeof(double),
-                                          cudaMemcpyDeviceToHost, stream_.get()));
+        d2h_async(out.physpos_kept.data(), dPhysposKept,
+                  static_cast<std::size_t>(m_kept), stream_.get());
     }
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
