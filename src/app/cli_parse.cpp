@@ -27,6 +27,7 @@
 
 #include "app/cmd_cache.hpp"
 #include "app/cmd_extract_f2.hpp"
+#include "app/cmd_readv2_concord.hpp"
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
 #include "app/cmd_f4ratio.hpp"
@@ -267,6 +268,9 @@ int run_cli(int argc, char** argv) {
     std::string cache_show_dir;
     std::string cache_verify_dir;
     bool cache_check_sources = false;
+
+    // The host-only READv2 concordance validator args, also owned at run_cli scope.
+    Readv2ConcordArgs concord_args;
 
     int code = cfg::kExitOk;
 
@@ -553,6 +557,22 @@ int run_cli(int argc, char** argv) {
                            "(reserved; source-file hashing lives in the steppe-cache Python tool)");
         c_verify->callback([&]() { code = run_cache_verify(cache_verify_dir, cache_check_sources); });
     }
+
+    // The host-only READv2 concordance validator — no GPU, no RunConfig. The Phase-0
+    // "ruler": diffs two READv2 output tables (steppe's --a vs the reference tool's --b).
+    CLI::App* rc = app.add_subcommand(
+        "readv2-concord",
+        "Validate a READv2 output table against a reference table (host-only; degree confusion + P0_norm concordance)");
+    rc->add_option("--a", concord_args.a_path, "steppe's READv2 output table (CSV/TSV, steppe schema)")->required();
+    rc->add_option("--b", concord_args.b_path, "reference READv2 output table (CSV/TSV, steppe schema)")->required();
+    rc->add_option("--p0-atol", concord_args.p0_atol, "P0_norm abs tolerance (default 5e-3)");
+    rc->add_option("--p0-rtol", concord_args.p0_rtol, "P0_norm rel tolerance (default 1e-2)");
+    rc->add_option("--degree-agreement-min", concord_args.degree_agreement_min, "degree-match PASS floor (default 0.95)");
+    rc->add_option("--p0-within-tol-min", concord_args.p0_within_tol_min, "P0_norm within-tol PASS floor (default 0.90)");
+    rc->add_option("--coverage-min", concord_args.coverage_min, "oracle-pair coverage PASS floor (default 1.0)");
+    rc->add_option("--format", concord_args.format, "report format: text | json (default text)");
+    rc->add_option("--out", concord_args.out_path, "write report here (default stdout)");
+    rc->callback([&]() { code = run_readv2_concord(concord_args); });
 
     CLI11_PARSE(app, argc, argv);
 

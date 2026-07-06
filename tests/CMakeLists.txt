@@ -1230,6 +1230,19 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/examples/f2_9pop" LABELS "cli")
 
+  # --- READv2 concordance-validator host-only gate --------------------------
+  # Plain C++ host TU (NO CUDA, NO GPU): the Phase-0 "ruler". Writes hand-authored
+  # TOY READv2 tables (steppe schema) to temp files, runs the built
+  # `steppe readv2-concord --a .. --b ..` and asserts the confusion matrix, degree
+  # agreement, P0_norm within-tol counts, coverage, threshold PASS/FAIL, and exit
+  # code against known-by-construction expectations. Tests the validator's OWN diff
+  # arithmetic (NOT science). Host lane (label "cli", NOT "gpu") — needs no device.
+  add_executable(test_cli_readv2_concord cli/test_cli_readv2_concord.cpp)
+  target_link_libraries(test_cli_readv2_concord PRIVATE steppe::warnings)
+  add_dependencies(test_cli_readv2_concord steppe_app)
+  steppe_add_test(NAME cli_readv2_concord
+           COMMAND test_cli_readv2_concord "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
   # --- `steppe extract-f2 -> qpadm` end-to-end gate -------------------------
   # Plain C++ host TU (no CUDA): runs the built `steppe extract-f2` on the raw v66
   # AADR triple for the golden pop sets, then `steppe qpadm --f2-dir <extracted>`, and
