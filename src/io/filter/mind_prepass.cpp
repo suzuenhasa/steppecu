@@ -43,7 +43,6 @@ MindSummary run_mind_prepass(const MindPrepassInput& in, const FilterConfig& cfg
             out.missing_frac[ind] =
                 1.0 - static_cast<double>(nonmissing_count) / n_snp_d;
         }
-    } else {
     }
 
     for (std::size_t ind = 0; ind < n_ind; ++ind) {

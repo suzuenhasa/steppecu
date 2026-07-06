@@ -52,6 +52,14 @@ inline constexpr int kFirstOtherChromCode = -1;
     return static_cast<std::uint8_t>((byte >> shift) & kCodeMask);
 }
 
+// OR-accumulate a 2-bit code into slot k of a packed byte (the write-side
+// companion to code_in_byte) — reference §7
+[[nodiscard]] constexpr std::uint8_t pack_code_into_byte(std::uint8_t byte, int k,
+                                                         std::uint8_t code) noexcept {
+    const int shift = (kCodesPerByte - 1 - (k % kCodesPerByte)) * kBitsPerCode;
+    return static_cast<std::uint8_t>(byte | static_cast<std::uint8_t>(code << shift));
+}
+
 // GenoFormat: the on-disk layouts — reference §8
 enum class GenoFormat { Unknown, Tgeno, Geno, Eigenstrat, Plink, Ancestrymap };
 

@@ -26,6 +26,24 @@ namespace steppe::io {
 
 namespace {
 
+// Strip a trailing CR (CRLF line ending) — reference §8
+void strip_cr(std::string& line) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+}
+
+// Scan the next ' '/'\t'-delimited token at or after cur; on success sets
+// [start, len), advances cur past the token, and returns true (the shared scan
+// primitive for the ANCESTRYMAP tokenizers) — reference §8
+bool next_ws_token(std::string_view sv, std::size_t& cur,
+                   std::size_t& start, std::size_t& len) {
+    while (cur < sv.size() && (sv[cur] == ' ' || sv[cur] == '\t')) ++cur;
+    if (cur >= sv.size()) return false;
+    start = cur;
+    while (cur < sv.size() && sv[cur] != ' ' && sv[cur] != '\t') ++cur;
+    len = cur - start;
+    return true;
+}
+
 // Sibling text-file line counter — reference §8
 std::size_t count_text_records(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -33,7 +51,7 @@ std::size_t count_text_records(const std::string& path) {
     std::size_t n = 0;
     std::string line;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        strip_cr(line);
         if (line.empty()) {
             if (in.peek() == std::char_traits<char>::eof()) break;
             continue;
@@ -60,11 +78,6 @@ static_assert(sizeof(std::streamoff) >= 8,
               "GenoReader assumes a >=64-bit std::streamoff for record-offset math");
 
 namespace {
-
-// Strip a trailing CR (CRLF line ending) — reference §8
-void strip_cr(std::string& line) {
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-}
 
 // EIGENSTRAT geometry scan — reference §3
 GenoHeader parse_eigenstrat_geometry(const std::string& path) {
@@ -125,7 +138,7 @@ GenoHeader parse_ancestrymap_geometry(const std::string& geno_path) {
     std::string line;
     bool got_line = false;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        strip_cr(line);
         bool only_ws = true;
         for (char c : line) {
             if (c != ' ' && c != '\t') { only_ws = false; break; }
@@ -137,13 +150,10 @@ GenoHeader parse_ancestrymap_geometry(const std::string& geno_path) {
     if (!got_line) return GenoHeader{};
 
     std::vector<std::string_view> toks;
-    std::size_t i = 0;
-    while (i < line.size()) {
-        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
-        if (i >= line.size()) break;
-        const std::size_t start = i;
-        while (i < line.size() && line[i] != ' ' && line[i] != '\t') ++i;
-        toks.emplace_back(line.data() + start, i - start);
+    std::string_view sv(line);
+    std::size_t cur = 0, start = 0, len = 0;
+    while (next_ws_token(sv, cur, start, len)) {
+        toks.emplace_back(sv.data() + start, len);
     }
     if (toks.size() != kAncestrymapFields) return GenoHeader{};
     std::uint8_t probe_code = 0;
@@ -542,7 +552,7 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
                 std::to_string(s + 1) + " (expected " + std::to_string(tile_snps) +
                 " lines) in " + path_);
         }
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        strip_cr(line);
         if (line.size() != header_.n_ind) {
             throw std::runtime_error(
                 "io::GenoReader::read_eigenstrat_snp_major_tile: SNP line " +
@@ -561,10 +571,8 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
                     " (expected 0/1/2/9) in " + path_);
             }
             const std::size_t byte_in_rec = i / cpb;
-            const int shift =
-                (kCodesPerByte - 1 - static_cast<int>(i % cpb)) * kBitsPerCode;
-            rec[byte_in_rec] = static_cast<std::uint8_t>(
-                rec[byte_in_rec] | static_cast<std::uint8_t>(code << shift));
+            rec[byte_in_rec] =
+                pack_code_into_byte(rec[byte_in_rec], static_cast<int>(i), code);
         }
     }
     return tile;
@@ -637,10 +645,8 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
             const std::uint8_t bed_code =
                 bed_code_in_byte(bed_rec[i / cpb], static_cast<int>(i % cpb));
             const std::uint8_t canon = kBedToCanon[bed_code];
-            const int shift =
-                (kCodesPerByte - 1 - static_cast<int>(i % cpb)) * kBitsPerCode;
-            canon_rec[i / cpb] = static_cast<std::uint8_t>(
-                canon_rec[i / cpb] | static_cast<std::uint8_t>(canon << shift));
+            canon_rec[i / cpb] =
+                pack_code_into_byte(canon_rec[i / cpb], static_cast<int>(i), canon);
         }
     }
     return tile;
@@ -714,19 +720,15 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
                 std::to_string(ii) + "; expected " + std::to_string(n_lines) +
                 " triple lines for the prefix) in " + path_);
         }
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        strip_cr(line);
         std::string_view sv(line);
         std::array<std::string_view, kAncestrymapFields> toks{};
         std::size_t ntok = 0;
-        std::size_t p = 0;
+        std::size_t cur = 0, start = 0, len = 0;
         bool too_many = false;
-        while (p < sv.size()) {
-            while (p < sv.size() && (sv[p] == ' ' || sv[p] == '\t')) ++p;
-            if (p >= sv.size()) break;
-            const std::size_t start = p;
-            while (p < sv.size() && sv[p] != ' ' && sv[p] != '\t') ++p;
+        while (next_ws_token(sv, cur, start, len)) {
             if (ntok < kAncestrymapFields) {
-                toks[ntok] = sv.substr(start, p - start);
+                toks[ntok] = sv.substr(start, len);
             } else {
                 too_many = true;
                 break;
@@ -755,10 +757,8 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
         const std::size_t i = L % n_ind;
         std::uint8_t* rec = tile.snp_major.data() + s * src_bpr;
         const std::size_t byte_in_rec = i / cpb;
-        const int shift =
-            (kCodesPerByte - 1 - static_cast<int>(i % cpb)) * kBitsPerCode;
-        rec[byte_in_rec] = static_cast<std::uint8_t>(
-            rec[byte_in_rec] | static_cast<std::uint8_t>(code << shift));
+        rec[byte_in_rec] =
+            pack_code_into_byte(rec[byte_in_rec], static_cast<int>(i), code);
     }
     return tile;
 }
