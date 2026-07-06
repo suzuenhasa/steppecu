@@ -21,6 +21,7 @@
 #include "core/internal/decode_af.hpp"
 #include "core/internal/index_cast.hpp"
 #include "core/internal/primary_backend.hpp"
+#include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -147,52 +148,14 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     }
     if (P <= 0 || M <= 0) { res.status = Status::Ok; return res; }
 
-    std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    DecodeTileView view;
-    view.packed = tile.packed.data();
-    view.bytes_per_record = tile.bytes_per_record;
-    view.n_snp = tile.n_snp;
-    view.n_individuals = tile.n_individuals;
-    view.pop_offsets = tile.pop_offsets.data();
-    view.n_pop = P;
-    view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = core::kPloidyDiploid;
-
-    const bool resident = (be.capabilities().device_count > 0);
-    device::DeviceDecodeResult ddr;
-    std::vector<double> Qk, Vk;
-    std::vector<int> chrom_kept;
-    std::vector<double> genpos_kept;
-    std::vector<double> physpos_kept;
-    if (resident) {
-        ddr = be.decode_af_compact_autosome(
-            view, std::span<const int>(snptab.chrom.data(), idx(M)),
-            std::span<const double>(snptab.genpos_morgans.data(), idx(M)),
-            std::span<const double>(snptab.physpos.data(), idx(M)),
-            kAutosomeChromMin, kAutosomeChromMax);
-        chrom_kept = ddr.chrom_kept;
-        genpos_kept = ddr.genpos_kept;
-        physpos_kept = ddr.physpos_kept;
-    } else {
-        const DecodeResult dec = be.decode_af(view);
-        Qk.reserve(idx(P) * idx(M));
-        Vk.reserve(idx(P) * idx(M));
-        chrom_kept.reserve(idx(M));
-        genpos_kept.reserve(idx(M));
-        physpos_kept.reserve(idx(M));
-        for (long s = 0; s < M; ++s) {
-            const int chr = snptab.chrom[idx(s)];
-            if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;
-            const std::size_t src = idx(P) * idx(s);
-            for (int p = 0; p < P; ++p) {
-                Qk.push_back(dec.q[src + idx(p)]);
-                Vk.push_back(dec.v[src + idx(p)]);
-            }
-            chrom_kept.push_back(chr);
-            genpos_kept.push_back(snptab.genpos_morgans[idx(s)]);
-            physpos_kept.push_back(snptab.physpos[idx(s)]);
-        }
-    }
+    const core::DecodeKeepResult dk = core::decode_and_keep_autosomes(be, tile, snptab, P, M);
+    const bool resident = dk.resident;
+    const device::DeviceDecodeResult& ddr = dk.ddr;
+    const std::vector<double>& Qk = dk.Qk;
+    const std::vector<double>& Vk = dk.Vk;
+    const std::vector<int>& chrom_kept = dk.chrom_kept;
+    const std::vector<double>& genpos_kept = dk.genpos_kept;
+    const std::vector<double>& physpos_kept = dk.physpos_kept;
     const long M_kept = static_cast<long>(chrom_kept.size());
     if (M_kept <= 0) { res.status = Status::Ok; return res; }
 

@@ -14,6 +14,16 @@ namespace steppe::core {
     return static_cast<std::size_t>(i);
 }
 
+// ld() — the single long-double promotion helper. Lets the host long-double
+// accumulation in core's CPU-oracle reference paths read as ld(x) instead of
+// spelling out static_cast<long double> at every term. Every arg type wrapped
+// (double / int / long / std::uint8_t) converts to long double value-preserving,
+// so this is a bit-identical wrap of the explicit cast. Host-pure, constexpr.
+template <class T>
+[[nodiscard]] constexpr long double ld(T x) noexcept {
+    return static_cast<long double>(x);
+}
+
 // nonneg_count() — idx() of a signed count, clamping a negative to 0. The size_t
 // analogue of idx() for lengths/counts that must never wrap on an uninitialized
 // (negative) shape. Host-pure, constexpr.

@@ -22,6 +22,7 @@
 #include "core/internal/host_device.hpp"
 #include "core/internal/index_cast.hpp"
 #include "core/internal/primary_backend.hpp"
+#include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -37,6 +38,7 @@
 namespace steppe {
 
 using core::idx;
+using core::ld;
 
 namespace {
 
@@ -58,23 +60,23 @@ void weight_jack(const std::vector<double>& jmean, const std::vector<double>& jw
     const int g = static_cast<int>(m.size());
     if (g <= 1) return;
     long double yn = 0.0L;
-    for (double x : w) yn += static_cast<long double>(x);
+    for (double x : w) yn += ld(x);
     long double tdiff_sum = 0.0L, wdot = 0.0L;
     for (int k = 0; k < g; ++k) {
-        tdiff_sum += static_cast<long double>(mean) - static_cast<long double>(m[idx(k)]);
-        wdot += static_cast<long double>(w[idx(k)]) *
-                static_cast<long double>(m[idx(k)]);
+        tdiff_sum += ld(mean) - ld(m[idx(k)]);
+        wdot += ld(w[idx(k)]) *
+                ld(m[idx(k)]);
     }
     const long double jackest = tdiff_sum + wdot / yn;
     long double yvar = 0.0L;
     for (int k = 0; k < g; ++k) {
-        const long double hh = yn / static_cast<long double>(w[idx(k)]);
-        const long double tau = hh * static_cast<long double>(mean) -
-                                (hh - 1.0L) * static_cast<long double>(m[idx(k)]) -
+        const long double hh = yn / ld(w[idx(k)]);
+        const long double tau = hh * ld(mean) -
+                                (hh - 1.0L) * ld(m[idx(k)]) -
                                 jackest;
         yvar += (tau * tau) / (hh - 1.0L);
     }
-    yvar /= static_cast<long double>(g);
+    yvar /= ld(g);
     est = static_cast<double>(jackest);
     sig = (yvar > 0.0L) ? static_cast<double>(std::sqrt(static_cast<double>(yvar))) : std::nan("");
 }
@@ -113,15 +115,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     if (P <= 0 || M <= 0) { res.status = Status::InvalidConfig; return res; }
 
     std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    DecodeTileView view;
-    view.packed = tile.packed.data();
-    view.bytes_per_record = tile.bytes_per_record;
-    view.n_snp = tile.n_snp;
-    view.n_individuals = tile.n_individuals;
-    view.pop_offsets = tile.pop_offsets.data();
-    view.n_pop = P;
-    view.sample_ploidy = sample_ploidy.data();
-    view.ploidy = core::kPloidyDiploid;
+    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
     const DecodeResult dec = be.decode_af(view);
 
     const int p_tgt = find_pop(tile.pop_labels, target);

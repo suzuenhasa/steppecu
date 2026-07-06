@@ -38,6 +38,7 @@ add_library(steppe_core STATIC
     stats/dstat.cpp
     stats/qpfstats.cpp
     stats/dates.cpp
+    stats/decode_keep_autosomes.cpp
     stats/read_canonical_tile.cpp
     stats/genotype_front_end.cpp
     config/config_builder.cpp)

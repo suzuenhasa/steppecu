@@ -35,8 +35,8 @@ inline double linfit_2x2(const std::vector<double>& y, double v, bool affine, do
     long double Sbb = 0.0L, Sb1 = 0.0L, S11 = 0.0L, Sby = 0.0L, Sy = 0.0L;
     double bi = 1.0;
     for (std::size_t i = 0; i < n; ++i) {
-        const long double b = static_cast<long double>(bi);
-        const long double yi = static_cast<long double>(y[i]);
+        const long double b = ld(bi);
+        const long double yi = ld(y[i]);
         Sbb += b * b;
         Sby += b * yi;
         if (affine) { Sb1 += b; S11 += 1.0L; Sy += yi; }
@@ -55,7 +55,7 @@ inline double linfit_2x2(const std::vector<double>& y, double v, bool affine, do
     double bb = 1.0;
     for (std::size_t i = 0; i < n; ++i) {
         const double pred = co0 * bb + c;
-        const long double r = static_cast<long double>(y[i]) - pred;
+        const long double r = ld(y[i]) - pred;
         rss += r * r;
         bb *= v;
     }
