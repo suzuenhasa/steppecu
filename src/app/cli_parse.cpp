@@ -6,11 +6,14 @@
 // host translation unit — CLI11 is named only here and no CUDA header is
 // included (a build-time grep gate enforces it).
 //
-// Every subcommand is registered through one shared register_cmd() recipe.
-// Each subcommand's flags bind to a CliArgs owned at run_cli scope (so the
-// owner outlives CLI11's parse), and on parse the callback builds the config
-// and records the run_*_command exit code into `code` — no std::exit, so
-// stack unwinding and destructors run normally and run_cli returns the code.
+// Flags bind directly to their CliArgs field (each field is a std::optional
+// or a std::vector, so CLI11 leaves it untouched when the flag is absent —
+// the same "was it set?" sentinel the config merge reads). Every subcommand
+// is registered through one shared register_cmd() recipe: its flags bind to a
+// CliArgs owned at run_cli scope (so the owner outlives the parse), and on
+// parse the callback builds the config and records the run_*_command exit code
+// into a shared `code` — no std::exit, so destructors run and run_cli returns
+// the code.
 //
 // Reference: docs/reference/src_app_cli_parse.cpp.md
 #include "app/cli_parse.hpp"
@@ -76,80 +79,62 @@ namespace cfg = steppe::config;
 
 // Shared flag helpers — reference §5
 void add_common_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::string>(
-        "--device", [&a](const std::string& v) { a.device = v; },
-        "CUDA device(s): auto | <ordinal> | <ordinal>,<ordinal> (GPU-only; no 'cpu')");
-    sub->add_option_function<std::string>(
-        "--precision", [&a](const std::string& v) { a.precision = v; },
-        "Matmul precision: emu40 | emu32 | fp64 | tf32 (default emu40)");
-    sub->add_option_function<std::string>(
-        "--config", [&a](const std::string& v) { a.config_path = v; },
-        "TOML config file (reserved; not yet supported — passing one currently errors)");
+    sub->add_option("--device", a.device,
+                    "CUDA device(s): auto | <ordinal> | <ordinal>,<ordinal> (GPU-only; no 'cpu')");
+    sub->add_option("--precision", a.precision,
+                    "Matmul precision: emu40 | emu32 | fp64 | tf32 (default emu40)");
+    sub->add_option("--config", a.config_path,
+                    "TOML config file (reserved; not yet supported — passing one currently errors)");
 }
 
 void add_output_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::string>(
-        "--out", [&a](const std::string& v) { a.out_file = v; },
-        "Output FILE (stdout if omitted)");
-    sub->add_option_function<std::string>(
-        "--format", [&a](const std::string& v) { a.format = v; },
-        "Output format: csv | tsv | json (default csv)");
+    sub->add_option("--out", a.out_file, "Output FILE (stdout if omitted)");
+    sub->add_option("--format", a.format, "Output format: csv | tsv | json (default csv)");
 }
 
 void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; },
-                                     "AT2 ridge constant (default 1e-4)");
-    sub->add_option_function<int>("--als-iters", [&a](int v) { a.als_iterations = v; },
-                                  "ALS iteration count (default 20)");
-    sub->add_option_function<int>("--rank", [&a](int v) { a.rank = v; },
-                                  "f4 rank for the fit (-1 = auto nl-1)");
-    sub->add_option_function<double>("--rank-alpha", [&a](double v) { a.rank_alpha = v; },
-                                     "Rank-decision significance (default 0.05)");
-    sub->add_flag_function("--allow-neg,!--no-allow-neg",
-                           [&a](std::int64_t v) { a.allow_negative_weights = (v >= 0); },
-                           "Allow negative weights (default on)");
-    sub->add_option_function<int>("--jackknife", [&a](int v) { a.jackknife = v; },
-                                  "SE policy: 0 none | 1 feasible-only | 2 all (rotate only)");
-    sub->add_option_function<double>("--p-se-threshold", [&a](double v) { a.p_se_threshold = v; },
-                                     "Feasible-only survivor p-gate (jackknife=1)");
-    sub->add_flag_function("--se-require-p",
-                           [&a](std::int64_t) { a.se_require_p = true; },
-                           "Feasible-only also requires p >= --p-se-threshold");
+    sub->add_option("--fudge", a.fudge, "AT2 ridge constant (default 1e-4)");
+    sub->add_option("--als-iters", a.als_iterations, "ALS iteration count (default 20)");
+    sub->add_option("--rank", a.rank, "f4 rank for the fit (-1 = auto nl-1)");
+    sub->add_option("--rank-alpha", a.rank_alpha, "Rank-decision significance (default 0.05)");
+    sub->add_flag("--allow-neg,!--no-allow-neg", a.allow_negative_weights,
+                  "Allow negative weights (default on)");
+    sub->add_option("--jackknife", a.jackknife,
+                    "SE policy: 0 none | 1 feasible-only | 2 all (rotate only)");
+    sub->add_option("--p-se-threshold", a.p_se_threshold,
+                    "Feasible-only survivor p-gate (jackknife=1)");
+    sub->add_flag("--se-require-p", a.se_require_p,
+                  "Feasible-only also requires p >= --p-se-threshold");
 }
 
 void add_qpgraph_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::string>("--graph", [&a](const std::string& v) { a.graph = v; },
-                                          "The admixture-graph edge-list file (parent child per line)");
-    sub->add_option_function<int>("--numstart", [&a](int v) { a.numstart = v; },
-                                  "Multistart restart count (the fleet axis; default 10)");
-    sub->add_option_function<double>("--diag-f3", [&a](double v) { a.diag_f3 = v; },
-                                     "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
-    sub->add_flag_function("--constrained,!--no-constrained",
-                           [&a](std::int64_t v) { a.constrained = (v >= 0); },
-                           "Drift edges >= 0 (AT2 default on)");
+    sub->add_option("--graph", a.graph,
+                    "The admixture-graph edge-list file (parent child per line)");
+    sub->add_option("--numstart", a.numstart,
+                    "Multistart restart count (the fleet axis; default 10)");
+    sub->add_option("--diag-f3", a.diag_f3,
+                    "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
+    sub->add_flag("--constrained,!--no-constrained", a.constrained,
+                  "Drift edges >= 0 (AT2 default on)");
 }
 
 void add_fudge_flag(CLI::App* sub, CliArgs& a, const char* help) {
-    sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; }, help);
+    sub->add_option("--fudge", a.fudge, help);
 }
 
 // Comma-delimited string-list option -> target vector; the shared shape behind
 // every --pop/--pops/--left/--right flag.
 void add_str_list_flag(CLI::App* sub, const char* name, std::vector<std::string>& target,
                        const char* help) {
-    sub->add_option_function<std::vector<std::string>>(
-            name, [&target](const std::vector<std::string>& v) { target = v; }, help)
-        ->delimiter(',');
+    sub->add_option(name, target, help)->delimiter(',');
 }
 
 void add_f2_dir_flag(CLI::App* sub, CliArgs& a, const char* help) {
-    sub->add_option_function<std::string>(
-        "--f2-dir", [&a](const std::string& v) { a.f2_dir = v; }, help);
+    sub->add_option("--f2-dir", a.f2_dir, help);
 }
 
 void add_target_flag(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::string>(
-        "--target", [&a](const std::string& v) { a.target = v; }, "Target population label");
+    sub->add_option("--target", a.target, "Target population label");
 }
 
 void add_right_flag(CLI::App* sub, CliArgs& a, const char* help) {
@@ -197,26 +182,21 @@ void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
 // The f-statistic sweep flags — reference §7
 void add_sweep_filter_flags(CLI::App* sub, CliArgs& a, const char* min_z_help,
                             const char* top_k_help, const char* sure_help) {
-    sub->add_option_function<double>(
-        "--min-z", [&a](double v) { a.sweep_min_z = v; }, min_z_help);
-    sub->add_option_function<int>(
-        "--top-k", [&a](int v) { a.sweep_top_k = v; }, top_k_help);
-    sub->add_flag_function(
-        "--sure", [&a](std::int64_t) { a.sweep_sure = true; }, sure_help);
+    sub->add_option("--min-z", a.sweep_min_z, min_z_help);
+    sub->add_option("--top-k", a.sweep_top_k, top_k_help);
+    sub->add_flag("--sure", a.sweep_sure, sure_help);
 }
 
 void add_sweep_mode_flags(CLI::App* sub, CliArgs& a, const char* enable_flag,
                           const char* enable_help) {
-    sub->add_flag_function(enable_flag, [&a](std::int64_t) { a.sweep_all_combinations = true; },
-                           enable_help);
+    sub->add_flag(enable_flag, a.sweep_all_combinations, enable_help);
     add_sweep_filter_flags(
         sub, a,
         "Sweep: keep items with |z| >= this (the on-device filter; default 3.0). Excludes --top-k.",
         "Sweep: keep the K items with the largest |z| (bounded device-side reservoir, ~K resident). Excludes --min-z.",
         "Sweep: lift the maxcomb cap (a sweep over more than the cap refuses without this).");
-    sub->add_option_function<std::string>(
-        "--shard-dir", [&a](const std::string& v) { a.shard_dir = v; },
-        "Sweep: write the survivor table to a CSV under this dir (created if absent; vs stdout/--out).");
+    sub->add_option("--shard-dir", a.shard_dir,
+                    "Sweep: write the survivor table to a CSV under this dir (created if absent; vs stdout/--out).");
 }
 
 void add_sweep_flags(CLI::App* sub, CliArgs& a) {
@@ -314,16 +294,15 @@ int run_cli(int argc, char** argv) {
             add_f2_dir_flag(s, a, "The f2_blocks directory (f2.bin + pops.txt)");
             add_pops_flag(s, a,
                           "The bounded leaf pop-set the search enumerates topologies over (>= 3 names)");
-            s->add_option_function<int>("--max-nadmix", [&a](int v) { a.max_nadmix = v; },
-                                        "Bounded admixture-node ceiling (v1: 0 or 1; default 1)");
-            s->add_option_function<int>("--numstart", [&a](int v) { a.numstart = v; },
-                                        "Per-candidate multistart restart count (the fleet axis; default 10)");
-            s->add_option_function<double>("--diag-f3", [&a](double v) { a.diag_f3 = v; },
-                                           "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
+            s->add_option("--max-nadmix", a.max_nadmix,
+                          "Bounded admixture-node ceiling (v1: 0 or 1; default 1)");
+            s->add_option("--numstart", a.numstart,
+                          "Per-candidate multistart restart count (the fleet axis; default 10)");
+            s->add_option("--diag-f3", a.diag_f3,
+                          "f3 covariance regularization (AT2 diag_f3; default 1e-5)");
             add_fudge_flag(s, a, "AT2 cc edge-solve ridge (diag; default 1e-4)");
-            s->add_flag_function("--constrained,!--no-constrained",
-                                 [&a](std::int64_t v) { a.constrained = (v >= 0); },
-                                 "Drift edges >= 0 (AT2 default on)");
+            s->add_flag("--constrained,!--no-constrained", a.constrained,
+                        "Drift edges >= 0 (AT2 default on)");
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -333,9 +312,8 @@ int run_cli(int argc, char** argv) {
         "Admixture dating: --prefix genotypes + --target + --left{2 sources} -> date + SE",
         dates_args, Command::Dates,
         [](CLI::App* s, CliArgs& a) {
-            s->add_option_function<std::string>(
-                "--prefix", [&a](const std::string& v) { a.qpdstat_prefix = v; },
-                "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; .snp needs a real cM map)");
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; .snp needs a real cM map)");
             add_target_flag(s, a);
             add_left_flag(s, a,
                           "The TWO reference source populations (the ancestral pops; exactly two)");
@@ -377,11 +355,10 @@ int run_cli(int argc, char** argv) {
             add_f4_quartet_flags(s, a);
             add_sweep_mode_flags(s, a, "--all-quartets",
                                  "Sweep ALL quadruples C(P,4) over the --pops subset (empty ⇒ whole f2 dir)");
-            s->add_option_function<std::string>(
-                "--prefix", [&a](const std::string& v) { a.qpdstat_prefix = v; },
-                "Genotype triple prefix PREFIX.{geno,snp,ind} for the normalized-D magnitude "
-                "(Part B; allsnps=TRUE block-jackknife). Without it, --f2-dir reports f4 "
-                "(the AT2 f2-path convention).");
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix PREFIX.{geno,snp,ind} for the normalized-D magnitude "
+                          "(Part B; allsnps=TRUE block-jackknife). Without it, --f2-dir reports f4 "
+                          "(the AT2 f2-path convention).");
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -436,17 +413,14 @@ int run_cli(int argc, char** argv) {
         "Genotype-path joint f2 smoother: --prefix genotypes + --pops -> a smoothed f2 dir",
         qpfstats_args, Command::Qpfstats,
         [](CLI::App* s, CliArgs& a) {
-            s->add_option_function<std::string>(
-                "--prefix", [&a](const std::string& v) { a.qpdstat_prefix = v; },
-                "Genotype triple prefix (reads PREFIX.{geno,snp,ind})");
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind})");
             add_pops_flag(s, a,
                           "Population set to smooth over (sorted ASC internally = the AT2 dimnames order)");
-            s->add_option_function<std::string>(
-                "--out-dir", [&a](const std::string& v) { a.out_dir = v; },
-                "Output smoothed f2_blocks dir (f2.bin + pops.txt + meta.json)");
-            s->add_option_function<double>(
-                "--blgsize", [&a](double v) { a.blgsize = v; },
-                "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
+            s->add_option("--out-dir", a.out_dir,
+                          "Output smoothed f2_blocks dir (f2.bin + pops.txt + meta.json)");
+            s->add_option("--blgsize", a.blgsize,
+                          "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
             add_common_flags(s, a);
         },
         run_qpfstats_command, code);
@@ -456,14 +430,10 @@ int run_cli(int argc, char** argv) {
         [](CLI::App* s, CliArgs& a) {
             add_f2_dir_flag(s, a, "The f2_blocks directory");
             add_target_flag(s, a);
-            s->add_option_function<std::vector<std::string>>(
-                "--pool", [&a](const std::vector<std::string>& v) { a.pool = v; },
-                "Source pool to enumerate subsets of")->delimiter(',');
+            s->add_option("--pool", a.pool, "Source pool to enumerate subsets of")->delimiter(',');
             add_right_flag(s, a, "Right outgroup labels");
-            s->add_option_function<int>("--min-sources", [&a](int v) { a.min_sources = v; },
-                                        "Minimum sources per model (default 1)");
-            s->add_option_function<int>("--max-sources", [&a](int v) { a.max_sources = v; },
-                                        "Maximum sources per model (-1 = whole pool)");
+            s->add_option("--min-sources", a.min_sources, "Minimum sources per model (default 1)");
+            s->add_option("--max-sources", a.max_sources, "Maximum sources per model (-1 = whole pool)");
             add_qpadm_option_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);
@@ -475,43 +445,29 @@ int run_cli(int argc, char** argv) {
         [](CLI::App* s, CliArgs& a) {
             add_f2_dir_flag(s, a, "The f2_blocks directory");
             add_target_flag(s, a);
-            s->add_option_function<std::vector<std::string>>(
-                "--pool", [&a](const std::vector<std::string>& v) { a.pool = v; },
-                "Source pool to enumerate subsets of")->delimiter(',');
+            s->add_option("--pool", a.pool, "Source pool to enumerate subsets of")->delimiter(',');
             add_right_flag(s, a, "Right outgroup labels");
-            s->add_option_function<int>("--min-sources", [&a](int v) { a.min_sources = v; },
-                                        "Minimum sources per model (default 1)");
-            s->add_option_function<int>("--max-sources", [&a](int v) { a.max_sources = v; },
-                                        "Maximum sources per model (-1 = whole pool)");
-            s->add_option_function<double>("--p-min", [&a](double v) { a.scan_p_min = v; },
-                                           "Objective hard-gate tail-p cutoff alpha (default 0.05)");
-            s->add_flag_function("--allow-clade,!--no-allow-clade",
-                                 [&a](std::int64_t v) { a.scan_allow_clade = (v >= 0); },
-                                 "May a 1-source (clade) model be the winner? (default on; "
-                                 "--no-allow-clade prefers genuine >=2-source mixtures)");
-            s->add_option_function<std::string>(
-                "--strategy", [&a](const std::string& v) { a.scan_strategy = v; },
-                "Search: greedy | beam | exhaustive (default beam; small pools auto-exhaustive)");
-            s->add_option_function<int>("--beam-width", [&a](int v) { a.scan_beam_width = v; },
-                                        "Beam width for --strategy beam (default 3)");
-            s->add_option_function<std::vector<std::string>>(
-                "--base", [&a](const std::vector<std::string>& v) { a.scan_base = v; },
-                "Optional seed model (sources) to grow the guided search from")->delimiter(',');
-            s->add_flag_function(
-                "--sure", [&a](std::int64_t) { a.sweep_sure = true; },
-                "Proceed with a huge explicit --strategy exhaustive enumeration (lifts the safety cap)");
-            s->add_flag_function(
-                "--prerank", [&a](std::int64_t) { a.scan_prerank = true; },
-                "Rank the pool by mean outgroup-f3 relatedness to the target (over the right set), then exit");
-            s->add_flag_function(
-                "--suggest-swaps", [&a](std::int64_t) { a.scan_suggest_swaps = true; },
-                "For models that fail the gate, suggest dropping the least-related source and adding a related one");
-            s->add_option_function<std::string>(
-                "--right-search", [&a](const std::string& v) { a.scan_right_search = v; },
-                "Outgroup admissibility: none | check | add-drop (sources-only qpWave gate; R0 pinned)");
-            s->add_option_function<std::vector<std::string>>(
-                "--right-pool", [&a](const std::vector<std::string>& v) { a.scan_right_pool = v; },
-                "Curated outgroup pool that add-drop may draw from (R0 = --right[0] stays pinned)")->delimiter(',');
+            s->add_option("--min-sources", a.min_sources, "Minimum sources per model (default 1)");
+            s->add_option("--max-sources", a.max_sources, "Maximum sources per model (-1 = whole pool)");
+            s->add_option("--p-min", a.scan_p_min, "Objective hard-gate tail-p cutoff alpha (default 0.05)");
+            s->add_flag("--allow-clade,!--no-allow-clade", a.scan_allow_clade,
+                        "May a 1-source (clade) model be the winner? (default on; "
+                        "--no-allow-clade prefers genuine >=2-source mixtures)");
+            s->add_option("--strategy", a.scan_strategy,
+                          "Search: greedy | beam | exhaustive (default beam; small pools auto-exhaustive)");
+            s->add_option("--beam-width", a.scan_beam_width, "Beam width for --strategy beam (default 3)");
+            s->add_option("--base", a.scan_base,
+                          "Optional seed model (sources) to grow the guided search from")->delimiter(',');
+            s->add_flag("--sure", a.sweep_sure,
+                        "Proceed with a huge explicit --strategy exhaustive enumeration (lifts the safety cap)");
+            s->add_flag("--prerank", a.scan_prerank,
+                        "Rank the pool by mean outgroup-f3 relatedness to the target (over the right set), then exit");
+            s->add_flag("--suggest-swaps", a.scan_suggest_swaps,
+                        "For models that fail the gate, suggest dropping the least-related source and adding a related one");
+            s->add_option("--right-search", a.scan_right_search,
+                          "Outgroup admissibility: none | check | add-drop (sources-only qpWave gate; R0 pinned)");
+            s->add_option("--right-pool", a.scan_right_pool,
+                          "Curated outgroup pool that add-drop may draw from (R0 = --right[0] stays pinned)")->delimiter(',');
             add_qpadm_option_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);
@@ -522,33 +478,29 @@ int run_cli(int argc, char** argv) {
     register_cmd(app, "extract-f2", "Precompute the f2_blocks dir from genotypes", extract_args,
         Command::ExtractF2,
         [](CLI::App* s, CliArgs& a) {
-            s->add_option_function<std::string>("--prefix", [&a](const std::string& v) { a.prefix = v; },
-                                                "Genotype triple prefix (sets --geno/--snp/--ind = PREFIX.{geno,snp,ind})");
-            s->add_option_function<std::string>("--geno", [&a](const std::string& v) { a.geno = v; }, "Genotype file (overrides --prefix)");
-            s->add_option_function<std::string>("--snp",  [&a](const std::string& v) { a.snp = v; },  "SNP file (overrides --prefix)");
-            s->add_option_function<std::string>("--ind",  [&a](const std::string& v) { a.ind = v; },  "Individual file (overrides --prefix)");
-            s->add_option_function<std::string>("--out-dir,--out",  [&a](const std::string& v) { a.out_dir = v; }, "Output f2_blocks DIRECTORY (f2.bin + pops.txt + meta.json)");
-            s->add_option_function<std::vector<std::string>>(
-                "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
-                "Explicit population list")->delimiter(',');
-            s->add_option_function<int>("--auto-top-k", [&a](int v) { a.auto_top_k = v; }, "Keep the K largest pops");
-            s->add_option_function<int>("--min-n", [&a](int v) { a.min_n = v; }, "Keep pops with >= N individuals");
-            s->add_option_function<double>("--blgsize", [&a](double v) { a.blgsize = v; }, "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
-            s->add_option_function<double>("--maf", [&a](double v) { a.maf = v; }, "Minimum MAF");
-            s->add_option_function<double>("--geno-max-miss", [&a](double v) { a.geno_max_missing = v; }, "Max per-SNP missing fraction");
-            s->add_option_function<double>("--maxmiss", [&a](double v) { a.geno_max_missing = v; }, "AT2 alias for --geno-max-miss");
-            s->add_option_function<double>("--mind-max-miss", [&a](double v) { a.mind_max_missing = v; }, "Max per-sample missing fraction");
-            s->add_flag_function("--auto-only,!--no-auto-only",
-                                 [&a](std::int64_t v) { a.autosomes_only = (v >= 0); },
-                                 "Keep only autosomes chr 1-22 (default on; --no-auto-only to disable)");
-            s->add_flag_function("--drop-mono,!--no-drop-mono",
-                                 [&a](std::int64_t v) { a.drop_monomorphic = (v >= 0); },
-                                 "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
-            s->add_flag_function("--transversions", [&a](std::int64_t) { a.transversions_only = true; }, "Keep only transversions");
-            s->add_option_function<std::string>(
-                "--strand-mode", [&a](const std::string& v) { a.strand_mode = v; },
-                "Strand-ambiguous (A/T, C/G) SNP policy: drop (default; merge-safe) | keep "
-                "(retain, AT2 default) | flip (not-yet-implemented, == keep)");
+            s->add_option("--prefix", a.prefix,
+                          "Genotype triple prefix (sets --geno/--snp/--ind = PREFIX.{geno,snp,ind})");
+            s->add_option("--geno", a.geno, "Genotype file (overrides --prefix)");
+            s->add_option("--snp", a.snp, "SNP file (overrides --prefix)");
+            s->add_option("--ind", a.ind, "Individual file (overrides --prefix)");
+            s->add_option("--out-dir,--out", a.out_dir, "Output f2_blocks DIRECTORY (f2.bin + pops.txt + meta.json)");
+            s->add_option("--pops", a.pops, "Explicit population list")->delimiter(',');
+            s->add_option("--auto-top-k", a.auto_top_k, "Keep the K largest pops");
+            s->add_option("--min-n", a.min_n, "Keep pops with >= N individuals");
+            s->add_option("--blgsize", a.blgsize, "Jackknife block size in MORGANS (AT2 convention; default 0.05 = 5 cM)");
+            s->add_option("--maf", a.maf, "Minimum MAF");
+            s->add_option("--geno-max-miss", a.geno_max_missing, "Max per-SNP missing fraction");
+            s->add_option("--maxmiss", a.geno_max_missing, "AT2 alias for --geno-max-miss");
+            s->add_option("--mind-max-miss", a.mind_max_missing, "Max per-sample missing fraction");
+            s->add_flag("--auto-only,!--no-auto-only", a.autosomes_only,
+                        "Keep only autosomes chr 1-22 (default on; --no-auto-only to disable)");
+            s->add_flag("--drop-mono,!--no-drop-mono", a.drop_monomorphic,
+                        "Drop monomorphic SNPs (default on, AT2 poly_only parity; --no-drop-mono to keep)");
+            s->add_flag("--transversions", a.transversions_only, "Keep only transversions");
+            s->add_option("--strand-mode", a.strand_mode,
+                          "Strand-ambiguous (A/T, C/G) SNP policy: drop (default; merge-safe) | keep "
+                          "(retain, AT2 default) | flip (not-yet-implemented, == keep)");
+            // --ploidy keeps its validating lambda so the friendly error message is preserved.
             s->add_option_function<std::string>(
                 "--ploidy",
                 [&a](const std::string& v) {
@@ -559,14 +511,12 @@ int run_cli(int argc, char** argv) {
                         "--ploidy", "must be auto, 1 (pseudo-haploid), or 2 (diploid); got '" + v + "'");
                 },
                 "Ploidy policy: auto (AT2 adjust_pseudohaploid, default) | 1 (pseudo-haploid) | 2 (diploid)");
-            s->add_option_function<std::string>(
-                "--tier", [&a](const std::string& v) { a.tier = v; },
-                "f2_blocks output tier: auto | resident | host | disk (default auto; "
-                "host/disk stream the SNP-tile input so high-P runs that OOM resident complete)");
-            s->add_flag_function("--dry-run", [&a](std::int64_t) { a.dry_run = true; }, "Report sizes/tier/precision, no compute");
-            s->add_flag_function("--hash,!--no-hash",
-                                 [&a](std::int64_t v) { a.hash_source = (v >= 0); },
-                                 "Compute source-dataset provenance SHA-256 (default OFF; overlapped on a background thread)");
+            s->add_option("--tier", a.tier,
+                          "f2_blocks output tier: auto | resident | host | disk (default auto; "
+                          "host/disk stream the SNP-tile input so high-P runs that OOM resident complete)");
+            s->add_flag("--dry-run", a.dry_run, "Report sizes/tier/precision, no compute");
+            s->add_flag("--hash,!--no-hash", a.hash_source,
+                        "Compute source-dataset provenance SHA-256 (default OFF; overlapped on a background thread)");
             add_common_flags(s, a);
         },
         run_extract_f2_command, code);

@@ -50,8 +50,8 @@ Two mechanical details make this work reliably:
 
 - **One `CliArgs` per subcommand, held in stable storage.** `run_cli` declares a
   separate `CliArgs` local for every subcommand and keeps all of them alive for the
-  whole parse. The flag-binding lambdas capture these by reference, so the storage
-  must outlive parsing. Only the selected subcommand's callback ever fires, so only
+  whole parse. CLI11 binds each flag to a field of these by reference (most flags bind
+  their field directly), so the storage must outlive parsing. Only the selected subcommand's callback ever fires, so only
   the chosen subcommand's `CliArgs` carries user input; the rest stay at their
   defaults and are ignored.
 - **One shared registration recipe, no `std::exit`.** Every subcommand is registered
