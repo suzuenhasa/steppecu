@@ -145,10 +145,12 @@ gates, the column indices, and the prose can never drift apart.
 
 ---
 
-## 7. Bit-packing helpers: `packed_bytes` and `code_in_byte`
+## 7. Bit-packing helpers: `packed_bytes`, `code_in_byte`, and `pack_code_into_byte`
 
-Two `constexpr` helpers do the actual bit arithmetic, so the packing formula and
-the bit order each live at exactly one site.
+Three `constexpr` helpers do the actual bit arithmetic, so the packing formula
+and the bit order each live at exactly one site. `packed_bytes` sizes a record,
+`code_in_byte` reads one code out of a packed byte, and `pack_code_into_byte`
+writes one code back in — the read and write sides of the same layout.
 
 ### `packed_bytes(n_codes)`
 
@@ -172,6 +174,24 @@ Extracts the 2-bit code at position `k` (0-based) within a packed byte,
 This is the rule `(byte >> (6 − 2·(k mod 4))) & 3`. It is the single bit-order
 site shared by the host reader and, through the decode primitive, the GPU and CPU
 decoders — so the MSB-first convention is defined in exactly one place.
+
+### `pack_code_into_byte(byte, k, code)`
+
+The write-side companion to `code_in_byte`: it OR-accumulates a 2-bit `code` into
+slot `k` (0-based) of a packed byte and returns the updated byte. It computes the
+**same** most-significant-bits-first shift as `code_in_byte` — `(6 − 2·(k mod 4))`
+— then places the code with `byte | (code << shift)`. Reading slot `k` back out of
+the result with `code_in_byte` returns exactly the `code` that was written, which
+is what makes the two a matched read/write pair.
+
+Because it *ORs* the code in rather than overwriting, it assumes the target slot
+starts clear — the caller builds a byte by starting from `0` and packing four
+codes into slots `0`–`3` in turn, never by re-packing over an already-filled slot.
+Deriving the shift from the same `kCodesPerByte` / `kBitsPerCode` constants as the
+reader means the pack and unpack directions can never disagree about the MSB-first
+bit order: there is one place that decides where a code lives inside a byte, and
+both sides read it from there. This is what a genotype **writer** uses to
+re-encode canonical 2-bit codes back into the packed on-disk form.
 
 ---
 

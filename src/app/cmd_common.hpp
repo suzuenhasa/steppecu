@@ -5,6 +5,8 @@
 // "no CUDA device available" diagnostic and never throws (each caller's guard
 // sits inside a try{} that would otherwise remap a throw to a different exit
 // code). Header-only, app-layer, CUDA-free.
+//
+// Reference: docs/reference/src_app_cmd_common.hpp.md
 #ifndef STEPPE_APP_CMD_COMMON_HPP
 #define STEPPE_APP_CMD_COMMON_HPP
 

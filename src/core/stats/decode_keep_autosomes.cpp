@@ -2,6 +2,8 @@
 //
 // make_decode_tile_view is the byte-identical DecodeTileView wiring block; decode_and_keep_autosomes
 // is the resident-or-host decode + autosome-keep block shared verbatim by dstat and qpfstats.
+//
+// Reference: docs/reference/src_core_stats_decode_keep_autosomes.hpp.md
 
 #include "core/stats/decode_keep_autosomes.hpp"
 

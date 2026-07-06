@@ -7,6 +7,8 @@
 //
 // Lifetime: the returned DecodeTileView aliases the caller's sample_ploidy vector, so the
 // caller must keep that vector alive for the view's whole lifetime.
+//
+// Reference: docs/reference/src_core_stats_decode_keep_autosomes.hpp.md
 #ifndef STEPPE_CORE_STATS_DECODE_KEEP_AUTOSOMES_HPP
 #define STEPPE_CORE_STATS_DECODE_KEEP_AUTOSOMES_HPP
 

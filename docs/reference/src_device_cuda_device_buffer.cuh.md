@@ -198,3 +198,48 @@ about those would just emit noise on every clean shutdown. steppe's buffers are
 normally owned by the backend rather than being long-lived global objects, so this
 end-of-process case rarely arises in the first place — but the guard keeps a clean
 exit quiet.
+
+---
+
+## 7. The typed async copy helpers (`h2d_async` / `d2h_async`)
+
+Alongside the buffer class, the header defines two small free functions that move
+data between host and device: `h2d_async` (host to device) and `d2h_async` (device
+to host). They are not members of `DeviceBuffer` — they are plain templates that
+take a buffer plus a raw host pointer, a count, and a CUDA stream.
+
+Each one does the same three small things that a hand-written copy would do, folded
+into a single call:
+
+- it computes the byte count as `n * sizeof(T)`, so the caller passes an *element*
+  count and never has to spell out `sizeof` at the call site;
+- it issues exactly one asynchronous copy in the requested direction on the given
+  stream; and
+- it wraps that copy in `STEPPE_CUDA_CHECK`, so a failed transfer throws the same
+  typed error every other CUDA call in steppe does, rather than returning a status
+  code that a caller might forget to inspect.
+
+The reason these exist is the same "one source of truth" reasoning behind the shared
+f2 numerics: before them, roughly two hundred places across the codebase hand-rolled
+their own `cudaMemcpyAsync(dst, src, n * sizeof(T), direction, stream)` and their own
+error check. Every one of those was a chance to get the byte count wrong (forget the
+`sizeof`, or multiply by the wrong type's size), pass the wrong direction constant, or
+skip the error check entirely. Converging all of them onto these two helpers means the
+byte arithmetic and the error handling are written correctly once and reused, and the
+call sites shrink to a clear statement of intent — *copy these `n` elements to the
+device on this stream*.
+
+One deliberate detail in the signatures: the *non-buffer* side of each copy is typed
+as `void*` rather than `T*`. In `h2d_async` the host source is `const void*`; in
+`d2h_async` the host destination is `void*`. This mirrors the raw `cudaMemcpyAsync`
+prototype and lets the byte count derive solely from the `DeviceBuffer<T>`'s element
+type. That matters at the sites where the host and device element types differ but
+share a size — for example a `char` host array feeding a `std::uint8_t` device buffer
+— where insisting the two pointer types match would force an extra cast for no real
+benefit. Because the byte count comes from the buffer's `T`, the transfer stays
+byte-identical to the hand-written copy it replaced.
+
+These are `async` copies: they enqueue the transfer on the stream and return without
+waiting for it to finish, exactly like the raw call. Ordering and completion are still
+the caller's responsibility — the helpers only remove the repetitive, error-prone
+boilerplate around each individual copy, not the surrounding stream synchronization.

@@ -52,19 +52,50 @@ first bad model.
 
 ---
 
-## 3. The `Status` values
+## 3. The `Status` values and their wire strings
 
 `Status` is a scoped enum (`enum class Status`). Every call in the early layers
-returns one of these six values.
+returns one of these six values. Each value also has a stable snake_case label —
+its "wire string" — produced by the `status_str` function described just below.
 
-| Value | Category | Meaning |
-|---|---|---|
-| `Ok` | Success | The call succeeded. |
-| `DeviceOom` | Resource failure (maybe recoverable) | A GPU memory allocation or the VRAM-budget check failed. This is a resource condition, and it is sometimes recoverable — for example by retrying with a smaller chunk size or a smaller memory budget. |
-| `RankDeficient` | Recoverable domain outcome | The rank test or the generalized-least-squares solve hit a rank-deficient design matrix `X`, which means the model cannot be uniquely identified. This is the expected result of fitting a degenerate model, not a bug. |
-| `NonSpdCovariance` | Recoverable domain outcome | The covariance matrix `Q` is not symmetric positive-definite, so its Cholesky factorization failed. This happens for a degenerate or collinear model, and again is a statistical result, not a bug. |
-| `ChisqUndefined` | Recoverable domain outcome | The degrees of freedom are zero or negative (or the chi-squared statistic otherwise cannot be computed) for this model, so its chi-squared tail probability `p` is undefined. Instead of reporting a fabricated value, steppe leaves `p` at its NaN sentinel. This is the expected result of an over-parameterized model — for instance, when the number of sources minus one spans all available columns and leaves zero degrees of freedom — not a bug. |
-| `InvalidConfig` | Fail-fast fault | Configuration failed validation in `ConfigBuilder::build()`: a bad architecture list, conflicting flags, an over-budget VRAM request, or a precision mode that cannot be honored. This is a setup mistake and fails fast. |
+| Value | Wire string | Category | Meaning |
+|---|---|---|---|
+| `Ok` | `"ok"` | Success | The call succeeded. |
+| `DeviceOom` | `"device_oom"` | Resource failure (maybe recoverable) | A GPU memory allocation or the VRAM-budget check failed. This is a resource condition, and it is sometimes recoverable — for example by retrying with a smaller chunk size or a smaller memory budget. |
+| `RankDeficient` | `"rank_deficient"` | Recoverable domain outcome | The rank test or the generalized-least-squares solve hit a rank-deficient design matrix `X`, which means the model cannot be uniquely identified. This is the expected result of fitting a degenerate model, not a bug. |
+| `NonSpdCovariance` | `"non_spd_covariance"` | Recoverable domain outcome | The covariance matrix `Q` is not symmetric positive-definite, so its Cholesky factorization failed. This happens for a degenerate or collinear model, and again is a statistical result, not a bug. |
+| `ChisqUndefined` | `"chisq_undefined"` | Recoverable domain outcome | The degrees of freedom are zero or negative (or the chi-squared statistic otherwise cannot be computed) for this model, so its chi-squared tail probability `p` is undefined. Instead of reporting a fabricated value, steppe leaves `p` at its NaN sentinel. This is the expected result of an over-parameterized model — for instance, when the number of sources minus one spans all available columns and leaves zero degrees of freedom — not a bug. |
+| `InvalidConfig` | `"invalid_config"` | Fail-fast fault | Configuration failed validation in `ConfigBuilder::build()`: a bad architecture list, conflicting flags, an over-budget VRAM request, or a precision mode that cannot be honored. This is a setup mistake and fails fast. |
+
+### The `status_str` mapping
+
+```
+status_str(Status s) -> const char*
+```
+
+`status_str` is a tiny `inline` helper that turns a `Status` value into its stable
+snake_case label — `Status::DeviceOom` becomes `"device_oom"`, and so on down the
+table above. It is marked `[[nodiscard]]`, does one `switch` over the enum, and
+falls back to `"unknown"` for any value outside the enumerators, so it can never
+return a null pointer.
+
+The reason this lives here, right next to the enum, is single-sourcing. Two very
+different places need to turn a `Status` into text: the command-line tool, when it
+prints an outcome for a human to read, and the language bindings, when they hand a
+result back across the API boundary. If each of those wrote its own enum-to-string
+`switch`, the two copies could quietly drift — a renamed or newly added status
+might get `"device_oom"` in one place and `"deviceOom"` (or nothing) in the other,
+and a caller that keys off the string would break depending on which layer it went
+through. Hoisting the mapping into the header means the app emitter and the
+bindings read the *same* labels from the *same* function, so the wire strings
+cannot disagree.
+
+Keeping it here also keeps the labels honest as the enum grows: when a new
+`Status` value is added, the missing `case` shows up in one obvious spot rather
+than being scattered across the tool and the bindings. The snake_case spelling is
+chosen so the labels are stable, machine-friendly identifiers — safe to compare
+against, log, or surface through the eventual C ABI — rather than prose that might
+be reworded later.
 
 ---
 

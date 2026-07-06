@@ -4,6 +4,8 @@
 // run_f4 both turn a per-stat total estimate plus jackknife-diagonal variance
 // into (est, se, z, p) with the exact same loop; this collapses that
 // byte-identical body onto one helper. Host-pure.
+//
+// Reference: docs/reference/src_core_qpadm_point_estimates.hpp.md
 #ifndef STEPPE_CORE_QPADM_POINT_ESTIMATES_HPP
 #define STEPPE_CORE_QPADM_POINT_ESTIMATES_HPP
 

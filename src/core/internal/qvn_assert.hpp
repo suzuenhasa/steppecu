@@ -3,6 +3,8 @@
 // assert_qvn_consistent() — the shared Q/V/N shape precondition. The three debug
 // asserts (P agree, M agree, non-negative shape) that every f2 entry point runs
 // on its inputs, factored into one place. Host-pure, compiles out under NDEBUG.
+//
+// Reference: docs/reference/src_core_internal_qvn_assert.hpp.md
 #ifndef STEPPE_CORE_INTERNAL_QVN_ASSERT_HPP
 #define STEPPE_CORE_INTERNAL_QVN_ASSERT_HPP
 

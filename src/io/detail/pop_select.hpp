@@ -3,6 +3,8 @@
 // Shared population-selection tail for the EIGENSTRAT .ind and PLINK .fam readers:
 // the Explicit / AutoTopK / MinN filter over the parsed raw groups (byte-identical
 // logic previously copy-pasted into both TUs). Pure host C++20.
+//
+// Reference: docs/reference/src_io_detail_pop_select.hpp.md
 #ifndef STEPPE_IO_DETAIL_POP_SELECT_HPP
 #define STEPPE_IO_DETAIL_POP_SELECT_HPP
 

@@ -3,6 +3,8 @@
 // primary_backend() — the single primary-GPU backend accessor. Collapses the
 // per-call `*resources.gpus.at(0).backend` seam the qpAdm/qpGraph entry points
 // each open-coded onto one helper. Names only CUDA-free seam types.
+//
+// Reference: docs/reference/src_core_internal_primary_backend.hpp.md
 #ifndef STEPPE_CORE_INTERNAL_PRIMARY_BACKEND_HPP
 #define STEPPE_CORE_INTERNAL_PRIMARY_BACKEND_HPP
 

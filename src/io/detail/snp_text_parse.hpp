@@ -2,6 +2,8 @@
 //
 // Shared SNP-text field parsers for the EIGENSTRAT .snp and PLINK .bim readers
 // (byte-identical logic previously copy-pasted into both TUs). Pure host C++20.
+//
+// Reference: docs/reference/src_io_detail_snp_text_parse.hpp.md
 #ifndef STEPPE_IO_DETAIL_SNP_TEXT_PARSE_HPP
 #define STEPPE_IO_DETAIL_SNP_TEXT_PARSE_HPP
 

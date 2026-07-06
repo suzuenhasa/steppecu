@@ -1,5 +1,7 @@
 // src/core/internal/index_cast.hpp
 //
+// Reference: docs/reference/src_core_internal_index_cast.hpp.md
+//
 // idx() — the single signed→size_t index-cast helper. Lets the flat index math in
 // core's host-reference headers read as idx(i) + idx(n) * idx(j) instead of spelling
 // out static_cast<std::size_t> at every subscript. Host-pure, constexpr.

@@ -1,5 +1,7 @@
 // src/core/qpadm/qpgraph_arena.hpp
 //
+// Reference: docs/reference/src_core_qpadm_qpgraph_arena.hpp.md
+//
 // fill_topo_arena_common() — copies the topology-invariant QpGraphTopoArena
 // fields shared by the qpGraph fit and search paths. Each caller still sets the
 // pair layout itself (npair, cmb1, cmb2).
