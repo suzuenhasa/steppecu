@@ -38,6 +38,7 @@ add_executable(steppe_app
     cmd_rotate.cpp
     cmd_scan.cpp
     cmd_extract_f2.cpp
+    cmd_cache.cpp
     result_emit.cpp)
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)

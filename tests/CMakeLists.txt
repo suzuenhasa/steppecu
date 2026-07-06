@@ -1214,6 +1214,22 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
 
+  # --- native `steppe cache` host-only inspector gate -----------------------
+  # Plain C++ host TU (NO CUDA, NO GPU): drives the built `steppe cache ls/show/verify`
+  # over the committed real 9-pop example cache and asserts the parity behaviors the
+  # Python steppe-cache tool has (size / f2_cache_id / header-P cross-checks, report-only
+  # when there is no stored id, the dtype gate, and missing-root -> exit 0). Because the
+  # cache tool is host-only this runs everywhere (label "cli", not "gpu"); it SKIPs only
+  # if the example cache is absent. argv = steppe binary + the example cache dir. NO
+  # SYNTHETIC DATA (the fixture is the committed real-AADR example cache).
+  add_executable(test_cli_cache cli/test_cli_cache.cpp)
+  target_link_libraries(test_cli_cache PRIVATE steppe::warnings)
+  add_dependencies(test_cli_cache steppe_app)
+  steppe_add_test(NAME cli_cache
+           COMMAND test_cli_cache
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../docs/examples/f2_9pop" LABELS "cli")
+
   # --- `steppe extract-f2 -> qpadm` end-to-end gate -------------------------
   # Plain C++ host TU (no CUDA): runs the built `steppe extract-f2` on the raw v66
   # AADR triple for the golden pop sets, then `steppe qpadm --f2-dir <extracted>`, and

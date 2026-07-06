@@ -25,6 +25,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "app/cmd_cache.hpp"
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
@@ -259,6 +260,13 @@ int run_cli(int argc, char** argv) {
     CliArgs f3sweep_args;
     CliArgs qpfstats_args;
     CliArgs dates_args;
+
+    // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
+    // to these plain locals, also owned at run_cli scope so they outlive the parse.
+    std::string cache_ls_root;
+    std::string cache_show_dir;
+    std::string cache_verify_dir;
+    bool cache_check_sources = false;
 
     int code = cfg::kExitOk;
 
@@ -520,6 +528,31 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_extract_f2_command, code);
+
+    // The host-only cache inspector — no GPU, no build_config; the native mirror
+    // of the steppe-cache Python tool. Nested ls/show/verify dispatch straight to
+    // run_cache_* (not register_cmd — there is no RunConfig here) — reference §10.
+    CLI::App* cache = app.add_subcommand("cache",
+        "Inspect f2 caches (host-only: ls | show | verify)");
+    cache->require_subcommand(1);
+    {
+        CLI::App* c_ls = cache->add_subcommand(
+            "ls", "Tabulate STPF2BK1 caches under a root (header-only)");
+        c_ls->add_option("root", cache_ls_root, "Root directory to scan (default: current dir)");
+        c_ls->callback([&]() { code = run_cache_ls(cache_ls_root); });
+
+        CLI::App* c_show = cache->add_subcommand(
+            "show", "Header facts + integrity mark + raw meta.json for one cache");
+        c_show->add_option("dir", cache_show_dir, "The f2 cache directory")->required();
+        c_show->callback([&]() { code = run_cache_show(cache_show_dir); });
+
+        CLI::App* c_verify = cache->add_subcommand(
+            "verify", "Re-hash f2.bin/pops.txt against the stored content-address");
+        c_verify->add_option("dir", cache_verify_dir, "The f2 cache directory")->required();
+        c_verify->add_flag("--check-sources", cache_check_sources,
+                           "(reserved; source-file hashing lives in the steppe-cache Python tool)");
+        c_verify->callback([&]() { code = run_cache_verify(cache_verify_dir, cache_check_sources); });
+    }
 
     CLI11_PARSE(app, argc, argv);
 
