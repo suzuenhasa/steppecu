@@ -1,4 +1,4 @@
-"""``steppe-cache`` — list, inspect, and verify f2 caches (STPF2BK1 dirs). GPU-free.
+"""``steppe-cache`` — list, inspect, verify f2 caches and manage AADR datasets. GPU-free.
 
 A cache is a directory holding ``f2.bin`` (a 64-byte header + the f2 / vpair slabs +
 an int32 block-sizes trailer), ``pops.txt``, and an optional ``meta.json``. This tool
@@ -17,6 +17,8 @@ Design notes (from the scope doc + its critic pass):
     stored ``f2_cache_id`` (the ``.rds``-import path writes none), verify recomputes and
     reports it as informational, not a failure. The ``meta.json`` record itself is not
     self-hashable and is not attested.
+  * The dataset half (``datasets`` / ``get``) WRAPS ``docs/download-aadr.sh`` — it does
+    not re-implement the Harvard Dataverse resolve/MD5 logic.
 
 GPU-free by construction: stdlib only (no numpy, no compiled ``_core``, no CUDA) — the
 same reason ``steppe-rds`` runs without a GPU.
@@ -38,6 +40,14 @@ _F2_HEADER_SIZE = 64
 _HEADER_FMT = "<8sIIiiQQQ16s"
 _DASH = "-"
 
+# The AADR panels docs/download-aadr.sh understands (with approximate genotype sizes).
+_AADR_PANELS = ("1240K", "HO", "2M")
+_AADR_APPROX = {"1240K": "~7G", "HO": "~4G", "2M": "~12G"}
+
+
+# ---------------------------------------------------------------------------------------
+# Parse primitives (header-only; never touch the f2/vpair payload)
+# ---------------------------------------------------------------------------------------
 
 def _expected_f2_bytes(P: int, n_block: int) -> int:
     """The f2.bin size the writer produces: 64-byte header + f2 slab + vpair slab +
@@ -132,57 +142,24 @@ def _default_root() -> str:
     return os.environ.get("STEPPE_F2_DIR") or os.getcwd()
 
 
-# ---------------------------------------------------------------------------------------
-# Subcommands
-# ---------------------------------------------------------------------------------------
-
-def cmd_ls(root: str, long_: bool, sort_: str) -> int:
-    rows = []
-    for d in _find_caches(root):
-        try:
-            info = _read_header_only(d)
-        except (OSError, ValueError) as exc:
-            print(f"steppe-cache: skipping {d!r}: {exc}", file=sys.stderr)
-            continue
-        meta = info["meta"]
-        rows.append({
-            "path": os.path.relpath(d, root),
-            "P": info["P"],
-            "n_block": info["n_block"],
-            "snp_kept": meta.get("n_snp_kept", _DASH),
-            "prec": meta.get("precision_tag", _DASH),
-            "blgsize": meta.get("blgsize_cm", _DASH),
-            "bytes": _dir_bytes(d),
-            "cache_id": _short_id(meta.get("f2_cache_id")),
-            "source": meta.get("pop_selection", _DASH),
-        })
-    if not rows:
-        print(f"steppe-cache: no STPF2BK1 caches found under {root!r}", file=sys.stderr)
-        return 0
-
-    key = {
-        "size": lambda r: r["bytes"],
-        "pops": lambda r: r["P"],
-        "blocks": lambda r: r["n_block"],
-        "mtime": lambda r: os.path.getmtime(os.path.join(root, r["path"])),
-    }.get(sort_)
-    if key is not None:
-        rows.sort(key=key, reverse=(sort_ in ("size", "mtime")))
-    else:
-        rows.sort(key=lambda r: r["path"])
-
-    header = f"{'PATH':<28}{'P':>4}{'N_BLOCK':>9}{'SNP_KEPT':>11}{'PREC':>6}{'BLGSIZE':>9}{'SIZE':>9}  CACHE_ID"
-    print(header)
-    for r in rows:
-        print(f"{r['path']:<28}{r['P']:>4}{r['n_block']:>9}{str(r['snp_kept']):>11}"
-              f"{str(r['prec']):>6}{str(r['blgsize']):>9}{_human_size(r['bytes']):>9}  {r['cache_id']}")
-        if long_:
-            print(f"    source: {r['source']}")
-    return 0
+def _summary(info: dict) -> dict:
+    """The lightweight per-cache record for ``ls`` / :func:`list_caches` (no payload)."""
+    meta = info["meta"]
+    return {
+        "path": os.path.abspath(info["path"]),
+        "P": info["P"],
+        "n_block": info["n_block"],
+        "n_snp_kept": meta.get("n_snp_kept"),
+        "precision_tag": meta.get("precision_tag"),
+        "blgsize_cm": meta.get("blgsize_cm"),
+        "cache_id": meta.get("f2_cache_id"),
+        "pop_selection": meta.get("pop_selection"),
+        "bytes": _dir_bytes(info["path"]),
+    }
 
 
 def _record(info: dict) -> dict:
-    """The machine-readable record for ``show --json``: header-derived facts + raw meta."""
+    """The machine-readable record for ``show --json`` / :func:`cache_info`."""
     return {
         "path": info["path"],
         "P": info["P"],
@@ -193,6 +170,201 @@ def _record(info: dict) -> dict:
         "size_ok": info["f2_bin_size"] == info["expected_f2_bin_size"],
         "meta": info["meta"],
     }
+
+
+# ---------------------------------------------------------------------------------------
+# Integrity check (shared by the CLI verify and the verify_cache facade)
+# ---------------------------------------------------------------------------------------
+
+def _verify_checks(f2_dir: str, check_sources: bool) -> list:
+    """Build the integrity check list: (label, status: ok|fail|info, detail)."""
+    info = _read_header_only(f2_dir)
+    meta = info["meta"]
+    checks = []
+
+    if info["f2_bin_size"] == info["expected_f2_bin_size"]:
+        checks.append(("f2.bin size", "ok", f"{info['f2_bin_size']} bytes"))
+    else:
+        checks.append(("f2.bin size", "fail",
+                       f"{info['f2_bin_size']} != expected {info['expected_f2_bin_size']}"))
+
+    for field in ("P", "n_block"):
+        if field in meta:
+            if meta[field] == info[field]:
+                checks.append((f"header {field}", "ok", f"{info[field]}"))
+            else:
+                checks.append((f"header {field}", "fail",
+                               f"header {info[field]} != meta {meta[field]}"))
+
+    computed_f2 = _sha256_file(os.path.join(f2_dir, "f2.bin"))
+    stored_f2 = meta.get("f2_cache_id")
+    if stored_f2:
+        checks.append(("f2_cache_id", "ok" if computed_f2 == stored_f2 else "fail",
+                       computed_f2 if computed_f2 == stored_f2 else f"{computed_f2} != stored {stored_f2}"))
+    else:
+        checks.append(("f2_cache_id", "info", f"no stored id; computed {computed_f2}"))
+
+    pops_path = os.path.join(f2_dir, "pops.txt")
+    if os.path.exists(pops_path):
+        computed_pops = _sha256_file(pops_path)
+        stored_pops = meta.get("pops_sha256")
+        if stored_pops:
+            checks.append(("pops_sha256", "ok" if computed_pops == stored_pops else "fail",
+                           computed_pops if computed_pops == stored_pops else f"{computed_pops} != stored {stored_pops}"))
+        else:
+            checks.append(("pops_sha256", "info", f"no stored id; computed {computed_pops}"))
+
+    if check_sources:
+        src = meta.get("source", {})
+        if src.get("source_hash_computed"):
+            base = os.path.dirname(os.path.abspath(f2_dir))
+            for kind in ("geno", "snp", "ind"):
+                name = src.get(kind)
+                stored = src.get(f"{kind}_sha256")
+                if not name:
+                    continue
+                path = name if os.path.isabs(name) else os.path.join(base, name)
+                if not os.path.exists(path):
+                    checks.append((f"source {kind}", "info", f"{name} not present"))
+                elif stored:
+                    got = _sha256_file(path)
+                    checks.append((f"source {kind}", "ok" if got == stored else "fail",
+                                   got if got == stored else f"{got} != stored {stored}"))
+        else:
+            checks.append(("sources", "info", "source_hash_computed is false"))
+
+    return checks
+
+
+# ---------------------------------------------------------------------------------------
+# Opt-in scan index (off by default; scan-on-demand stays the source of truth)
+# ---------------------------------------------------------------------------------------
+
+def _index_path() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "steppe", "cache_index.json")
+
+
+def _load_index() -> dict:
+    try:
+        with open(_index_path()) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_index(index: dict) -> None:
+    path = _index_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(index, fh)
+    except OSError:
+        pass  # the index is a best-effort memo; a write failure never breaks ls
+
+
+# ---------------------------------------------------------------------------------------
+# Public facade (GPU-free; mirrors export_f2_rds / import_f2_rds in __init__.py)
+# ---------------------------------------------------------------------------------------
+
+def list_caches(root: Optional[str] = None, use_index: bool = False) -> list:
+    """Return a lightweight record per STPF2BK1 cache under ``root`` (default:
+    $STEPPE_F2_DIR or cwd). With ``use_index``, memoize the header scan in
+    ``~/.cache/steppe/cache_index.json``, invalidated by f2.bin mtime + size."""
+    root = root or _default_root()
+    index = _load_index() if use_index else None
+    out = []
+    for d in _find_caches(root):
+        try:
+            if index is not None:
+                key = os.path.abspath(d)
+                st = os.stat(os.path.join(d, "f2.bin"))
+                ent = index.get(key)
+                if ent and ent.get("mtime") == st.st_mtime and ent.get("size") == st.st_size:
+                    out.append(ent["summary"])
+                    continue
+                summary = _summary(_read_header_only(d))
+                index[key] = {"mtime": st.st_mtime, "size": st.st_size, "summary": summary}
+                out.append(summary)
+            else:
+                out.append(_summary(_read_header_only(d)))
+        except (OSError, ValueError):
+            continue
+    if index is not None:
+        _save_index(index)
+    return out
+
+
+def cache_info(f2_dir: str) -> dict:
+    """The full parsed record for one cache (header facts + raw meta.json)."""
+    return _record(_read_header_only(f2_dir))
+
+
+def verify_cache(f2_dir: str, check_sources: bool = False) -> bool:
+    """True iff every present integrity check passes (a missing stored id is not a
+    failure). Attests the f2.bin payload + pops.txt labels, not the meta.json record."""
+    return not any(c[1] == "fail" for c in _verify_checks(f2_dir, check_sources))
+
+
+# ---------------------------------------------------------------------------------------
+# AADR dataset half (wrap docs/download-aadr.sh; do not re-implement)
+# ---------------------------------------------------------------------------------------
+
+def _panel_geno(panel: str) -> str:
+    return f"v66.p1_{panel}.aadr.geno"
+
+
+def _panel_present(root: str, panel: str) -> Optional[str]:
+    name = _panel_geno(panel)
+    for d in (root, os.path.join(root, f"aadr_{panel}")):
+        if os.path.exists(os.path.join(d, name)):
+            return d
+    return None
+
+
+def _find_download_script() -> Optional[str]:
+    """Locate docs/download-aadr.sh: $STEPPE_AADR_SCRIPT, else repo-relative, else cwd/docs."""
+    env = os.environ.get("STEPPE_AADR_SCRIPT")
+    if env and os.path.exists(env):
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    for c in (os.path.join(here, "..", "..", "docs", "download-aadr.sh"),
+              os.path.join(os.getcwd(), "docs", "download-aadr.sh")):
+        if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
+
+# ---------------------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------------------
+
+def cmd_ls(root: str, long_: bool, sort_: str, use_index: bool) -> int:
+    caches = list_caches(root, use_index=use_index)
+    if not caches:
+        print(f"steppe-cache: no STPF2BK1 caches found under {root!r}", file=sys.stderr)
+        return 0
+
+    key = {
+        "size": lambda c: c["bytes"],
+        "pops": lambda c: c["P"],
+        "blocks": lambda c: c["n_block"],
+        "mtime": lambda c: os.path.getmtime(os.path.join(c["path"], "f2.bin")),
+    }.get(sort_)
+    if key is not None:
+        caches.sort(key=key, reverse=(sort_ in ("size", "mtime")))
+    else:
+        caches.sort(key=lambda c: c["path"])
+
+    print(f"{'PATH':<28}{'P':>4}{'N_BLOCK':>9}{'SNP_KEPT':>11}{'PREC':>6}{'BLGSIZE':>9}{'SIZE':>9}  CACHE_ID")
+    for c in caches:
+        rel = os.path.relpath(c["path"], root)
+        print(f"{rel:<28}{c['P']:>4}{c['n_block']:>9}{str(c['n_snp_kept'] or _DASH):>11}"
+              f"{str(c['precision_tag'] or _DASH):>6}{str(c['blgsize_cm'] or _DASH):>9}"
+              f"{_human_size(c['bytes']):>9}  {_short_id(c['cache_id'])}")
+        if long_:
+            print(f"    source: {c['pop_selection'] or _DASH}")
+    return 0
 
 
 def cmd_show(f2_dir: str, as_json: bool) -> int:
@@ -231,71 +403,12 @@ def cmd_pops(f2_dir: str) -> int:
 
 
 def cmd_verify(f2_dir: str, check_sources: bool) -> int:
-    info = _read_header_only(f2_dir)
-    meta = info["meta"]
-    checks = []  # (label, status: ok|fail|info, detail)
-
-    # 1. size vs the writer's arithmetic
-    if info["f2_bin_size"] == info["expected_f2_bin_size"]:
-        checks.append(("f2.bin size", "ok", f"{info['f2_bin_size']} bytes"))
-    else:
-        checks.append(("f2.bin size", "fail",
-                       f"{info['f2_bin_size']} != expected {info['expected_f2_bin_size']}"))
-
-    # 2. header vs meta P/n_block (only if meta carries them)
-    for field in ("P", "n_block"):
-        if field in meta:
-            if meta[field] == info[field]:
-                checks.append((f"header {field}", "ok", f"{info[field]}"))
-            else:
-                checks.append((f"header {field}", "fail",
-                               f"header {info[field]} != meta {meta[field]}"))
-
-    # 3. content-address re-hash (G1: report-only when there is no stored reference)
-    computed_f2 = _sha256_file(os.path.join(f2_dir, "f2.bin"))
-    stored_f2 = meta.get("f2_cache_id")
-    if stored_f2:
-        checks.append(("f2_cache_id", "ok" if computed_f2 == stored_f2 else "fail",
-                       computed_f2 if computed_f2 == stored_f2 else f"{computed_f2} != stored {stored_f2}"))
-    else:
-        checks.append(("f2_cache_id", "info", f"no stored id; computed {computed_f2}"))
-
-    pops_path = os.path.join(f2_dir, "pops.txt")
-    if os.path.exists(pops_path):
-        computed_pops = _sha256_file(pops_path)
-        stored_pops = meta.get("pops_sha256")
-        if stored_pops:
-            checks.append(("pops_sha256", "ok" if computed_pops == stored_pops else "fail",
-                           computed_pops if computed_pops == stored_pops else f"{computed_pops} != stored {stored_pops}"))
-        else:
-            checks.append(("pops_sha256", "info", f"no stored id; computed {computed_pops}"))
-
-    # 4. optional source-file hashes (off by default; absent files are info, not fail)
-    if check_sources:
-        src = meta.get("source", {})
-        if src.get("source_hash_computed"):
-            base = os.path.dirname(os.path.abspath(f2_dir))
-            for key, kind in (("geno", "geno"), ("snp", "snp"), ("ind", "ind")):
-                name = src.get(kind)
-                stored = src.get(f"{kind}_sha256")
-                if not name:
-                    continue
-                path = name if os.path.isabs(name) else os.path.join(base, name)
-                if not os.path.exists(path):
-                    checks.append((f"source {kind}", "info", f"{name} not present"))
-                elif stored:
-                    got = _sha256_file(path)
-                    checks.append((f"source {kind}", "ok" if got == stored else "fail",
-                                   got if got == stored else f"{got} != stored {stored}"))
-        else:
-            checks.append(("sources", "info", "source_hash_computed is false"))
-
-    print(f"verify {info['path']}:")
+    checks = _verify_checks(f2_dir, check_sources)
+    print(f"verify {f2_dir}:")
     for label, status, detail in checks:
         tag = {"ok": "OK  ", "fail": "FAIL", "info": "--  "}[status]
         print(f"  [{tag}] {label:<14} {detail}")
     print("  (verify attests the f2.bin payload + pops.txt labels; the meta.json record itself is not hashable.)")
-
     failed = [c for c in checks if c[1] == "fail"]
     if failed:
         print(f"steppe-cache: verify FAILED ({len(failed)} check(s))", file=sys.stderr)
@@ -303,21 +416,48 @@ def cmd_verify(f2_dir: str, check_sources: bool) -> int:
     return 0
 
 
+def cmd_datasets(root: str) -> int:
+    print(f"{'PANEL':<8}{'SIZE~':>8}  PRESENT  PATH")
+    for panel in _AADR_PANELS:
+        loc = _panel_present(root, panel)
+        print(f"{panel:<8}{_AADR_APPROX[panel]:>8}  {'yes' if loc else 'no':<7}  {loc or _DASH}")
+    return 0
+
+
+def cmd_get(panel: str, outdir: Optional[str]) -> int:
+    if panel not in _AADR_PANELS:
+        print(f"steppe-cache: unknown panel {panel!r} (choose {'|'.join(_AADR_PANELS)})",
+              file=sys.stderr)
+        return 2
+    script = _find_download_script()
+    if script is None:
+        print("steppe-cache: download-aadr.sh not found. Set $STEPPE_AADR_SCRIPT or run it "
+              "directly from the repo (docs/download-aadr.sh).", file=sys.stderr)
+        return 1
+    import subprocess
+    cmd = ["bash", script, panel] + ([outdir] if outdir else [])
+    print(f"steppe-cache: running {' '.join(cmd)}")
+    return subprocess.run(cmd).returncode
+
+
 def main(argv=None):
-    """``steppe-cache`` — the GPU-free f2-cache manager CLI (the ``[project.scripts]`` entry).
+    """``steppe-cache`` — the GPU-free f2-cache + AADR-dataset manager CLI.
 
         steppe-cache ls [ROOT]         scan for STPF2BK1 caches (default: $STEPPE_F2_DIR or cwd)
         steppe-cache show <DIR>        pretty-print one cache (--json for the parsed record)
         steppe-cache pops <DIR>        the population labels, one per line
         steppe-cache verify <DIR>      re-hash f2.bin/pops.txt vs the stored content-address
+        steppe-cache datasets          which AADR panels (1240K|HO|2M) are present locally
+        steppe-cache get <PANEL>       fetch a panel (wraps docs/download-aadr.sh; needs bash)
 
     Pure on-disk inspection — no GPU. Returns a process exit code (0 ok, 1 on error / a
     failed integrity check)."""
     parser = argparse.ArgumentParser(
         prog="steppe-cache",
-        description="List, inspect, and verify steppe f2 caches (STPF2BK1 dirs). No GPU.",
+        description="List, inspect, and verify steppe f2 caches, and manage AADR datasets. No GPU.",
     )
-    sub = parser.add_subparsers(dest="mode", required=True, metavar="{ls,show,pops,verify}")
+    sub = parser.add_subparsers(dest="mode", required=True,
+                                metavar="{ls,show,pops,verify,datasets,get}")
 
     p_ls = sub.add_parser("ls", help="scan a root for STPF2BK1 caches and tabulate them")
     p_ls.add_argument("root", nargs="?", default=None,
@@ -325,6 +465,8 @@ def main(argv=None):
     p_ls.add_argument("--long", action="store_true", help="add the pop-selection source line")
     p_ls.add_argument("--sort", choices=("path", "size", "pops", "blocks", "mtime"),
                       default="path", help="row ordering (default: path)")
+    p_ls.add_argument("--index", action="store_true",
+                      help="memoize the scan in ~/.cache/steppe (invalidated by mtime+size)")
 
     p_show = sub.add_parser("show", help="pretty-print one cache's header + meta.json")
     p_show.add_argument("dir", help="the f2 cache directory (holds f2.bin + pops.txt)")
@@ -338,16 +480,28 @@ def main(argv=None):
     p_verify.add_argument("--check-sources", action="store_true",
                           help="also re-hash geno/snp/ind if source_hash_computed (may be large)")
 
+    p_ds = sub.add_parser("datasets", help="which AADR panels are known + present locally")
+    p_ds.add_argument("--dir", default=None, help="root to look under (default: cwd)")
+
+    p_get = sub.add_parser("get", help="fetch an AADR panel (wraps docs/download-aadr.sh)")
+    p_get.add_argument("panel", choices=_AADR_PANELS, help="the AADR panel to fetch")
+    p_get.add_argument("outdir", nargs="?", default=None,
+                       help="output directory (default: ./aadr_<PANEL>)")
+
     args = parser.parse_args(argv)
     try:
         if args.mode == "ls":
-            return cmd_ls(args.root or _default_root(), args.long, args.sort)
+            return cmd_ls(args.root or _default_root(), args.long, args.sort, args.index)
         if args.mode == "show":
             return cmd_show(args.dir, args.json)
         if args.mode == "pops":
             return cmd_pops(args.dir)
         if args.mode == "verify":
             return cmd_verify(args.dir, args.check_sources)
+        if args.mode == "datasets":
+            return cmd_datasets(args.dir or os.getcwd())
+        if args.mode == "get":
+            return cmd_get(args.panel, args.outdir)
     except (OSError, ValueError) as exc:
         print(f"steppe-cache: error: {exc}", file=sys.stderr)
         return 1

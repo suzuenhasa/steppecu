@@ -6,11 +6,13 @@ verify's re-hash must equal the content-address the extract writer stamped."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
+import steppe
 from steppe import _cache
 
 REPO = Path(__file__).resolve().parents[2]
@@ -83,3 +85,68 @@ def test_pops_lists_labels(example, capsys):
     assert _cache.main(["pops", example]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
     assert len(lines) == 9
+
+
+# --- Phase 3: the public facade (steppe.list_caches / cache_info / verify_cache) ---
+
+def _make_cache(dst: Path, meta: dict) -> None:
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy(EXAMPLE / "f2.bin", dst / "f2.bin")
+    shutil.copy(EXAMPLE / "pops.txt", dst / "pops.txt")
+    (dst / "meta.json").write_text(json.dumps(meta))
+
+
+def test_public_facade(example):
+    rec = steppe.cache_info(example)
+    assert rec["P"] == 9 and rec["meta"]["precision_tag"] == "emu"
+    assert steppe.verify_cache(example) is True
+
+
+def test_list_caches_facade(example, tmp_path):
+    _make_cache(tmp_path / "a", {"format": "STPF2BK1", "P": 9, "n_block": 710, "f2_cache_id": F2_CACHE_ID})
+    _make_cache(tmp_path / "b", {"format": "STPF2BK1", "P": 9, "n_block": 710})
+    caches = {os.path.basename(c["path"]): c for c in steppe.list_caches(str(tmp_path))}
+    assert set(caches) == {"a", "b"}
+    assert caches["a"]["cache_id"] == F2_CACHE_ID
+    assert caches["b"]["cache_id"] is None  # minimal meta -> no stored id
+    assert all(c["P"] == 9 and c["n_block"] == 710 for c in caches.values())
+
+
+def test_verify_cache_facade_fails_truncated(example, tmp_path):
+    dst = tmp_path / "trunc"
+    shutil.copytree(example, dst)
+    (dst / "f2.bin").write_bytes((dst / "f2.bin").read_bytes()[:-1])
+    assert steppe.verify_cache(str(dst)) is False
+
+
+def test_index_invalidates_on_change(example, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    croot = tmp_path / "caches"
+    _make_cache(croot / "c1", {"format": "STPF2BK1", "P": 9, "n_block": 710, "n_snp_kept": 111})
+    first = _cache.list_caches(str(croot), use_index=True)
+    assert len(first) == 1 and first[0]["n_snp_kept"] == 111
+    idx = json.loads((tmp_path / "xdg" / "steppe" / "cache_index.json").read_text())
+    assert len(idx) == 1
+    _make_cache(croot / "c1", {"format": "STPF2BK1", "P": 9, "n_block": 710, "n_snp_kept": 999})
+    f2 = croot / "c1" / "f2.bin"
+    f2.write_bytes(f2.read_bytes() + b"\x00")  # size change -> index entry invalidates
+    assert _cache.list_caches(str(croot), use_index=True)[0]["n_snp_kept"] == 999
+
+
+# --- Phase 2: the dataset half (datasets presence-detect + get wiring) ---
+
+def test_datasets_detects_present_panel(tmp_path, capsys):
+    (tmp_path / "aadr_1240K").mkdir()
+    (tmp_path / "aadr_1240K" / "v66.p1_1240K.aadr.geno").write_text("stub")
+    assert _cache.main(["datasets", "--dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "1240K" in out and "yes" in out  # present
+    assert "HO" in out and "no" in out       # absent
+
+
+def test_get_wires_to_download_script(tmp_path, monkeypatch):
+    stub = tmp_path / "stub.sh"
+    stub.write_text('#!/usr/bin/env bash\necho "got: $@"\nexit 0\n')
+    monkeypatch.setenv("STEPPE_AADR_SCRIPT", str(stub))
+    # no network: get shells out to the (stubbed) script and passes panel + outdir through
+    assert _cache.main(["get", "HO", str(tmp_path / "out")]) == 0

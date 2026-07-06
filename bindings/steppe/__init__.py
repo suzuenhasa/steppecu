@@ -137,6 +137,9 @@ __all__ = [
     "qpadm_search",
     "export_f2_rds",
     "import_f2_rds",
+    "list_caches",
+    "cache_info",
+    "verify_cache",
 ]
 
 
@@ -1232,3 +1235,32 @@ def import_f2_rds(rds_dir, out_dir, *, type="f2"):
     from . import _rds  # lazy: pulls pyreadr only on the import path
 
     return _rds.import_f2_rds(rds_dir, out_dir, type=type)
+
+
+def list_caches(root=None, *, use_index=False):
+    """List the STPF2BK1 f2 caches under ``root`` (default: ``$STEPPE_F2_DIR`` or cwd).
+
+    Returns one lightweight dict per cache (``path``, ``P``, ``n_block``, ``precision_tag``,
+    ``cache_id``, ``bytes``, …), read header-only so a tree of multi-GB caches is cheap to
+    scan. GPU-free — the whole implementation is stdlib in :mod:`steppe._cache`. ``use_index``
+    memoizes the scan in ``~/.cache/steppe`` (invalidated by f2.bin mtime + size)."""
+    from . import _cache  # lazy: keeps `import steppe` free of the manager machinery
+
+    return _cache.list_caches(root, use_index=use_index)
+
+
+def cache_info(f2_dir):
+    """The full parsed record for one f2 cache: header-derived ``P``/``n_block``, the on-disk
+    vs expected f2.bin size, and the raw ``meta.json`` provenance. GPU-free."""
+    from . import _cache
+
+    return _cache.cache_info(f2_dir)
+
+
+def verify_cache(f2_dir, *, check_sources=False):
+    """True iff the cache's ``f2.bin`` payload + ``pops.txt`` labels re-hash to the content-
+    address the extract writer stamped (``f2_cache_id`` / ``pops_sha256``); a cache carrying
+    no stored id is not a failure. Does not attest the ``meta.json`` record. GPU-free."""
+    from . import _cache
+
+    return _cache.verify_cache(f2_dir, check_sources=check_sources)
