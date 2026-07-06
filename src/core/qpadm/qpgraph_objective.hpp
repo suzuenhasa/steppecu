@@ -14,15 +14,11 @@
 #include <limits>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/internal/small_linalg.hpp"
 #include "core/qpadm/qpgraph_model.hpp"
 
 namespace steppe::core::qpadm {
-
-// Index-cast helper (long → std::size_t): collapses the flat-index casts below.
-[[nodiscard]] constexpr std::size_t idx(long i) noexcept {
-    return static_cast<std::size_t>(i);
-}
 
 // build_ppwts_2d — reference §3
 inline void build_ppwts_2d(const QpGraphModel& m, const std::vector<double>& pwts_c,

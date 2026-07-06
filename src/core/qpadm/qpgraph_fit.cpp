@@ -12,6 +12,7 @@
 #include <span>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/f3_triples.hpp"
 #include "core/qpadm/jackknife.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
@@ -23,6 +24,8 @@
 #include "steppe/error.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -63,15 +66,15 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
     const Precision prec = core::qpadm::default_fit_precision();
     res.precision_tag = core::qpadm::honored_tag(prec, be);
 
-    const int base_f2 = m.leaf_to_f2[static_cast<std::size_t>(m.base_leaf)];
+    const int base_f2 = m.leaf_to_f2[idx(m.base_leaf)];
     std::vector<int> flat;
-    flat.reserve(static_cast<std::size_t>(m.npair) * 3);
+    flat.reserve(idx(m.npair) * 3);
     for (int k = 0; k < m.npair; ++k) {
-        const int la = m.centered_col_to_leaf(m.cmb1[static_cast<std::size_t>(k)]);
-        const int lb = m.centered_col_to_leaf(m.cmb2[static_cast<std::size_t>(k)]);
+        const int la = m.centered_col_to_leaf(m.cmb1[idx(k)]);
+        const int lb = m.centered_col_to_leaf(m.cmb2[idx(k)]);
         flat.push_back(base_f2);
-        flat.push_back(m.leaf_to_f2[static_cast<std::size_t>(la)]);
-        flat.push_back(m.leaf_to_f2[static_cast<std::size_t>(lb)]);
+        flat.push_back(m.leaf_to_f2[idx(la)]);
+        flat.push_back(m.leaf_to_f2[idx(lb)]);
     }
     F4Blocks X = core::qpadm::assemble_f3_triples(be, f2, std::span<const int>(flat), prec);
     const int npair = X.nl * X.nr;
@@ -81,8 +84,8 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
         core::qpadm::jackknife_cov(be, X, std::span<const int>(X.block_sizes), opts.diag_f3, prec);
     if (cov.status != Status::Ok) { res.status = cov.status; return res; }
 
-    std::span<const double> f_obs(X.x_total.data(), static_cast<std::size_t>(npair));
-    std::span<const double> qinv(cov.Qinv.data(), static_cast<std::size_t>(npair) * npair);
+    std::span<const double> f_obs(X.x_total.data(), idx(npair));
+    std::span<const double> qinv(cov.Qinv.data(), idx(npair) * npair);
 
     const QpGraphTopoArena arena = make_arena(m, opts);
     const QpGraphFleet fl =
@@ -103,17 +106,17 @@ QpGraphResult run_qpgraph_impl(ComputeBackend& be, const F2Src& f2,
     double worst = 0.0;
     int worst_k = -1;
     for (int k = 0; k < npair; ++k) {
-        const double qkk = cov.Q[static_cast<std::size_t>(k) + static_cast<std::size_t>(npair) * static_cast<std::size_t>(k)];
+        const double qkk = cov.Q[idx(k) + idx(npair) * idx(k)];
         const double se = (qkk > 0.0) ? std::sqrt(qkk) : std::nan("");
-        const double z = (X.x_total[static_cast<std::size_t>(k)] - fl.f3_fit[static_cast<std::size_t>(k)]) / se;
+        const double z = (X.x_total[idx(k)] - fl.f3_fit[idx(k)]) / se;
         if (std::isfinite(z) && std::fabs(z) > std::fabs(worst)) { worst = z; worst_k = k; }
     }
     res.worst_residual_z = worst;
     if (worst_k >= 0) {
-        const int la = m.centered_col_to_leaf(m.cmb1[static_cast<std::size_t>(worst_k)]);
-        const int lb = m.centered_col_to_leaf(m.cmb2[static_cast<std::size_t>(worst_k)]);
-        res.worst_pop2 = m.leaves[static_cast<std::size_t>(la)];
-        res.worst_pop3 = m.leaves[static_cast<std::size_t>(lb)];
+        const int la = m.centered_col_to_leaf(m.cmb1[idx(worst_k)]);
+        const int lb = m.centered_col_to_leaf(m.cmb2[idx(worst_k)]);
+        res.worst_pop2 = m.leaves[idx(la)];
+        res.worst_pop3 = m.leaves[idx(lb)];
     }
     res.status = Status::Ok;
     return res;

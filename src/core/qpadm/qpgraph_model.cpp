@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
+
 namespace steppe::core::qpadm {
 
 namespace {
@@ -49,35 +51,35 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
     const int E = static_cast<int>(edges.size());
     std::vector<int> e_parent(E), e_child(E);
     for (int e = 0; e < E; ++e) {
-        if (edges[static_cast<std::size_t>(e)].from.empty() ||
-            edges[static_cast<std::size_t>(e)].to.empty()) {
+        if (edges[idx(e)].from.empty() ||
+            edges[idx(e)].to.empty()) {
             m.error = "qpgraph: an edge has an empty endpoint";
             return m;
         }
-        e_parent[static_cast<std::size_t>(e)] = reg.get(edges[static_cast<std::size_t>(e)].from);
-        e_child[static_cast<std::size_t>(e)] = reg.get(edges[static_cast<std::size_t>(e)].to);
+        e_parent[idx(e)] = reg.get(edges[idx(e)].from);
+        e_child[idx(e)] = reg.get(edges[idx(e)].to);
     }
     const int V = static_cast<int>(reg.names.size());
     m.nedge_total = E;
 
-    std::vector<int> indeg(static_cast<std::size_t>(V), 0), outdeg(static_cast<std::size_t>(V), 0);
-    std::vector<std::vector<int>> out_edges(static_cast<std::size_t>(V));
-    std::vector<std::vector<int>> in_edges(static_cast<std::size_t>(V));
+    std::vector<int> indeg(idx(V), 0), outdeg(idx(V), 0);
+    std::vector<std::vector<int>> out_edges(idx(V));
+    std::vector<std::vector<int>> in_edges(idx(V));
     for (int e = 0; e < E; ++e) {
-        const int p = e_parent[static_cast<std::size_t>(e)], c = e_child[static_cast<std::size_t>(e)];
-        ++outdeg[static_cast<std::size_t>(p)];
-        ++indeg[static_cast<std::size_t>(c)];
-        out_edges[static_cast<std::size_t>(p)].push_back(e);
-        in_edges[static_cast<std::size_t>(c)].push_back(e);
+        const int p = e_parent[idx(e)], c = e_child[idx(e)];
+        ++outdeg[idx(p)];
+        ++indeg[idx(c)];
+        out_edges[idx(p)].push_back(e);
+        in_edges[idx(c)].push_back(e);
     }
     int root = -1;
     for (int v = 0; v < V; ++v) {
-        if (indeg[static_cast<std::size_t>(v)] == 0) {
+        if (indeg[idx(v)] == 0) {
             if (root != -1) { m.error = "qpgraph: multiple roots (graph is not singly-rooted)"; return m; }
             root = v;
         }
-        if (indeg[static_cast<std::size_t>(v)] > 2) {
-            m.error = "qpgraph: node '" + reg.names[static_cast<std::size_t>(v)] +
+        if (indeg[idx(v)] > 2) {
+            m.error = "qpgraph: node '" + reg.names[idx(v)] +
                       "' has in-degree > 2 (not a valid admixture node)";
             return m;
         }
@@ -86,63 +88,63 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
 
     std::vector<int> leaf_nodes;
     for (int v = 0; v < V; ++v)
-        if (outdeg[static_cast<std::size_t>(v)] == 0) leaf_nodes.push_back(v);
+        if (outdeg[idx(v)] == 0) leaf_nodes.push_back(v);
     if (leaf_nodes.empty()) { m.error = "qpgraph: no leaves"; return m; }
     m.npop = static_cast<int>(leaf_nodes.size());
     m.npair = m.npop * (m.npop - 1) / 2;
 
-    std::vector<int> node_leaf(static_cast<std::size_t>(V), -1);
-    for (int li = 0; li < m.npop; ++li) node_leaf[static_cast<std::size_t>(leaf_nodes[static_cast<std::size_t>(li)])] = li;
+    std::vector<int> node_leaf(idx(V), -1);
+    for (int li = 0; li < m.npop; ++li) node_leaf[idx(leaf_nodes[idx(li)])] = li;
 
     std::unordered_map<std::string, int> f2idx;
     for (int i = 0; i < static_cast<int>(leaf_names.size()); ++i)
-        f2idx.emplace(leaf_names[static_cast<std::size_t>(i)], i);
-    m.leaves.resize(static_cast<std::size_t>(m.npop));
-    m.leaf_to_f2.assign(static_cast<std::size_t>(m.npop), -1);
+        f2idx.emplace(leaf_names[idx(i)], i);
+    m.leaves.resize(idx(m.npop));
+    m.leaf_to_f2.assign(idx(m.npop), -1);
     for (int li = 0; li < m.npop; ++li) {
-        const std::string& nm = reg.names[static_cast<std::size_t>(leaf_nodes[static_cast<std::size_t>(li)])];
-        m.leaves[static_cast<std::size_t>(li)] = nm;
+        const std::string& nm = reg.names[idx(leaf_nodes[idx(li)])];
+        m.leaves[idx(li)] = nm;
         auto it = f2idx.find(nm);
         if (it == f2idx.end()) {
             m.error = "qpgraph: leaf '" + nm + "' is not in the f2 population set";
             return m;
         }
-        m.leaf_to_f2[static_cast<std::size_t>(li)] = it->second;
+        m.leaf_to_f2[idx(li)] = it->second;
     }
     m.base_leaf = 0;
     if (!f3basepop.empty()) {
         bool found = false;
         for (int li = 0; li < m.npop; ++li)
-            if (m.leaves[static_cast<std::size_t>(li)] == f3basepop) { m.base_leaf = li; found = true; break; }
+            if (m.leaves[idx(li)] == f3basepop) { m.base_leaf = li; found = true; break; }
         if (!found) { m.error = "qpgraph: f3basepop '" + f3basepop + "' is not a leaf"; return m; }
     }
 
     std::vector<int> admix_nodes;
     for (int v = 0; v < V; ++v)
-        if (indeg[static_cast<std::size_t>(v)] == 2) admix_nodes.push_back(v);
+        if (indeg[idx(v)] == 2) admix_nodes.push_back(v);
     m.nadmix = static_cast<int>(admix_nodes.size());
 
-    std::vector<int> admixedge_of(static_cast<std::size_t>(E), -1);
-    m.admix_from.resize(static_cast<std::size_t>(m.nadmix));
-    m.admix_to.resize(static_cast<std::size_t>(m.nadmix));
+    std::vector<int> admixedge_of(idx(E), -1);
+    m.admix_from.resize(idx(m.nadmix));
+    m.admix_to.resize(idx(m.nadmix));
     for (int j = 0; j < m.nadmix; ++j) {
-        const int an = admix_nodes[static_cast<std::size_t>(j)];
-        const std::vector<int>& ie = in_edges[static_cast<std::size_t>(an)];
+        const int an = admix_nodes[idx(j)];
+        const std::vector<int>& ie = in_edges[idx(an)];
         const int e0 = ie[0], e1 = ie[1];
-        admixedge_of[static_cast<std::size_t>(e0)] = 2 * j + 1;
-        admixedge_of[static_cast<std::size_t>(e1)] = 2 * j + 2;
-        m.admix_from[static_cast<std::size_t>(j)] = reg.names[static_cast<std::size_t>(e_parent[static_cast<std::size_t>(e0)])];
-        m.admix_to[static_cast<std::size_t>(j)] = reg.names[static_cast<std::size_t>(e_child[static_cast<std::size_t>(e0)])];
+        admixedge_of[idx(e0)] = 2 * j + 1;
+        admixedge_of[idx(e1)] = 2 * j + 2;
+        m.admix_from[idx(j)] = reg.names[idx(e_parent[idx(e0)])];
+        m.admix_to[idx(j)] = reg.names[idx(e_child[idx(e0)])];
     }
 
-    std::vector<int> norm_of(static_cast<std::size_t>(E), -1);
+    std::vector<int> norm_of(idx(E), -1);
     m.nedge_norm = 0;
     m.edge_from.clear(); m.edge_to.clear();
     for (int e = 0; e < E; ++e) {
-        if (admixedge_of[static_cast<std::size_t>(e)] == -1) {
-            norm_of[static_cast<std::size_t>(e)] = m.nedge_norm++;
-            m.edge_from.push_back(reg.names[static_cast<std::size_t>(e_parent[static_cast<std::size_t>(e)])]);
-            m.edge_to.push_back(reg.names[static_cast<std::size_t>(e_child[static_cast<std::size_t>(e)])]);
+        if (admixedge_of[idx(e)] == -1) {
+            norm_of[idx(e)] = m.nedge_norm++;
+            m.edge_from.push_back(reg.names[idx(e_parent[idx(e)])]);
+            m.edge_to.push_back(reg.names[idx(e_child[idx(e)])]);
         }
     }
 
@@ -150,18 +152,18 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
     std::vector<Path> paths;
     {
         std::vector<int> stack_edges;
-        std::vector<char> on_stack(static_cast<std::size_t>(V), 0);
+        std::vector<char> on_stack(idx(V), 0);
         bool cycle = false;
         std::function<void(int)> dfs = [&](int node) {
             if (cycle) return;
-            if (outdeg[static_cast<std::size_t>(node)] == 0) {
-                paths.push_back(Path{stack_edges, node_leaf[static_cast<std::size_t>(node)]});
+            if (outdeg[idx(node)] == 0) {
+                paths.push_back(Path{stack_edges, node_leaf[idx(node)]});
                 return;
             }
-            on_stack[static_cast<std::size_t>(node)] = 1;
-            for (int e : out_edges[static_cast<std::size_t>(node)]) {
-                const int child = e_child[static_cast<std::size_t>(e)];
-                if (on_stack[static_cast<std::size_t>(child)]) {
+            on_stack[idx(node)] = 1;
+            for (int e : out_edges[idx(node)]) {
+                const int child = e_child[idx(e)];
+                if (on_stack[idx(child)]) {
                     cycle = true;
                     break;
                 }
@@ -170,7 +172,7 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
                 stack_edges.pop_back();
                 if (cycle) break;
             }
-            on_stack[static_cast<std::size_t>(node)] = 0;
+            on_stack[idx(node)] = 0;
         };
         dfs(root);
         if (cycle) {
@@ -180,44 +182,44 @@ QpGraphModel parse_qpgraph(const std::vector<QpGraphEdge>& edges,
     }
     m.npath = static_cast<int>(paths.size());
 
-    std::vector<int> pathcount(static_cast<std::size_t>(m.npop), 0);
-    for (const Path& p : paths) ++pathcount[static_cast<std::size_t>(p.leaf)];
+    std::vector<int> pathcount(idx(m.npop), 0);
+    for (const Path& p : paths) ++pathcount[idx(p.leaf)];
 
-    m.pwts0.assign(static_cast<std::size_t>(m.nedge_norm) * static_cast<std::size_t>(m.npop), 0.0);
+    m.pwts0.assign(idx(m.nedge_norm) * idx(m.npop), 0.0);
     for (const Path& p : paths) {
         const int leaf = p.leaf;
-        const double inc = 1.0 / static_cast<double>(pathcount[static_cast<std::size_t>(leaf)]);
+        const double inc = 1.0 / static_cast<double>(pathcount[idx(leaf)]);
         for (int e : p.edge_seq) {
-            const int ne = norm_of[static_cast<std::size_t>(e)];
+            const int ne = norm_of[idx(e)];
             if (ne < 0) continue;
-            m.pwts0[static_cast<std::size_t>(ne) + static_cast<std::size_t>(m.nedge_norm) * static_cast<std::size_t>(leaf)] += inc;
+            m.pwts0[idx(ne) + idx(m.nedge_norm) * idx(leaf)] += inc;
         }
     }
 
     m.pae_path.clear(); m.pae_admixedge.clear();
     for (int pi = 0; pi < m.npath; ++pi) {
-        for (int e : paths[static_cast<std::size_t>(pi)].edge_seq) {
-            const int ae = admixedge_of[static_cast<std::size_t>(e)];
+        for (int e : paths[idx(pi)].edge_seq) {
+            const int ae = admixedge_of[idx(e)];
             if (ae > 0) { m.pae_path.push_back(pi); m.pae_admixedge.push_back(ae); }
         }
     }
     std::map<std::pair<int, int>, int> cell_cnt;
     for (int pi = 0; pi < m.npath; ++pi) {
-        const int leaf = paths[static_cast<std::size_t>(pi)].leaf;
-        for (int e : paths[static_cast<std::size_t>(pi)].edge_seq) {
-            const int ne = norm_of[static_cast<std::size_t>(e)];
+        const int leaf = paths[idx(pi)].leaf;
+        for (int e : paths[idx(pi)].edge_seq) {
+            const int ne = norm_of[idx(e)];
             if (ne < 0) continue;
             ++cell_cnt[{ne, leaf}];
         }
     }
     m.pe_edge.clear(); m.pe_leaf.clear(); m.pe_path.clear();
     for (int pi = 0; pi < m.npath; ++pi) {
-        const int leaf = paths[static_cast<std::size_t>(pi)].leaf;
-        for (int e : paths[static_cast<std::size_t>(pi)].edge_seq) {
-            const int ne = norm_of[static_cast<std::size_t>(e)];
+        const int leaf = paths[idx(pi)].leaf;
+        for (int e : paths[idx(pi)].edge_seq) {
+            const int ne = norm_of[idx(e)];
             if (ne < 0) continue;
             const int cnt = cell_cnt[{ne, leaf}];
-            if (cnt < pathcount[static_cast<std::size_t>(leaf)]) {
+            if (cnt < pathcount[idx(leaf)]) {
                 m.pe_edge.push_back(ne);
                 m.pe_leaf.push_back(leaf);
                 m.pe_path.push_back(pi);

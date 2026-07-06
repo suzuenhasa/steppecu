@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/internal/host_device.hpp"
+#include "core/internal/index_cast.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -32,6 +33,8 @@
 #include "steppe/config.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -58,16 +61,16 @@ void weight_jack(const std::vector<double>& jmean, const std::vector<double>& jw
     for (double x : w) yn += static_cast<long double>(x);
     long double tdiff_sum = 0.0L, wdot = 0.0L;
     for (int k = 0; k < g; ++k) {
-        tdiff_sum += static_cast<long double>(mean) - static_cast<long double>(m[static_cast<std::size_t>(k)]);
-        wdot += static_cast<long double>(w[static_cast<std::size_t>(k)]) *
-                static_cast<long double>(m[static_cast<std::size_t>(k)]);
+        tdiff_sum += static_cast<long double>(mean) - static_cast<long double>(m[idx(k)]);
+        wdot += static_cast<long double>(w[idx(k)]) *
+                static_cast<long double>(m[idx(k)]);
     }
     const long double jackest = tdiff_sum + wdot / yn;
     long double yvar = 0.0L;
     for (int k = 0; k < g; ++k) {
-        const long double hh = yn / static_cast<long double>(w[static_cast<std::size_t>(k)]);
+        const long double hh = yn / static_cast<long double>(w[idx(k)]);
         const long double tau = hh * static_cast<long double>(mean) -
-                                (hh - 1.0L) * static_cast<long double>(m[static_cast<std::size_t>(k)]) -
+                                (hh - 1.0L) * static_cast<long double>(m[idx(k)]) -
                                 jackest;
         yvar += (tau * tau) / (hh - 1.0L);
     }
@@ -128,43 +131,43 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
 
     std::vector<double> s1_freq, s2_freq, s_valid, genpos_kept;
     std::vector<int> chrom_kept;
-    s1_freq.reserve(static_cast<std::size_t>(M));
-    s2_freq.reserve(static_cast<std::size_t>(M));
-    s_valid.reserve(static_cast<std::size_t>(M));
-    genpos_kept.reserve(static_cast<std::size_t>(M));
-    chrom_kept.reserve(static_cast<std::size_t>(M));
-    const std::size_t tgt_begin = tile.pop_offsets[static_cast<std::size_t>(p_tgt)];
-    const std::size_t tgt_end = tile.pop_offsets[static_cast<std::size_t>(p_tgt) + 1];
+    s1_freq.reserve(idx(M));
+    s2_freq.reserve(idx(M));
+    s_valid.reserve(idx(M));
+    genpos_kept.reserve(idx(M));
+    chrom_kept.reserve(idx(M));
+    const std::size_t tgt_begin = tile.pop_offsets[idx(p_tgt)];
+    const std::size_t tgt_end = tile.pop_offsets[idx(p_tgt) + 1];
     const int n_target = static_cast<int>(tgt_end - tgt_begin);
     if (n_target <= 0) { res.status = Status::InvalidConfig; return res; }
 
     std::vector<long> kept_src;
-    kept_src.reserve(static_cast<std::size_t>(M));
+    kept_src.reserve(idx(M));
     for (long s = 0; s < M; ++s) {
-        const int chr = snptab.chrom[static_cast<std::size_t>(s)];
+        const int chr = snptab.chrom[idx(s)];
         if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;
-        const std::size_t col = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
-        const double v1 = dec.v[col + static_cast<std::size_t>(p_s1)];
-        const double v2 = dec.v[col + static_cast<std::size_t>(p_s2)];
-        s1_freq.push_back(dec.q[col + static_cast<std::size_t>(p_s1)]);
-        s2_freq.push_back(dec.q[col + static_cast<std::size_t>(p_s2)]);
+        const std::size_t col = idx(P) * idx(s);
+        const double v1 = dec.v[col + idx(p_s1)];
+        const double v2 = dec.v[col + idx(p_s2)];
+        s1_freq.push_back(dec.q[col + idx(p_s1)]);
+        s2_freq.push_back(dec.q[col + idx(p_s2)]);
         s_valid.push_back((v1 != 0.0 && v2 != 0.0) ? 1.0 : 0.0);
         chrom_kept.push_back(chr);
-        genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
+        genpos_kept.push_back(snptab.genpos_morgans[idx(s)]);
         kept_src.push_back(s);
     }
     const long M_kept = static_cast<long>(kept_src.size());
     if (M_kept <= 0) { res.status = Status::InvalidConfig; return res; }
 
-    const std::size_t kept_bpr = io::packed_bytes(static_cast<std::size_t>(M_kept));
-    std::vector<std::uint8_t> tgt_packed(static_cast<std::size_t>(n_target) * kept_bpr, 0);
+    const std::size_t kept_bpr = io::packed_bytes(idx(M_kept));
+    std::vector<std::uint8_t> tgt_packed(idx(n_target) * kept_bpr, 0);
     const std::uint8_t* tgt_src =
         tile.packed.data() + tgt_begin * tile.bytes_per_record;
     be.dates_repack(tgt_src, tile.bytes_per_record, kept_src.data(), M_kept, n_target,
                     kept_bpr, tgt_packed.data());
 
     const double qb = opts.binsize_morgans / static_cast<double>(opts.qbin);
-    std::vector<int> grid_cell(static_cast<std::size_t>(M_kept), 0);
+    std::vector<int> grid_cell(idx(M_kept), 0);
     double ydis = 0.0, last_genpos = genpos_kept[0];
     int cur_chrom = chrom_kept[0];
     int max_cell = 0;
@@ -181,8 +184,8 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
         }
     };
     for (long ks = 0; ks < M_kept; ++ks) {
-        const int chr = chrom_kept[static_cast<std::size_t>(ks)];
-        const double gp = genpos_kept[static_cast<std::size_t>(ks)];
+        const int chr = chrom_kept[idx(ks)];
+        const double gp = genpos_kept[idx(ks)];
         if (ks == 0) {
             ydis = 0.0;
         } else if (chr != cur_chrom) {
@@ -193,7 +196,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
         }
         last_genpos = gp;
         const int cell = static_cast<int>(std::floor(ydis / qb));
-        grid_cell[static_cast<std::size_t>(ks)] = cell;
+        grid_cell[idx(ks)] = cell;
         max_cell = std::max(max_cell, cell);
         touch_chrom(chr, cell);
     }
@@ -211,16 +214,16 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const int diffmax = static_cast<int>(diffmax_l);
     if (n_bin <= 0 || diffmax <= 0) { res.status = Status::InvalidConfig; return res; }
 
-    std::vector<int> tgt_ploidy(static_cast<std::size_t>(n_target), kPloidyDiploid);
+    std::vector<int> tgt_ploidy(idx(n_target), kPloidyDiploid);
     const Precision precision;
     DatesMoments mom = be.dates_curve(
         s1_freq.data(), s2_freq.data(), s_valid.data(), tgt_packed.data(), kept_bpr, n_target,
         tgt_ploidy.data(), grid_cell.data(), M_kept, chrom_first.data(), chrom_last.data(),
         n_chrom, numqbins, n_bin, diffmax, opts.binsize_morgans, opts.qbin, precision);
 
-    const std::size_t nb = static_cast<std::size_t>(n_bin);
+    const std::size_t nb = idx(n_bin);
     auto at = [&](const std::vector<double>& a, int kc, int s) -> double {
-        return a[static_cast<std::size_t>(kc) * nb + static_cast<std::size_t>(s)];
+        return a[idx(kc) * nb + idx(s)];
     };
     auto corr_from = [](double S0, double S11, double S12, double S22) -> double {
         if (S0 < 0.5) return 0.0;
@@ -239,7 +242,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
                 S0 += at(mom.s0, kc, s); S11 += at(mom.s11, kc, s);
                 S12 += at(mom.s12, kc, s); S22 += at(mom.s22, kc, s);
             }
-            curve[static_cast<std::size_t>(s)] = corr_from(S0, S11, S12, S22);
+            curve[idx(s)] = corr_from(S0, S11, S12, S22);
         }
         return curve;
     };
@@ -250,12 +253,12 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     auto bin_center_morgans = [&](int s) -> double {
         return (static_cast<double>(s) + 1.0) * opts.binsize_morgans;
     };
-    res.curve_cm.reserve(static_cast<std::size_t>(n_emit));
-    res.curve_corr.reserve(static_cast<std::size_t>(n_emit));
+    res.curve_cm.reserve(idx(n_emit));
+    res.curve_corr.reserve(idx(n_emit));
     for (int s = 0; s < n_emit; ++s) {
         const double cm = bin_center_morgans(s) * kCentimorgansPerMorgan;
         res.curve_cm.push_back(cm);
-        res.curve_corr.push_back(full_curve[static_cast<std::size_t>(s)]);
+        res.curve_corr.push_back(full_curve[idx(s)]);
     }
 
     const double loval_morgans = opts.lovalfit_cm / kCentimorgansPerMorgan;
@@ -265,7 +268,7 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
             const double d = bin_center_morgans(s);
             if (d < loval_morgans) continue;
             if (d > opts.maxdis_morgans) break;
-            w.push_back(curve[static_cast<std::size_t>(s)]);
+            w.push_back(curve[idx(s)]);
         }
         return w;
     };
@@ -273,12 +276,12 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     const std::vector<double> win_full = windowed(full_curve);
     const int win_len = static_cast<int>(win_full.size());
     const int n_curves = n_chrom + 1;
-    std::vector<double> curves(static_cast<std::size_t>(n_curves) *
-                               static_cast<std::size_t>(win_len), 0.0);
+    std::vector<double> curves(idx(n_curves) *
+                               idx(win_len), 0.0);
     auto copy_curve = [&](int c, const std::vector<double>& w) {
         for (int j = 0; j < win_len && j < static_cast<int>(w.size()); ++j)
-            curves[static_cast<std::size_t>(c) * static_cast<std::size_t>(win_len) +
-                   static_cast<std::size_t>(j)] = w[static_cast<std::size_t>(j)];
+            curves[idx(c) * idx(win_len) +
+                   idx(j)] = w[idx(j)];
     };
     copy_curve(0, win_full);
     for (int kc = 0; kc < n_chrom; ++kc) copy_curve(kc + 1, windowed(total_corr_curve(kc)));
@@ -290,22 +293,22 @@ DatesResult run_dates(const std::string& geno, const std::string& snp, const std
     if (!full_fit.ok) { res.status = Status::RankDeficient; res.date_gen = std::nan(""); return res; }
     res.fit_error_sd = full_fit.error_sd;
 
-    std::vector<int> snp_count(static_cast<std::size_t>(n_chrom), 0);
+    std::vector<int> snp_count(idx(n_chrom), 0);
     for (long ks = 0; ks < M_kept; ++ks) {
-        const int chr = chrom_kept[static_cast<std::size_t>(ks)];
+        const int chr = chrom_kept[idx(ks)];
         for (int kc = 0; kc < n_chrom; ++kc)
-            if (chrom_present[static_cast<std::size_t>(kc)] == chr) { ++snp_count[static_cast<std::size_t>(kc)]; break; }
+            if (chrom_present[idx(kc)] == chr) { ++snp_count[idx(kc)]; break; }
     }
     long total_count = 0;
     for (int c : snp_count) total_count += c;
 
-    std::vector<double> jmean(static_cast<std::size_t>(n_chrom), std::nan(""));
-    std::vector<double> jwt(static_cast<std::size_t>(n_chrom), 0.0);
+    std::vector<double> jmean(idx(n_chrom), std::nan(""));
+    std::vector<double> jwt(idx(n_chrom), 0.0);
     for (int kc = 0; kc < n_chrom; ++kc) {
-        const DatesExpFit& f = fits.at(static_cast<std::size_t>(kc + 1));
-        jmean[static_cast<std::size_t>(kc)] = f.ok ? f.date_gen : std::nan("");
-        jwt[static_cast<std::size_t>(kc)] =
-            static_cast<double>(total_count - snp_count[static_cast<std::size_t>(kc)]);
+        const DatesExpFit& f = fits.at(idx(kc + 1));
+        jmean[idx(kc)] = f.ok ? f.date_gen : std::nan("");
+        jwt[idx(kc)] =
+            static_cast<double>(total_count - snp_count[idx(kc)]);
     }
     res.loo_date_gen = jmean;
     res.loo_weight = jwt;

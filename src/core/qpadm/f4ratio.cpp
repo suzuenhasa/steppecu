@@ -14,6 +14,7 @@
 #include <span>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
 #include "device/backend.hpp"
 #include "device/device_f2_blocks.hpp"
@@ -22,6 +23,8 @@
 #include "steppe/error.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -51,13 +54,13 @@ F4RatioResult run_f4ratio_impl(ComputeBackend& be, const F2Src& f2,
         return res;
     }
 
-    res.p1.reserve(static_cast<std::size_t>(N));
-    res.p2.reserve(static_cast<std::size_t>(N));
-    res.p3.reserve(static_cast<std::size_t>(N));
-    res.p4.reserve(static_cast<std::size_t>(N));
-    res.p5.reserve(static_cast<std::size_t>(N));
+    res.p1.reserve(idx(N));
+    res.p2.reserve(idx(N));
+    res.p3.reserve(idx(N));
+    res.p4.reserve(idx(N));
+    res.p5.reserve(idx(N));
     std::vector<int> flat;
-    flat.reserve(static_cast<std::size_t>(N) * 8);
+    flat.reserve(idx(N) * 8);
     for (const std::array<int, 5>& t : tuples) {
         res.p1.push_back(t[0]);
         res.p2.push_back(t[1]);

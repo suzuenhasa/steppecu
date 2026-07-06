@@ -8,6 +8,7 @@
 // Reference: docs/reference/src_core_config_config_builder.cpp.md
 #include "core/config/config_builder.hpp"
 
+#include "core/internal/index_cast.hpp"
 #include "io/genotype_source.hpp"
 
 #include <algorithm>
@@ -373,11 +374,11 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         } else if (merged_.auto_top_k.has_value()) {
             if (*merged_.auto_top_k < 1) return fail("--auto-top-k must be >= 1");
             cfg.pop_selection_.mode = io::PopSelection::Mode::AutoTopK;
-            cfg.pop_selection_.k = static_cast<std::size_t>(*merged_.auto_top_k);
+            cfg.pop_selection_.k = core::idx(*merged_.auto_top_k);
         } else if (merged_.min_n.has_value()) {
             if (*merged_.min_n < 1) return fail("--min-n must be >= 1");
             cfg.pop_selection_.mode = io::PopSelection::Mode::MinN;
-            cfg.pop_selection_.min_n = static_cast<std::size_t>(*merged_.min_n);
+            cfg.pop_selection_.min_n = core::idx(*merged_.min_n);
         }
     }
 

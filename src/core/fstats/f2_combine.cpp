@@ -14,6 +14,7 @@
 #include "steppe/fstats.hpp"
 #include "device/shard_plan.hpp"
 #include "core/fstats/f2_partials_validate.hpp"
+#include "core/internal/index_cast.hpp"
 
 namespace steppe::core {
 
@@ -28,18 +29,18 @@ F2BlockTensor combine_f2_partials_host(
     out.P = P;
     out.n_block = n_block_full;
     const std::size_t slab =
-        static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
-    const std::size_t total = slab * static_cast<std::size_t>(n_block_full);
+        idx(P) * idx(P);
+    const std::size_t total = slab * idx(n_block_full);
     out.f2.assign(total, 0.0);
     out.vpair.assign(total, 0.0);
-    out.block_sizes.assign(static_cast<std::size_t>(n_block_full), 0);
+    out.block_sizes.assign(idx(n_block_full), 0);
 
     for (std::size_t g = 0; g < partials.size(); ++g) {
         const F2BlockTensor& part = partials[g];
         if (part.n_block <= 0) continue;
-        const std::size_t b0 = static_cast<std::size_t>(shards[g].b0);
+        const std::size_t b0 = idx(shards[g].b0);
         const std::size_t part_elems =
-            slab * static_cast<std::size_t>(part.n_block);
+            slab * idx(part.n_block);
         const std::size_t out_base = slab * b0;
         auto place = [&](const double* src, double* dst) {
             std::copy_n(src, part_elems, dst + out_base);
@@ -47,7 +48,7 @@ F2BlockTensor combine_f2_partials_host(
         place(part.f2.data(),    out.f2.data());
         place(part.vpair.data(), out.vpair.data());
         std::copy_n(part.block_sizes.data(),
-                    static_cast<std::size_t>(part.n_block),
+                    idx(part.n_block),
                     out.block_sizes.data() + b0);
     }
 

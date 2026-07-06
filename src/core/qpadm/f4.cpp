@@ -13,6 +13,7 @@
 #include <span>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/f4_quartets.hpp"
 #include "core/qpadm/jackknife.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
@@ -23,6 +24,8 @@
 #include "steppe/error.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -50,12 +53,12 @@ F4Result run_f4_impl(ComputeBackend& be, const F2Src& f2,
         return res;
     }
 
-    res.p1.reserve(static_cast<std::size_t>(N));
-    res.p2.reserve(static_cast<std::size_t>(N));
-    res.p3.reserve(static_cast<std::size_t>(N));
-    res.p4.reserve(static_cast<std::size_t>(N));
+    res.p1.reserve(idx(N));
+    res.p2.reserve(idx(N));
+    res.p3.reserve(idx(N));
+    res.p4.reserve(idx(N));
     std::vector<int> flat;
-    flat.reserve(static_cast<std::size_t>(N) * 4);
+    flat.reserve(idx(N) * 4);
     for (const std::array<int, 4>& q : quartets) {
         res.p1.push_back(q[0]);
         res.p2.push_back(q[1]);
@@ -71,10 +74,10 @@ F4Result run_f4_impl(ComputeBackend& be, const F2Src& f2,
     const int m = X.nl * X.nr;
 
     if (m <= 0 || X.n_block <= 0) {
-        res.est.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.se.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.z.assign(static_cast<std::size_t>(N), std::nan(""));
-        res.p.assign(static_cast<std::size_t>(N), std::nan(""));
+        res.est.assign(idx(N), std::nan(""));
+        res.se.assign(idx(N), std::nan(""));
+        res.z.assign(idx(N), std::nan(""));
+        res.p.assign(idx(N), std::nan(""));
         res.status = Status::Ok;
         return res;
     }
@@ -82,12 +85,12 @@ F4Result run_f4_impl(ComputeBackend& be, const F2Src& f2,
     const JackknifeDiag diag =
         core::qpadm::jackknife_diag(be, X, std::span<const int>(X.block_sizes), prec);
 
-    res.est.assign(static_cast<std::size_t>(N), 0.0);
-    res.se.assign(static_cast<std::size_t>(N), 0.0);
-    res.z.assign(static_cast<std::size_t>(N), 0.0);
-    res.p.assign(static_cast<std::size_t>(N), 0.0);
+    res.est.assign(idx(N), 0.0);
+    res.se.assign(idx(N), 0.0);
+    res.z.assign(idx(N), 0.0);
+    res.p.assign(idx(N), 0.0);
     for (int k = 0; k < N; ++k) {
-        const std::size_t ks = static_cast<std::size_t>(k);
+        const std::size_t ks = idx(k);
         const double est = X.x_total[ks];
         const double var = diag.var[ks];
         const double se = (var > 0.0) ? std::sqrt(var) : std::nan("");

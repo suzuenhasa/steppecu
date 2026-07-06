@@ -14,6 +14,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
+
 namespace steppe::core::qpadm {
 
 namespace {
@@ -162,7 +164,7 @@ std::vector<QpGraphEdge> to_named(const IGraph& g, const std::vector<std::string
     std::vector<QpGraphEdge> out;
     out.reserve(g.size());
     auto name = [&](int id) -> std::string {
-        if (id >= 0 && id < nleaf) return leaves[static_cast<std::size_t>(id)];
+        if (id >= 0 && id < nleaf) return leaves[idx(id)];
         return "N" + std::to_string(id);
     };
     for (const IEdge& e : g) out.push_back({name(e.p), name(e.c)});
@@ -279,7 +281,7 @@ IGraph base_tree_of(const IGraph& g, [[maybe_unused]] int nleaf) {
 // Relabel labeled edges to int ids — reference §3
 IGraph relabel_to_int(const std::vector<QpGraphEdge>& edges, const std::vector<std::string>& leaves) {
     std::unordered_map<std::string, int> id;
-    for (int i = 0; i < static_cast<int>(leaves.size()); ++i) id[leaves[static_cast<std::size_t>(i)]] = i;
+    for (int i = 0; i < static_cast<int>(leaves.size()); ++i) id[leaves[idx(i)]] = i;
     int next = static_cast<int>(leaves.size());
     IGraph g;
     g.reserve(edges.size());
@@ -342,8 +344,8 @@ void nni_tree_neighbors(const IGraph& tree, int nleaf, const std::vector<std::st
                         std::vector<EnumeratedTopology>& out) {
     const int E = static_cast<int>(tree.size());
     for (int ei = 0; ei < E; ++ei) {
-        const int u = tree[static_cast<std::size_t>(ei)].p;
-        const int v = tree[static_cast<std::size_t>(ei)].c;
+        const int u = tree[idx(ei)].p;
+        const int v = tree[idx(ei)].c;
         if (v < nleaf) continue;
         const std::vector<int> uch = children_of(tree, u);
         const std::vector<int> vch = children_of(tree, v);
@@ -351,17 +353,17 @@ void nni_tree_neighbors(const IGraph& tree, int nleaf, const std::vector<std::st
         const int u_other = (uch[0] == v) ? uch[1] : uch[0];
         int idx_u_other = -1;
         for (int j = 0; j < E; ++j)
-            if (tree[static_cast<std::size_t>(j)].p == u && tree[static_cast<std::size_t>(j)].c == u_other) { idx_u_other = j; break; }
+            if (tree[idx(j)].p == u && tree[idx(j)].c == u_other) { idx_u_other = j; break; }
         if (idx_u_other < 0) continue;
         for (int k = 0; k < 2; ++k) {
-            const int v_child = vch[static_cast<std::size_t>(k)];
+            const int v_child = vch[idx(k)];
             int idx_v_child = -1;
             for (int j = 0; j < E; ++j)
-                if (tree[static_cast<std::size_t>(j)].p == v && tree[static_cast<std::size_t>(j)].c == v_child) { idx_v_child = j; break; }
+                if (tree[idx(j)].p == v && tree[idx(j)].c == v_child) { idx_v_child = j; break; }
             if (idx_v_child < 0) continue;
             IGraph ng = tree;
-            ng[static_cast<std::size_t>(idx_u_other)] = IEdge{u, v_child};
-            ng[static_cast<std::size_t>(idx_v_child)] = IEdge{v, u_other};
+            ng[idx(idx_u_other)] = IEdge{u, v_child};
+            ng[idx(idx_v_child)] = IEdge{v, u_other};
             const std::uint64_t h = hash_igraph(ng, nleaf);
             if (seen.insert(h).second) {
                 EnumeratedTopology et;

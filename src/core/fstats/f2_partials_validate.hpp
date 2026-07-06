@@ -14,6 +14,7 @@
 #include <string>
 
 #include "steppe/fstats.hpp"
+#include "core/internal/index_cast.hpp"
 #include "device/shard_plan.hpp"
 #include "device/device_partial.hpp"
 
@@ -64,7 +65,7 @@ inline void validate_f2_partials(
     std::span<const steppe::device::DeviceShard> shards,
     int P, int n_block_full) {
     const std::size_t slab =
-        static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+        idx(P) * idx(P);
 
     detail::validate_partials_scaffold(
         who, partials.size(), shards, P, n_block_full,
@@ -87,9 +88,9 @@ inline void validate_f2_partials(
             }
             if (part.n_block > 0) {
                 const std::size_t want_slabs =
-                    slab * static_cast<std::size_t>(part.n_block);
+                    slab * idx(part.n_block);
                 const std::size_t want_counts =
-                    static_cast<std::size_t>(part.n_block);
+                    idx(part.n_block);
                 if (part.f2.size() != want_slabs ||
                     part.vpair.size() != want_slabs ||
                     part.block_sizes.size() != want_counts) {
@@ -139,7 +140,7 @@ inline void validate_resident_partials(
                     std::to_string(P) + ")");
             }
             if (part.n_block_local > 0 &&
-                part.block_sizes.size() != static_cast<std::size_t>(part.n_block_local)) {
+                part.block_sizes.size() != idx(part.n_block_local)) {
                 throw std::runtime_error(
                     prefix + "partial[" + std::to_string(g) +
                     "] block_sizes size mismatch: expected " +

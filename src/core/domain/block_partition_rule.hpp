@@ -15,14 +15,10 @@
 #include <string>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "steppe/config.hpp"
 
 namespace steppe::core {
-
-// Index-cast helper (long → std::size_t) — reference §8
-[[nodiscard]] constexpr std::size_t idx(long i) noexcept {
-    return static_cast<std::size_t>(i);
-}
 
 // block_of — the per-SNP block primitive — reference §3
 [[nodiscard]] inline int block_of(double genpos_morgans, double block_size_morgans) noexcept {
@@ -67,13 +63,13 @@ struct BlockRange {
         throw std::runtime_error("core::block_ranges: " + msg);
     };
 
-    if (block_id.size() < static_cast<std::size_t>(M)) {
+    if (block_id.size() < idx(M)) {
         fail("block_id has " + std::to_string(block_id.size()) +
              " entries but M = " + std::to_string(M) +
              " columns are required (partition shorter than the SNP count)");
     }
 
-    std::vector<BlockRange> ranges(static_cast<std::size_t>(n_block));
+    std::vector<BlockRange> ranges(idx(n_block));
 
     long s = 0;
     int prev_b = -1;
@@ -91,7 +87,7 @@ struct BlockRange {
 
         long e = s;
         while (e < M && block_id[idx(e)] == b) ++e;
-        ranges[static_cast<std::size_t>(b)] = BlockRange{s, e};
+        ranges[idx(b)] = BlockRange{s, e};
         prev_b = b;
         s = e;
     }

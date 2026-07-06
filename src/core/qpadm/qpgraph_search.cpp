@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/f3_triples.hpp"
 #include "core/qpadm/jackknife.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
@@ -29,6 +30,8 @@
 #include "steppe/error.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -59,23 +62,23 @@ struct CanonicalBasis {
     b.npop = static_cast<int>(pops.size());
     std::unordered_map<std::string, int> f2idx;
     for (int i = 0; i < static_cast<int>(leaf_names.size()); ++i)
-        f2idx.emplace(leaf_names[static_cast<std::size_t>(i)], i);
-    std::vector<int> pop_f2(static_cast<std::size_t>(b.npop), -1);
+        f2idx.emplace(leaf_names[idx(i)], i);
+    std::vector<int> pop_f2(idx(b.npop), -1);
     for (int i = 0; i < b.npop; ++i) {
-        auto it = f2idx.find(pops[static_cast<std::size_t>(i)]);
-        pop_f2[static_cast<std::size_t>(i)] = (it == f2idx.end()) ? -1 : it->second;
+        auto it = f2idx.find(pops[idx(i)]);
+        pop_f2[idx(i)] = (it == f2idx.end()) ? -1 : it->second;
     }
     const int base_f2 = pop_f2[0];
     std::vector<int> nonbase_f2;
-    for (int i = 1; i < b.npop; ++i) nonbase_f2.push_back(pop_f2[static_cast<std::size_t>(i)]);
+    for (int i = 1; i < b.npop; ++i) nonbase_f2.push_back(pop_f2[idx(i)]);
     const int n_nonbase = static_cast<int>(nonbase_f2.size());
     for (int a = 0; a < n_nonbase; ++a)
         for (int bb = a; bb < n_nonbase; ++bb) {
             b.flat.push_back(base_f2);
-            b.flat.push_back(nonbase_f2[static_cast<std::size_t>(a)]);
-            b.flat.push_back(nonbase_f2[static_cast<std::size_t>(bb)]);
-            b.pair_a_pop.push_back(nonbase_f2[static_cast<std::size_t>(a)]);
-            b.pair_b_pop.push_back(nonbase_f2[static_cast<std::size_t>(bb)]);
+            b.flat.push_back(nonbase_f2[idx(a)]);
+            b.flat.push_back(nonbase_f2[idx(bb)]);
+            b.pair_a_pop.push_back(nonbase_f2[idx(a)]);
+            b.pair_b_pop.push_back(nonbase_f2[idx(bb)]);
         }
     b.npair = static_cast<int>(b.pair_a_pop.size());
     return b;
@@ -87,19 +90,19 @@ struct CanonicalBasis {
     std::unordered_map<int, int> f2_to_ccol;
     for (int c = 0; c < m.npop - 1; ++c) {
         const int leaf = m.centered_col_to_leaf(c);
-        const int f2 = m.leaf_to_f2[static_cast<std::size_t>(leaf)];
+        const int f2 = m.leaf_to_f2[idx(leaf)];
         f2_to_ccol[f2] = c;
     }
-    std::vector<int> cmb1(static_cast<std::size_t>(basis.npair));
-    std::vector<int> cmb2(static_cast<std::size_t>(basis.npair));
+    std::vector<int> cmb1(idx(basis.npair));
+    std::vector<int> cmb2(idx(basis.npair));
     for (int k = 0; k < basis.npair; ++k) {
-        auto ia = f2_to_ccol.find(basis.pair_a_pop[static_cast<std::size_t>(k)]);
-        auto ib = f2_to_ccol.find(basis.pair_b_pop[static_cast<std::size_t>(k)]);
+        auto ia = f2_to_ccol.find(basis.pair_a_pop[idx(k)]);
+        auto ib = f2_to_ccol.find(basis.pair_b_pop[idx(k)]);
         if (ia == f2_to_ccol.end() || ib == f2_to_ccol.end()) return false;
         int ca = ia->second, cb = ib->second;
         if (ca > cb) std::swap(ca, cb);
-        cmb1[static_cast<std::size_t>(k)] = ca;
-        cmb2[static_cast<std::size_t>(k)] = cb;
+        cmb1[idx(k)] = ca;
+        cmb2[idx(k)] = cb;
     }
     out.npop = m.npop; out.nedge_norm = m.nedge_norm; out.nadmix = m.nadmix;
     out.npair = basis.npair; out.npath = m.npath; out.base_leaf = m.base_leaf;
@@ -142,8 +145,8 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     const JackknifeCov cov =
         cq::jackknife_cov(be, X, std::span<const int>(X.block_sizes), opts.fit.diag_f3, prec);
     if (cov.status != Status::Ok) { res.status = cov.status; return res; }
-    std::span<const double> f_obs(X.x_total.data(), static_cast<std::size_t>(npair));
-    std::span<const double> qinv(cov.Qinv.data(), static_cast<std::size_t>(npair) * npair);
+    std::span<const double> f_obs(X.x_total.data(), idx(npair));
+    std::span<const double> qinv(cov.Qinv.data(), idx(npair) * npair);
 
     std::vector<cq::QpGraphModel> models(cands.size());
     std::vector<QpGraphTopoArena> arenas;
@@ -177,8 +180,8 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
         c.nadmix = cands[i].nadmix;
         c.id = cands[i].id;
         c.hash = cands[i].hash;
-        c.score = fb.best_score[static_cast<std::size_t>(a)];
-        c.restart_spread = fb.restart_spread[static_cast<std::size_t>(a)];
+        c.score = fb.best_score[idx(a)];
+        c.restart_spread = fb.restart_spread[idx(a)];
         c.edges = cands[i].edges;
         res.candidates.push_back(std::move(c));
     }
@@ -187,7 +190,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     double best_s = std::numeric_limits<double>::infinity();
     double second_s = std::numeric_limits<double>::infinity();
     for (int a = 0; a < static_cast<int>(arenas.size()); ++a) {
-        const double s = fb.best_score[static_cast<std::size_t>(a)];
+        const double s = fb.best_score[idx(a)];
         if (!std::isfinite(s)) continue;
         if (s < best_s) { second_s = best_s; best_s = s; best_arena = a; }
         else if (s < second_s) { second_s = s; }
@@ -195,15 +198,15 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
     if (best_arena < 0) { res.status = Status::NonSpdCovariance; return res; }
     int best_cand = -1;
     for (std::size_t i = 0; i < cands.size(); ++i) if (arena_of[i] == best_arena) { best_cand = static_cast<int>(i); break; }
-    res.best.nadmix = cands[static_cast<std::size_t>(best_cand)].nadmix;
-    res.best.id = cands[static_cast<std::size_t>(best_cand)].id;
-    res.best.hash = cands[static_cast<std::size_t>(best_cand)].hash;
+    res.best.nadmix = cands[idx(best_cand)].nadmix;
+    res.best.id = cands[idx(best_cand)].id;
+    res.best.hash = cands[idx(best_cand)].hash;
     res.best.score = best_s;
-    res.best.edges = cands[static_cast<std::size_t>(best_cand)].edges;
+    res.best.edges = cands[idx(best_cand)].edges;
     res.second_best_score = second_s;
 
     {
-        const QpGraphTopoArena& a = arenas[static_cast<std::size_t>(best_arena)];
+        const QpGraphTopoArena& a = arenas[idx(best_arena)];
         const QpGraphFleet fl =
             be.qpgraph_fit_fleet(a, f_obs, qinv, opts.fit.numstart, opts.fit.maxit, opts.fit.tol, prec);
         res.best_fit.status = fl.status;
@@ -213,7 +216,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
         res.best_fit.weight_hi = fl.theta_hi;
         res.best_fit.restart_spread = fl.restart_spread;
         res.best_fit.edge_length = fl.edge_length;
-        const cq::QpGraphModel& bm = models[static_cast<std::size_t>(best_cand)];
+        const cq::QpGraphModel& bm = models[idx(best_cand)];
         res.best_fit.edge_from = bm.edge_from;
         res.best_fit.edge_to = bm.edge_to;
         res.best_fit.admix_from = bm.admix_from;
@@ -227,7 +230,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
         std::unordered_map<std::uint64_t, double> score_cache;
         for (std::size_t i = 0; i < cands.size(); ++i)
             if (arena_of[i] >= 0)
-                score_cache[cands[i].hash] = fb.best_score[static_cast<std::size_t>(arena_of[i])];
+                score_cache[cands[i].hash] = fb.best_score[idx(arena_of[i])];
 
         auto score_of = [&](const cq::EnumeratedTopology& g) -> double {
             auto it = score_cache.find(g.hash);
@@ -252,7 +255,7 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
         double agg_s = std::numeric_limits<double>::infinity();
         for (int sidx = 0; sidx < K; ++sidx) {
             const std::size_t start =
-                cands.size() > 1 ? (static_cast<std::size_t>(sidx) * cands.size()) / static_cast<std::size_t>(K) : 0;
+                cands.size() > 1 ? (idx(sidx) * cands.size()) / idx(K) : 0;
             cq::EnumeratedTopology cur = cands[start];
             double cur_s = score_of(cur);
             for (int step = 0; step < kMaxHillClimbSteps; ++step) {
@@ -261,11 +264,11 @@ QpGraphSearchResult run_search_impl(ComputeBackend& be, const F2Src& f2,
                 double best_nb = cur_s;
                 int best_j = -1;
                 for (int j = 0; j < static_cast<int>(nb.size()); ++j) {
-                    const double s = score_of(nb[static_cast<std::size_t>(j)]);
+                    const double s = score_of(nb[idx(j)]);
                     if (std::isfinite(s) && s < best_nb) { best_nb = s; best_j = j; }
                 }
                 if (best_j < 0) break;
-                cur = nb[static_cast<std::size_t>(best_j)];
+                cur = nb[idx(best_j)];
                 cur_s = best_nb;
             }
             res.heuristic_seed_hashes.push_back(cur.hash);

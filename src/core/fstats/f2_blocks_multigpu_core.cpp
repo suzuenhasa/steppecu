@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/internal/views.hpp"
 #include "core/domain/block_partition_rule.hpp"
 #include "device/resources.hpp"
@@ -56,16 +57,16 @@ void fan_out_shards(const MatView& Q, const MatView& V, const MatView& N,
                     const int  n_block_local = sh.b1 - sh.b0;
 
                     const std::size_t col_off =
-                        static_cast<std::size_t>(P) * static_cast<std::size_t>(s0 < 0 ? 0 : s0);
+                        idx(P) * idx(s0 < 0 ? 0 : s0);
                     const MatView Qg{Q.data + col_off, P, M_local};
                     const MatView Vg{V.data + col_off, P, M_local};
                     const MatView Ng{N.data + col_off, P, M_local};
 
                     std::vector<int> block_id_local(
-                        static_cast<std::size_t>(M_local < 0 ? 0 : M_local), 0);
+                        idx(M_local < 0 ? 0 : M_local), 0);
                     for (long k = 0; k < M_local; ++k) {
-                        block_id_local[static_cast<std::size_t>(k)] =
-                            partition.block_id[static_cast<std::size_t>(s0 + k)] - sh.b0;
+                        block_id_local[idx(k)] =
+                            partition.block_id[idx(s0 + k)] - sh.b0;
                     }
 
                     seam(g, Qg, Vg, Ng, block_id_local.data(), n_block_local, sh);
@@ -90,7 +91,7 @@ std::vector<steppe::device::DeviceShard> plan_multigpu_shards(
     const BlockPartition& partition, long M, int n_block, std::size_t G) {
     const std::vector<BlockRange> ranges = core::block_ranges(
         std::span<const int>(partition.block_id.data(),
-                             static_cast<std::size_t>(M < 0 ? 0 : M)),
+                             idx(M < 0 ? 0 : M)),
         M, n_block);
 
     return steppe::device::plan_block_shards(

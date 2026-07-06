@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/model_search_core.hpp"
 #include "core/qpadm/qpadm_bounds.hpp"
 #include "core/qpadm/qpadm_fit.hpp"
@@ -110,6 +111,8 @@ std::vector<QpAdmResult> fit_shard(ComputeBackend& be, const device::DeviceF2Blo
 
 namespace steppe {
 
+using core::idx;
+
 namespace {
 
 // Multi-GPU f2 replication handle — reference §8
@@ -123,10 +126,10 @@ void scatter_into_slots(std::vector<QpAdmResult>& results,
                         std::vector<QpAdmResult>& batch, std::size_t n) {
     for (QpAdmResult& r : batch) {
         const int mi = r.model_index;
-        if (mi < 0 || static_cast<std::size_t>(mi) >= n)
+        if (mi < 0 || idx(mi) >= n)
             throw std::runtime_error("run_qpadm_search: model_index out of range "
                                      "(must be 0..n-1 for the deterministic re-sort)");
-        results[static_cast<std::size_t>(mi)] = std::move(r);
+        results[idx(mi)] = std::move(r);
     }
 }
 
@@ -224,8 +227,8 @@ std::vector<QpAdmResult> run_qpadm_search(const F2BlockTensor& f2_host,
     for (std::size_t i = 0; i < n; ++i) {
         QpAdmResult r = core::qpadm::fit_one_model(be, f2_host, models[i], opts);
         const int mi = r.model_index;
-        const std::size_t slot = (mi >= 0 && static_cast<std::size_t>(mi) < n)
-                                     ? static_cast<std::size_t>(mi) : i;
+        const std::size_t slot = (mi >= 0 && idx(mi) < n)
+                                     ? idx(mi) : i;
         results[slot] = std::move(r);
     }
     return results;

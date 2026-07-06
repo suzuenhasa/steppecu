@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/internal/pchisq.hpp"
 #include "core/qpadm/f4_matrix.hpp"
 #include "core/qpadm/gls_solve.hpp"
@@ -105,9 +106,9 @@ QpAdmResult run_impl(ComputeBackend& be, F4Blocks&& X, std::span<const int> bloc
         res.z = se.z;
     }
 
-    res.rank_p.assign(static_cast<std::size_t>(r) + 1, 0.0);
-    if (r >= 0 && static_cast<std::size_t>(r) < res.rank_p.size())
-        res.rank_p[static_cast<std::size_t>(r)] = res.p;
+    res.rank_p.assign(idx(r) + 1, 0.0);
+    if (r >= 0 && idx(r) < res.rank_p.size())
+        res.rank_p[idx(r)] = res.p;
 
     if (be.provides_rank_sweep()) {
         const RankSweep rs = run_rank_sweep(be, X, cov, opts.rank_alpha, opts, prec);
@@ -170,6 +171,8 @@ double pchisq_upper(double x, int dof) {
 }  // namespace steppe::core::qpadm
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 

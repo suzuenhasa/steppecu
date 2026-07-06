@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/internal/decode_af.hpp"
+#include "core/internal/index_cast.hpp"
 
 namespace steppe::core::dates {
 
@@ -115,16 +116,16 @@ inline void dates_repack_host(const std::uint8_t* src, std::size_t src_bpr,
                               const long* kept_src, long M_kept, int n_target,
                               std::size_t dst_bpr, std::uint8_t* dst) {
     for (int i = 0; i < n_target; ++i) {
-        const std::uint8_t* src_rec = src + static_cast<std::size_t>(i) * src_bpr;
-        std::uint8_t* dst_rec = dst + static_cast<std::size_t>(i) * dst_bpr;
+        const std::uint8_t* src_rec = src + idx(i) * src_bpr;
+        std::uint8_t* dst_rec = dst + idx(i) * dst_bpr;
         for (long ks = 0; ks < M_kept; ++ks) {
-            const long s = kept_src[static_cast<std::size_t>(ks)];
+            const long s = kept_src[idx(ks)];
             const std::size_t sb =
-                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+                idx(s) / idx(core::kCodesPerByte);
             const int sp = static_cast<int>(s % core::kCodesPerByte);
             const std::uint8_t code = core::genotype_code(src_rec[sb], sp);
             const std::size_t db =
-                static_cast<std::size_t>(ks) / static_cast<std::size_t>(core::kCodesPerByte);
+                idx(ks) / idx(core::kCodesPerByte);
             const int dp = static_cast<int>(ks % core::kCodesPerByte);
             const int shift = (core::kCodesPerByte - 1 - dp) * core::kBitsPerCode;
             dst_rec[db] = static_cast<std::uint8_t>(dst_rec[db] | (code << shift));

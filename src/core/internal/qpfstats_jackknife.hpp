@@ -13,13 +13,14 @@
 #include <vector>
 
 #include "core/internal/host_device.hpp"
+#include "core/internal/index_cast.hpp"
 
 namespace steppe::core {
 
 // Global per-combination estimate (matrix_jackknife_est_full) — reference §4
 [[nodiscard]] inline double matrix_jackknife_est_col(const double* numer, const double* cnt,
                                                      int c, int n_block) {
-    const std::size_t base = static_cast<std::size_t>(c) * static_cast<std::size_t>(n_block);
+    const std::size_t base = idx(c) * idx(n_block);
     long double sum_n_all = 0.0L;
     for (int b = 0; b < n_block; ++b) sum_n_all += static_cast<long double>(cnt[base + b]);
     if (sum_n_all <= 0.0L) return std::nan("");
@@ -68,24 +69,24 @@ namespace steppe::core {
     const int nb = static_cast<int>(arr.size());
     long double sum_bl = 0.0L;
     for (int b = 0; b < nb; ++b)
-        if (std::isfinite(arr[static_cast<std::size_t>(b)]))
-            sum_bl += static_cast<long double>(bl[static_cast<std::size_t>(b)]);
+        if (std::isfinite(arr[idx(b)]))
+            sum_bl += static_cast<long double>(bl[idx(b)]);
     if (sum_bl <= 0.0L) return 0.0;
 
     long double tot_num = 0.0L;
     for (int b = 0; b < nb; ++b) {
-        const double a = arr[static_cast<std::size_t>(b)];
+        const double a = arr[idx(b)];
         if (!std::isfinite(a)) continue;
         tot_num += static_cast<long double>(a) *
-                   static_cast<long double>(bl[static_cast<std::size_t>(b)]);
+                   static_cast<long double>(bl[idx(b)]);
     }
     const long double tot = tot_num / sum_bl;
 
     long double num = 0.0L, den = 0.0L;
     for (int b = 0; b < nb; ++b) {
-        const double a = arr[static_cast<std::size_t>(b)];
+        const double a = arr[idx(b)];
         if (!std::isfinite(a)) continue;
-        const long double blb = static_cast<long double>(bl[static_cast<std::size_t>(b)]);
+        const long double blb = static_cast<long double>(bl[idx(b)]);
         const long double rel = blb / sum_bl;
         if (rel >= 1.0L) continue;
         const long double loo = (tot - static_cast<long double>(a) * rel) / (1.0L - rel);

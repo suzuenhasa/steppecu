@@ -11,6 +11,7 @@
 #include "device/backend.hpp"
 #include "core/internal/views.hpp"
 #include "core/internal/host_device.hpp"
+#include "core/internal/index_cast.hpp"
 #include "core/domain/block_partition_rule.hpp"
 #include "steppe/fstats.hpp"
 #include "steppe/config.hpp"
@@ -37,7 +38,7 @@ void validate_qvn([[maybe_unused]] const MatView& Q, [[maybe_unused]] const MatV
 bool block_ids_dense_nondecreasing(const BlockPartition& partition, long M) {
     int prev = -1;
     for (long s = 0; s < M; ++s) {
-        const int id = partition.block_id[static_cast<std::size_t>(s)];
+        const int id = partition.block_id[idx(s)];
         if (id < 0 || id >= partition.n_block || id < prev) return false;
         prev = id;
     }
@@ -47,7 +48,7 @@ bool block_ids_dense_nondecreasing(const BlockPartition& partition, long M) {
 // Block-partition contract — reference §5
 void validate_partition([[maybe_unused]] const BlockPartition& partition,
                         [[maybe_unused]] long M) {
-    STEPPE_ASSERT(partition.block_id.size() == static_cast<std::size_t>(M < 0 ? 0 : M),
+    STEPPE_ASSERT(partition.block_id.size() == idx(M < 0 ? 0 : M),
                   "compute_f2_blocks: block_id length != M (partition does not "
                   "describe exactly the SNP columns)");
     STEPPE_ASSERT(M <= 0 || partition.n_block > 0,

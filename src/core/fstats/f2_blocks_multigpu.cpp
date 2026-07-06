@@ -17,6 +17,7 @@
 
 #include "core/fstats/f2_blocks_multigpu_core.hpp"
 #include "core/domain/block_partition_rule.hpp"
+#include "core/internal/index_cast.hpp"
 #include "core/internal/views.hpp"
 #include "core/internal/host_device.hpp"
 #include "core/internal/log.hpp"
@@ -43,10 +44,10 @@ inline constexpr char kEnvF2CachePath[] = "STEPPE_F2_CACHE_PATH";
 [[nodiscard]] constexpr int clamp_nonneg(int n) noexcept { return n < 0 ? 0 : n; }
 
 [[nodiscard]] constexpr std::size_t nonneg_count(int n) noexcept {
-    return static_cast<std::size_t>(n < 0 ? 0 : n);
+    return idx(n < 0 ? 0 : n);
 }
 [[nodiscard]] constexpr std::size_t nonneg_count(long n) noexcept {
-    return static_cast<std::size_t>(n < 0 ? 0 : n);
+    return idx(n < 0 ? 0 : n);
 }
 
 // The combine gate — reference §4
@@ -139,7 +140,7 @@ F2BlockTensor compute_f2_blocks_multigpu(
     F2BlockTensor out;
     out.P = P;
     out.n_block = n_block;
-    const std::size_t slab = static_cast<std::size_t>(P) * static_cast<std::size_t>(P);
+    const std::size_t slab = idx(P) * idx(P);
     const std::size_t total = slab * nonneg_count(n_block);
     out.f2.resize(total);
     out.vpair.resize(total);
@@ -230,8 +231,8 @@ steppe::device::F2BlocksOut compute_f2_blocks_multigpu_tiered(
                                M, n_block);
         out.block_sizes.assign(nonneg_count(n_block), 0);
         for (int b = 0; b < n_block; ++b)
-            out.block_sizes[static_cast<std::size_t>(b)] =
-                static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+            out.block_sizes[idx(b)] =
+                static_cast<int>(ranges[idx(b)].size());
     }
 
     switch (tier) {

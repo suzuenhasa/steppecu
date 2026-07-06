@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"
+#include "core/internal/index_cast.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -30,6 +31,8 @@
 
 namespace steppe {
 
+using core::idx;
+
 namespace {
 
 // Named constants — reference §4
@@ -38,7 +41,7 @@ inline constexpr std::size_t kPrimaryGpu = 0;
 
 // Degenerate-outcome NaN fill — reference §9
 void fill_nan(DstatResult& res, int row_count) {
-    const auto count = static_cast<std::size_t>(row_count);
+    const auto count = idx(row_count);
     res.est.assign(count, std::nan(""));
     res.se.assign(count, std::nan(""));
     res.z.assign(count, std::nan(""));
@@ -59,12 +62,12 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     const int N = static_cast<int>(quadruples.size());
     if (N <= 0) { res.status = Status::Ok; return res; }
 
-    res.p1.reserve(static_cast<std::size_t>(N));
-    res.p2.reserve(static_cast<std::size_t>(N));
-    res.p3.reserve(static_cast<std::size_t>(N));
-    res.p4.reserve(static_cast<std::size_t>(N));
+    res.p1.reserve(idx(N));
+    res.p2.reserve(idx(N));
+    res.p3.reserve(idx(N));
+    res.p4.reserve(idx(N));
     std::vector<int> flat;
-    flat.reserve(static_cast<std::size_t>(N) * 4);
+    flat.reserve(idx(N) * 4);
     for (const std::array<int, 4>& q : quadruples) {
         res.p1.push_back(q[0]); res.p2.push_back(q[1]);
         res.p3.push_back(q[2]); res.p4.push_back(q[3]);
@@ -103,31 +106,31 @@ DstatResult run_dstat(const std::string& geno, const std::string& snp, const std
     std::vector<double> physpos_kept;
     if (resident) {
         ddr = be.decode_af_compact_autosome(
-            view, std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
-            std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
-            std::span<const double>(snptab.physpos.data(), static_cast<std::size_t>(M)),
+            view, std::span<const int>(snptab.chrom.data(), idx(M)),
+            std::span<const double>(snptab.genpos_morgans.data(), idx(M)),
+            std::span<const double>(snptab.physpos.data(), idx(M)),
             kAutosomeChromMin, kAutosomeChromMax);
         chrom_kept = ddr.chrom_kept;
         genpos_kept = ddr.genpos_kept;
         physpos_kept = ddr.physpos_kept;
     } else {
         const DecodeResult dec = be.decode_af(view);
-        Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-        Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-        chrom_kept.reserve(static_cast<std::size_t>(M));
-        genpos_kept.reserve(static_cast<std::size_t>(M));
-        physpos_kept.reserve(static_cast<std::size_t>(M));
+        Qk.reserve(idx(P) * idx(M));
+        Vk.reserve(idx(P) * idx(M));
+        chrom_kept.reserve(idx(M));
+        genpos_kept.reserve(idx(M));
+        physpos_kept.reserve(idx(M));
         for (long s = 0; s < M; ++s) {
-            const int chr = snptab.chrom[static_cast<std::size_t>(s)];
+            const int chr = snptab.chrom[idx(s)];
             if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;
-            const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+            const std::size_t src = idx(P) * idx(s);
             for (int p = 0; p < P; ++p) {
-                Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
-                Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+                Qk.push_back(dec.q[src + idx(p)]);
+                Vk.push_back(dec.v[src + idx(p)]);
             }
             chrom_kept.push_back(chr);
-            genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
-            physpos_kept.push_back(snptab.physpos[static_cast<std::size_t>(s)]);
+            genpos_kept.push_back(snptab.genpos_morgans[idx(s)]);
+            physpos_kept.push_back(snptab.physpos[idx(s)]);
         }
     }
     const long M_kept = static_cast<long>(chrom_kept.size());

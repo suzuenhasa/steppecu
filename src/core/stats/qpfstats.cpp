@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/domain/block_partition_rule.hpp"
+#include "core/internal/index_cast.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
@@ -30,6 +31,8 @@
 #include "io/snp_reader.hpp"
 
 namespace steppe {
+
+using core::idx;
 
 namespace {
 
@@ -85,27 +88,27 @@ void build_popcomb_and_design(int npop, std::vector<PopComb>& combs,
                 combs.push_back({q[rot[r][0]], q[rot[r][1]], q[rot[r][2]], q[rot[r][3]]});
     }
 
-    if (combs.size() > static_cast<std::size_t>(INT_MAX))
+    if (combs.size() > idx(INT_MAX))
         throw std::runtime_error("qpfstats: npopcomb overflows int (pop set too large)");
     npopcomb = static_cast<int>(combs.size());
 
-    x.assign(static_cast<std::size_t>(npopcomb) * static_cast<std::size_t>(npairs), 0.0);
+    x.assign(idx(npopcomb) * idx(npairs), 0.0);
     const auto set = [&](int c, int i, int j, double v) {
         if (i == j) return;
         const int p = pair_index(i, j, npop);
-        x[static_cast<std::size_t>(c) + static_cast<std::size_t>(npopcomb) *
-                                            static_cast<std::size_t>(p)] = v;
+        x[idx(c) + idx(npopcomb) *
+                                            idx(p)] = v;
     };
     for (int c = 0; c < npopcomb; ++c) {
-        const PopComb& pc = combs[static_cast<std::size_t>(c)];
+        const PopComb& pc = combs[idx(c)];
         set(c, pc.p1, pc.p4, 1.0);
         set(c, pc.p2, pc.p3, 1.0);
         set(c, pc.p1, pc.p3, -1.0);
         set(c, pc.p2, pc.p4, -1.0);
         if (pc.p1 == pc.p3 && pc.p2 == pc.p4) {
             for (int p = 0; p < npairs; ++p)
-                x[static_cast<std::size_t>(c) + static_cast<std::size_t>(npopcomb) *
-                                                    static_cast<std::size_t>(p)] *= 2.0;
+                x[idx(c) + idx(npopcomb) *
+                                                    idx(p)] *= 2.0;
         }
     }
     for (double& v : x) v *= 0.5;
@@ -163,31 +166,31 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     std::vector<double> physpos_kept;
     if (resident) {
         ddr = be.decode_af_compact_autosome(
-            view, std::span<const int>(snptab.chrom.data(), static_cast<std::size_t>(M)),
-            std::span<const double>(snptab.genpos_morgans.data(), static_cast<std::size_t>(M)),
-            std::span<const double>(snptab.physpos.data(), static_cast<std::size_t>(M)),
+            view, std::span<const int>(snptab.chrom.data(), idx(M)),
+            std::span<const double>(snptab.genpos_morgans.data(), idx(M)),
+            std::span<const double>(snptab.physpos.data(), idx(M)),
             kAutosomeChromMin, kAutosomeChromMax);
         chrom_kept = ddr.chrom_kept;
         genpos_kept = ddr.genpos_kept;
         physpos_kept = ddr.physpos_kept;
     } else {
         const DecodeResult dec = be.decode_af(view);
-        Qk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-        Vk.reserve(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
-        chrom_kept.reserve(static_cast<std::size_t>(M));
-        genpos_kept.reserve(static_cast<std::size_t>(M));
-        physpos_kept.reserve(static_cast<std::size_t>(M));
+        Qk.reserve(idx(P) * idx(M));
+        Vk.reserve(idx(P) * idx(M));
+        chrom_kept.reserve(idx(M));
+        genpos_kept.reserve(idx(M));
+        physpos_kept.reserve(idx(M));
         for (long s = 0; s < M; ++s) {
-            const int chr = snptab.chrom[static_cast<std::size_t>(s)];
+            const int chr = snptab.chrom[idx(s)];
             if (chr < kAutosomeChromMin || chr > kAutosomeChromMax) continue;
-            const std::size_t src = static_cast<std::size_t>(P) * static_cast<std::size_t>(s);
+            const std::size_t src = idx(P) * idx(s);
             for (int p = 0; p < P; ++p) {
-                Qk.push_back(dec.q[src + static_cast<std::size_t>(p)]);
-                Vk.push_back(dec.v[src + static_cast<std::size_t>(p)]);
+                Qk.push_back(dec.q[src + idx(p)]);
+                Vk.push_back(dec.v[src + idx(p)]);
             }
             chrom_kept.push_back(chr);
-            genpos_kept.push_back(snptab.genpos_morgans[static_cast<std::size_t>(s)]);
-            physpos_kept.push_back(snptab.physpos[static_cast<std::size_t>(s)]);
+            genpos_kept.push_back(snptab.genpos_morgans[idx(s)]);
+            physpos_kept.push_back(snptab.physpos[idx(s)]);
         }
     }
     const long M_kept = static_cast<long>(chrom_kept.size());
@@ -201,10 +204,10 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
 
     const std::vector<core::BlockRange> ranges = core::block_ranges(
         std::span<const int>(partition.block_id), M_kept, n_block);
-    std::vector<int> block_lengths(static_cast<std::size_t>(n_block), 0);
+    std::vector<int> block_lengths(idx(n_block), 0);
     for (int b = 0; b < n_block; ++b)
-        block_lengths[static_cast<std::size_t>(b)] =
-            static_cast<int>(ranges[static_cast<std::size_t>(b)].size());
+        block_lengths[idx(b)] =
+            static_cast<int>(ranges[idx(b)].size());
 
     std::vector<PopComb> combs;
     std::vector<double> x;
@@ -212,7 +215,7 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     build_popcomb_and_design(npop, combs, x, npopcomb, npairs);
 
     std::vector<int> flat;
-    flat.reserve(static_cast<std::size_t>(npopcomb) * 4);
+    flat.reserve(idx(npopcomb) * 4);
     for (const PopComb& pc : combs) {
         flat.push_back(pc.p1); flat.push_back(pc.p2); flat.push_back(pc.p3); flat.push_back(pc.p4);
     }
@@ -231,37 +234,37 @@ QpfstatsResult run_qpfstats(const std::string& geno, const std::string& snp,
     F2BlockTensor& T = res.f2;
     T.P = npop;
     T.n_block = n_block;
-    const std::size_t slab = static_cast<std::size_t>(npop) * static_cast<std::size_t>(npop);
-    T.f2.assign(slab * static_cast<std::size_t>(n_block), 0.0);
-    T.vpair.assign(slab * static_cast<std::size_t>(n_block), 0.0);
-    T.block_sizes.assign(static_cast<std::size_t>(n_block), 0);
-    const std::size_t np = static_cast<std::size_t>(npairs);
+    const std::size_t slab = idx(npop) * idx(npop);
+    T.f2.assign(slab * idx(n_block), 0.0);
+    T.vpair.assign(slab * idx(n_block), 0.0);
+    T.block_sizes.assign(idx(n_block), 0);
+    const std::size_t np = idx(npairs);
     for (int b = 0; b < n_block; ++b) {
-        T.block_sizes[static_cast<std::size_t>(b)] =
-            block_lengths[static_cast<std::size_t>(b)];
-        const std::size_t boff = slab * static_cast<std::size_t>(b);
+        T.block_sizes[idx(b)] =
+            block_lengths[idx(b)];
+        const std::size_t boff = slab * idx(b);
         for (int i = 0; i < npop; ++i) {
             for (int j = i + 1; j < npop; ++j) {
                 const int p = pair_index(i, j, npop);
-                const double v = sm.b[static_cast<std::size_t>(p) +
-                                      np * static_cast<std::size_t>(b)] +
-                                 sm.recenter_shift[static_cast<std::size_t>(p)];
-                T.f2[boff + static_cast<std::size_t>(i) +
-                     static_cast<std::size_t>(npop) * static_cast<std::size_t>(j)] = v;
-                T.f2[boff + static_cast<std::size_t>(j) +
-                     static_cast<std::size_t>(npop) * static_cast<std::size_t>(i)] = v;
+                const double v = sm.b[idx(p) +
+                                      np * idx(b)] +
+                                 sm.recenter_shift[idx(p)];
+                T.f2[boff + idx(i) +
+                     idx(npop) * idx(j)] = v;
+                T.f2[boff + idx(j) +
+                     idx(npop) * idx(i)] = v;
             }
         }
     }
 
     for (int b = 0; b < n_block; ++b) {
-        const double bs = static_cast<double>(T.block_sizes[static_cast<std::size_t>(b)]);
-        const std::size_t boff = slab * static_cast<std::size_t>(b);
+        const double bs = static_cast<double>(T.block_sizes[idx(b)]);
+        const std::size_t boff = slab * idx(b);
         for (int i = 0; i < npop; ++i)
             for (int j = 0; j < npop; ++j)
                 if (i != j)
-                    T.vpair[boff + static_cast<std::size_t>(i) +
-                            static_cast<std::size_t>(npop) * static_cast<std::size_t>(j)] = bs;
+                    T.vpair[boff + idx(i) +
+                            idx(npop) * idx(j)] = bs;
     }
 
     res.status = Status::Ok;

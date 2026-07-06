@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "steppe/qpgraph.hpp"
 
 namespace steppe::core::qpadm {
@@ -76,14 +77,14 @@ struct QpGraphModel {
 inline void fill_pwts_centered(const QpGraphModel& m, const double* theta,
                                std::vector<double>& pwts_c) {
     const int ne = m.nedge_norm, np = m.npop;
-    std::vector<double> path_w(static_cast<std::size_t>(m.npath), 1.0);
+    std::vector<double> path_w(idx(m.npath), 1.0);
     for (std::size_t t = 0; t < m.pae_path.size(); ++t) {
         const int pi = m.pae_path[t];
         const int id = m.pae_admixedge[t];
         const int j = (id - 1) / 2;
         const double w = theta[j];
         const double v = (id % 2 == 1) ? w : (1.0 - w);
-        path_w[static_cast<std::size_t>(pi)] *= v;
+        path_w[idx(pi)] *= v;
     }
     std::vector<double> pwts = m.pwts0;
     for (std::size_t a = 0; a < m.pe_edge.size(); ++a) {
@@ -94,17 +95,17 @@ inline void fill_pwts_centered(const QpGraphModel& m, const double* theta,
         if (!first) continue;
         double sum = 0.0;
         for (std::size_t b = a; b < m.pe_edge.size(); ++b)
-            if (m.pe_edge[b] == e && m.pe_leaf[b] == leaf) sum += path_w[static_cast<std::size_t>(m.pe_path[b])];
-        pwts[static_cast<std::size_t>(e) + static_cast<std::size_t>(ne) * static_cast<std::size_t>(leaf)] = sum;
+            if (m.pe_edge[b] == e && m.pe_leaf[b] == leaf) sum += path_w[idx(m.pe_path[b])];
+        pwts[idx(e) + idx(ne) * idx(leaf)] = sum;
     }
-    pwts_c.assign(static_cast<std::size_t>(ne) * static_cast<std::size_t>(np - 1), 0.0);
+    pwts_c.assign(idx(ne) * idx(np - 1), 0.0);
     int col = 0;
     for (int leaf = 0; leaf < np; ++leaf) {
         if (leaf == m.base_leaf) continue;
         for (int e = 0; e < ne; ++e) {
-            const double v = pwts[static_cast<std::size_t>(e) + static_cast<std::size_t>(ne) * static_cast<std::size_t>(leaf)] -
-                             pwts[static_cast<std::size_t>(e) + static_cast<std::size_t>(ne) * static_cast<std::size_t>(m.base_leaf)];
-            pwts_c[static_cast<std::size_t>(e) + static_cast<std::size_t>(ne) * static_cast<std::size_t>(col)] = v;
+            const double v = pwts[idx(e) + idx(ne) * idx(leaf)] -
+                             pwts[idx(e) + idx(ne) * idx(m.base_leaf)];
+            pwts_c[idx(e) + idx(ne) * idx(col)] = v;
         }
         ++col;
     }

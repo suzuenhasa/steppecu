@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
+
 namespace steppe::core {
 
 // LinAlgStatus — reference §3
@@ -21,8 +23,8 @@ struct LinAlgStatus {
 
 // Internal building blocks — reference §8
 [[nodiscard]] inline std::size_t cm_index(int i, int j, int ld) noexcept {
-    return static_cast<std::size_t>(i) +
-           static_cast<std::size_t>(ld) * static_cast<std::size_t>(j);
+    return idx(i) +
+           idx(ld) * idx(j);
 }
 
 inline void apply_rotation(double* x, double* y, int len, double c, double s) noexcept {
@@ -51,22 +53,22 @@ inline void lu_solve_rhs(const At& at, int n, std::vector<double>& y,
                          std::vector<double>& out, std::size_t out_offset,
                          std::size_t out_stride) {
     for (int i = 0; i < n; ++i) {
-        double s = y[static_cast<std::size_t>(i)];
-        for (int j = 0; j < i; ++j) s -= at(i, j) * y[static_cast<std::size_t>(j)];
-        y[static_cast<std::size_t>(i)] = s;
+        double s = y[idx(i)];
+        for (int j = 0; j < i; ++j) s -= at(i, j) * y[idx(j)];
+        y[idx(i)] = s;
     }
     for (int i = n - 1; i >= 0; --i) {
-        double s = y[static_cast<std::size_t>(i)];
+        double s = y[idx(i)];
         for (int j = i + 1; j < n; ++j)
-            s -= at(i, j) * out[out_offset + static_cast<std::size_t>(j) * out_stride];
-        out[out_offset + static_cast<std::size_t>(i) * out_stride] = s / at(i, i);
+            s -= at(i, j) * out[out_offset + idx(j) * out_stride];
+        out[out_offset + idx(i) * out_stride] = s / at(i, i);
     }
 }
 
 [[nodiscard]] inline LinAlgStatus lu_factor(std::vector<double>& a, int n,
                                             std::vector<int>& piv) {
-    piv.resize(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) piv[static_cast<std::size_t>(i)] = i;
+    piv.resize(idx(n));
+    for (int i = 0; i < n; ++i) piv[idx(i)] = i;
     const auto at = [&](int i, int j) -> double& { return a[cm_index(i, j, n)]; };
     for (int k = 0; k < n; ++k) {
         int p = k;
@@ -80,9 +82,9 @@ inline void lu_solve_rhs(const At& at, int n, std::vector<double>& y,
             for (int j = 0; j < n; ++j) {
                 double t = at(k, j); at(k, j) = at(p, j); at(p, j) = t;
             }
-            int tp = piv[static_cast<std::size_t>(k)];
-            piv[static_cast<std::size_t>(k)] = piv[static_cast<std::size_t>(p)];
-            piv[static_cast<std::size_t>(p)] = tp;
+            int tp = piv[idx(k)];
+            piv[idx(k)] = piv[idx(p)];
+            piv[idx(p)] = tp;
         }
         const double inv_pivot = 1.0 / at(k, k);
         for (int i = k + 1; i < n; ++i) {
@@ -103,10 +105,10 @@ inline void lu_solve_rhs(const At& at, int n, std::vector<double>& y,
     const LinAlgStatus st = lu_factor(lu, n, piv);
     if (!st.ok) return st;
     const auto at = [&](int i, int j) -> double { return lu[cm_index(i, j, n)]; };
-    std::vector<double> y(static_cast<std::size_t>(n));
+    std::vector<double> y(idx(n));
     for (int i = 0; i < n; ++i)
-        y[static_cast<std::size_t>(i)] = b[static_cast<std::size_t>(piv[static_cast<std::size_t>(i)])];
-    x.assign(static_cast<std::size_t>(n), 0.0);
+        y[idx(i)] = b[idx(piv[idx(i)])];
+    x.assign(idx(n), 0.0);
     lu_solve_rhs(at, n, y, x, /*out_offset=*/0, /*out_stride=*/1);
     return {true};
 }
@@ -119,12 +121,12 @@ inline void lu_solve_rhs(const At& at, int n, std::vector<double>& y,
     const LinAlgStatus st = lu_factor(lu, n, piv);
     if (!st.ok) return st;
     const auto at = [&](int i, int j) -> double { return lu[cm_index(i, j, n)]; };
-    inv.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
-    std::vector<double> y(static_cast<std::size_t>(n));
+    inv.assign(idx(n) * idx(n), 0.0);
+    std::vector<double> y(idx(n));
     for (int col = 0; col < n; ++col) {
         for (int i = 0; i < n; ++i) {
-            const int src = piv[static_cast<std::size_t>(i)];
-            y[static_cast<std::size_t>(i)] = (src == col) ? 1.0 : 0.0;
+            const int src = piv[idx(i)];
+            y[idx(i)] = (src == col) ? 1.0 : 0.0;
         }
         lu_solve_rhs(at, n, y, inv, /*out_offset=*/cm_index(0, col, n), /*out_stride=*/1);
     }
@@ -143,7 +145,7 @@ struct SvdResult {
 
 [[nodiscard]] inline SvdResult jacobi_svd(const std::vector<double>& A, int m, int n) {
     std::vector<double> W = A;
-    std::vector<double> Vfull(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
+    std::vector<double> Vfull(idx(n) * idx(n), 0.0);
     for (int i = 0; i < n; ++i) Vfull[cm_index(i, i, n)] = 1.0;
 
     const auto Wcol = [&](int j) -> double* { return &W[cm_index(0, j, m)]; };
@@ -178,29 +180,29 @@ struct SvdResult {
     }
 
     const int k = (m < n) ? m : n;
-    std::vector<double> sigma(static_cast<std::size_t>(n));
+    std::vector<double> sigma(idx(n));
     for (int j = 0; j < n; ++j)
-        sigma[static_cast<std::size_t>(j)] = std::sqrt(col_sqnorm(Wcol(j), m));
-    std::vector<int> order(static_cast<std::size_t>(n));
-    for (int j = 0; j < n; ++j) order[static_cast<std::size_t>(j)] = j;
+        sigma[idx(j)] = std::sqrt(col_sqnorm(Wcol(j), m));
+    std::vector<int> order(idx(n));
+    for (int j = 0; j < n; ++j) order[idx(j)] = j;
     for (int i = 0; i < n - 1; ++i)
         for (int j = i + 1; j < n; ++j)
-            if (sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(j)])] >
-                sigma[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])]) {
-                int tmp_idx = order[static_cast<std::size_t>(i)];
-                order[static_cast<std::size_t>(i)] = order[static_cast<std::size_t>(j)];
-                order[static_cast<std::size_t>(j)] = tmp_idx;
+            if (sigma[idx(order[idx(j)])] >
+                sigma[idx(order[idx(i)])]) {
+                int tmp_idx = order[idx(i)];
+                order[idx(i)] = order[idx(j)];
+                order[idx(j)] = tmp_idx;
             }
 
     SvdResult out;
     out.m = m; out.n = n; out.k = k;
-    out.S.resize(static_cast<std::size_t>(k));
-    out.U.assign(static_cast<std::size_t>(m) * static_cast<std::size_t>(k), 0.0);
-    out.V.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(k), 0.0);
+    out.S.resize(idx(k));
+    out.U.assign(idx(m) * idx(k), 0.0);
+    out.V.assign(idx(n) * idx(k), 0.0);
     for (int jj = 0; jj < k; ++jj) {
-        const int src = order[static_cast<std::size_t>(jj)];
-        const double sv = sigma[static_cast<std::size_t>(src)];
-        out.S[static_cast<std::size_t>(jj)] = sv;
+        const int src = order[idx(jj)];
+        const double sv = sigma[idx(src)];
+        out.S[idx(jj)] = sv;
         const double* vsrc = &Vfull[cm_index(0, src, n)];
         for (int i = 0; i < n; ++i) out.V[cm_index(i, jj, n)] = vsrc[i];
         const double* wsrc = &W[cm_index(0, src, m)];

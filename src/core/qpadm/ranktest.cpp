@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "core/internal/index_cast.hpp"
 #include "core/qpadm/qpadm_bounds.hpp"
 #include "steppe/error.hpp"
 
@@ -44,31 +45,31 @@ void reduce_rows(const F4Blocks& x, const JackknifeCov& cov,
     x_reduced.nl = nl_red;
     x_reduced.nr = nr;
     x_reduced.n_block = x.n_block;
-    x_reduced.x_total.assign(static_cast<std::size_t>(m_red), 0.0);
+    x_reduced.x_total.assign(idx(m_red), 0.0);
 
-    std::vector<int> ind(static_cast<std::size_t>(m_red), 0);
+    std::vector<int> ind(idx(m_red), 0);
     for (int ii = 0; ii < nl_red; ++ii) {
-        const int i = surv[static_cast<std::size_t>(ii)];
+        const int i = surv[idx(ii)];
         for (int j = 0; j < nr; ++j) {
             const int dst = j + nr * ii;
             const int src = j + nr * i;
-            x_reduced.x_total[static_cast<std::size_t>(dst)] =
-                x.x_total[static_cast<std::size_t>(src)];
-            ind[static_cast<std::size_t>(dst)] = src;
+            x_reduced.x_total[idx(dst)] =
+                x.x_total[idx(src)];
+            ind[idx(dst)] = src;
         }
     }
     cov_reduced.m = m_red;
     cov_reduced.status = cov.status;
-    cov_reduced.Qinv.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
-    cov_reduced.Q.assign(static_cast<std::size_t>(m_red) * static_cast<std::size_t>(m_red), 0.0);
-    const std::size_t m_full_sz = static_cast<std::size_t>(m_full);
-    const std::size_t m_red_sz = static_cast<std::size_t>(m_red);
+    cov_reduced.Qinv.assign(idx(m_red) * idx(m_red), 0.0);
+    cov_reduced.Q.assign(idx(m_red) * idx(m_red), 0.0);
+    const std::size_t m_full_sz = idx(m_full);
+    const std::size_t m_red_sz = idx(m_red);
     for (int a = 0; a < m_red; ++a) {
-        const std::size_t ia = static_cast<std::size_t>(ind[static_cast<std::size_t>(a)]);
-        const std::size_t a_sz = static_cast<std::size_t>(a);
+        const std::size_t ia = idx(ind[idx(a)]);
+        const std::size_t a_sz = idx(a);
         for (int b = 0; b < m_red; ++b) {
-            const std::size_t src = ia + m_full_sz * static_cast<std::size_t>(ind[static_cast<std::size_t>(b)]);
-            const std::size_t dst = a_sz + m_red_sz * static_cast<std::size_t>(b);
+            const std::size_t src = ia + m_full_sz * idx(ind[idx(b)]);
+            const std::size_t dst = a_sz + m_red_sz * idx(b);
             cov_reduced.Qinv[dst] = cov.Qinv[src];
             if (!cov.Q.empty()) cov_reduced.Q[dst] = cov.Q[src];
         }
@@ -80,8 +81,8 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
                        int nl_full, int drop, const std::vector<int>& surv,
                        const QpAdmOptions& opts, const Precision& precision) {
     PopDropRow row;
-    row.pat.assign(static_cast<std::size_t>(nl_full), '0');
-    if (drop >= 0) row.pat[static_cast<std::size_t>(drop)] = '1';
+    row.pat.assign(idx(nl_full), '0');
+    if (drop >= 0) row.pat[idx(drop)] = '1';
     row.wt = (drop >= 0) ? 1 : 0;
 
     F4Blocks x_reduced; JackknifeCov cov_reduced;
@@ -90,19 +91,19 @@ PopDropRow popdrop_one(ComputeBackend& be, const F4Blocks& x, const JackknifeCov
 
     const int r_fit = nl_red - 1;
     const RankSweep rs = run_rank_sweep(be, x_reduced, cov_reduced, opts.rank_alpha, opts, precision);
-    const std::size_t ri = static_cast<std::size_t>(r_fit < 0 ? 0 : r_fit);
+    const std::size_t ri = idx(r_fit < 0 ? 0 : r_fit);
     row.f4rank = r_fit;
     row.dof = (ri < rs.dof.size()) ? rs.dof[ri] : qpadm_dof(x_reduced.nl, x_reduced.nr, r_fit);
     row.chisq = (ri < rs.chisq.size()) ? rs.chisq[ri] : 0.0;
     row.p = (ri < rs.p.size()) ? rs.p[ri] : 0.0;
     row.status = rs.status;
 
-    row.weight.assign(static_cast<std::size_t>(nl_full),
+    row.weight.assign(idx(nl_full),
                       std::numeric_limits<double>::quiet_NaN());
     const GlsWeights gw = gls_weights(be, x_reduced, cov_reduced, r_fit, opts, precision);
     if (gw.status == Status::Ok && gw.w.size() == surv.size()) {
         for (std::size_t s = 0; s < surv.size(); ++s)
-            row.weight[static_cast<std::size_t>(surv[s])] = gw.w[s];
+            row.weight[idx(surv[s])] = gw.w[s];
     }
     row.feasible = popdrop_feasible(row.weight);
     return row;
@@ -117,7 +118,7 @@ std::vector<PopDropRow> run_popdrop(ComputeBackend& be, const F4Blocks& x,
     const int nl_full = x.nl;
     std::vector<PopDropRow> rows;
     if (nl_full <= 0) return rows;
-    rows.reserve(static_cast<std::size_t>(nl_full) + 1);
+    rows.reserve(idx(nl_full) + 1);
 
     std::vector<int> all;
     for (int i = 0; i < nl_full; ++i) all.push_back(i);

@@ -19,7 +19,7 @@ namespace {
                                         std::span<const double> pos, long M,
                                         double window) {
     BlockPartition out;
-    out.block_id.resize(static_cast<std::size_t>(M));
+    out.block_id.resize(idx(M));
 
     double fpos = -1.0e20;
     int prev_chrom = -1;
@@ -71,7 +71,7 @@ BlockPartition assign_blocks(std::span<const int> chrom,
         return out;
     }
 
-    const bool have_physaxis = physpos.size() >= static_cast<std::size_t>(M) &&
+    const bool have_physaxis = physpos.size() >= idx(M) &&
                                bp_window > 0.0;
     if (have_physaxis && all_zero(genpos_morgans, M) && !all_zero(physpos, M)) {
         std::fprintf(stderr,
