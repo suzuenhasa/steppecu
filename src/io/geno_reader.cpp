@@ -433,6 +433,33 @@ void GenoReader::checked_alloc_snp_major(std::size_t tile_snps,
     }
 }
 
+// check_snp_major_range: shared snp_begin/snp_end/empty-partition guard preamble
+// for the four SNP-major readers (Guards 2-4). Keeps per-reader message bytes
+// identical via who (method tag) + begin_tag (the P0/P2/'' milestone prefix).
+void GenoReader::check_snp_major_range(const IndPartition& part,
+                                       std::size_t snp_begin,
+                                       std::size_t snp_end,
+                                       const char* who,
+                                       const char* begin_tag) const {
+    const std::string prefix = std::string("io::GenoReader::") + who + ": ";
+    if (snp_begin != 0) {
+        throw std::runtime_error(
+            prefix + begin_tag + "requires snp_begin == 0 "
+            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
+    }
+    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
+        throw std::runtime_error(
+            prefix + "SNP range [" +
+            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
+            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
+    }
+    if (part.groups.empty()) {
+        throw std::runtime_error(
+            prefix + "empty partition (no selected "
+            "populations) for " + path_);
+    }
+}
+
 // read_snp_major_tile: GENO SNP-major gather — reference §6
 SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
                                              std::size_t snp_begin,
@@ -443,22 +470,7 @@ SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
             "PACKEDANCESTRYMAP) path; this file is TGENO (individual-major) — read it "
             "via read_tile.");
     }
-    if (snp_begin != 0) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: P0 requires snp_begin == 0 "
-            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
-    }
-    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: SNP range [" +
-            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
-            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
-    }
-    if (part.groups.empty()) {
-        throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: empty partition (no selected "
-            "populations) for " + path_);
-    }
+    check_snp_major_range(part, snp_begin, snp_end, "read_snp_major_tile", "P0 ");
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
@@ -507,22 +519,8 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
             std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
-    if (snp_begin != 0) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: P0 requires snp_begin == 0 "
-            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
-    }
-    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: SNP range [" +
-            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
-            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
-    }
-    if (part.groups.empty()) {
-        throw std::runtime_error(
-            "io::GenoReader::read_eigenstrat_snp_major_tile: empty partition (no selected "
-            "populations) for " + path_);
-    }
+    check_snp_major_range(part, snp_begin, snp_end,
+                          "read_eigenstrat_snp_major_tile", "P0 ");
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
@@ -589,22 +587,8 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
             std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
-    if (snp_begin != 0) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: P2 requires snp_begin == 0 "
-            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
-    }
-    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: SNP range [" +
-            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
-            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
-    }
-    if (part.groups.empty()) {
-        throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: empty partition (no selected "
-            "populations) for " + path_);
-    }
+    check_snp_major_range(part, snp_begin, snp_end,
+                          "read_plink_snp_major_tile", "P2 ");
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
@@ -663,22 +647,8 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
             std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
-    if (snp_begin != 0) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: requires snp_begin == 0 "
-            "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
-    }
-    if (snp_end <= snp_begin || snp_end > header_.n_snp) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: SNP range [" +
-            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
-            ") out of bounds (n_snp=" + std::to_string(header_.n_snp) + ")");
-    }
-    if (part.groups.empty()) {
-        throw std::runtime_error(
-            "io::GenoReader::read_ancestrymap_snp_major_tile: empty partition (no selected "
-            "populations) for " + path_);
-    }
+    check_snp_major_range(part, snp_begin, snp_end,
+                          "read_ancestrymap_snp_major_tile", "");
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;

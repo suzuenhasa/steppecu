@@ -34,49 +34,6 @@ namespace {
 
 namespace cfg = steppe::config;
 
-[[nodiscard]] bool build_quartet_names(const cfg::RunConfig& config,
-                                       std::vector<std::array<std::string, 4>>& quartets,
-                                       std::string& err) {
-    const auto& p1 = config.pop1();
-    const auto& p2 = config.pop2();
-    const auto& p3 = config.pop3();
-    const auto& p4 = config.pop4();
-    const bool have_cols = !p1.empty() || !p2.empty() || !p3.empty() || !p4.empty();
-
-    if (have_cols) {
-        const std::size_t n = p1.size();
-        if (p2.size() != n || p3.size() != n || p4.size() != n) {
-            err = "--pop1/--pop2/--pop3/--pop4 must be ROW-ALIGNED (same length); got " +
-                  std::to_string(p1.size()) + "/" + std::to_string(p2.size()) + "/" +
-                  std::to_string(p3.size()) + "/" + std::to_string(p4.size());
-            return false;
-        }
-        if (n == 0) { err = "--pop1/--pop2/--pop3/--pop4 are empty"; return false; }
-        quartets.reserve(n);
-        for (std::size_t k = 0; k < n; ++k)
-            quartets.push_back({p1[k], p2[k], p3[k], p4[k]});
-        return true;
-    }
-
-    const auto& pops = config.pops();
-    if (pops.empty()) {
-        err = "f4 needs quartets: either --pop1/--pop2/--pop3/--pop4 (row-aligned) or "
-              "--pops p1,p2,p3,p4[,...] (names in groups of 4)";
-        return false;
-    }
-    if (pops.size() % 4 != 0) {
-        err = "--pops for f4 must be a multiple of 4 names (each quartet is p1,p2,p3,p4); "
-              "got " + std::to_string(pops.size());
-        return false;
-    }
-    const std::size_t n = pops.size() / 4;
-    quartets.reserve(n);
-    for (std::size_t k = 0; k < n; ++k)
-        quartets.push_back({pops[4 * k + 0], pops[4 * k + 1],
-                            pops[4 * k + 2], pops[4 * k + 3]});
-    return true;
-}
-
 }  // namespace
 
 int run_f4_command(const cfg::RunConfig& config) {
@@ -96,7 +53,7 @@ int run_f4_command(const cfg::RunConfig& config) {
 
     std::vector<std::array<std::string, 4>> quartet_names;
     std::string qerr;
-    if (!build_quartet_names(config, quartet_names, qerr)) {
+    if (!build_quartet_names(config, quartet_names, qerr, "f4", "quartet")) {
         std::fprintf(stderr, "steppe f4: %s\n", qerr.c_str());
         return cfg::kExitInvalidConfig;
     }

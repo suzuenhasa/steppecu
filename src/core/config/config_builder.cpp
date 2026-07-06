@@ -15,9 +15,12 @@
 #include <cctype>
 #include <charconv>
 #include <cstdlib>
+#include <initializer_list>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace steppe::config {
@@ -69,6 +72,18 @@ namespace {
     if (ec != std::errc{} || ptr != last) return false;
     out = v;
     return true;
+}
+
+// Case-folded token -> enum lookup over a fixed {token, value} table. The token
+// is expected already to_lower(trim())'d; per-flag help text stays at the call
+// site. Reference §3
+template <typename E>
+[[nodiscard]] std::optional<E> parse_enum(
+    std::string_view token, std::initializer_list<std::pair<std::string_view, E>> table) {
+    for (const auto& [name, value] : table) {
+        if (token == name) return value;
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] std::optional<std::string> env(const char* key) {
@@ -264,18 +279,16 @@ BuildResult<RunConfig> ConfigBuilder::build() {
 
     if (merged_.tier.has_value()) {
         const std::string t = to_lower(trim(*merged_.tier));
-        if (t == "auto") {
-            cfg.device_.force_tier = DeviceConfig::ForceTier::Auto;
-        } else if (t == "resident") {
-            cfg.device_.force_tier = DeviceConfig::ForceTier::Resident;
-        } else if (t == "host") {
-            cfg.device_.force_tier = DeviceConfig::ForceTier::HostRam;
-        } else if (t == "disk") {
-            cfg.device_.force_tier = DeviceConfig::ForceTier::Disk;
-        } else {
+        const auto tier = parse_enum<DeviceConfig::ForceTier>(
+            t, {{"auto", DeviceConfig::ForceTier::Auto},
+                {"resident", DeviceConfig::ForceTier::Resident},
+                {"host", DeviceConfig::ForceTier::HostRam},
+                {"disk", DeviceConfig::ForceTier::Disk}});
+        if (!tier) {
             return fail("--tier '" + *merged_.tier +
                         "' is unknown (use auto | resident | host | disk)");
         }
+        cfg.device_.force_tier = *tier;
     }
 
     if (merged_.format.has_value()) {
@@ -347,16 +360,15 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
     if (merged_.strand_mode.has_value()) {
         const std::string s = to_lower(trim(*merged_.strand_mode));
-        if (s == "drop") {
-            flt.strand_mode = StrandMode::Drop;
-        } else if (s == "keep") {
-            flt.strand_mode = StrandMode::Keep;
-        } else if (s == "flip") {
-            flt.strand_mode = StrandMode::Flip;
-        } else {
+        const auto mode = parse_enum<StrandMode>(
+            s, {{"drop", StrandMode::Drop},
+                {"keep", StrandMode::Keep},
+                {"flip", StrandMode::Flip}});
+        if (!mode) {
             return fail("--strand-mode '" + *merged_.strand_mode +
                         "' is unknown (use drop | keep | flip)");
         }
+        flt.strand_mode = *mode;
     }
 
     {

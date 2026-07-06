@@ -62,6 +62,16 @@ public:
     ~GenoReader() = default;
 
 private:
+    // check_snp_major_range: shared snp_begin/snp_end/empty-partition guard preamble
+    // for the four SNP-major readers. who = "io::GenoReader::<method>" method tag;
+    // begin_tag = the per-reader milestone prefix on the snp_begin message
+    // ("P0 "/"P2 "/"") so its bytes stay identical. Throws std::runtime_error.
+    void check_snp_major_range(const IndPartition& part,
+                               std::size_t snp_begin,
+                               std::size_t snp_end,
+                               const char* who,
+                               const char* begin_tag) const;
+
     // Private SNP-major helpers: build_selection + checked_alloc_snp_major — reference §11
     void build_selection(const IndPartition& part,
                          std::size_t src_bpr,
