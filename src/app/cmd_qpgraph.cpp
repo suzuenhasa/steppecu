@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_common.hpp"
 #include "app/cmd_emit.hpp"
 #include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_io.hpp"
@@ -133,13 +134,7 @@ template <typename Result, typename RunFit>
                                                      Result& result, RunFit&& run_fit) {
     try {
         device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe %s: no CUDA device available (steppe is a GPU "
-                         "product; a CUDA-capable GPU is required)\n",
-                         prefix);
-            return cfg::kExitRuntimeError;
-        }
+        if (!require_first_gpu(resources, prefix)) return cfg::kExitRuntimeError;
         const int device_id = resources.gpus.front().device_id;
         device::DeviceF2Blocks dev_f2 =
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);

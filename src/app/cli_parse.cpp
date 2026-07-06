@@ -127,6 +127,15 @@ void add_fudge_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<double>("--fudge", [&a](double v) { a.fudge = v; }, help);
 }
 
+// Comma-delimited string-list option -> target vector; the shared shape behind
+// every --pop/--pops/--left/--right flag.
+void add_str_list_flag(CLI::App* sub, const char* name, std::vector<std::string>& target,
+                       const char* help) {
+    sub->add_option_function<std::vector<std::string>>(
+            name, [&target](const std::vector<std::string>& v) { target = v; }, help)
+        ->delimiter(',');
+}
+
 void add_f2_dir_flag(CLI::App* sub, CliArgs& a, const char* help) {
     sub->add_option_function<std::string>(
         "--f2-dir", [&a](const std::string& v) { a.f2_dir = v; }, help);
@@ -138,91 +147,45 @@ void add_target_flag(CLI::App* sub, CliArgs& a) {
 }
 
 void add_right_flag(CLI::App* sub, CliArgs& a, const char* help) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--right", [&a](const std::vector<std::string>& v) { a.right = v; }, help)
-        ->delimiter(',');
+    add_str_list_flag(sub, "--right", a.right, help);
 }
 
 void add_left_flag(CLI::App* sub, CliArgs& a, const char* help) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--left", [&a](const std::vector<std::string>& v) { a.left = v; }, help)
-        ->delimiter(',');
+    add_str_list_flag(sub, "--left", a.left, help);
 }
 
 void add_pops_flag(CLI::App* sub, CliArgs& a, const char* help) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; }, help)
-        ->delimiter(',');
+    add_str_list_flag(sub, "--pops", a.pops, help);
 }
 
 // Population inputs for the standalone f-statistics — reference §6
 void add_f4_quartet_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
-            "Quartet column 1 (p1, the f4 target/first pop), row-aligned with --pop2/3/4")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
-            "Quartet column 2 (p2)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
-            "Quartet column 3 (p3, the f4 R0)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop4", [&a](const std::vector<std::string>& v) { a.pop4 = v; },
-            "Quartet column 4 (p4, the f4 R1)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
-            "Quartet(s) as names in groups of 4: p1,p2,p3,p4[,p1,p2,p3,p4,...]")
-        ->delimiter(',');
+    add_str_list_flag(sub, "--pop1", a.pop1,
+                      "Quartet column 1 (p1, the f4 target/first pop), row-aligned with --pop2/3/4");
+    add_str_list_flag(sub, "--pop2", a.pop2, "Quartet column 2 (p2)");
+    add_str_list_flag(sub, "--pop3", a.pop3, "Quartet column 3 (p3, the f4 R0)");
+    add_str_list_flag(sub, "--pop4", a.pop4, "Quartet column 4 (p4, the f4 R1)");
+    add_str_list_flag(sub, "--pops", a.pops,
+                      "Quartet(s) as names in groups of 4: p1,p2,p3,p4[,p1,p2,p3,p4,...]");
 }
 
 void add_f3_triple_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
-            "Triple column 1 (C, the f3 apex/outgroup/target), row-aligned with --pop2/3")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
-            "Triple column 2 (A, the f3 first arg)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
-            "Triple column 3 (B, the f3 second arg)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
-            "Triple(s) as names in groups of 3: C,A,B[,C,A,B,...]")
-        ->delimiter(',');
+    add_str_list_flag(sub, "--pop1", a.pop1,
+                      "Triple column 1 (C, the f3 apex/outgroup/target), row-aligned with --pop2/3");
+    add_str_list_flag(sub, "--pop2", a.pop2, "Triple column 2 (A, the f3 first arg)");
+    add_str_list_flag(sub, "--pop3", a.pop3, "Triple column 3 (B, the f3 second arg)");
+    add_str_list_flag(sub, "--pops", a.pops,
+                      "Triple(s) as names in groups of 3: C,A,B[,C,A,B,...]");
 }
 
 void add_f4ratio_flags(CLI::App* sub, CliArgs& a) {
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop1", [&a](const std::vector<std::string>& v) { a.pop1 = v; },
-            "5-tuple column 1 (p1), row-aligned with --pop2/3/4/5")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop2", [&a](const std::vector<std::string>& v) { a.pop2 = v; },
-            "5-tuple column 2 (p2)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop3", [&a](const std::vector<std::string>& v) { a.pop3 = v; },
-            "5-tuple column 3 (p3, the numerator 3rd slot)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop4", [&a](const std::vector<std::string>& v) { a.pop4 = v; },
-            "5-tuple column 4 (p4, the shared 4th slot)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pop5", [&a](const std::vector<std::string>& v) { a.pop5 = v; },
-            "5-tuple column 5 (p5, the denominator 3rd slot)")
-        ->delimiter(',');
-    sub->add_option_function<std::vector<std::string>>(
-            "--pops", [&a](const std::vector<std::string>& v) { a.pops = v; },
-            "Tuple(s) as names in groups of 5: p1,p2,p3,p4,p5[,...]")
-        ->delimiter(',');
+    add_str_list_flag(sub, "--pop1", a.pop1, "5-tuple column 1 (p1), row-aligned with --pop2/3/4/5");
+    add_str_list_flag(sub, "--pop2", a.pop2, "5-tuple column 2 (p2)");
+    add_str_list_flag(sub, "--pop3", a.pop3, "5-tuple column 3 (p3, the numerator 3rd slot)");
+    add_str_list_flag(sub, "--pop4", a.pop4, "5-tuple column 4 (p4, the shared 4th slot)");
+    add_str_list_flag(sub, "--pop5", a.pop5, "5-tuple column 5 (p5, the denominator 3rd slot)");
+    add_str_list_flag(sub, "--pops", a.pops,
+                      "Tuple(s) as names in groups of 5: p1,p2,p3,p4,p5[,...]");
 }
 
 // The f-statistic sweep flags — reference §7

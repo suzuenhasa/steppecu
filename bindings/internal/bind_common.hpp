@@ -182,18 +182,6 @@ inline steppe::QpAdmOptions make_options(double fudge, int als_iterations, int r
 }
 
 // Result structs to Python dicts — reference §9
-inline const char* status_str(steppe::Status s) {
-    switch (s) {
-        case steppe::Status::Ok: return "ok";
-        case steppe::Status::DeviceOom: return "device_oom";
-        case steppe::Status::RankDeficient: return "rank_deficient";
-        case steppe::Status::NonSpdCovariance: return "non_spd_covariance";
-        case steppe::Status::ChisqUndefined: return "chisq_undefined";
-        case steppe::Status::InvalidConfig: return "invalid_config";
-    }
-    return "ok";
-}
-
 inline const char* precision_str(steppe::Precision::Kind k) {
     switch (k) {
         case steppe::Precision::Kind::Fp64: return "fp64";
@@ -201,6 +189,13 @@ inline const char* precision_str(steppe::Precision::Kind k) {
         case steppe::Precision::Kind::Tf32: return "tf32";
     }
     return "fp64";
+}
+
+// Shared status/precision tail: the two string fields every quartet/fit dict carries
+template <class R>
+void put_status_precision(nb::dict& d, const R& r) {
+    d["status"] = steppe::status_str(r.status);
+    d["precision"] = precision_str(r.precision_tag);
 }
 
 inline nb::dict result_to_dict(const steppe::QpAdmResult& r) {
@@ -233,8 +228,7 @@ inline nb::dict result_to_dict(const steppe::QpAdmResult& r) {
         feas[i] = (r.popdrop_feasible[i] != 0);
     d["popdrop_feasible"] = feas;
 
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
+    put_status_precision(d, r);
     d["model_index"] = r.model_index;
     return d;
 }
@@ -253,39 +247,32 @@ inline nb::dict qpwave_to_dict(const steppe::QpWaveResult& r) {
     d["rankdrop_p_nested"] = r.rankdrop_p_nested;
     d["f4rank"] = r.f4rank;
     d["est_rank"] = r.est_rank;
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
+    put_status_precision(d, r);
+    return d;
+}
+
+// Shared p1..p4 quartet builder (est/se/z/p + status/precision) — F4Result ≡ DstatResult
+template <class R>
+nb::dict quartet_to_dict(const R& r, const std::vector<std::string>& pops) {
+    nb::dict d;
+    d["pop1"] = names_of(r.p1, pops);
+    d["pop2"] = names_of(r.p2, pops);
+    d["pop3"] = names_of(r.p3, pops);
+    d["pop4"] = names_of(r.p4, pops);
+    d["est"] = r.est;
+    d["se"] = r.se;
+    d["z"] = r.z;
+    d["p"] = r.p;
+    put_status_precision(d, r);
     return d;
 }
 
 inline nb::dict f4_to_dict(const steppe::F4Result& r, const std::vector<std::string>& pops) {
-    nb::dict d;
-    d["pop1"] = names_of(r.p1, pops);
-    d["pop2"] = names_of(r.p2, pops);
-    d["pop3"] = names_of(r.p3, pops);
-    d["pop4"] = names_of(r.p4, pops);
-    d["est"] = r.est;
-    d["se"] = r.se;
-    d["z"] = r.z;
-    d["p"] = r.p;
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
-    return d;
+    return quartet_to_dict(r, pops);
 }
 
 inline nb::dict dstat_to_dict(const steppe::DstatResult& r, const std::vector<std::string>& pops) {
-    nb::dict d;
-    d["pop1"] = names_of(r.p1, pops);
-    d["pop2"] = names_of(r.p2, pops);
-    d["pop3"] = names_of(r.p3, pops);
-    d["pop4"] = names_of(r.p4, pops);
-    d["est"] = r.est;
-    d["se"] = r.se;
-    d["z"] = r.z;
-    d["p"] = r.p;
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
-    return d;
+    return quartet_to_dict(r, pops);
 }
 
 inline nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::string>& pops) {
@@ -297,8 +284,7 @@ inline nb::dict f3_to_dict(const steppe::F3Result& r, const std::vector<std::str
     d["se"] = r.se;
     d["z"] = r.z;
     d["p"] = r.p;
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
+    put_status_precision(d, r);
     return d;
 }
 
@@ -312,8 +298,7 @@ inline nb::dict f4ratio_to_dict(const steppe::F4RatioResult& r, const std::vecto
     d["alpha"] = r.alpha;
     d["se"] = r.se;
     d["z"] = r.z;
-    d["status"] = status_str(r.status);
-    d["precision"] = precision_str(r.precision_tag);
+    put_status_precision(d, r);
     return d;
 }
 
@@ -324,7 +309,7 @@ inline nb::dict qpgraph_to_dict(const steppe::QpGraphResult& r) {
     d["worst_residual_z"] = r.worst_residual_z;
     d["worst_pop2"] = r.worst_pop2;
     d["worst_pop3"] = r.worst_pop3;
-    d["status"] = status_str(r.status);
+    d["status"] = steppe::status_str(r.status);
     d["weight"] = r.weight;
     d["weight_lo"] = r.weight_lo;
     d["weight_hi"] = r.weight_hi;

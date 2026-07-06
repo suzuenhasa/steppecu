@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "app/cmd_common.hpp"
 #include "app/cmd_emit.hpp"
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/exit_code_for_caught.hpp"
@@ -174,12 +175,7 @@ namespace cfg = steppe::config;
     DstatResult result;
     try {
         device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe qpdstat: no CUDA device available (steppe is a GPU product; "
-                         "a CUDA-capable GPU is required)\n");
-            return cfg::kExitRuntimeError;
-        }
+        if (!require_first_gpu(resources, "qpdstat")) return cfg::kExitRuntimeError;
         result = run_dstat(geno, snp, ind, std::span<const std::string>(pop_union),
                            std::span<const std::array<int, 4>>(quadruples),
                            blgsize_morgans, resources);
@@ -249,12 +245,7 @@ int run_qpdstat_command(const cfg::RunConfig& config) {
     F4Result result;
     try {
         device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe qpdstat: no CUDA device available (steppe is a GPU product; "
-                         "a CUDA-capable GPU is required)\n");
-            return cfg::kExitRuntimeError;
-        }
+        if (!require_first_gpu(resources, "qpdstat")) return cfg::kExitRuntimeError;
         const int device_id = resources.gpus.front().device_id;
         device::DeviceF2Blocks dev_f2 =
             device::upload_f2_blocks_to_device(dir.dir.f2, device_id);

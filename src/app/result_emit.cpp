@@ -14,32 +14,31 @@
 #include <string>
 #include <vector>
 
+#include "app/precision_label.hpp"
 #include "steppe/error.hpp"
 
 namespace steppe::app {
 
 namespace {
 
-// Status and precision labels
-[[nodiscard]] const char* status_str(Status s) {
-    switch (s) {
-        case Status::Ok:               return "ok";
-        case Status::DeviceOom:        return "device_oom";
-        case Status::RankDeficient:    return "rank_deficient";
-        case Status::NonSpdCovariance: return "non_spd_covariance";
-        case Status::ChisqUndefined:   return "chisq_undefined";
-        case Status::InvalidConfig:    return "invalid_config";
-    }
-    return "unknown";
+// Shared %.17g formatter: NaN -> caller's sentinel, else 17-digit round-trip
+[[nodiscard]] std::string format_g17(double v, const char* nan_sentinel) {
+    if (std::isnan(v)) return nan_sentinel;
+    std::ostringstream o;
+    o.precision(17);
+    o << v;
+    return o.str();
 }
 
-[[nodiscard]] const char* precision_str(Precision::Kind k) {
-    switch (k) {
-        case Precision::Kind::EmulatedFp64: return "emu";
-        case Precision::Kind::Tf32:         return "tf32";
-        case Precision::Kind::Fp64:         return "fp64";
+// Wrap a string in double quotes, doubling any embedded '"' (RFC-4180 escaping)
+[[nodiscard]] std::string quote_doubling(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
     }
-    return "fp64";
+    out += "\"";
+    return out;
 }
 
 // Whole-model feasibility (weights in [0,1])
@@ -58,13 +57,7 @@ namespace {
 
 // Always-quote CSV cell
 [[nodiscard]] std::string csv_quote(const std::string& s) {
-    std::string out = "\"";
-    for (char c : s) {
-        if (c == '"') out += "\"\"";
-        else out += c;
-    }
-    out += "\"";
-    return out;
+    return quote_doubling(s);
 }
 
 
@@ -122,7 +115,7 @@ void emit_csv(std::ostream& os, const QpAdmResult& r, const std::string& target,
        << r.f4rank << sep << r.est_rank << sep
        << (model_feasible(r) ? "TRUE" : "FALSE") << sep
        << csv_quote(status_str(r.status)) << sep
-       << csv_quote(precision_str(r.precision_tag))
+       << csv_quote(precision_label(r.precision_tag))
        << "\n";
 
     os << "# section: rankdrop\n";
@@ -180,7 +173,7 @@ void emit_json(std::ostream& os, const QpAdmResult& r, const std::string& target
     os << "    \"est_rank\": " << r.est_rank << ",\n";
     os << "    \"feasible\": " << (model_feasible(r) ? "true" : "false") << ",\n";
     os << "    \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "    \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
+    os << "    \"precision\": " << json_quote(precision_label(r.precision_tag)) << "\n";
     os << "  },\n";
 
     os << "  \"rankdrop\": {\n";
@@ -320,7 +313,7 @@ void emit_qpwave_csv(std::ostream& os, const QpWaveResult& r,
        << "\"precision\"" << sep << "\"reference\"" << sep << "\"right_n\"\n";
     os << r.f4rank << sep << r.est_rank << sep
        << csv_quote(status_str(r.status)) << sep
-       << csv_quote(precision_str(r.precision_tag))
+       << csv_quote(precision_label(r.precision_tag))
        << sep << csv_quote(left.empty() ? std::string() : left.front()) << sep
        << right_n << "\n";
 }
@@ -358,7 +351,7 @@ void emit_qpwave_json(std::ostream& os, const QpWaveResult& r,
     os << "    \"f4rank\": " << r.f4rank << ",\n";
     os << "    \"est_rank\": " << r.est_rank << ",\n";
     os << "    \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "    \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
+    os << "    \"precision\": " << json_quote(precision_label(r.precision_tag)) << "\n";
     os << "  }\n";
 
     os << "}\n";
@@ -402,7 +395,7 @@ void emit_f4_json(std::ostream& os, const F4Result& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
+    os << "  \"precision\": " << json_quote(precision_label(r.precision_tag)) << "\n";
     os << "}\n";
 }
 
@@ -437,7 +430,7 @@ void emit_f3_json(std::ostream& os, const F3Result& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
+    os << "  \"precision\": " << json_quote(precision_label(r.precision_tag)) << "\n";
     os << "}\n";
 }
 
@@ -476,27 +469,29 @@ void emit_f4ratio_json(std::ostream& os, const F4RatioResult& r,
     }
     os << "  ],\n";
     os << "  \"status\": " << json_quote(status_str(r.status)) << ",\n";
-    os << "  \"precision\": " << json_quote(precision_str(r.precision_tag)) << "\n";
+    os << "  \"precision\": " << json_quote(precision_label(r.precision_tag)) << "\n";
     os << "}\n";
+}
+
+// Three-way format dispatch: Csv/Tsv route to csvFn with the separator, Json to jsonFn
+template <class CsvFn, class JsonFn>
+void dispatch_format([[maybe_unused]] std::ostream& os, OutputFormat fmt, CsvFn csvFn, JsonFn jsonFn) {
+    switch (fmt) {
+        case OutputFormat::Csv:  csvFn(','); break;
+        case OutputFormat::Tsv:  csvFn('\t'); break;
+        case OutputFormat::Json: jsonFn(); break;
+    }
 }
 
 }  // namespace
 
 // Number formatters (17-digit exact round-trip; NaN -> "NA"/"null")
 std::string fmt_double(double v) {
-    if (std::isnan(v)) return "NA";
-    std::ostringstream o;
-    o.precision(17);
-    o << v;
-    return o.str();
+    return format_g17(v, "NA");
 }
 
 std::string json_double(double v) {
-    if (std::isnan(v)) return "null";
-    std::ostringstream o;
-    o.precision(17);
-    o << v;
-    return o.str();
+    return format_g17(v, "null");
 }
 
 // Conditional RFC-4180 CSV field (public)
@@ -506,13 +501,7 @@ std::string csv_field(const std::string& s, char sep) {
         if (c == sep || c == '"' || c == '\n' || c == '\r') { needs_quote = true; break; }
     }
     if (!needs_quote) return s;
-    std::string out = "\"";
-    for (char c : s) {
-        if (c == '"') out += "\"\"";
-        else out += c;
-    }
-    out += "\"";
-    return out;
+    return quote_doubling(s);
 }
 
 // JSON string escaping (public)
@@ -544,11 +533,9 @@ void emit_qpadm_result(std::ostream& os, OutputFormat fmt,
                        const QpAdmResult& result,
                        const std::string& target_label,
                        const std::vector<std::string>& left_labels) {
-    switch (fmt) {
-        case OutputFormat::Csv:  emit_csv(os, result, target_label, left_labels, ','); break;
-        case OutputFormat::Tsv:  emit_csv(os, result, target_label, left_labels, '\t'); break;
-        case OutputFormat::Json: emit_json(os, result, target_label, left_labels); break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) { emit_csv(os, result, target_label, left_labels, sep); },
+        [&] { emit_json(os, result, target_label, left_labels); });
 }
 
 void emit_rotation_table(std::ostream& os, OutputFormat fmt,
@@ -556,28 +543,20 @@ void emit_rotation_table(std::ostream& os, OutputFormat fmt,
                          const std::string& target_label,
                          const std::vector<std::vector<std::string>>& left_labels_per_model,
                          int right_n) {
-    switch (fmt) {
-        case OutputFormat::Csv:
-            emit_rotation_csv(os, results, target_label, left_labels_per_model, right_n, ',');
-            break;
-        case OutputFormat::Tsv:
-            emit_rotation_csv(os, results, target_label, left_labels_per_model, right_n, '\t');
-            break;
-        case OutputFormat::Json:
-            emit_rotation_json(os, results, target_label, left_labels_per_model, right_n);
-            break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) {
+            emit_rotation_csv(os, results, target_label, left_labels_per_model, right_n, sep);
+        },
+        [&] { emit_rotation_json(os, results, target_label, left_labels_per_model, right_n); });
 }
 
 void emit_qpwave_result(std::ostream& os, OutputFormat fmt,
                         const QpWaveResult& result,
                         const std::vector<std::string>& left_labels,
                         int right_n) {
-    switch (fmt) {
-        case OutputFormat::Csv:  emit_qpwave_csv(os, result, left_labels, right_n, ','); break;
-        case OutputFormat::Tsv:  emit_qpwave_csv(os, result, left_labels, right_n, '\t'); break;
-        case OutputFormat::Json: emit_qpwave_json(os, result, left_labels, right_n); break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) { emit_qpwave_csv(os, result, left_labels, right_n, sep); },
+        [&] { emit_qpwave_json(os, result, left_labels, right_n); });
 }
 
 void emit_f4_result(std::ostream& os, OutputFormat fmt,
@@ -586,17 +565,9 @@ void emit_f4_result(std::ostream& os, OutputFormat fmt,
                     const std::vector<std::string>& p2_labels,
                     const std::vector<std::string>& p3_labels,
                     const std::vector<std::string>& p4_labels) {
-    switch (fmt) {
-        case OutputFormat::Csv:
-            emit_f4_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, ',');
-            break;
-        case OutputFormat::Tsv:
-            emit_f4_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, '\t');
-            break;
-        case OutputFormat::Json:
-            emit_f4_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels);
-            break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) { emit_f4_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, sep); },
+        [&] { emit_f4_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels); });
 }
 
 void emit_f3_result(std::ostream& os, OutputFormat fmt,
@@ -604,17 +575,9 @@ void emit_f3_result(std::ostream& os, OutputFormat fmt,
                     const std::vector<std::string>& p1_labels,
                     const std::vector<std::string>& p2_labels,
                     const std::vector<std::string>& p3_labels) {
-    switch (fmt) {
-        case OutputFormat::Csv:
-            emit_f3_csv(os, result, p1_labels, p2_labels, p3_labels, ',');
-            break;
-        case OutputFormat::Tsv:
-            emit_f3_csv(os, result, p1_labels, p2_labels, p3_labels, '\t');
-            break;
-        case OutputFormat::Json:
-            emit_f3_json(os, result, p1_labels, p2_labels, p3_labels);
-            break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) { emit_f3_csv(os, result, p1_labels, p2_labels, p3_labels, sep); },
+        [&] { emit_f3_json(os, result, p1_labels, p2_labels, p3_labels); });
 }
 
 void emit_f4ratio_result(std::ostream& os, OutputFormat fmt,
@@ -624,20 +587,13 @@ void emit_f4ratio_result(std::ostream& os, OutputFormat fmt,
                          const std::vector<std::string>& p3_labels,
                          const std::vector<std::string>& p4_labels,
                          const std::vector<std::string>& p5_labels) {
-    switch (fmt) {
-        case OutputFormat::Csv:
-            emit_f4ratio_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels,
-                             p5_labels, ',');
-            break;
-        case OutputFormat::Tsv:
-            emit_f4ratio_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels,
-                             p5_labels, '\t');
-            break;
-        case OutputFormat::Json:
-            emit_f4ratio_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels,
-                              p5_labels);
-            break;
-    }
+    dispatch_format(os, fmt,
+        [&](char sep) {
+            emit_f4ratio_csv(os, result, p1_labels, p2_labels, p3_labels, p4_labels, p5_labels, sep);
+        },
+        [&] {
+            emit_f4ratio_json(os, result, p1_labels, p2_labels, p3_labels, p4_labels, p5_labels);
+        });
 }
 
 }  // namespace steppe::app

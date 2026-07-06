@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/cmd_common.hpp"
 #include "app/exit_code_for_caught.hpp"
 #include "app/f2_dir_writer.hpp"
 #include "app/precision_label.hpp"
@@ -238,12 +239,7 @@ int run_extract_f2_command(const cfg::RunConfig& config) {
     F2ExtractResult extracted;
     try {
         device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe extract-f2: no CUDA device available (steppe is a GPU "
-                         "product; a CUDA-capable GPU is required)\n");
-            return cfg::kExitRuntimeError;
-        }
+        if (!require_first_gpu(resources, "extract-f2")) return cfg::kExitRuntimeError;
         extracted = steppe::run_extract_f2(
             config.geno(), config.snp(), config.ind(), sel, filter, precision,
             steppe::core::block_size_cm_to_morgans(config.blgsize_cm()), lib_ploidy,

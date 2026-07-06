@@ -25,6 +25,19 @@ enum class Status {
     InvalidConfig
 };
 
+// Stable snake_case label for a Status — reference §3
+[[nodiscard]] inline const char* status_str(Status s) {
+    switch (s) {
+        case Status::Ok:               return "ok";
+        case Status::DeviceOom:        return "device_oom";
+        case Status::RankDeficient:    return "rank_deficient";
+        case Status::NonSpdCovariance: return "non_spd_covariance";
+        case Status::ChisqUndefined:   return "chisq_undefined";
+        case Status::InvalidConfig:    return "invalid_config";
+    }
+    return "unknown";
+}
+
 }  // namespace steppe
 
 #endif  // STEPPE_ERROR_HPP

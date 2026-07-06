@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/config/exit_code.hpp"
+#include "app/cmd_common.hpp"
 #include "app/cmd_emit.hpp"
 #include "app/result_emit.hpp"
 #include "device/resources.hpp"
@@ -99,12 +100,7 @@ int run_dates_command(const cfg::RunConfig& config) {
     steppe::DatesResult result;
     try {
         device::Resources resources = device::build_resources(config.device());
-        if (resources.gpus.empty()) {
-            std::fprintf(stderr,
-                         "steppe dates: no CUDA device available (steppe is a GPU product; a "
-                         "CUDA-capable GPU is required)\n");
-            return cfg::kExitRuntimeError;
-        }
+        if (!require_first_gpu(resources, "dates")) return cfg::kExitRuntimeError;
         result = run_dates(geno, snp, ind, config.target(), sources[0], sources[1], opts,
                            resources);
     } catch (const std::exception& e) {

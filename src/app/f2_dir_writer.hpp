@@ -13,8 +13,8 @@
 #include <string>
 #include <vector>
 
-#include "steppe/error.hpp"   
-#include "steppe/fstats.hpp"  
+#include "steppe/error.hpp"
+#include "steppe/fstats.hpp"
 
 namespace steppe::app {
 
@@ -23,16 +23,16 @@ inline constexpr int kF2MetaSchemaVersion = 1;
 
 // F2DirMeta — provenance record — reference §5
 struct F2DirMeta {
-    std::string steppe_version;     
-    std::string precision_tag;      
+    std::string steppe_version;
+    std::string precision_tag;
     int precision_mantissa_bits = 0;
-    double blgsize_cm = 0.0;        
-    int n_block = 0;                
-    int P = 0;                      
-    long n_snp_total = 0;           
-    long n_snp_kept = 0;            
+    double blgsize_cm = 0.0;
+    int n_block = 0;
+    int P = 0;
+    long n_snp_total = 0;
+    long n_snp_kept = 0;
     double maf_min = 0.0;
-    double geno_max_missing = 1.0;  
+    double geno_max_missing = 1.0;
     double mind_max_missing = 1.0;
     bool autosomes_only = false;
     bool drop_monomorphic = false;
@@ -42,15 +42,15 @@ struct F2DirMeta {
     std::string ind_sha256;
     std::string geno_path, snp_path, ind_path;
     bool hash_source_files = false;
-    std::string pop_selection;      
+    std::string pop_selection;
 };
 
 // F2DirWriteResult — write outcome — reference §6
 struct F2DirWriteResult {
     bool ok = false;
     Status status = Status::Ok;
-    std::string error;            
-    std::string f2_cache_id;      
+    std::string error;
+    std::string f2_cache_id;
 };
 
 // write_f2_dir — write entry point — reference §7
