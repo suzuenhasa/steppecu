@@ -73,12 +73,10 @@ void launch_detect_ploidy(const std::uint8_t* d_packed,
     // every sample stays the AT2 default pseudo-haploid (the het-scan loop body never
     // runs for window=0), matching the host loop's all-1 init — so the output is still
     // written without a special-case branch here.
-    const long grid_x =
-        core::cdiv(static_cast<long>(n_individuals), static_cast<long>(kPloidyBlock));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "detect-ploidy gridDim.x (individual axis) exceeds kMaxGridX "
-                  "(architecture.md §7) — tile the individual axis");
+    const int grid_x = core::grid_for_x(
+        static_cast<long>(n_individuals), kPloidyBlock,
+        "detect-ploidy gridDim.x (individual axis) exceeds kMaxGridX "
+        "(architecture.md §7) — tile the individual axis");
     detect_ploidy_kernel<<<static_cast<unsigned>(grid_x), kPloidyBlock, 0, stream>>>(
         d_packed, bytes_per_record, n_individuals, window, d_ploidy);
     STEPPE_CUDA_CHECK_KERNEL();

@@ -91,11 +91,9 @@ void launch_autosome_keep_mask(const int* d_chrom, long M, int chrom_min,
                                int chrom_max, std::uint8_t* d_flags,
                                cudaStream_t stream) {
     if (M <= 0) return;
-    const long grid_x = core::cdiv(M, static_cast<long>(kKeepBlock));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "autosome keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
-                  "(architecture.md §7) — tile the SNP axis");
+    const int grid_x = core::grid_for_x(M, kKeepBlock,
+                                        "autosome keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
+                                        "(architecture.md §7) — tile the SNP axis");
     autosome_keep_mask_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
         d_chrom, M, chrom_min, chrom_max, d_flags);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -107,11 +105,9 @@ void launch_regimeb_keep_mask(const double* d_Q, const double* d_N, int P, long 
                               double ploidy, double total_indiv, double maxmiss,
                               std::uint8_t* d_flags, cudaStream_t stream) {
     if (M <= 0) return;
-    const long grid_x = core::cdiv(M, static_cast<long>(kKeepBlock));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "regime-B keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
-                  "(architecture.md §7) — tile the SNP axis");
+    const int grid_x = core::grid_for_x(M, kKeepBlock,
+                                        "regime-B keep-mask gridDim.x (SNP axis) exceeds kMaxGridX "
+                                        "(architecture.md §7) — tile the SNP axis");
     regimeb_keep_mask_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
         d_Q, d_N, P, M, d_ref, d_alt, d_chrom, cfg, ploidy, total_indiv, maxmiss,
         d_flags);
@@ -124,11 +120,9 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                                    cudaStream_t stream) {
     if (P <= 0 || M <= 0) return;
     const int bx = core::kDecodeBlockX, by = core::kDecodeBlockY;
-    const long grid_x = core::cdiv(M, static_cast<long>(by));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "compact-columns gridDim.x (SNP axis) exceeds kMaxGridX "
-                  "(architecture.md §7) — tile the SNP axis");
+    const int grid_x = core::grid_for_x(M, by,
+                                        "compact-columns gridDim.x (SNP axis) exceeds kMaxGridX "
+                                        "(architecture.md §7) — tile the SNP axis");
     const dim3 block(static_cast<unsigned>(bx), static_cast<unsigned>(by));
     const dim3 grid(static_cast<unsigned>(grid_x),
                     static_cast<unsigned>(core::grid_for(P, bx)));

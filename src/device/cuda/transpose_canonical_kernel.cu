@@ -82,10 +82,7 @@ void launch_transpose_to_canonical(const std::uint8_t* d_snp_major,
                                    cudaStream_t stream) {
     const std::size_t total = n_individuals * out_bytes_per_record;
     if (total == 0) return;
-    const long grid_l =
-        core::cdiv(static_cast<long>(total), static_cast<long>(kTransposeBlock));
-    const long grid_cap = static_cast<long>(core::kMaxGridX);
-    const long grid_x = grid_l > grid_cap ? grid_cap : grid_l;
+    const long grid_x = core::grid_stride_extent(static_cast<long>(total), kTransposeBlock);
     transpose_to_canonical_kernel<<<static_cast<unsigned>(grid_x), kTransposeBlock,
                                     0, stream>>>(
         d_snp_major, src_bytes_per_record, d_sel_rows, n_individuals, n_snp,

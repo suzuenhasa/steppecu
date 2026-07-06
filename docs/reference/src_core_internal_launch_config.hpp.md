@@ -14,8 +14,9 @@ The file holds four kinds of thing:
    the largest number of blocks CUDA will accept along each of the three grid axes.
 2. **Ceiling division** (`cdiv`) — the one building block every grid calculation
    uses, in both an `int` and a `long` form.
-3. **Two grid-extent helpers** (`grid_for`, `grid_z_extent`) — the functions that
-   compute how many blocks to launch, with the hardware limit checked automatically.
+3. **The grid-extent helpers** (`grid_for`, `grid_z_extent`, `grid_stride_extent`,
+   `grid_for_x`) — the functions that compute how many blocks to launch, with the
+   hardware limit checked or clamped automatically.
 4. **The decode kernel's block shape** (`kDecodeBlockX`, `kDecodeBlockY`) — the one
    kernel whose thread block is deliberately not square, named here rather than
    re-picked inside the kernel.
@@ -148,3 +149,35 @@ the kernel.
 |---|---|---|
 | `kDecodeBlockX` | `32` | The SNP-axis (x) edge of the block. 32 is exactly one warp — the group of 32 GPU threads that execute together. Putting a full warp along the SNP axis means the warp's 32 threads read 32 neighbouring SNPs of one record, so the packed-byte memory reads are contiguous and coalesce into efficient wide loads. Using the square block's edge of 16 (a half-warp) would halve that coalescing run and waste memory bandwidth, which is why the decode kernel picks its own edge. |
 | `kDecodeBlockY` | `8` | The population-axis (y) edge. 8 keeps the block at 32 × 8 = 256 threads, a standard, occupancy-friendly block size for a memory-bandwidth-bound kernel, while spending the warp on the SNP axis where coalescing matters. |
+
+---
+
+## 7. 1-D grid-stride launch extent (`grid_stride_extent`)
+
+`grid_stride_extent(total, block)` sizes a **grid-stride** 1-D launch: a kernel whose
+threads loop over `total` elements, so the grid does not have to cover every element
+one-to-one. It returns `cdiv(total, block)` blocks, but **clamped** to `kMaxGridX`
+rather than asserted against it. `total` is a `long` because these launches flatten a
+multi-axis problem (for example `nl × nr × nb × n_models`) into a single count that can
+run past the 32-bit range; the ceiling division goes through the `long` overload and the
+result is narrowed back to the `int` a launch expects (`kMaxGridX` is `2^31 − 1`, so a
+clamped value always fits an `int`).
+
+Clamping instead of asserting is correct here precisely because the kernel is
+grid-stride: if the block count would exceed the x-axis cap, launching the cap's worth
+of blocks is safe — each thread's stride loop still visits every element, it just does
+more iterations. This is the helper the qpAdm fit and f-statistic launch wrappers use
+for their flattened element-wise passes.
+
+---
+
+## 8. Single-axis grid extent, x-axis checked (`grid_for_x`)
+
+`grid_for_x(n, block, what)` is the `grid_for` counterpart for a one-to-one 1-D launch
+whose single axis rides x. Like `grid_for` it returns `cdiv(n, block)` with the
+hardware limit checked by assert — but against `kMaxGridX` (the large x cap) rather than
+`grid_for`'s conservative `kMaxGridY` default, and it takes `n` as a `long` so a
+SNP-scale count cannot overflow the division. The `what` argument is a caller-supplied
+message naming the axis, so an over-limit launch fails with a precise, per-call
+diagnostic instead of a generic CUDA error. As with every helper here the assert
+compiles away under `NDEBUG`, leaving a bare ceiling division in release builds.

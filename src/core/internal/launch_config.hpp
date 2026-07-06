@@ -1,7 +1,7 @@
 // src/core/internal/launch_config.hpp
 //
 // The single home for GPU launch-grid math: ceiling division, the hardware
-// grid-dimension limits, and the two extent helpers that turn a problem size
+// grid-dimension limits, and the extent helpers that turn a problem size
 // into a block count. Pure host/device constexpr integer arithmetic with no
 // CUDA, so both the host-pure core and the device kernels can include it.
 //
@@ -47,6 +47,21 @@ inline constexpr unsigned kMaxGridZ = kMaxGridY;
                   "(architecture.md §7; cleanup X-7/B6) — the backend tiles the batch "
                   "so this holds");
     return z;
+}
+
+// 1-D grid-stride launch extent — reference §7
+[[nodiscard]] inline int grid_stride_extent(long total, int block) noexcept {
+    const long grid = cdiv(total, static_cast<long>(block));
+    const long cap = static_cast<long>(kMaxGridX);
+    return static_cast<int>(grid > cap ? cap : grid);
+}
+
+// Single-axis grid extent with the x-axis limit checked — reference §8
+[[nodiscard]] STEPPE_HD constexpr int grid_for_x(long n, int block,
+                                                 [[maybe_unused]] const char* what) noexcept {
+    const int e = cdiv(n, static_cast<long>(block));
+    STEPPE_ASSERT(e >= 0 && static_cast<unsigned long long>(e) <= kMaxGridX, what);
+    return e;
 }
 
 // Decode-kernel block geometry — reference §6

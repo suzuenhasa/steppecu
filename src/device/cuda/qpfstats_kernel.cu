@@ -8,6 +8,7 @@
 // Reference: docs/reference/src_device_cuda_qpfstats_kernel.cu.md
 #include <cuda_runtime.h>
 
+#include "core/internal/launch_config.hpp"
 #include "core/internal/nvtx.hpp"
 #include "device/cuda/check.cuh"
 #include "device/cuda/qpfstats_kernel.cuh"
@@ -49,7 +50,7 @@ void launch_qpfstats_zero_nan_ymat(double* d_ymat, int npopcomb, int n_block,
     STEPPE_CUDA_CHECK(cudaMemsetAsync(d_nan_per_block, 0,
                                       static_cast<std::size_t>(n_block) * sizeof(int), stream));
     constexpr int kZeroNanThreads = 256;
-    const long blocks = (total + kZeroNanThreads - 1) / kZeroNanThreads;
+    const long blocks = core::cdiv(total, static_cast<long>(kZeroNanThreads));
     qpfstats_zero_nan_ymat_kernel<<<static_cast<unsigned>(blocks), kZeroNanThreads, 0, stream>>>(
         d_ymat, npopcomb, n_block, d_nan_per_block);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -58,7 +59,7 @@ void launch_qpfstats_zero_nan_ymat(double* d_ymat, int npopcomb, int n_block,
 void launch_qpfstats_add_ridge_diag(double* d_A, int n, double ridge, cudaStream_t stream) {
     if (n <= 0) return;
     constexpr int kRidgeThreads = 64;
-    const int blocks = (n + kRidgeThreads - 1) / kRidgeThreads;
+    const int blocks = core::cdiv(n, kRidgeThreads);
     qpfstats_add_ridge_diag_kernel<<<static_cast<unsigned>(blocks), kRidgeThreads, 0, stream>>>(
         d_A, n, ridge);
     STEPPE_CUDA_CHECK_KERNEL();

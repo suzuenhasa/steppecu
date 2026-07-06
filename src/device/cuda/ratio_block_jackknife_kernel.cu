@@ -178,9 +178,7 @@ void launch_ratio_block_jackknife(const DRatioJackArray& num, const DRatioJackAr
                                   cudaStream_t stream) {
     if (N <= 0 || n_block <= 0) return;
     constexpr int kThreads = 128;
-    long blocks = (static_cast<long>(N) + kThreads - 1) / kThreads;
-    if (blocks < 1) blocks = 1;
-    if (blocks > static_cast<long>(core::kMaxGridX)) blocks = core::kMaxGridX;
+    const long blocks = core::grid_stride_extent(N, kThreads);
     ratio_block_jackknife_kernel<<<static_cast<unsigned>(blocks), kThreads, 0, stream>>>(
         num, den, weight, xblk_num, xblk_den, N, n_block, tot_mode, setmiss_thresh, compute_p,
         d_est, d_se, d_z, d_p);

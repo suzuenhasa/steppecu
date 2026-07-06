@@ -97,11 +97,9 @@ void launch_decode_af(const std::uint8_t* d_packed,
                       double* d_Q, double* d_V, double* d_N,
                       cudaStream_t stream) {
     const dim3 block(kDecodeBlockX, kDecodeBlockY);
-    const long grid_x = core::cdiv(M, static_cast<long>(kDecodeBlockX));
-    STEPPE_ASSERT(grid_x >= 0 &&
-                      static_cast<unsigned long long>(grid_x) <= core::kMaxGridX,
-                  "decode gridDim.x (SNP/M axis) exceeds kMaxGridX "
-                  "(architecture.md §7; cleanup X-7/B6) — tile the SNP axis");
+    const int grid_x = core::grid_for_x(M, kDecodeBlockX,
+                                        "decode gridDim.x (SNP/M axis) exceeds kMaxGridX "
+                                        "(architecture.md §7; cleanup X-7/B6) — tile the SNP axis");
     const dim3 grid(static_cast<unsigned>(grid_x),
                     static_cast<unsigned>(core::grid_for(P, kDecodeBlockY)));
     decode_af_kernel<<<grid, block, 0, stream>>>(d_packed, bytes_per_record,

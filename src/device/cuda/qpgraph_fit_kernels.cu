@@ -8,6 +8,7 @@
 // Reference: docs/reference/src_device_cuda_qpgraph_fit_kernels.cu.md
 #include "device/cuda/qpgraph_fit_kernels.cuh"
 
+#include "core/internal/launch_config.hpp"
 #include "core/qpadm/qpgraph_opt_constants.hpp"
 #include "device/cuda/check.cuh"
 #include "device/cuda/device_buffer.cuh"
@@ -389,7 +390,7 @@ void launch_qpgraph_fleet(const QpGraphDeviceTopo& topo, int numstart, int maxit
     DeviceBuffer<double> g_dbl(static_cast<std::size_t>(numstart) * static_cast<std::size_t>(L.dbl_total));
     DeviceBuffer<int> g_int(static_cast<std::size_t>(numstart) * static_cast<std::size_t>(L.int_total > 0 ? L.int_total : 1));
     const int TPB = 64;
-    const int blocks = (numstart + TPB - 1) / TPB;
+    const int blocks = core::cdiv(numstart, TPB);
     qpgraph_fleet_kernel<<<blocks, TPB, 0, stream>>>(topo, numstart, maxit, tol, d_fobs, d_qinv,
                                                      L, g_dbl.data(), g_int.data(),
                                                      d_out_theta, d_out_score);
@@ -432,7 +433,7 @@ void launch_qpgraph_fleet_batch(const QpGraphDeviceTopoView* d_views, int ntopo,
     Lmax.int_total = int_per_thread;
     const long total = static_cast<long>(ntopo) * static_cast<long>(numstart);
     const int TPB = 64;
-    const long blocks = (total + TPB - 1) / TPB;
+    const long blocks = core::cdiv(total, static_cast<long>(TPB));
     qpgraph_fleet_batch_kernel<<<static_cast<unsigned>(blocks), TPB, 0, stream>>>(
         d_views, ntopo, numstart, maxit, tol, d_pwts0, d_pe_edge, d_pe_leaf, d_pe_path,
         d_pae_path, d_pae_admixedge, d_cmb1, d_cmb2, d_fobs, d_qinv, Lmax, d_g_dbl, d_g_int,

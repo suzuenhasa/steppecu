@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 #include "core/internal/decode_af.hpp"
+#include "core/internal/launch_config.hpp"
 #include "core/internal/nvtx.hpp"
 #include "device/cuda/check.cuh"
 #include "device/cuda/dates_kernel.cuh"
@@ -291,8 +292,6 @@ __global__ void dates_fit_curves_kernel(const double* __restrict__ curves, int w
     d_ok[c] = ok ? 1 : 0;
 }
 
-inline int grid_for(long n) { return static_cast<int>((n + kBlock - 1) / kBlock); }
-
 }  // namespace
 
 // Launch wrappers and shared conventions — reference §9
@@ -300,7 +299,7 @@ void launch_dates_regress_dots(const double* d_src1, const double* d_src2, const
                                const std::uint8_t* d_packed, std::size_t bytes_per_record,
                                int sample, long M, double* d_dot12, double* d_dot22,
                                cudaStream_t stream) {
-    regress_dots_kernel<<<grid_for(M), kBlock, 0, stream>>>(
+    regress_dots_kernel<<<static_cast<int>(core::cdiv(M, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         d_src1, d_src2, d_valid, d_packed, bytes_per_record, sample, M, d_dot12, d_dot22);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -309,7 +308,7 @@ void launch_dates_scatter(const double* d_src1, const double* d_src2, const doub
                           const std::uint8_t* d_packed, std::size_t bytes_per_record, int sample,
                           long M, const int* d_grid_cell, double yreg, double* d_z0, double* d_z1,
                           double* d_z2, cudaStream_t stream) {
-    scatter_kernel<<<grid_for(M), kBlock, 0, stream>>>(
+    scatter_kernel<<<static_cast<int>(core::cdiv(M, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         d_src1, d_src2, d_valid, d_packed, bytes_per_record, sample, M, d_grid_cell, yreg,
         d_z0, d_z1, d_z2);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -319,7 +318,7 @@ void launch_dates_pack_segments(const double* d_grid, const int* d_chrom_first,
                                 const int* d_chrom_last, int n_chrom, int numqbins, int n_fft,
                                 double* d_padded, cudaStream_t stream) {
     const long total = static_cast<long>(n_chrom) * static_cast<long>(n_fft);
-    pack_segments_kernel<<<grid_for(total), kBlock, 0, stream>>>(
+    pack_segments_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         d_grid, d_chrom_first, d_chrom_last, n_chrom, numqbins, n_fft, d_padded);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -327,7 +326,7 @@ void launch_dates_pack_segments(const double* d_grid, const int* d_chrom_first,
 void launch_dates_power_spectrum(const void* d_freq, int n_cplx, int n_chrom, void* d_power,
                                  cudaStream_t stream) {
     const long total = static_cast<long>(n_chrom) * static_cast<long>(n_cplx);
-    power_spectrum_kernel<<<grid_for(total), kBlock, 0, stream>>>(
+    power_spectrum_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         static_cast<const double2*>(d_freq), n_cplx, n_chrom, static_cast<double2*>(d_power));
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -335,7 +334,7 @@ void launch_dates_power_spectrum(const void* d_freq, int n_cplx, int n_chrom, vo
 void launch_dates_cross_power(const void* d_freq_a, const void* d_freq_b, int n_cplx, int n_chrom,
                               void* d_out, cudaStream_t stream) {
     const long total = static_cast<long>(n_chrom) * static_cast<long>(n_cplx);
-    cross_power_kernel<<<grid_for(total), kBlock, 0, stream>>>(
+    cross_power_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         static_cast<const double2*>(d_freq_a), static_cast<const double2*>(d_freq_b), n_cplx,
         n_chrom, static_cast<double2*>(d_out));
     STEPPE_CUDA_CHECK_KERNEL();
@@ -344,7 +343,7 @@ void launch_dates_cross_power(const void* d_freq_a, const void* d_freq_b, int n_
 void launch_dates_extract_lags(const double* d_inv, int n_fft, int n_chrom, int diffmax,
                                double* d_dd, cudaStream_t stream) {
     const long total = static_cast<long>(n_chrom) * (static_cast<long>(diffmax) + 1);
-    extract_lags_kernel<<<grid_for(total), kBlock, 0, stream>>>(d_inv, n_fft, n_chrom, diffmax,
+    extract_lags_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(d_inv, n_fft, n_chrom, diffmax,
                                                                 d_dd);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -354,7 +353,7 @@ void launch_dates_accumulate_bins(const double* d_dd00, const double* d_dd11,
                                   int diffmax, int n_bin, int qbin, double* d_s0, double* d_s11,
                                   double* d_s12, double* d_s22, cudaStream_t stream) {
     const long total = static_cast<long>(n_chrom) * (static_cast<long>(diffmax) + 1);
-    accumulate_bins_kernel<<<grid_for(total), kBlock, 0, stream>>>(
+    accumulate_bins_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         d_dd00, d_dd11, d_dd02, d_dd20, n_chrom, diffmax, n_bin, qbin, d_s0, d_s11, d_s12, d_s22);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -364,7 +363,7 @@ void launch_dates_repack_target(const std::uint8_t* d_src, std::size_t src_bpr,
                                 std::size_t dst_bpr, std::uint8_t* d_dst, cudaStream_t stream) {
     const long total = static_cast<long>(n_target) * static_cast<long>(dst_bpr);
     if (total <= 0) return;
-    repack_target_kernel<<<grid_for(total), kBlock, 0, stream>>>(
+    repack_target_kernel<<<static_cast<int>(core::cdiv(total, static_cast<long>(kBlock))), kBlock, 0, stream>>>(
         d_src, src_bpr, d_kept_src, M_kept, n_target, dst_bpr, d_dst);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -374,7 +373,7 @@ void launch_dates_fit_curves(const double* d_curves, int win_len, int n_curves, 
                              cudaStream_t stream) {
     if (n_curves <= 0) return;
     STEPPE_NVTX_RANGE("dates_fit_curves");
-    const int grid = grid_for(static_cast<long>(n_curves));
+    const int grid = static_cast<int>(core::cdiv(static_cast<long>(n_curves), static_cast<long>(kBlock)));
     dates_fit_curves_kernel<<<grid, kBlock, 0, stream>>>(
         d_curves, win_len, n_curves, step, affine, d_date, d_sd, d_ok);
     STEPPE_CUDA_CHECK_KERNEL();

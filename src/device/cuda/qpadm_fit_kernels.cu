@@ -30,7 +30,9 @@ using core::qpadm::kQpMaxT;
 // Launch-geometry & numeric constants — reference §4
 constexpr int kSymTile = 16;
 constexpr int kWarpSize = 32;
-constexpr int kMaxGridDimX = static_cast<int>(core::kMaxGridX);
+constexpr int kBlock64 = 64;
+constexpr int kBlock128 = 128;
+constexpr int kBlock256 = 256;
 constexpr double kOffConvergence = 1e-30;
 constexpr double kJacobiTol = 1e-15;
 constexpr int kJacobiMaxSweeps = 60;
@@ -1270,13 +1272,6 @@ __global__ void qpadm_gather_loo_qinv_kernel(const double* __restrict__ dLooSrc,
     }
 }
 
-// 1-D grid-stride launch geometry — reference §14
-inline int launch_grid_stride(long total, int block) {
-    const long grid_l = (total + block - 1) / block;
-    const long grid_cap = static_cast<long>(kMaxGridDimX);
-    return static_cast<int>(grid_l > grid_cap ? grid_cap : grid_l);
-}
-
 }  // namespace
 
 // Launch wrappers — reference §14
@@ -1288,8 +1283,8 @@ void launch_assemble_f4_gather_models_batched(const double* d_f2, int P,
                                               double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * nr * nb * n_models;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     assemble_f4_gather_models_kernel<<<grid, block, 0, stream>>>(
         d_f2, P, d_left_arena, d_right_arena, nl, nr, nb, n_models, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1301,8 +1296,8 @@ void launch_f4_loo_total_models_batched(const double* dX, const int* d_block_siz
                                         cudaStream_t stream) {
     const long total = static_cast<long>(m) * n_models;
     if (total <= 0 || nb <= 0) return;
-    const int block = 128;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock128;
+    const int grid = core::grid_stride_extent(total, block);
     f4_loo_total_models_kernel<<<grid, block, 0, stream>>>(
         dX, d_block_sizes, m, nb, n, n_models, dLoo, dTotal, dTotLine);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1314,8 +1309,8 @@ void launch_f4_xtau_models_batched(const double* dLoo, const double* dEst,
                                    double* dXtau, cudaStream_t stream) {
     const long total = static_cast<long>(m) * nb * n_models;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     f4_xtau_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dEst, dTotLine, d_block_sizes, m, nb, n, n_models, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1334,8 +1329,8 @@ void launch_add_fudge_diag_models_batched(const double* dQ, double* dQf, int m,
 void launch_fill_identity_batched(double* dI, int m, int n_models, cudaStream_t stream) {
     const long total = static_cast<long>(m) * m * n_models;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     fill_identity_batched_kernel<<<grid, block, 0, stream>>>(dI, m, n_models);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1349,8 +1344,8 @@ void launch_qpadm_fit_models_batched(const double* dTotal, const double* dQinv,
                                      double* d_pop_chisq, double* d_pop_wfull,
                                      cudaStream_t stream) {
     if (n_models <= 0) return;
-    const int block = 64;
-    const int grid = (n_models + block - 1) / block;
+    const int block = kBlock64;
+    const int grid = core::cdiv(n_models, block);
     qpadm_fit_models_kernel<<<grid, block, 0, stream>>>(
         dTotal, dQinv, dLoo, d_block_sizes, nl, nr, r_fit, rmax, fudge, als_iters,
         nb, n_models, d_weight, d_se, d_chisq, d_status, d_rank_chisq,
@@ -1364,8 +1359,8 @@ void launch_qpadm_loo_models_batched(const double* dLoo, const double* dQinv,
                                      double* dWmat, cudaStream_t stream) {
     const long total = static_cast<long>(nb) * n_models;
     if (total <= 0) return;
-    const int block = 128;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock128;
+    const int grid = core::grid_stride_extent(total, block);
     qpadm_loo_models_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, nl, nr, r_fit, fudge, als_iters, nb, n_models, s, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1375,8 +1370,8 @@ void launch_qpadm_se_from_wmat_batched(const double* dWmat, int nl, int nb,
                                        int n_models, double* d_se, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * n_models;
     if (total <= 0) return;
-    const int block = 128;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock128;
+    const int grid = core::grid_stride_extent(total, block);
     qpadm_se_from_wmat_kernel<<<grid, block, 0, stream>>>(dWmat, nl, nb, n_models, d_se);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1387,8 +1382,8 @@ void launch_qpadm_gather_loo_qinv(const double* dLooSrc, const double* dQinvSrc,
     const long per = static_cast<long>(m) * nb + static_cast<long>(m) * m;
     const long total = per * n_surv;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     qpadm_gather_loo_qinv_kernel<<<grid, block, 0, stream>>>(
         dLooSrc, dQinvSrc, d_surv, m, nb, n_surv, dLooDst, dQinvDst);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1400,8 +1395,8 @@ void launch_assemble_f4_gather(const double* d_f2, int P,
                                double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * nr * nb;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     assemble_f4_gather_kernel<<<grid, block, 0, stream>>>(d_f2, P, d_left, d_right,
                                                           nl, nr, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1413,8 +1408,8 @@ void launch_assemble_f4_quartets_gather(const double* d_f2, int P,
                                         double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(N) * nb;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     assemble_f4_quartets_gather_kernel<<<grid, block, 0, stream>>>(
         d_f2, P, d_quartets, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1426,8 +1421,8 @@ void launch_assemble_f3_triples_gather(const double* d_f2, int P,
                                        double* dX, cudaStream_t stream) {
     const long total = static_cast<long>(N) * nb;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     assemble_f3_triples_gather_kernel<<<grid, block, 0, stream>>>(
         d_f2, P, d_triples, N, nb, d_surv, dX);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1436,8 +1431,8 @@ void launch_assemble_f3_triples_gather(const double* d_f2, int P,
 void launch_f2_block_keep(const double* d_vpair, int P, int nb, int* d_keep,
                           cudaStream_t stream) {
     if (nb <= 0) return;
-    const int block = 128;
-    const int grid = (nb + block - 1) / block;
+    const int block = kBlock128;
+    const int grid = core::cdiv(nb, block);
     f2_block_keep_kernel<<<grid, block, 0, stream>>>(d_vpair, P, nb, d_keep);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1447,8 +1442,8 @@ void launch_f4_loo_total(const double* dX, const int* d_block_sizes,
                          double* dLoo, double* dTotal, double* dTotLine,
                          cudaStream_t stream) {
     if (m <= 0 || nb <= 0) return;
-    const int block = 64;
-    const int grid = (m + block - 1) / block;
+    const int block = kBlock64;
+    const int grid = core::cdiv(m, block);
     f4_loo_total_kernel<<<grid, block, 0, stream>>>(dX, d_block_sizes, m, nb, n,
                                                     dLoo, dTotal, dTotLine);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1459,8 +1454,8 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
                     double* dXtau, cudaStream_t stream) {
     const long total = static_cast<long>(m) * nb;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock256;
+    const int grid = core::grid_stride_extent(total, block);
     f4_xtau_kernel<<<grid, block, 0, stream>>>(dLoo, dEst, dTotLine, d_block_sizes,
                                                m, nb, n, dXtau);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1469,8 +1464,8 @@ void launch_f4_xtau(const double* dLoo, const double* dEst, const double* dTotLi
 void launch_f4_diag_var(const double* dXtau, int m, int nb, double* dVar,
                         cudaStream_t stream) {
     if (m <= 0 || nb <= 0) return;
-    const int block = 256;
-    const int grid = (m + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(m, block);
     f4_diag_var_kernel<<<grid, block, 0, stream>>>(dXtau, m, nb, dVar);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1478,8 +1473,8 @@ void launch_f4_diag_var(const double* dXtau, int m, int nb, double* dVar,
 void launch_sweep_unrank_quartets(long long c0, int C, int range, const int* d_subset,
                                   int* dQuartets, cudaStream_t stream) {
     if (C <= 0) return;
-    const int block = 256;
-    const int grid = (C + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(C, block);
     sweep_unrank_quartets_kernel<<<grid, block, 0, stream>>>(c0, C, range, d_subset, dQuartets);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1487,8 +1482,8 @@ void launch_sweep_unrank_quartets(long long c0, int C, int range, const int* d_s
 void launch_sweep_unrank_triples(long long c0, int C, int range, const int* d_subset,
                                  int* dTriples, cudaStream_t stream) {
     if (C <= 0) return;
-    const int block = 256;
-    const int grid = (C + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(C, block);
     sweep_unrank_triples_kernel<<<grid, block, 0, stream>>>(c0, C, range, d_subset, dTriples);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1497,8 +1492,8 @@ void launch_sweep_zfilter(const double* dXtotal, const double* dVar, int C, int 
                           double min_z, double* dEst, double* dSe, double* dZ,
                           unsigned char* d_flags, cudaStream_t stream) {
     if (C <= 0) return;
-    const int block = 256;
-    const int grid = (C + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(C, block);
     sweep_zfilter_kernel<<<grid, block, 0, stream>>>(dXtotal, dVar, C, mode, min_z,
                                                      dEst, dSe, dZ, d_flags);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1508,8 +1503,8 @@ void launch_sweep_deinterleave_keys(const int* d_items, int C, int k,
                                     int* d_c0, int* d_c1, int* d_c2, int* d_c3,
                                     cudaStream_t stream) {
     if (C <= 0) return;
-    const int block = 256;
-    const int grid = (C + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(C, block);
     sweep_deinterleave_keys_kernel<<<grid, block, 0, stream>>>(d_items, C, k,
                                                                d_c0, d_c1, d_c2, d_c3);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1519,8 +1514,8 @@ void launch_sweep_zfilter_tau(const double* dXtotal, const double* dVar, int C,
                               const double* d_tau, double* dEst, double* dSe, double* dZ,
                               double* dAbsZ, unsigned char* d_flags, cudaStream_t stream) {
     if (C <= 0) return;
-    const int block = 256;
-    const int grid = (C + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(C, block);
     sweep_zfilter_tau_kernel<<<grid, block, 0, stream>>>(dXtotal, dVar, C, d_tau,
                                                          dEst, dSe, dZ, dAbsZ, d_flags);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1528,8 +1523,8 @@ void launch_sweep_zfilter_tau(const double* dXtotal, const double* dVar, int C,
 
 void launch_sweep_topk_iota(int* d_idx, int n, cudaStream_t stream) {
     if (n <= 0) return;
-    const int block = 256;
-    const int grid = (n + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(n, block);
     sweep_topk_iota_kernel<<<grid, block, 0, stream>>>(d_idx, n);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1542,8 +1537,8 @@ void launch_sweep_topk_gather(const int* d_perm, int m,
                               int* outC0, int* outC1, int* outC2, int* outC3,
                               cudaStream_t stream) {
     if (m <= 0) return;
-    const int block = 256;
-    const int grid = (m + block - 1) / block;
+    const int block = kBlock256;
+    const int grid = core::cdiv(m, block);
     sweep_topk_gather_kernel<<<grid, block, 0, stream>>>(
         d_perm, m, inEst, inSe, inZ, inAbsZ, inC0, inC1, inC2, inC3,
         outEst, outSe, outZ, outAbsZ, outC0, outC1, outC2, outC3);
@@ -1569,8 +1564,8 @@ void launch_symmetrize_lower_to_full(double* dM, int n, cudaStream_t stream) {
 void launch_add_fudge_diag(double* dM, int n, double fudge, double tr,
                            cudaStream_t stream) {
     if (n <= 0) return;
-    const int block = 64;
-    const int grid = (n + block - 1) / block;
+    const int block = kBlock64;
+    const int grid = core::cdiv(n, block);
     add_fudge_diag_kernel<<<grid, block, 0, stream>>>(dM, n, fudge, tr);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1617,8 +1612,8 @@ void launch_qpadm_loo_batched(const double* dLoo, const double* dQinv,
                               int nl, int nr, int r, double fudge, int als_iters,
                               int nb, double* dWmat, cudaStream_t stream) {
     if (nb <= 0) return;
-    const int block = 64;
-    const int grid = (nb + block - 1) / block;
+    const int block = kBlock64;
+    const int grid = core::cdiv(nb, block);
     loo_batched_kernel<<<grid, block, 0, stream>>>(dLoo, dQinv, nl, nr, r, fudge,
                                                    als_iters, nb, dWmat);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -1628,8 +1623,8 @@ void launch_transpose_small(const double* dXmat, int nl, int nr,
                             double* dXt, cudaStream_t stream) {
     const long total = static_cast<long>(nl) * nr;
     if (total <= 0) return;
-    const int block = 256;
-    const int grid = static_cast<int>((total + block - 1) / block);
+    const int block = kBlock256;
+    const int grid = static_cast<int>(core::cdiv(total, static_cast<long>(block)));
     transpose_small_kernel<<<grid, block, 0, stream>>>(dXmat, nl, nr, dXt);
     STEPPE_CUDA_CHECK_KERNEL();
 }
@@ -1670,8 +1665,8 @@ void launch_qpadm_loo_large_batched(const double* dLoo, const double* dQinv,
                                     cudaStream_t stream) {
     const long total = static_cast<long>(nb) * n_models;
     if (total <= 0) return;
-    const int block = 64;
-    const int grid = launch_grid_stride(total, block);
+    const int block = kBlock64;
+    const int grid = core::grid_stride_extent(total, block);
     loo_large_batched_kernel<<<grid, block, 0, stream>>>(
         dLoo, dQinv, dAseed, dBseed, nl, nr, r, fudge, als_iters, nb, n_models,
         dbl_refit, int_refit, dScratch, dIntScratch, dWmat);

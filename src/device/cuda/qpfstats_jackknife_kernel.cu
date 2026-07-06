@@ -130,8 +130,7 @@ void launch_qpfstats_numer_jackknife(const double* d_numsum, const double* d_cnt
                                      double* d_ymat, double* d_y, cudaStream_t stream) {
     if (npopcomb <= 0 || n_block <= 0) return;
     constexpr int kThreads = 128;
-    long blocks = (static_cast<long>(npopcomb) + kThreads - 1) / kThreads;
-    if (blocks > static_cast<long>(core::kMaxGridX)) blocks = core::kMaxGridX;
+    const long blocks = core::grid_stride_extent(npopcomb, kThreads);
     qpfstats_numer_jackknife_kernel<<<static_cast<unsigned>(blocks), kThreads, 0, stream>>>(
         d_numsum, d_cnt, npopcomb, n_block, d_numer, d_ymat, d_y);
     STEPPE_CUDA_CHECK_KERNEL();
@@ -142,9 +141,7 @@ void launch_qpfstats_recenter_shift(const double* d_b, const double* d_bglob,
                                     double* d_shift, cudaStream_t stream) {
     if (npairs <= 0 || n_block <= 0) return;
     constexpr int kThreads = 128;
-    long blocks = (static_cast<long>(npairs) + kThreads - 1) / kThreads;
-    if (blocks < 1) blocks = 1;
-    if (blocks > static_cast<long>(core::kMaxGridX)) blocks = core::kMaxGridX;
+    const long blocks = core::grid_stride_extent(npairs, kThreads);
     qpfstats_recenter_shift_kernel<<<static_cast<unsigned>(blocks), kThreads, 0, stream>>>(
         d_b, d_bglob, d_block_sizes, npairs, n_block, d_shift);
     STEPPE_CUDA_CHECK_KERNEL();
