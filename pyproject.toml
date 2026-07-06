@@ -75,6 +75,9 @@ cuda = [
 # PATH). Export needs no dependency; import needs the [rds] extra (pyreadr). scikit-build-core
 # emits this as a standard console entry point in the wheel's metadata.
 steppe-rds = "steppe._rds:main"
+# `steppe-cache` — the GPU-free f2-cache manager CLI (bindings/steppe/_cache.py::main): list /
+# inspect / verify STPF2BK1 caches. Same GPU-free console-script pattern as steppe-rds.
+steppe-cache = "steppe._cache:main"
 
 [tool.scikit-build]
 # Build the bindings AND bundle the `steppe` CLI (steppe_app) into the wheel's scripts dir, so

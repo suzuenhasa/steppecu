@@ -102,6 +102,8 @@ add_custom_command(TARGET _core POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
             "${CMAKE_CURRENT_SOURCE_DIR}/steppe/_rds.py" "${STEPPE_PY_STAGE_DIR}/"
     COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_CURRENT_SOURCE_DIR}/steppe/_cache.py" "${STEPPE_PY_STAGE_DIR}/"
+    COMMAND ${CMAKE_COMMAND} -E copy
             "$<TARGET_FILE:_core>" "${STEPPE_PY_STAGE_DIR}/"
-    COMMENT "Staging the importable steppe package (__init__.py + _rds.py + _core) in the build tree"
+    COMMENT "Staging the importable steppe package (__init__.py + _rds.py + _cache.py + _core) in the build tree"
     VERBATIM)
