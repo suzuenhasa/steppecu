@@ -3,9 +3,12 @@
 ## 1. Purpose
 
 `src/app/precision_label.hpp` provides one small shared helper,
-`precision_label`. It takes a resolved precision setting and returns a short
+`precision_label`, in two overloads. The primary overload,
+`precision_label(Precision::Kind)`, holds the actual mapping and returns a short
 human-readable string — `"emu"`, `"tf32"`, or `"fp64"` — that names which flavor
-of floating-point math the computation actually ran in.
+of floating-point math the computation actually ran in. A convenience overload,
+`precision_label(const Precision&)`, simply forwards `p.kind` to the primary one,
+so a caller holding a whole resolved precision setting need not unpack it by hand.
 
 That string is recorded in the small `meta.json` file that sits alongside a
 directory of f2 blocks. It is the tag that says which precision was *engaged* for
@@ -66,13 +69,16 @@ The difference is the input and the destination:
 
 - `precision_str` takes a bare precision *mode* value and fills the `precision`
   column of a result row.
-- `precision_label` takes the whole resolved precision *setting* that the
-  f2-directory writer path produces, and fills the engaged-precision tag in an
-  f2 `meta.json`.
+- `precision_label` maps that same bare mode to the engaged-precision tag in an
+  f2 `meta.json` (via its `Precision::Kind` overload; the `const Precision&`
+  overload just forwards `p.kind`), along the f2-directory writer path.
 
-Because their signatures differ (one takes the mode alone, the other takes the
-full setting), they stay as two distinct helpers even though the strings they can
-return are identical. They are not interchangeable.
+The signature is no longer the differentiator: `precision_label` now also has a
+bare-mode overload, `precision_label(Precision::Kind)`, so it is no longer true
+that only `precision_label` takes the full setting. What keeps them as two
+distinct helpers is their purpose and destination — one fills a result-row column
+in the result-emitting code, the other writes the cache tag in `meta.json` — even
+though the strings they can return are identical. They are not interchangeable.
 
 ---
 

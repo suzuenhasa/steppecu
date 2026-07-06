@@ -124,11 +124,11 @@ any backend trusts them.
 
 ---
 
-## 4. The Q/V/N precondition (`validate_qvn`)
+## 4. The Q/V/N precondition (`assert_qvn_consistent`)
 
-`validate_qvn` enforces the shared precondition that the backend documents but
-assumes rather than checks. Both entry points call it first. It asserts three
-things:
+`assert_qvn_consistent` (defined in `core/internal/qvn_assert.hpp`) enforces the
+shared precondition that the backend documents but assumes rather than checks. Both
+entry points call it first. It asserts three things:
 
 - `Q`, `V`, and `N` agree on `P` (the population count).
 - `Q`, `V`, and `N` agree on `M` (the SNP count).
@@ -140,8 +140,11 @@ be cast to an enormous unsigned size and drive a huge, wrong allocation. The vie
 type does no bounds checking on element access, so catching a mismatch here prevents
 a read past the end of a too-short view.
 
-There is exactly one copy of this check, shared by both entry points, so the
-single-block and batched paths cannot drift apart on what "valid inputs" means.
+This check now lives in the shared `assert_qvn_consistent` helper
+(`core/internal/qvn_assert.hpp`) rather than as a copy local to this file, so it is
+reused across the f2 files (for example `f2_blocks_multigpu.cpp`) as well as by both
+entry points here — the single-block and batched paths cannot drift apart on what
+"valid inputs" means.
 
 ---
 
@@ -219,6 +222,10 @@ The file is deliberately kept pure host C++ with no GPU dependency. It includes 
 
 - the CUDA-free `ComputeBackend` seam (and the `F2Result` it returns),
 - the shared host-only `Q`/`V`/`N` view type,
+- the CUDA-free index-cast helpers (`core/internal/index_cast.hpp`, for `idx` /
+  `nonneg_count`),
+- the CUDA-free Q/V/N consistency helper (`core/internal/qvn_assert.hpp`, for
+  `assert_qvn_consistent`),
 - the host-only block-partition rule and the public `F2BlockTensor` result type,
 - the debug-assert facility, and
 - the public configuration header (for the `Precision` type).

@@ -240,7 +240,7 @@ crash. So every allocation is wrapped in a try/catch that translates both into t
 documented `std::runtime_error`, keeping the contract true for any allocation
 failure whatsoever.
 
-Two private helpers hold the parts every SNP-major reader shares, so this logic
+Three private helpers hold the parts every SNP-major reader shares, so this logic
 lives in one place rather than being copied four times:
 
 - **`build_selection`** sets the tile geometry and builds the pop-contiguous list
@@ -249,6 +249,10 @@ lives in one place rather than being copied four times:
 - **`checked_alloc_snp_major`** performs the overflow-checked allocation with the
   exception translation described above, choosing between a zero-filled and a bare
   buffer via the `zero_init` flag.
+- **`check_snp_major_range`** holds the shared `snp_begin == 0` /
+  SNP-range-bounds / empty-partition guard, extracted from the four SNP-major
+  readers so its message bytes stay per-reader-identical via the method-tag and
+  begin-tag arguments.
 
 Each reader passes its own name into these helpers so the thrown message names the
 right function.

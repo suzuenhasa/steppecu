@@ -294,9 +294,12 @@ so the three entries cannot drift apart:
   the device count. The tiered entry calls this purely for its throwing side effect
   and discards the returned count, since it only ever uses the root device.
 
-The file also folds a small "treat a defensive negative count as zero" idiom into
-two tiny helpers — one that keeps the value's `int` type (for block-count fields)
-and one that also widens to the unsigned size type the allocators expect. These do
-exactly the same arithmetic the inline expressions did; they only remove the risk of
-mistyping the same guard at the many places it appears. The protected count and
-size names themselves are never renamed — only the guard idiom is shared.
+The file also uses a small "treat a defensive negative count as zero" idiom. It
+defines only one of the two helpers locally — `clamp_nonneg`, which keeps the
+value's `int` type (for block-count fields). The companion helper that also widens
+to the unsigned size type the allocators expect, `nonneg_count`, is no longer
+defined here; it now lives in the shared `core/internal/index_cast.hpp` header and
+is simply imported. These do exactly the same arithmetic the inline expressions did;
+they only remove the risk of mistyping the same guard at the many places it appears.
+The protected count and size names themselves are never renamed — only the guard
+idiom is shared.

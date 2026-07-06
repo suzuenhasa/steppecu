@@ -273,12 +273,15 @@ negligible next to the matrix multiplies it feeds.
 ## 8. The index-cast helper (`idx`)
 
 `idx(long i)` is a one-line helper that widens a signed per-SNP column index to the
-unsigned `std::size_t` that a `std::vector` or `std::span` subscript expects. It
-exists to write that widening cast once instead of repeating the
-`some_vector[static_cast<std::size_t>(...)]` boilerplate in the per-SNP loops of both
-`assign_blocks` and `block_ranges`. Callers always pass a non-negative index (SNP
-columns run from zero up to the count), so the cast is value-preserving and never
-changes a result.
+unsigned `std::size_t` that a `std::vector` or `std::span` subscript expects. It is
+**not defined in this file** — it is the shared signed→`std::size_t` cast helper
+used across the core host-reference headers, defined in and documented by
+`core/internal/index_cast.hpp` (see that file's reference doc). This file merely
+includes it and consumes it in the per-SNP loops of `assign_blocks` and
+`block_ranges`, writing the widening cast once instead of repeating the
+`some_vector[static_cast<std::size_t>(...)]` boilerplate. Callers always pass a
+non-negative index (SNP columns run from zero up to the count), so the cast is
+value-preserving and never changes a result.
 
 ---
 

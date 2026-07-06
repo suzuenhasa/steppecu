@@ -48,7 +48,7 @@ machinery:
   loop. It goes through the **same** on-device ratio block-jackknife engine that
   f4-ratio uses — one shared backend routine, reached here through
   `dstat_blocks_jackknife`. D and f4-ratio are both ratios of two sums, so they
-  can share the leave-one-out math (Section 7).
+  can share the leave-one-out math (Section 6).
 
 The one-line way to think about it: `run_dstat` reuses the f4-ratio *decode* and
 the f4-ratio *jackknife*, and only the middle step — the per-SNP D reduction — is
@@ -67,8 +67,10 @@ what makes the output byte-identical to the reference, and they must not drift.
 
 The reference computes each population's allele frequency as the plain ratio
 `(sum of reference-allele counts) / (2 × number of observed alleles)` — with **no
-pseudo-haploid adjustment**. To reproduce that, `run_dstat` forces every sample
-to be treated as diploid (ploidy = 2) when it decodes allele frequencies.
+pseudo-haploid adjustment**. To reproduce that, `run_dstat` decodes through the
+shared `core::decode_and_keep_autosomes` helper, which forces every sample to be
+treated as diploid (ploidy = 2) when it computes allele frequencies. The forced
+ploidy lives inside that helper now, not as a constant in this file.
 
 This is a deliberate departure from the f2-extraction path, which auto-detects
 each sample's ploidy and applies a pseudo-haploid adjustment. That adjustment
@@ -103,18 +105,7 @@ different quadruples can keep different SNPs.
 
 ---
 
-## 4. Named constants
-
-Two small constants are defined at the top of the file.
-
-| Constant | Value | What it's for |
-|---|---|---|
-| `kPloidyDiploid` | `2` | The forced-diploid ploidy that implements Pin 1. Every sample is decoded as diploid so that allele frequencies are the plain reference-count / (2 × observed) ratio, with no pseudo-haploid adjustment. This is the value that makes the frequencies match for parity[^at2]. |
-| `kPrimaryGpu` | `0` | The index of the single GPU this entry point uses. `run_dstat` is a single-GPU routine; it always uses the primary device. This mirrors the same choice in `f4.cpp` and `f4ratio.cpp`. |
-
----
-
-## 5. The population-axis contract
+## 4. The population-axis contract
 
 This is a subtle but important invariant about *which* populations get read and
 how the quadruple indices line up.
@@ -136,11 +127,11 @@ from the same input.
 file — propagates *out* as an exception, which the application's error handling
 maps to a nonzero I/O exit code. A *domain* outcome — for example, a quadruple
 that has no surviving blocks — is **not** an exception; it is reported as a
-not-a-number sentinel in that row (Section 9).
+not-a-number sentinel in that row (Section 8).
 
 ---
 
-## 6. The processing pipeline
+## 5. The processing pipeline
 
 `run_dstat` runs four stages in order.
 
@@ -193,7 +184,7 @@ p-value become the result.
 
 ---
 
-## 7. The block jackknife
+## 6. The block jackknife
 
 The standard error comes from a **leave-one-out block jackknife** over genome
 blocks. Because D is a ratio (numerator sum over denominator sum), this is a
@@ -231,10 +222,12 @@ Two details make this match the reference and stay numerically sound:
 
 ---
 
-## 8. Device-resident and CPU-reference paths
+## 7. Device-resident and CPU-reference paths
 
 The routine runs one of two ways depending on whether a real GPU is present, and
-both are guaranteed to produce the same result.
+both are guaranteed to produce the same result. `run_dstat` is a single-GPU
+routine: it always runs on the primary device, obtained by calling
+`device::primary_backend(resources)` rather than hard-coding a device index.
 
 - **GPU present.** The whole compute path stays on the device. The decode, the
   autosome compaction (Stage 2), and the per-quadruple/per-block sums (Stage 4)
@@ -251,7 +244,7 @@ the CPU path is the thing that proves the GPU path is right.
 
 ---
 
-## 9. Degenerate outcomes and error handling
+## 8. Degenerate outcomes and error handling
 
 A "degenerate" run is one where there is nothing to compute — for example, no
 populations or no SNPs decoded, no SNP surviving the autosome keep, or no block

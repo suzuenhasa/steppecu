@@ -141,12 +141,13 @@ described in the next section.
 
 ## 6. Named constants
 
-Two file-private constants are defined here. Both are conventions shared with the
-sibling f4 and f3 entry points.
+One file-private constant is defined here. It is a convention shared with the
+sibling f4 and f3 entry points. (The GPU-index constant `kPrimaryGpu` no longer
+lives in this file — backend resolution now goes through the shared
+`primary_backend` helper in `core/internal/primary_backend.hpp`.)
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPrimaryGpu` | `0` | The GPU index this single entry point runs on. Batching a model space across multiple GPUs is handled one layer above this file — a higher-level rotation drives the other GPUs — so at this level the work always targets GPU 0. Matches the same constant in `f4.cpp` and `f3.cpp`. |
 | `kSetmissThresh` | `1e-6` | The near-zero-denominator threshold. Inside the jackknife, a per-block numerator or denominator whose absolute value is smaller than this is treated as missing for that block, so a vanishing denominator cannot produce a meaningless blown-up ratio. This matches the `qpf4ratio` `setmiss` threshold of `1e-6`[^at2]. |
 
 ---

@@ -334,8 +334,19 @@ partition, a malformed input line (for the text formats), or a failed allocation
 
 ## 11. Private helpers
 
-Two private methods factor out the work the four SNP-major readers share, so the
-selection logic and the allocation-safety logic each live in exactly one place.
+Three private methods factor out the work the four SNP-major readers share, so the
+range-guard logic, the selection logic, and the allocation-safety logic each live in
+exactly one place.
+
+### `check_snp_major_range`
+
+The shared range/empty-partition guard preamble every SNP-major reader runs first. It
+enforces that `snp_begin == 0` (the readers only handle a byte-aligned SNP prefix; a
+nonzero begin is the M5 tile loop), that the `[snp_begin, snp_end)` range is in bounds
+against `n_snp`, and that the partition actually selects at least one population. The
+readers differ only in a `who` method tag and a `begin_tag` milestone prefix that keep
+each one's error-message bytes identical. Throws `std::runtime_error` on a nonzero
+begin, an out-of-range SNP range, or an empty partition.
 
 ### `build_selection`
 

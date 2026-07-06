@@ -86,9 +86,12 @@ column (see below), not on whether a number came out as `NA`.
 ## 4. Status and precision labels
 
 Two small columns carry a short human-readable tag describing how a result was
-produced. Both are computed by a `switch`, deliberately not a chained
-conditional, so that adding a new enumerated value elsewhere in the codebase
-forces a visible compile-time update here rather than silently falling through.
+produced. Both label mappings now live in shared headers rather than in this
+file — `status_str` in `include/steppe/error.hpp` and `precision_label` in
+`src/app/precision_label.hpp` — and `result_emit.cpp` only calls them. Each
+mapping is a `switch`, deliberately not a chained conditional, so that adding a
+new enumerated value elsewhere in the codebase forces a visible compile-time
+update at the switch rather than silently falling through.
 
 ### The `status` column
 
@@ -109,7 +112,9 @@ never a serialization failure.
 
 ### The `precision` column
 
-`precision_str` maps the arithmetic mode a result was computed in to a short tag:
+`precision_label` maps the arithmetic mode a result was computed in to a short
+tag. It is defined in the shared header `src/app/precision_label.hpp`, not in
+`result_emit.cpp`; this file just calls it:
 
 | Precision mode | Emitted string |
 |---|---|

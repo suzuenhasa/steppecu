@@ -36,9 +36,12 @@ output tensor.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPloidyDiploid` | `2` | The forced ploidy. Every sample is treated as diploid (allele frequency computed as reference-count over allele-count over 2), which is the parity behavior on this path[^at2]. This is deliberately *not* the per-sample auto-detected ploidy that the f2-cache extraction path uses — qpfstats runs through the D-statistic numerator engine, which assumes plain diploid frequencies. |
-| `kPrimaryGpu` | `0` | The index of the single GPU this tool runs on. qpfstats is a single-GPU tool; it always uses device 0. |
 | `kRidge` | `1e-5` | The ridge (Tikhonov) regularization added to the regression normal-matrix diagonal. The `qpfstats_regression` default of `ridge = 1e-5`[^at2]. It keeps the least-squares system well-conditioned and invertible even when the design matrix is rank-deficient. |
+
+Two behaviors that used to have their own named constants here now live in shared
+helpers instead. The forced-diploid ploidy moved into `core::decode_and_keep_autosomes`
+(the shared genotype decode front-end), and the GPU-0 selection moved into
+`device::primary_backend(resources)`. This file no longer names either one.
 
 ---
 

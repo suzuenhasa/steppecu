@@ -139,7 +139,7 @@ for example, a change to a block edge automatically moves the matching grid divi
 |---|---|---|
 | `kSymTile` | `16` | The edge length of the square 2-D thread block used by the symmetrize kernel: a 16×16 block tiled over the n×n matrix. The grid divisor is derived from this same constant, so a block-size change cannot silently under-cover the matrix. |
 | `kWarpSize` | `32` | The GPU warp size, used as the rounding granularity when picking a small block size for the per-model diagonal-fudge kernel (round `m·m` up to a whole number of warps, floored at one warp). |
-| `kMaxGridDimX` | `2^31 − 1` (equals `INT_MAX`) | The hardware limit on the x-dimension of a 1-D launch grid, taken from the shared launch-config header. Every 1-D grid-stride kernel clamps its computed grid to this. Note that only the x-dimension reaches `2^31−1`; the y- and z-dimensions are capped at 65535. This value equals `INT_MAX`, so the clamped grid always fits in an `int`. |
+| `kBlock64`, `kBlock128`, `kBlock256` | `64`, `128`, `256` | The thread-block sizes this file picks for its 1-D kernels: each launch wrapper selects one of the three depending on the kernel's per-thread cost. Naming the sizes keeps them consistent and greppable rather than scattering bare literals through the wrappers. |
 | `kOffConvergence` | `1e-30` | The stopping threshold for the in-kernel one-sided Jacobi SVD: the sweep stops when the summed squared off-diagonal magnitude falls below this. **Frozen** — the value sets the exact iteration count that matches the reference, so it may be renamed but its value must not change. |
 | `kJacobiTol` | `1e-15` | The per-rotation relative tolerance for the in-kernel Jacobi SVD (a rotation is skipped when the off-diagonal term is negligible relative to the two column norms). **Frozen** for the same parity reason. Shared by both routines that run the identical sweep so they cannot drift apart. |
 | `kJacobiMaxSweeps` | `60` | The maximum number of Jacobi sweeps before giving up. **Frozen** for parity. |
@@ -529,8 +529,12 @@ A set of small helper kernels round out the file.
 
 ### Grid geometry and the grid-stride safety net
 
-Most launch wrappers use a shared helper (`launch_grid_stride`) that ceil-divides the
-total work by the block size and clamps the result to the maximum x-grid dimension. This
+Most launch wrappers size their grid with a shared helper, `core::grid_stride_extent`
+(from `core/internal/launch_config.hpp`), which ceil-divides the total work by the block
+size and clamps the result to the maximum x-grid dimension (`core::kMaxGridX`, equal to
+`2^31 − 1`, so the clamped grid always fits in an `int`). The few wrappers whose work
+count cannot overflow — a per-model or per-block count rather than a per-item one — skip
+the clamp and use the plain ceil-divide `core::cdiv` instead. This
 clamp is not merely defensive: on the largest sweeps the total item count reaches several
 billion, so the raw grid would overflow a signed 32-bit integer and wrap negative. The
 clamp caps the grid at the maximum, and because every one of these kernels is written as

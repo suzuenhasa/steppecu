@@ -223,8 +223,9 @@ Both follow the same shape:
 - They compute the grid as the ceiling of the work count divided by 128, and then
   **clamp that block count** to the single shared grid-dimension cap
   (`core::kMaxGridX`). Clamping is safe because the grid-stride loop inside the
-  kernel covers any remaining work with the fixed grid. (The recenter wrapper also
-  guards a minimum of one block.)
+  kernel covers any remaining work with the fixed grid. Both wrappers derive this
+  block count from the same `core::grid_stride_extent` helper (ceiling-divide then
+  clamp to `core::kMaxGridX`).
 - After launching, each checks for a launch error through the shared kernel-check
   macro.
 

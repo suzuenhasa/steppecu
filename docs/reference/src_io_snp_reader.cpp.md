@@ -33,13 +33,24 @@ Two design ideas run through the whole file:
    block rule here would be a duplication smell.
 
 The file is pure host C++20. It uses no CUDA and depends on nothing in the core
-or device layers. The only project header it includes is the format-constants
-header, which is where the chromosome codes, column indices, and field-count
-thresholds it uses are defined once.
+or device layers. It includes two project headers: the format-constants header,
+which is where the chromosome codes, column indices, and field-count thresholds
+it uses are defined once; and the shared text-parse helper header
+(`io/detail/snp_text_parse.hpp`), which is where the token-splitting and
+numeric-field parsers described below actually live.
 
 ---
 
 ## 2. The shared numeric-parse contract (`parse_full`)
+
+The parsers described in this section and the next three — `parse_full`,
+`chrom_code`, `parse_genpos`, `parse_physpos`, and the `split_ws` splitter of
+section 6 — no longer live in this file's anonymous namespace. They were
+extracted to the shared `io/detail/snp_text_parse.hpp` helper header, and
+`read_snp` now calls them through the `detail::` namespace (for example
+`detail::split_ws`, `detail::parse_genpos`, `detail::chrom_code`,
+`detail::parse_physpos`). The descriptions below document that shared contract,
+which `read_snp` relies on unchanged.
 
 Every numeric field in the file is parsed through one small template helper,
 `parse_full`. It takes a token string and an output value, and returns true only
@@ -77,9 +88,12 @@ chromosome path can catch and handle gracefully (see section 5).
 
 ## 3. Genetic position: strict, finite-checked
 
-The genetic position (column 3, in Morgans) is parsed strictly by `parse_genpos`.
-It must parse cleanly, consume the whole token, **and** be a finite number.
-Anything else throws `std::runtime_error` naming the bad token and the line.
+The genetic position (column 3, in Morgans) is parsed strictly by the shared
+`detail::parse_genpos`, which `read_snp` calls as
+`detail::parse_genpos(token, line_no, "read_snp")` — passing its own name as the
+context argument that the helper folds into any error message. It must parse
+cleanly, consume the whole token, **and** be a finite number. Anything else
+throws `std::runtime_error` naming the bad token and the line.
 
 Two rejections come for free from the shared `parse_full` contract: trailing
 garbage like `0.5x`, and magnitude overflow like `1e400`.

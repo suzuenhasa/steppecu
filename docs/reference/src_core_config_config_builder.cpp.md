@@ -95,6 +95,7 @@ in a regular-expression engine or locale machinery:
 | `split_csv(s)` | Splits a comma-separated list, trimming each piece and dropping empty pieces. Dropping empties means a trailing comma or a doubled comma (like `0,,1`) does not produce a spurious blank entry. |
 | `parse_int(tok, out)` | Parses a base-10 integer from a token that must be *fully* consumed — any trailing junk, a partial number, non-numeric text, or an overflow all fail. This is the fail-fast gate that rejects a bad numeric token rather than silently reading part of it. |
 | `env(key)` | Reads an environment variable as an optional value, where both "unset" and "set but empty" come back as "no value." |
+| `parse_enum(tok, table)` | Case-folds the token and looks it up in a fixed `{token, value}` table, returning the matching enum value. It hands back a `std::optional`, so a token that matches no entry comes back as `nullopt` (no match) rather than a wrong-but-plausible default. |
 
 ---
 

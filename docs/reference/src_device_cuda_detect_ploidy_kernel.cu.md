@@ -149,14 +149,14 @@ returns early because there is no output to write at all.
 
 1. Returns immediately if `n_individuals == 0` (nothing to do).
 2. Computes the scan `window` as described in section 6.
-3. Computes the grid width by dividing the number of individuals by the block size,
-   rounding up (`core::cdiv`).
-4. Asserts that the resulting grid width does not exceed the maximum grid dimension the
-   hardware allows (`kMaxGridX`). If it ever did, the fix is to tile the individual
-   axis into multiple launches — the assertion message says so. In practice this is a
-   guard against an impossibly large individual count, not something that fires on
-   real data.
-5. Launches the kernel on the caller-supplied stream and checks for a launch error.
+3. Computes the grid width in one call to the shared `core::grid_for_x` helper (from
+   `core/internal/launch_config.hpp`): it divides the number of individuals by the
+   block size rounding up, and in the same step asserts that the resulting grid width
+   does not exceed the maximum grid dimension the hardware allows (`kMaxGridX`). If it
+   ever did, the fix is to tile the individual axis into multiple launches — the
+   message passed into `grid_for_x` says so. In practice this is a guard against an
+   impossibly large individual count, not something that fires on real data.
+4. Launches the kernel on the caller-supplied stream and checks for a launch error.
 
 The block size is a fixed compile-time constant, `kPloidyBlock = 256` threads per
 block, defined privately in this file. Kernels here never choose their own block size

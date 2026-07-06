@@ -62,11 +62,12 @@ by all candidates at once.
 
 All of these are defined in an anonymous namespace at the top of the file. Note that
 they are the constants of the topology *search* — the projected-Newton fit that
-actually scores a single graph has its own separate constants elsewhere.
+actually scores a single graph has its own separate constants elsewhere. The
+primary-GPU backend is no longer a local constant here: the search obtains it
+through the shared `device::primary_backend` helper (`core/internal/primary_backend.hpp`).
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPrimaryGpu` | `0` | The device index the search runs on. The search always uses a single, primary GPU; the entry points pull that GPU's backend out of the resource set through this index. |
 | `kMaxHillClimbSteps` | `1000` | A safety cap on how many steps a single hill-climb descent may take before giving up. The bounded search space has finite neighborhoods and the climb is strictly downhill, so it reaches a local minimum in far fewer steps than this in practice. The cap exists only to guard against a pathological walk that never terminates — it is not expected to fire. |
 | `kRecoveryRtol` | `1e-6` | The **relative** tolerance in the recovery check that compares the hill-climb's answer against the exhaustive global-best score. This mirrors the roughly 1e-6 relative tolerance used for the qpGraph fit's own parity comparison[^at2]. |
 | `kRecoveryAtol` | `1e-9` | The **absolute** tolerance in that same recovery check. Two scores count as equal when `|a − b| <= kRecoveryAtol + kRecoveryRtol · |b|`. |
@@ -213,7 +214,7 @@ Two public overloads, both thin wrappers, differ only in where the f2 blocks liv
 - `run_qpgraph_search(const F2BlockTensor& f2_host, …)` — f2 blocks in a host
   tensor.
 
-Each resolves the primary GPU's backend (via `kPrimaryGpu`) from the passed-in
+Each resolves the primary GPU's backend (via the shared `device::primary_backend` helper) from the passed-in
 resource set and forwards to the shared `run_search_impl` body. The result type,
 options, and per-candidate structures they exchange are declared in the public
 header and described in its own reference.

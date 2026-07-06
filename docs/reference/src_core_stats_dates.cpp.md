@@ -34,14 +34,20 @@ it is called out below.
 
 ## 2. Named constants
 
-A handful of file-local constants carry the values that would otherwise be bare
-numbers scattered through the code. Each has a specific reason to be exactly what
-it is, and each matches the reference DATES tool.
+Three file-local constants carry values that would otherwise be bare numbers
+scattered through the code. Each has a specific reason to be exactly what it is,
+and each matches the reference DATES tool.
+
+Two values that this file uses but does *not* define live in shared headers. GPU
+selection goes through the shared `device::primary_backend(resources)` helper
+rather than a local device-index constant, and the diploid ploidy forced during
+the decode is the shared `core::kPloidyDiploid` (value `2`) — DATES uses a plain
+reference/alternate frequency, and the per-sample dosage path divides the
+genotype by 2 directly, so a sample is treated as diploid regardless of its real
+ploidy.
 
 | Constant | Value | What it's for |
 |---|---|---|
-| `kPrimaryGpu` | `0` | Which GPU the run uses. Dating runs on a single GPU, so this is always device 0. |
-| `kPloidyDiploid` | `2` | The ploidy forced during the allele-frequency decode. DATES uses a plain reference/alternate frequency, and the per-sample dosage path divides the genotype by 2 directly, so it is treated as diploid regardless of the sample's real ploidy. |
 | `kInterChromGapMorgans` | `5.0` | The gap, in Morgans, inserted between chromosomes when all positions are laid end-to-end on one continuous genetic-distance axis. A 5-Morgan gap is far larger than any real chromosome span, so each chromosome's fine-grid cells stay disjoint and the per-chromosome FFT segments can never overlap. |
 | `kMinJackWeight` | `1e-6` | The zero-weight filter for the jackknife. A leave-one-out block whose weight falls below this is dropped before the standard-error calculation. Because the weight is a position count, any block with real data clears it easily — this only removes empty or degenerate blocks. |
 | `kCorrDenomFloor` | `1.0e-20` | A divide-by-zero guard added under the square root in the correlation formula. A bin with zero variance would otherwise divide by zero and return not-a-number; with this tiny floor added it returns a correlation of 0 instead. It is negligible against any genuine variance. |

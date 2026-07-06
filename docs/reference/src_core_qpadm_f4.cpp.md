@@ -158,12 +158,15 @@ assemble, which is handled as not-a-number rows above.
 
 ## 8. The primary GPU and the two entry points
 
-`kPrimaryGpu` is a small file-private constant fixed at `0`. It names the single
-GPU this routine runs on. Any spreading of work across multiple GPUs happens at a
-higher layer that batches many models and hands each GPU its own slice; within one
-f4 call the work stays on the primary GPU. The constant mirrors the same convention
-in the qpAdm fit code and is kept here as a local naming choice rather than a global
-setting.
+f4 does not define its own GPU-index constant or accessor. It pulls in the shared
+`primary_backend` helper (`using device::primary_backend;`, declared in
+`core/internal/primary_backend.hpp`), which centralizes the fixed primary-GPU
+convention — index `0` — used across qpAdm. That helper names the single GPU this
+routine runs on. Any spreading of work across multiple GPUs happens at a higher
+layer that batches many models and hands each GPU its own slice; within one f4 call
+the work stays on the primary GPU. Because the convention now lives in one shared
+header rather than being redefined here, all the qpAdm routines agree on the same
+primary GPU by construction.
 
 There are two public `run_f4` overloads, differing only in where the f2 data lives:
 

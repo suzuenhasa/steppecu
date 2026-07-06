@@ -39,13 +39,16 @@ model to bolt on.
 
 ## 2. Named constants
 
-Two named constants sit at the top of the file's private section. Neither one
-changes any reported result; both are documented as safe-to-tune or cosmetic.
+Four named constants sit at the top of the file's private section. None of them
+changes any reported result; each is documented as safe-to-tune, cosmetic, or a
+standard published constant.
 
 | Constant | Value | What it's for |
 |---|---|---|
 | `kWlExtraRounds` | `4` | Extra safety rounds added to the graph-hash refinement loop (see section 4). The refinement is guaranteed to reach its fixed point in at most `|V|-1` passes, and the loop already runs `2*|V|` passes, which more than covers that. The `+4` is conservative headroom so the loop is provably past the fixed point on every graph in the enumerated space. Tuning-only — not load-bearing for correctness. The hash is exact (zero collisions) on the 1485-graph reference set with this bound. |
 | `kFreshNodeBase` | `500000` | The starting id number for the synthetic split/admix nodes that the one-admixture wiring introduces (see section 6). It sits well above any real leaf id or tree-internal id so there is no collision. The exact value is cosmetic: the hash quotients these synthetic labels out (section 4), so the graph's identity does not depend on which base number is used. A single shared base is used on purpose — an earlier design split the base into two separate values (100000 and 500000) and that split risked the two drifting apart, so it was collapsed to one. |
+| `kFnvOffsetBasis` | `1469598103934665603` | The FNV-1a offset basis — the seed value the graph hash starts from before mixing in any bytes (see the FNV-1a fold in section 4). It is a standard published constant of the FNV-1a algorithm, not a tunable knob; it is named here only so the magic number no longer sits inline in the hash loop. |
+| `kFnvPrime` | `1099511628211` | The FNV-1a prime — the multiplier applied after each byte is XOR-mixed in the graph hash (see section 4). Like the offset basis, it is a fixed constant of the FNV-1a algorithm, not something to tune; it is named for readability, not to be changed. |
 
 ---
 

@@ -178,9 +178,11 @@ pipeline:
   how the reference-comparison test stages a known-good f2 tensor and checks
   steppe's f3 output against the parity oracle[^at2].
 
-Both overloads run on the first GPU in the supplied resources. The file pins that
-choice with a translation-unit-private constant `kPrimaryGpu = 0` (mirroring
-`f4.cpp`). Any spreading of work across multiple GPUs happens **above** this seam —
+Both overloads target the first GPU via the shared `device::primary_backend`
+accessor — the file brings it in with `using device::primary_backend;` rather than
+defining any constant of its own. The `kPrimaryGpu` value that pins that choice now
+lives in the shared header `core/internal/primary_backend.hpp`. Any spreading of
+work across multiple GPUs happens **above** this seam —
 the model-batched rotation drives the other GPUs — so this file always targets the
 one primary device.
 

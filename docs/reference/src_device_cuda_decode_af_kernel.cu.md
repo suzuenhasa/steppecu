@@ -234,10 +234,14 @@ The grid is sized to cover the full output:
 - The **population axis** rides the grid's `y` dimension, computed from `P` with
   the ordinary integer helper.
 
-Both grid dimensions have hardware maximums. The population axis is checked by its
-helper. The SNP axis is checked explicitly in `launch_decode_af`: an assertion
-verifies the computed `x`-grid extent does not exceed the maximum grid width, and
-if it ever did the fix would be to tile the SNP axis into multiple launches. This
-assertion compiles out of release builds, so it costs nothing at runtime and only
-guards against a future dataset large enough to overflow the grid. After the
-launch, the standard kernel-error check runs.
+Both grid dimensions have hardware maximums, and both are now computed and checked
+by their own helper — symmetric to each other. The population axis goes through the
+ordinary integer helper `core::grid_for`. The SNP axis goes through `core::grid_for_x`,
+which does the `long` ceil-divide and, on the same line, asserts that the computed
+`x`-grid extent does not exceed the maximum grid width; if it ever did the fix would
+be to tile the SNP axis into multiple launches. That check used to be an inline
+ceil-divide plus assertion written out inside `launch_decode_af`, but it was extracted
+into `core::grid_for_x` so the SNP axis is now guarded by its helper the same way the
+population axis is by `grid_for`. The assertion compiles out of release builds, so it
+costs nothing at runtime and only guards against a future dataset large enough to
+overflow the grid. After the launch, the standard kernel-error check runs.

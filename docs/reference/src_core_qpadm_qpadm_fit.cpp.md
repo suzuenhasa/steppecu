@@ -244,8 +244,10 @@ off to `run_impl`. For qpWave it assembles `X` from the left list directly.
 single accessor, `primary_backend`, which names the otherwise-magic device index via
 the constant `kPrimaryGpu` (value `0`). Any multi-GPU fan-out lives *above* this file —
 the model-batched search is what drives the other GPUs — so a single fit always runs
-on GPU 0. The index constant is kept private to this file because it is a local
-convention, not a cross-module tunable.
+on GPU 0. The index constant and the `primary_backend()` accessor live in the shared
+header `core/internal/primary_backend.hpp` (namespace `steppe::device`), reused across
+the single-GPU entry points (qpAdm, qpGraph); this file brings the accessor in via a
+using-declaration.
 
 **Survivor-block subtlety.** The jackknife is run over the block sizes that the
 assembly step *kept* in `X`, not the full block list of the original f2 source. If any

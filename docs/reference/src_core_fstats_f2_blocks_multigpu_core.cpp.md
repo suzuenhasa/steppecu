@@ -258,10 +258,15 @@ block-aligned shards always tile the block space with non-negative ranges, so
 these clamps never fire in normal operation — they exist purely so that a bad
 range can never turn into a giant wrapped-around unsigned value:
 
-- The column offset uses `s0 < 0 ? 0 : s0` before it is cast to an unsigned
-  size, so a negative start can never wrap the byte offset.
-- The local block-id array length uses `M_local < 0 ? 0 : M_local` for the same
-  reason, so a negative local SNP count can never wrap the vector length.
+- The column offset clamps a negative start to zero via `nonneg_count(s0)`
+  before the unsigned multiply, so a negative start can never wrap the byte
+  offset.
+- The local block-id array length uses `nonneg_count(M_local)`, which clamps a
+  negative local SNP count to zero, so it can never wrap the vector length.
+
+Both guards go through the `nonneg_count()` helper, which lives in
+`src/core/internal/index_cast.hpp`; it takes a signed count and returns its
+`size_t` value, clamping a negative to zero.
 
 **Empty shards** (where `b0 == b1`) are a normal, expected case — they occur
 when there are fewer blocks than GPUs. An empty shard has zero local blocks and

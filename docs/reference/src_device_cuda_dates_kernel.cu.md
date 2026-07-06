@@ -306,8 +306,9 @@ Shared conventions:
 
 - **Block size** is a fixed 256 threads (`kBlock`). The Phase-A reduction depends
   on this being a power of two (section 3).
-- **Grid size** is computed by a single ceiling-division helper (`grid_for`) so no
-  kernel picks its own launch geometry ad hoc.
+- **Grid size** is computed by the shared ceiling-division helper (`core::cdiv`,
+  in `src/core/internal/launch_config.hpp`) so no kernel picks its own launch
+  geometry ad hoc.
 - The complex-data wrappers take `void*` and cast to the complex type internally,
   so the header stays free of any CUDA/cuFFT types and can be included by
   non-GPU code.
