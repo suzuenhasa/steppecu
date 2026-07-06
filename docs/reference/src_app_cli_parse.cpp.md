@@ -41,10 +41,10 @@ The lifecycle for any one subcommand is:
    value-holder per flag).
 2. The subcommand's callback fires. It calls `build_config(...)` to run the
    precedence merge and validation (section 3).
-3. If the configuration is invalid, the process exits immediately with the
-   invalid-configuration exit code.
+3. If the configuration is invalid, the callback records the invalid-configuration
+   exit code and returns.
 4. Otherwise it calls the subcommand's `run_*_command(config)` — the real GPU
-   compute — and exits with whatever that returns.
+   compute — and records whatever that returns as the exit code.
 
 Two mechanical details make this work reliably:
 
@@ -54,16 +54,20 @@ Two mechanical details make this work reliably:
   must outlive parsing. Only the selected subcommand's callback ever fires, so only
   the chosen subcommand's `CliArgs` carries user input; the rest stay at their
   defaults and are ignored.
-- **Each callback ends in `std::exit`.** A subcommand callback never returns
-  normally — it computes and then calls `std::exit(...)` directly. That means
-  control reaches the bottom of `run_cli` only when *no* subcommand was chosen.
+- **One shared registration recipe, no `std::exit`.** Every subcommand is registered
+  through a single `register_cmd` helper: it creates the subcommand, tags its command
+  kind, runs a small setup lambda that attaches the flags, and installs a callback that
+  builds the config and records the `run_*_command` result into a shared `code`. The
+  callback returns normally — it does *not* call `std::exit` — so the stack unwinds and
+  destructors run, and `run_cli` returns `code` after parsing.
 
 **Bare invocation prints help.** The app is configured to require zero or one
 subcommand. Zero subcommands (a bare `steppe` with no verb) is not treated as an
 error: after parsing, `run_cli` prints the full help text and returns the success
 exit code, so a bare invocation is a clean, documented no-op. One subcommand runs
-that subcommand (and exits before reaching the help-print). Two or more subcommands
-is a parse error.
+that subcommand; after parsing, `run_cli` prints the help text only when no subcommand
+was selected, then returns the recorded exit code. Two or more subcommands is a parse
+error.
 
 ---
 
@@ -259,9 +263,10 @@ the number of survivors.
 
 ## 8. The subcommand catalog
 
-Every subcommand is registered the same way: it gets a `CliArgs`, is tagged with its
-command kind, has its flags attached (mostly through the shared helpers), and is
-given a callback that builds the config and dispatches to its `run_*_command`.
+Every subcommand is registered the same way, through the shared `register_cmd` recipe:
+it gets a `CliArgs` (owned at `run_cli` scope), is tagged with its command kind, has its
+flags attached (mostly through the shared helpers), and is given a callback that builds
+the config and records its `run_*_command` exit code.
 
 | Subcommand | What it does | Notable flags beyond the shared groups |
 |---|---|---|
