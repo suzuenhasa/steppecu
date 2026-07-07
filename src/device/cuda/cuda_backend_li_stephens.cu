@@ -6,6 +6,7 @@
 // always-on checkpoint/recompute scratch, and returns the per-column copying
 // posterior gamma (donor-major, K*M). A CUDA TU private to steppe_device.
 //
+// Reference: docs/reference/src_device_cuda_cuda_backend_li_stephens.cu.md
 // Reference: docs/planning/li-stephens-engine-scope.md §2a.
 #include <cmath>
 #include <cstdint>

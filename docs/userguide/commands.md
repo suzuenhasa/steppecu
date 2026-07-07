@@ -248,6 +248,49 @@ steppe readv2-concord --a relatedness.csv --b reference.readv2.csv \
 
 ---
 
+## Chromosome painting — Li-Stephens haplotype copying (needs your own data)
+
+`steppe paint` runs a GPU Li-Stephens haplotype-copying forward-backward: it paints each
+**recipient** haplotype (`--prefix`) as a mosaic of copied stretches from a **donor** panel
+(`--donors`), then summarizes the copying posterior two ways. Both triples must be
+**PRE-PHASED HAPLOID** — every haploid column is one haplotype, and steppe ships no phaser, so a
+diploid input is refused up front. Recipients and donors must share one `.snp` marker set with a
+real cM genetic map. Point `--prefix` and `--donors` at the same panel to paint it against itself
+(all-vs-all, self donor left out).
+
+Two faces:
+
+- **paint** (default) — the ChromoPainter-style *coancestry* summary: expected copied `chunks` +
+  `length_cM` per recipient, aggregated by donor ancestry/pop `--labels` (add `--full` for the
+  per-donor matrix instead).
+- **`--face localanc`** — the per-SNP *local-ancestry* posterior: for each recipient, at each
+  marker, the probability it copied from each ancestry label (carries `chrom`/`pos_bp` so a
+  FLARE/RFMix-style aligner needs no external join).
+
+```bash
+# coancestry: paint a set of recipients against a labelled donor panel, aggregate by label
+steppe paint --prefix recipients_phased --donors donor_panel_phased \
+  --labels donor_labels.txt --Ne 20000 --theta auto --out coancestry.csv
+
+# panel-vs-self all-vs-all (self haplotype left out automatically), full per-donor matrix
+steppe paint --prefix panel_phased --donors panel_phased \
+  --full --recip-batch 256 --out coancestry_full.csv
+
+# local ancestry: per-SNP ancestry posterior for each recipient
+steppe paint --prefix recipients_phased --donors donor_panel_phased \
+  --labels donor_labels.txt --face localanc --format json --out localanc.json
+```
+
+`--labels` is one label per donor **haplotype column**, in `.ind` order (for phased diploid donors
+that is two identical entries per individual); omit it to fall back to `.ind` population labels.
+Tune the copying model with `--Ne` (recombination scale, default 20000) and `--theta`
+(emission/miscopy rate, default `auto` = Watterson over the K donors). `--self-copy` lets a
+haplotype copy itself (default off = leave-one-out in the panel-vs-self case). `--recip-batch`
+(default 256) is the VRAM knob — recipient haplotypes resident per GPU wave; the full K×M posterior
+never leaves the device. `--sure` lifts the O(N·K·M) cost guard for a long job.
+
+---
+
 ## Interop — move an f2 cache to/from ADMIXTOOLS 2 (`.rds`)
 
 `steppe-rds` (installed alongside the CLI, GPU-free) converts between steppe's f2 dir and

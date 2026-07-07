@@ -6,7 +6,10 @@
 // The genotype triples are read through a host CpuBackend used ONLY as the io /
 // transpose / ploidy-detect oracle (the front-end needs a backend to canonicalize a
 // tile) — the paint statistic itself is NOT computed here (that is the Phase-1 GPU
-// forward-backward). Reference: docs/planning/li-stephens-engine-scope.md §1, §3.
+// forward-backward).
+//
+// Reference: docs/reference/src_app_cmd_paint.cpp.md
+// Reference: docs/planning/li-stephens-engine-scope.md §1, §3.
 #include "app/cmd_paint.hpp"
 
 #include <algorithm>

@@ -1,3 +1,5 @@
+// Reference: docs/reference/src_core_stats_li_stephens.cpp.md
+//
 // src/core/stats/li_stephens.cpp — host model helpers for `steppe paint`.
 //
 // CUDA-free; the forward-backward itself is a ComputeBackend virtual. Reference:

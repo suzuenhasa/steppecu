@@ -1,7 +1,8 @@
 // src/core/stats/li_stephens_validate.cpp — the host-pure `steppe paint` validator.
 //
 // Fail-fast, CUDA-free: enforce the five §3 contracts before any compute launches.
-// Reference: docs/planning/li-stephens-engine-scope.md §3
+// Reference: docs/reference/src_core_stats_li_stephens_validate.cpp.md
+// Contract source: docs/planning/li-stephens-engine-scope.md §3
 
 #include "core/stats/li_stephens_validate.hpp"
 

@@ -9,7 +9,8 @@
 // validated run plan. The GPU forward-backward core and the coancestry face land in
 // Phase 1/2 — there is no kernel launch here.
 //
-// Reference: docs/planning/li-stephens-engine-scope.md §1, §3
+// Reference: docs/reference/src_app_cmd_paint.hpp.md
+// Scope background: docs/planning/li-stephens-engine-scope.md §1, §3
 #ifndef STEPPE_APP_CMD_PAINT_HPP
 #define STEPPE_APP_CMD_PAINT_HPP
 

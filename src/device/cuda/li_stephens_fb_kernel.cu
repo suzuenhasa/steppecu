@@ -26,6 +26,7 @@
 // design.
 //
 // Reference: docs/planning/li-stephens-engine-scope.md §2a.
+// Reference: docs/reference/src_device_cuda_li_stephens_fb_kernel.cu.md
 #include <cassert>
 #include <cstddef>
 #include <cstdint>

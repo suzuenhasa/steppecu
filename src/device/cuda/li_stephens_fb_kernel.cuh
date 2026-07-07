@@ -9,6 +9,7 @@
 // to a block; __syncthreads() is the per-column barrier) and materializes the
 // per-column copying posterior gamma with an always-on checkpoint/recompute
 // memory scheme (a recipient's O(K*M) forward table is never fully resident).
+// Reference: docs/reference/src_device_cuda_li_stephens_fb_kernel.cuh.md
 // Reference: docs/planning/li-stephens-engine-scope.md §2a.
 #ifndef STEPPE_DEVICE_CUDA_LI_STEPHENS_FB_KERNEL_CUH
 #define STEPPE_DEVICE_CUDA_LI_STEPHENS_FB_KERNEL_CUH

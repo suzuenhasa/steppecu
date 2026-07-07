@@ -12,6 +12,7 @@
 // this header carries the shared, testable pieces both the reference gate and that
 // pipeline build on.
 //
+// Reference: docs/reference/src_core_stats_li_stephens.hpp.md
 // Reference: docs/planning/li-stephens-engine-scope.md §2a, §2c
 #ifndef STEPPE_CORE_STATS_LI_STEPHENS_HPP
 #define STEPPE_CORE_STATS_LI_STEPHENS_HPP

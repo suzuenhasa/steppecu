@@ -372,9 +372,9 @@ int run_cli(int argc, char** argv) {
         run_readv2_command, code);
 
     register_cmd(app, "paint",
-        "Li-Stephens haplotype copying (ChromoPainter coancestry): --prefix phased "
+        "GPU Li-Stephens chromosome painter (ChromoPainter coancestry): --prefix phased "
         "RECIPIENT haplotypes + --donors phased panel -> per-donor-label coancestry "
-        "[Phase 0: validate + plan; the GPU forward-backward is Phase 1]",
+        "(paint) or per-SNP local ancestry (--face localanc); requires pre-phased haploid input",
         paint_args, Command::Paint,
         [](CLI::App* s, CliArgs& a) {
             s->add_option("--prefix", a.qpdstat_prefix,

@@ -1,5 +1,7 @@
 // src/core/stats/li_stephens_validate.hpp
 //
+// Reference: docs/reference/src_core_stats_li_stephens_validate.hpp.md
+//
 // The host-pure, CUDA-free up-front validator for a `steppe paint` (Li-Stephens
 // haplotype-copying) request. It runs BEFORE any compute is launched — the same
 // validate-once, fail-fast posture ConfigBuilder::build() and the f-stat sweep's
