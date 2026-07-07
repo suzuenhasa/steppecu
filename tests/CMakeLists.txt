@@ -1009,6 +1009,20 @@ if(STEPPE_HAVE_GTEST)
 endif()
 steppe_add_test(NAME snp_reader_unit COMMAND test_snp_reader LABELS "unit")
 
+# --- Stage-2 native harmonization units (by-construction, no GPU, no gtest) ---
+# FaidxReader offset math + contig tolerance + error paths; the native panel
+# harmonizer's rsID join / strict-1:1 dedup / palindrome flag / native ref38.
+# Self-checking main()s (no gtest); link steppe::io only.
+add_executable(test_faidx_reader unit/test_faidx_reader.cpp)
+target_link_libraries(test_faidx_reader
+    PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME faidx_reader_unit COMMAND test_faidx_reader LABELS "unit")
+
+add_executable(test_target_build unit/test_target_build.cpp)
+target_link_libraries(test_target_build
+    PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME target_build_unit COMMAND test_target_build LABELS "unit")
+
 # --- Filter oracle test (real AADR) ------------------------------------------
 # Reads the raw TGENO triple, decodes via the CPU reference backend, builds the
 # filter keep-mask via the io filters, and validates it against an independent

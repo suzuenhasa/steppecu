@@ -19,6 +19,8 @@ add_library(steppe_io STATIC
     ploidy_detect.cpp
     gzip_line_reader.cpp
     target_sites.cpp
+    faidx_reader.cpp
+    target_build.cpp
     vcf_reader.cpp
     filter/include_exclude.cpp
     filter/snp_filter.cpp

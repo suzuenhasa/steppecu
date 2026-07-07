@@ -67,8 +67,10 @@ struct VariantRec {
 // Tie-break: prefer FILTER==PASS, then higher GQ (oracle.py _better(), L1).
 [[nodiscard]] bool better(const VariantRec& a, const VariantRec& b) {
     if (a.filt_pass != b.filt_pass) return a.filt_pass;
-    const long long ag = a.has_gq ? a.gq : -1;
-    const long long bg = b.has_gq ? b.gq : -1;
+    // GQ==0 is falsy in the oracle's `(a["gq"] or -1)` — treat it as -1 so a
+    // GQ==0 record does NOT out-rank a record carrying no GQ field (fix b).
+    const long long ag = (a.has_gq && a.gq != 0) ? a.gq : -1;
+    const long long bg = (b.has_gq && b.gq != 0) ? b.gq : -1;
     return ag > bg;
 }
 
@@ -343,7 +345,11 @@ VcfIngestResult VcfReader::genotype() {
 
         // step 3: hom-ref inside a passing ref block (H1 reconciliation).
         if (pass_cov[s.chrom][i]) {
-            if (s.ref38 == '.' || s.ref38 == 'N') {
+            // Base UNAVAILABLE ('.') -> no_refbase (missing). A real 'N' in the
+            // assembly is NOT no_refbase: it flows into reconcile() below, matches
+            // neither allele, and drops as ref_change — mirroring the oracle, whose
+            // no_refbase fires only when the FASTA fetch returned nothing (fix a).
+            if (s.ref38 == '.') {
                 c.call = VcfCall::Missing;      // source stays "none" (oracle)
                 c.drop_reason = "no_refbase";
                 ++counts.missing_total;

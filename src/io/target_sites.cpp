@@ -14,18 +14,34 @@ namespace steppe::io {
 
 namespace {
 
-[[nodiscard]] bool is_palindrome(char a, char b) {
-    const char x = static_cast<char>(std::toupper(static_cast<unsigned char>(a)));
-    const char y = static_cast<char>(std::toupper(static_cast<unsigned char>(b)));
-    return (x == 'A' && y == 'T') || (x == 'T' && y == 'A') ||
-           (x == 'C' && y == 'G') || (x == 'G' && y == 'C');
-}
-
 [[nodiscard]] char up(char c) {
     return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 }
 
 }  // namespace
+
+bool is_palindrome(char a1, char a2) {
+    const char x = up(a1);
+    const char y = up(a2);
+    return (x == 'A' && y == 'T') || (x == 'T' && y == 'A') ||
+           (x == 'C' && y == 'G') || (x == 'G' && y == 'C');
+}
+
+void build_chrom_index(TargetSites& ts) {
+    ts.by_chrom.clear();
+    for (const TargetSite& s : ts.sites) {
+        if (s.palindrome) continue;
+        ts.by_chrom[s.chrom].pos.push_back(s.pos38);
+    }
+    for (auto& [chrom, ci] : ts.by_chrom) {
+        (void)chrom;
+        std::sort(ci.pos.begin(), ci.pos.end());
+        ci.slot.reserve(ci.pos.size() * 2);
+        for (std::size_t i = 0; i < ci.pos.size(); ++i) {
+            ci.slot[ci.pos[i]] = i;  // duplicate pos38 -> highest index (last-wins)
+        }
+    }
+}
 
 TargetSites read_target_sites(const std::string& path) {
     std::ifstream in(path);
@@ -81,17 +97,7 @@ TargetSites read_target_sites(const std::string& path) {
 
     // Build the per-chrom sorted pos38 index over the NON-palindromic sites, then
     // the last-wins slot map (matching oracle sorted() + enumerate()).
-    for (const TargetSite& s : ts.sites) {
-        if (s.palindrome) continue;
-        ts.by_chrom[s.chrom].pos.push_back(s.pos38);
-    }
-    for (auto& [chrom, ci] : ts.by_chrom) {
-        std::sort(ci.pos.begin(), ci.pos.end());
-        ci.slot.reserve(ci.pos.size() * 2);
-        for (std::size_t i = 0; i < ci.pos.size(); ++i) {
-            ci.slot[ci.pos[i]] = i;  // duplicate pos38 -> highest index (last-wins)
-        }
-    }
+    build_chrom_index(ts);
     return ts;
 }
 

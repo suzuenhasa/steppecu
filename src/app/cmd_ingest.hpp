@@ -15,8 +15,15 @@
 namespace steppe::app {
 
 struct IngestArgs {
-    std::string vcf;          // REQUIRED: the .vcf.gz / .vcf
-    std::string targets;      // REQUIRED: the GRCh38 target-site table
+    std::string vcf;          // the .vcf.gz / .vcf (required to genotype)
+    // Target-site source — exactly one of:
+    //   (A) Stage-1 back-compat: a pre-built GRCh38 target-site table.
+    std::string targets;      // the GRCh38 target-site table
+    //   (B) Stage-2 native: build the table in-process from panel + FASTA + lift.
+    std::string panel;        // AADR EIGENSTRAT .snp (GRCh37)
+    std::string fasta;        // GRCh38 .fa (expects a sibling .fai) -> ref38
+    std::string lift;         // orchestrated rsID->pos38 map (the one deferred input)
+    std::string emit_targets; // OPTIONAL (native only): dump the built 7-col table
     std::string sample;       // OPTIONAL: sample id (default = the sole sample)
     std::string report;       // OPTIONAL: per-site report TSV (primary artifact)
     std::string emit_tile;    // OPTIONAL: raw canonical 2-bit tile bytes (needs a device)

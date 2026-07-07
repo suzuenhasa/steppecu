@@ -614,11 +614,21 @@ int run_cli(int argc, char** argv) {
     // the shared canonical transpose only.
     CLI::App* ing = app.add_subcommand(
         "ingest",
-        "Native gVCF-block-aware VCF reader: --vcf .vcf.gz + --targets GRCh38 table -> "
-        "per-site genotype report (and, with --emit-tile, the canonical 2-bit tile)");
-    ing->add_option("--vcf", ingest_args.vcf, "Input VCF (.vcf.gz BGZF/gzip or plain .vcf)")->required();
+        "Native gVCF-block-aware VCF reader: --vcf .vcf.gz + a GRCh38 target source "
+        "(--targets table, OR native --panel/--fasta/--lift) -> per-site genotype report "
+        "(and, with --emit-tile, the canonical 2-bit tile)");
+    ing->add_option("--vcf", ingest_args.vcf, "Input VCF (.vcf.gz BGZF/gzip or plain .vcf)");
     ing->add_option("--targets", ingest_args.targets,
-                    "GRCh38 target-site table: rsID chrom [pos37] pos38 A1 A2 ref38")->required();
+                    "Stage-1 pre-built GRCh38 target-site table: rsID chrom [pos37] pos38 A1 A2 "
+                    "ref38 (mutually exclusive with --panel/--fasta/--lift)");
+    ing->add_option("--panel", ingest_args.panel,
+                    "Stage-2 native: AADR EIGENSTRAT .snp panel (GRCh37) to harmonize");
+    ing->add_option("--fasta", ingest_args.fasta,
+                    "Stage-2 native: GRCh38 .fa (needs a sibling .fai) supplying ref38");
+    ing->add_option("--lift", ingest_args.lift,
+                    "Stage-2 native: orchestrated rsID<TAB>pos38 lift map");
+    ing->add_option("--emit-targets", ingest_args.emit_targets,
+                    "Native mode only: write the built 7-col target table here (gate-1 diff)");
     ing->add_option("--sample", ingest_args.sample,
                     "Sample id to genotype (default: the sole sample in the VCF)");
     ing->add_option("--report", ingest_args.report,

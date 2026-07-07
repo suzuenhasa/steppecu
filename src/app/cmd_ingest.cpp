@@ -20,7 +20,9 @@
 #include "core/config/exit_code.hpp"
 #include "core/stats/read_canonical_tile.hpp"
 #include "device/resources.hpp"
+#include "io/faidx_reader.hpp"
 #include "io/genotype_tile.hpp"
+#include "io/target_build.hpp"
 #include "io/target_sites.hpp"
 #include "io/vcf_reader.hpp"
 #include "steppe/config.hpp"
@@ -81,18 +83,29 @@ namespace {
 }  // namespace
 
 int run_ingest(const IngestArgs& args) {
-    if (args.vcf.empty()) {
-        std::fprintf(stderr, "steppe ingest: --vcf PATH is required\n");
-        return cfg::kExitInvalidConfig;
-    }
-    if (args.targets.empty()) {
+    // --- target-site source selection (mutually exclusive) --------------------
+    const bool native = !args.panel.empty() || !args.fasta.empty() || !args.lift.empty();
+    const bool legacy = !args.targets.empty();
+    if (native && legacy) {
         std::fprintf(stderr,
-                     "steppe ingest: --targets PATH is required "
-                     "(the GRCh38 target-site table rsID chrom [pos37] pos38 A1 A2 ref38)\n");
+                     "steppe ingest: choose ONE target source — either --targets <table> "
+                     "(Stage-1) OR --panel + --fasta + --lift (Stage-2 native), not both\n");
         return cfg::kExitInvalidConfig;
     }
-    if (args.report.empty() && args.emit_tile.empty()) {
-        std::fprintf(stderr, "steppe ingest: nothing to do — pass --report and/or --emit-tile\n");
+    if (!native && !legacy) {
+        std::fprintf(stderr,
+                     "steppe ingest: no target source — pass --targets <table> OR "
+                     "--panel .snp + --fasta ref.fa + --lift rsid_pos38.tsv\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (native && (args.panel.empty() || args.fasta.empty() || args.lift.empty())) {
+        std::fprintf(stderr,
+                     "steppe ingest: native target build needs all of --panel, --fasta, --lift\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (!native && !args.emit_targets.empty()) {
+        std::fprintf(stderr, "steppe ingest: --emit-targets is valid only with the native "
+                             "(--panel/--fasta/--lift) target build\n");
         return cfg::kExitInvalidConfig;
     }
     if (args.min_dp < 0 || args.min_gq < 0) {
@@ -100,9 +113,47 @@ int run_ingest(const IngestArgs& args) {
         return cfg::kExitInvalidConfig;
     }
 
+    // Genotyping is requested by --report/--emit-tile; a bare native --emit-targets
+    // builds the table only (no VCF needed — the gate-1 table-reproduction path).
+    const bool want_genotype = !args.report.empty() || !args.emit_tile.empty();
+    if (want_genotype && args.vcf.empty()) {
+        std::fprintf(stderr, "steppe ingest: --vcf PATH is required for --report/--emit-tile\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (!want_genotype && args.emit_targets.empty()) {
+        std::fprintf(stderr,
+                     "steppe ingest: nothing to do — pass --report and/or --emit-tile "
+                     "(and, in native mode, optionally --emit-targets)\n");
+        return cfg::kExitInvalidConfig;
+    }
+
+    // --- build (native) or read (legacy) the target-site set ------------------
+    io::TargetSites targets;
+    try {
+        if (native) {
+            io::FaidxReader fa(args.fasta);
+            io::TargetBuildCounts tc;
+            targets = io::build_target_sites(args.panel, args.lift, fa, {}, tc);
+            std::fprintf(stderr,
+                         "steppe ingest: native target build | panel_total=%lld autosomal=%lld "
+                         "non_rsid=%lld palindromic=%lld dup_rsids=%lld | lift_ok=%lld "
+                         "no_lift=%lld dropped_dup=%lld | emitted=%lld\n",
+                         tc.panel_total, tc.panel_autosomal, tc.panel_non_rsid, tc.panel_palindromic,
+                         tc.panel_dup_rsids, tc.lift_ok, tc.lift_no_lift, tc.lift_dropped_dup,
+                         tc.emitted);
+            if (!args.emit_targets.empty()) io::write_target_table(args.emit_targets, targets);
+        } else {
+            targets = io::read_target_sites(args.targets);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe ingest: %s\n", e.what());
+        return cfg::kExitIoError;
+    }
+
+    if (!want_genotype) return cfg::kExitOk;  // native table-only build (gate 1)
+
     io::VcfIngestResult result;
     try {
-        const io::TargetSites targets = io::read_target_sites(args.targets);
         io::VcfReader::Options opts;
         opts.min_dp = args.min_dp;
         opts.min_gq = args.min_gq;

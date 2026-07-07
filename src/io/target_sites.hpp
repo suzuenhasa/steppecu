@@ -54,6 +54,16 @@ struct TargetSites {
 // Parse the target-site table. Throws std::runtime_error on open/format failure.
 [[nodiscard]] TargetSites read_target_sites(const std::string& path);
 
+// Strand-ambiguous palindrome test: {A,T} or {C,G} (case-insensitive). Shared by
+// read_target_sites and the Stage-2 native builder (target_build) so the drop
+// policy is single-homed.
+[[nodiscard]] bool is_palindrome(char a1, char a2);
+
+// Build the per-chrom sorted pos38 index over the NON-palindromic sites, then the
+// last-wins (chrom,pos38)->slot map — the interval-join contract shared by
+// read_target_sites and build_target_sites. Overwrites ts.by_chrom.
+void build_chrom_index(TargetSites& ts);
+
 }  // namespace steppe::io
 
 #endif  // STEPPE_IO_TARGET_SITES_HPP

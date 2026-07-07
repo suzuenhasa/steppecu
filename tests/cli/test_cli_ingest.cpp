@@ -132,6 +132,11 @@ int main(int argc, char** argv) {
         t << "rs_mismap\t1\t13\t5600\tA\tG\t.\n";   // record ID != panel rsID -> dropped
         t << "rs_belowdp\t1\t14\t5700\tA\tG\t.\n";  // variant DP 5 -> below_floor
         t << "rs_notpass\t1\t15\t5800\tA\tG\t.\n";  // FILTER != PASS -> not_pass
+        // --- Stage-2 fold-in fixes (a) ref-block N / '.' ref-base -----------
+        t << "rs_Nref\t1\t16\t1500\tA\tG\tN\n";     // passing block, ref38 'N' -> dropped ref_change
+        t << "rs_dotref\t1\t17\t1600\tA\tG\t.\n";   // passing block, ref38 '.' -> missing no_refbase
+        // --- fix (b) GQ==0 tie-break (asserted only in the --min-gq 0 run) ---
+        t << "rs_gq0\t1\t18\t6000\tA\tG\t.\n";      // dup-POS variant: no-GQ vs GQ==0 tie-break
     }
 
     // ---- author the plain .vcf ----------------------------------------------
@@ -153,6 +158,12 @@ int main(int argc, char** argv) {
         v << "1\t5600\trs_OTHER\tA\tG\t.\tPASS\t.\tGT:DP:GQ\t0/1:30:99\n";  // rsID mismap
         v << "1\t5700\trs_belowdp\tA\tG\t.\tPASS\t.\tGT:DP:GQ\t0/1:5:99\n"; // DP < 8
         v << "1\t5800\trs_notpass\tA\tG\t.\tLowGQ\t.\tGT:DP:GQ\t0/1:30:15\n";
+        // fix (b): two duplicate-POS variant records at 6000 — record #1 carries
+        // NO GQ field, record #2 has GQ==0. With the GQ==0-as-falsy tie-break the
+        // no-GQ record (first-seen) is kept; without the fix the GQ==0 record wins.
+        // Distinguishable only when GQ==0 clears the floor -> the --min-gq 0 run.
+        v << "1\t6000\trs_gq0\tA\tG\t.\tPASS\t.\tGT:DP\t0/1:30\n";        // no GQ, first
+        v << "1\t6000\trs_gq0\tA\tG\t.\tPASS\t.\tGT:DP:GQ\t1/1:30:0\n";  // GQ==0, second
     }
 
     const std::filesystem::path rpath = tmp / "report.tsv";
@@ -185,6 +196,32 @@ int main(int argc, char** argv) {
     expect(rep, "rs_mismap",  "dropped", "NA",  "none",     "rsid_mismap");
     expect(rep, "rs_belowdp", "missing", "NA",  "variant",  "below_floor");
     expect(rep, "rs_notpass", "missing", "NA",  "variant",  "not_pass");
+    // fix (a): a passing ref block whose GRCh38 REF base is 'N' drops as
+    // ref_change (N flows into reconcile, matches neither allele); a '.' base is
+    // genuinely unavailable -> missing/no_refbase (source stays "none").
+    expect(rep, "rs_Nref",    "dropped", "NA",  "refblock", "ref_change");
+    expect(rep, "rs_dotref",  "missing", "NA",  "none",     "no_refbase");
+
+    // ---- fix (b): the GQ==0 tie-break, exercised with --min-gq 0 --min-dp 1 --
+    // At the default floor GQ==0 is below the floor either way (unobservable). Only
+    // when GQ==0 clears the floor does the tie-break decide the kept record. With
+    // the fix the no-GQ record (first-seen) is kept and, carrying no GQ, resolves
+    // to missing/below_floor; WITHOUT the fix the GQ==0 record (1/1) wins and
+    // resolves to homalt/0 — so this single assertion distinguishes fixed vs not.
+    {
+        const std::filesystem::path rpath0 = tmp / "report_gq0.tsv";
+        const std::filesystem::path logf0 = tmp / "ingest_gq0.log";
+        const int rc0 = run_steppe(
+            bin, {"ingest", "--vcf", vpath.string(), "--targets", tpath.string(), "--report",
+                  rpath0.string(), "--min-gq", "0", "--min-dp", "1"},
+            logf0);
+        if (rc0 != 0) {
+            std::printf("  [FAIL] steppe ingest (min-gq 0) exit=%d\n", rc0);
+            ++g_failures;
+        }
+        const auto rep0 = parse_report(rpath0);
+        expect(rep0, "rs_gq0", "missing", "NA", "variant", "below_floor");
+    }
 
     // The strand-flip site must carry flip=1.
     {
@@ -198,7 +235,8 @@ int main(int argc, char** argv) {
     std::filesystem::remove_all(tmp, ec);
 
     if (g_failures == 0) {
-        std::printf("\nRESULT: PASS (native VCF reader reproduces all 15 by-construction branches)\n");
+        std::printf("\nRESULT: PASS (native VCF reader reproduces all by-construction branches, "
+                    "incl. the Stage-2 N-ref / '.'-ref / GQ==0 fixes)\n");
         return 0;
     }
     std::printf("\nRESULT: FAIL (%d check(s) failed)\n", g_failures);
