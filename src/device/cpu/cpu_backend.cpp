@@ -537,6 +537,125 @@ public:
         return out;
     }
 
+    // ls_forward_backward: the Li-Stephens copying forward-backward REFERENCE oracle
+    // (the `steppe paint` FB core, Phase 0). Exact, per-column RESCALED, scalar,
+    // native FP64 — the FB is a product of sub-one probabilities that underflows over
+    // M columns, so alpha and beta are renormalized every column (kalis's convention,
+    // not log-space; §2e-3). The copying posterior gamma_l(k) = alpha*beta normalized
+    // per column is invariant to those per-column scalings, so it matches kalis's exact
+    // posterior regardless of rescale bookkeeping. This is the diff oracle the GPU
+    // forward-backward (Phase 1) is gated against; it is dev/test-only, never a runtime.
+    // Reference: docs/planning/li-stephens-engine-scope.md §2a.
+    [[nodiscard]] LsPosterior ls_forward_backward(const std::uint8_t* recipient,
+                                                  const std::uint8_t* donors, const double* pi,
+                                                  const double* rho, const double* mu, int K,
+                                                  long M, const Precision& precision) override {
+        (void)precision;  // the reference runs in native FP64 by construction
+        LsPosterior out;
+        out.K = K;
+        out.M = M;
+        if (K <= 0 || M <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t Ks = static_cast<std::size_t>(K);
+        const std::size_t Ms = static_cast<std::size_t>(M);
+
+        // donors are donor-major (K rows of M); recipient is M alleles. An allele byte
+        // > 1 is treated as missing -> an uninformative (constant 1) emission column.
+        const auto emission = [&](long l, int k) -> double {
+            const std::uint8_t r = recipient[static_cast<std::size_t>(l)];
+            const std::uint8_t d =
+                donors[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+            if (r > 1u || d > 1u) return 1.0;  // missing: no information
+            const double m = mu[static_cast<std::size_t>(l)];
+            return (r == d) ? (1.0 - m) : m;
+        };
+
+        // alpha / beta are stored per-column normalized (K x M, donor-major).
+        std::vector<double> alpha(Ks * Ms, 0.0);
+        std::vector<double> beta(Ks * Ms, 0.0);
+
+        // --- Forward sweep (left to right), rescaled each column ---------------
+        // l = 0: alpha_0(k) = pi[k] * e_0(k).
+        {
+            long double s = 0.0L;
+            for (int k = 0; k < K; ++k) {
+                const double a = pi[static_cast<std::size_t>(k)] * emission(0, k);
+                alpha[static_cast<std::size_t>(k) * Ms] = a;
+                s += static_cast<long double>(a);
+            }
+            const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+            for (int k = 0; k < K; ++k) alpha[static_cast<std::size_t>(k) * Ms] *= inv;
+        }
+        for (long l = 1; l < M; ++l) {
+            // alpha_{l-1} is already normalized (sum == 1); still form the reduction in
+            // native FP64 so the collapsed rank-1 transition is exact.
+            long double prev_sum = 0.0L;
+            for (int k = 0; k < K; ++k)
+                prev_sum += static_cast<long double>(
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)]);
+            const double r = rho[static_cast<std::size_t>(l)];
+            long double s = 0.0L;
+            for (int k = 0; k < K; ++k) {
+                const double aprev =
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)];
+                const double trans = (1.0 - r) * aprev +
+                                     r * pi[static_cast<std::size_t>(k)] *
+                                         static_cast<double>(prev_sum);
+                const double a = emission(l, k) * trans;
+                alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = a;
+                s += static_cast<long double>(a);
+            }
+            const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+            for (int k = 0; k < K; ++k)
+                alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+        }
+
+        // --- Backward sweep (right to left), rescaled each column --------------
+        // l = M-1: beta = 1.
+        for (int k = 0; k < K; ++k)
+            beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(M - 1)] = 1.0;
+        for (long l = M - 2; l >= 0; --l) {
+            const double r = rho[static_cast<std::size_t>(l + 1)];
+            // The shared rank-1 term T = sum_k pi[k] * e_{l+1}(k) * beta_{l+1}(k).
+            long double T = 0.0L;
+            for (int k = 0; k < K; ++k) {
+                const double b =
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                T += static_cast<long double>(pi[static_cast<std::size_t>(k)]) *
+                     static_cast<long double>(emission(l + 1, k)) * static_cast<long double>(b);
+            }
+            long double s = 0.0L;
+            for (int k = 0; k < K; ++k) {
+                const double bnext =
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                const double b = (1.0 - r) * emission(l + 1, k) * bnext +
+                                 r * static_cast<double>(T);
+                beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = b;
+                s += static_cast<long double>(b);
+            }
+            const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+            for (int k = 0; k < K; ++k)
+                beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+        }
+
+        // --- Posterior gamma_l(k) = alpha*beta normalized per column ----------
+        out.gamma.assign(Ks * Ms, 0.0);
+        for (long l = 0; l < M; ++l) {
+            long double denom = 0.0L;
+            for (int k = 0; k < K; ++k) {
+                const std::size_t o = static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                denom += static_cast<long double>(alpha[o]) * static_cast<long double>(beta[o]);
+            }
+            const double inv = (denom > 0.0L) ? static_cast<double>(1.0L / denom) : 0.0;
+            for (int k = 0; k < K; ++k) {
+                const std::size_t o = static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                out.gamma[o] = alpha[o] * beta[o] * inv;
+            }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     // qpfstats_smooth: joint-f2 smoothing solve — reference §12
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

@@ -37,6 +37,7 @@
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpgraph.hpp"
 #include "app/cmd_dates.hpp"
+#include "app/cmd_paint.hpp"
 #include "app/cmd_qpdstat.hpp"
 #include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
@@ -265,6 +266,7 @@ int run_cli(int argc, char** argv) {
     CliArgs qpfstats_args;
     CliArgs dates_args;
     CliArgs readv2_args;
+    CliArgs paint_args;
 
     // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
     // to these plain locals, also owned at run_cli scope so they outlive the parse.
@@ -368,6 +370,40 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_readv2_command, code);
+
+    register_cmd(app, "paint",
+        "Li-Stephens haplotype copying (ChromoPainter coancestry): --prefix phased "
+        "RECIPIENT haplotypes + --donors phased panel -> per-donor-label coancestry "
+        "[Phase 0: validate + plan; the GPU forward-backward is Phase 1]",
+        paint_args, Command::Paint,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Phased RECIPIENT genotype triple prefix (reads PREFIX.{geno,snp,ind}; "
+                          "haploid columns; .snp needs a real cM map)");
+            s->add_option("--donors", a.donors,
+                          "Phased DONOR / reference panel genotype triple prefix (haploid columns)");
+            s->add_option("--labels", a.labels,
+                          "Donor haplotype -> ancestry/pop label FILE (the coancestry columns)");
+            s->add_option("--face", a.face,
+                          "Downstream face: paint (v1) | localanc | impute | roh | contam");
+            s->add_option("--Ne", a.ls_ne,
+                          "Effective population size -> the recombination scale (default 20000)");
+            s->add_option("--theta", a.ls_theta,
+                          "Mutation/emission scale, or 'auto' = Watterson over the K donors (default auto)");
+            s->add_flag("--self-copy,!--no-self-copy", a.self_copy,
+                        "Allow a haplotype to copy itself (default off = leave-one-out when "
+                        "donors superset recipients)");
+            s->add_option("--recip-batch", a.recip_batch,
+                          "#recipient haplotypes resident per wave (the batch axis / VRAM knob; default 256)");
+            s->add_flag("--bp-fallback", a.bp_fallback,
+                        "Opt into approximating recombination from a base-pair window when the "
+                        ".snp has no genetic map (default off = a missing cM map is a hard error)");
+            s->add_flag("--sure", a.sweep_sure,
+                        "Lift the O(N*K*M) work cost guard (proceed with a long job)");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_paint_command, code);
 
     register_cmd(app, "qpwave", "qpWave rank sweep (no target; left[0]=ref)", qpwave_args,
         Command::QpWave,

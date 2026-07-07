@@ -53,6 +53,18 @@ inline constexpr double kStreamTileBudgetFraction = 0.25;
 inline constexpr double kDefaultBlockSizeCm = 5.0;
 inline constexpr double kCentimorgansPerMorgan = 100.0;
 inline constexpr double kBpFallbackWindow = 2.0e6;
+
+// Li-Stephens haplotype-copying engine (`steppe paint`) — the up-front cost guard.
+// The forward-backward core does O(N·K·M) work over N recipient haplotypes, K donor
+// states, and M streamed SNPs; the per-wave forward table is recip_batch·K doubles.
+// Both are capped up front, the same --sure posture the f-stat sweep uses (§3.5):
+// a run past the work cap refuses without an explicit override, and a per-wave α
+// footprint past its cap is a hard error asking for a smaller --recip-batch. The
+// values pick a "minutes, not hours" work envelope and a few-GB resident wave.
+inline constexpr double kLsMaxWorkStates = 1.0e12;
+inline constexpr std::size_t kLsMaxAlphaFootprintBytes = static_cast<std::size_t>(4) << 30;
+inline constexpr double kLsDefaultNe = 20000.0;
+inline constexpr int kLsDefaultRecipBatch = 256;
 inline constexpr int kAutosomeChromMin = 1;
 inline constexpr int kAutosomeChromMax = 22;
 inline constexpr double kMindFilterInactiveThreshold = 1.0;

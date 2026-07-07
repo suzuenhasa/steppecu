@@ -9,6 +9,7 @@
 #ifndef STEPPE_CORE_CONFIG_RUN_CONFIG_HPP
 #define STEPPE_CORE_CONFIG_RUN_CONFIG_HPP
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,17 @@ public:
     [[nodiscard]] const std::string& snp()      const noexcept { return snp_; }
     [[nodiscard]] const std::string& ind()      const noexcept { return ind_; }
     [[nodiscard]] const std::string& out_dir()  const noexcept { return out_dir_; }
+
+    // Li-Stephens `paint` controls (recipients arrive via qpdstat_prefix())
+    [[nodiscard]] const std::string& donors_prefix() const noexcept { return donors_prefix_; }
+    [[nodiscard]] const std::string& labels_file()   const noexcept { return labels_file_; }
+    [[nodiscard]] const std::string& face()          const noexcept { return face_; }
+    [[nodiscard]] double ls_ne()                 const noexcept { return ls_ne_; }
+    // NaN => "auto" (Watterson theta over the K donors), resolved in the engine.
+    [[nodiscard]] double ls_theta()              const noexcept { return ls_theta_; }
+    [[nodiscard]] bool ls_self_copy()            const noexcept { return ls_self_copy_; }
+    [[nodiscard]] int  ls_recip_batch()          const noexcept { return ls_recip_batch_; }
+    [[nodiscard]] bool ls_bp_fallback()          const noexcept { return ls_bp_fallback_; }
 
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
@@ -127,6 +139,14 @@ private:
     std::string snp_;
     std::string ind_;
     std::string out_dir_;
+    std::string donors_prefix_;
+    std::string labels_file_;
+    std::string face_ = "paint";
+    double ls_ne_ = kLsDefaultNe;
+    double ls_theta_ = std::numeric_limits<double>::quiet_NaN();  // NaN => auto
+    bool ls_self_copy_ = false;
+    int  ls_recip_batch_ = kLsDefaultRecipBatch;
+    bool ls_bp_fallback_ = false;
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

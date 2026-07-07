@@ -423,6 +423,19 @@ target_link_libraries(test_readv2_classify
     PRIVATE steppe::api steppe::warnings)
 steppe_add_test(NAME readv2_classify_unit COMMAND test_readv2_classify LABELS "unit")
 
+# --- Li-Stephens `paint` validator + model-helpers unit test (host-only) ------
+# Pure C++ host TU (no CUDA, no GPU, no data): drives core::validate_paint_request
+# (the five §3 up-front contracts — phased/haploid input, present + monotonic cM
+# map, self-copy / leave-one-out coherence, the numeric knobs, and the O(N·K·M)
+# cost guard) and the CUDA-free model helpers (recombination probability, Watterson
+# emission rate, the copying prior with leave-one-out, the code->allele map). The
+# device-free heart the paint command and the Phase-1 engine build on. Self-checking
+# executable; CTest gates on the exit code.
+add_executable(test_li_stephens_validate unit/test_li_stephens_validate.cpp)
+target_link_libraries(test_li_stephens_validate
+    PRIVATE steppe::core steppe::io steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME li_stephens_validate_unit COMMAND test_li_stephens_validate LABELS "unit")
+
 # --- qpAdm parity test (BOTH backends) ---------------------------------------
 # Reads the committed 9-pop f2 fixture and runs the single-model qpAdm fit
 # (steppe::run_qpadm) on both backends: the CpuBackend reference (bit-exact diff
@@ -524,6 +537,23 @@ target_link_libraries(test_dates_parity
     PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
 set_target_properties(test_dates_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 steppe_add_test(NAME dates_parity COMMAND test_dates_parity LABELS "reference;gpu")
+
+# --- Li-Stephens forward-backward parity gate (CpuBackend reference vs kalis) --
+# Asserts steppe's CpuBackend REFERENCE Li-Stephens copying forward-backward
+# (ComputeBackend::ls_forward_backward — exact, per-column rescaled, native FP64)
+# reproduces kalis's exact posterior NEAR-BIT on a tiny REAL 1000G chr22 phased
+# panel (24 haplotypes x 256 SNPs, a real HapMap cM map). The golden freezes
+# kalis's own FB inputs + its full per-SNP posterior; this gate feeds the identical
+# inputs to steppe and reports the max abs posterior diff. Uses ONLY the CpuBackend
+# reference — needs NO CUDA device (built by nvcc for link parity). This is the
+# Phase-0 numerics ruler the Phase-1 GPU forward-backward is diffed against.
+add_executable(test_li_stephens_parity reference/test_li_stephens_parity.cu)
+target_link_libraries(test_li_stephens_parity
+    PRIVATE steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_li_stephens_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+steppe_add_test(NAME li_stephens_parity
+         COMMAND test_li_stephens_parity
+                 "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/li_stephens" LABELS "reference;gpu")
 
 # --- f-stat sweep parity test ------------------------------------------------
 # Uploads the real 9-pop golden f2 fixture resident to VRAM and runs the GPU-only
@@ -1195,6 +1225,18 @@ if(STEPPE_BUILD_CLI)
            COMMAND test_cli_dates
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}" LABELS "cli;gpu;slow")
+
+  # --- `steppe paint` CLI + validator smoke gate (Phase 0, host-only) --------
+  # Plain C++ host TU (no CUDA): writes tiny EIGENSTRAT triples and drives the built
+  # `steppe paint`, asserting the host-pure up-front validator's contracts through
+  # the CLI (phased-haploid validates + reports a plan; a diploid triple is rejected
+  # "phase first"; an absent cM map is rejected unless --bp-fallback; a missing
+  # --donors is rejected). Phase 0 paint is host-only, so this needs NO CUDA device
+  # (no `gpu` label). Depends on steppe_app; the binary path is argv.
+  add_executable(test_cli_paint cli/test_cli_paint.cpp)
+  target_link_libraries(test_cli_paint PRIVATE steppe::warnings)
+  add_dependencies(test_cli_paint steppe_app)
+  steppe_add_test(NAME cli_paint COMMAND test_cli_paint "$<TARGET_FILE:steppe_app>" LABELS "cli")
 
   # --- `steppe qpfstats` genotype-path smoothed-f2-tensor golden gate --------
   # Plain C++ host TU (no CUDA): runs the built `steppe qpfstats --prefix <raw TGENO>

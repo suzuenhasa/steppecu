@@ -36,6 +36,7 @@ enum class Command {
     Dates,
     Scan,
     Readv2,
+    Paint,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -79,6 +80,16 @@ struct CliArgs {
     std::optional<int>         window_snps;   // non-overlapping SNP-count window
     std::optional<std::string> norm;          // background: median | mean
     std::optional<double>      min_overlap;   // drop pairs below this comparable fraction
+
+    // Li-Stephens `paint` inputs (recipients reuse the --prefix / qpdstat_prefix seam)
+    std::optional<std::string> donors;        // phased DONOR panel triple PREFIX (haploid columns)
+    std::optional<std::string> labels;        // donor haplotype -> ancestry/pop label FILE
+    std::optional<std::string> face;          // paint | localanc | impute | roh | contam (v1: paint)
+    std::optional<double>      ls_ne;         // effective pop size -> recombination scale
+    std::optional<std::string> ls_theta;      // mutation/emission scale, or "auto" (Watterson over K)
+    std::optional<bool>        self_copy;     // allow a haplotype to copy itself (off = leave-one-out)
+    std::optional<int>         recip_batch;   // #recipients resident per wave (the batch/VRAM knob)
+    std::optional<bool>        bp_fallback;   // opt into the bp cM-fallback when genpos is absent
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

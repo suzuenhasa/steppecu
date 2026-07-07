@@ -295,6 +295,18 @@ struct DatesExpFit {
     int ok = 0;
 };
 
+// Li-Stephens forward-backward copying posterior (the `steppe paint` FB core).
+// gamma is the per-column copying posterior gamma_l(k) = P(recipient copies donor k
+// at SNP l), donor-major: gamma[k*M + l], each column l summing to 1. In Phase 0
+// only the CpuBackend reference oracle computes it (native FP64, per-column rescaled);
+// the GPU override lands in Phase 1. Reference: li-stephens-engine-scope.md §2a.
+struct LsPosterior {
+    std::vector<double> gamma;  // K*M, donor-major, each SNP column normalized
+    int K = 0;
+    long M = 0;
+    Status status = Status::Ok;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -602,6 +614,27 @@ public:
         throw std::runtime_error(
             "ComputeBackend::dates_fit: not implemented by this backend "
             "(CpuBackend uses core::dates::dates_fit_default; CUDA the device fit)");
+    }
+
+    // ls_forward_backward: the Li-Stephens copying forward-backward for ONE recipient
+    // against a K-donor panel over M SNPs — the `steppe paint` FB core. Alleles are
+    // haploid {0,1} bytes (any other value == missing -> uninformative emission);
+    // `donors` is donor-major (K rows of M). `pi[k]` is the copying prior over donors
+    // (uniform 1/K, or leave-one-out with the self donor zeroed), `rho[l]` the
+    // recombination probability across the l-1 -> l gap (rho[0] ignored; 1.0 == an
+    // unlinked chromosome boundary), `mu[l]` the per-site emission/mutation rate
+    // (match -> 1-mu[l], mismatch -> mu[l]). Returns the per-column copying posterior
+    // gamma. Phase 0: only the CpuBackend reference oracle implements it (exact,
+    // per-column rescaled, scalar, native FP64); the GPU override is Phase 1.
+    [[nodiscard]] virtual LsPosterior ls_forward_backward(
+        const std::uint8_t* recipient, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, int K, long M, const Precision& precision) {
+        (void)recipient; (void)donors; (void)pi; (void)rho; (void)mu; (void)K; (void)M;
+        (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::ls_forward_backward: not implemented by this backend "
+            "(the batched GPU forward-backward is Phase 1; the CpuBackend provides the "
+            "reference oracle)");
     }
 
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_smooth(std::span<const double> x,

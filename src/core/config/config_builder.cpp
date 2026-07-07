@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <initializer_list>
 #include <optional>
@@ -199,6 +201,14 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.max_nadmix, args.max_nadmix);
     take_i(merged_.window_snps, args.window_snps);
     take_d(merged_.min_overlap, args.min_overlap);
+    take(merged_.donors, args.donors);
+    take(merged_.labels, args.labels);
+    take(merged_.face, args.face);
+    take(merged_.ls_theta, args.ls_theta);
+    take_d(merged_.ls_ne, args.ls_ne);
+    take_b(merged_.self_copy, args.self_copy);
+    take_i(merged_.recip_batch, args.recip_batch);
+    take_b(merged_.bp_fallback, args.bp_fallback);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -499,6 +509,48 @@ BuildResult<RunConfig> ConfigBuilder::build() {
             return fail("--min-overlap must lie in [0, 1]");
         }
         cfg.min_overlap_ = *merged_.min_overlap;
+    }
+
+    // Li-Stephens `paint` controls.
+    if (merged_.donors) cfg.donors_prefix_ = *merged_.donors;
+    if (merged_.labels) cfg.labels_file_ = *merged_.labels;
+    if (merged_.face) {
+        const std::string f = to_lower(trim(*merged_.face));
+        if (f != "paint" && f != "localanc" && f != "impute" && f != "roh" && f != "contam") {
+            return fail("--face '" + *merged_.face +
+                        "' is unknown (paint | localanc | impute | roh | contam)");
+        }
+        if (f != "paint") {
+            return fail("--face '" + f + "' is not yet available (v1 ships --face paint; "
+                        "localanc is v1.x, impute/roh/contam are later)");
+        }
+        cfg.face_ = f;
+    }
+    if (merged_.ls_ne.has_value()) {
+        if (!(*merged_.ls_ne > 0.0) || !std::isfinite(*merged_.ls_ne)) {
+            return fail("--Ne must be a finite value > 0");
+        }
+        cfg.ls_ne_ = *merged_.ls_ne;
+    }
+    if (merged_.ls_theta.has_value()) {
+        const std::string t = to_lower(trim(*merged_.ls_theta));
+        if (t == "auto" || t.empty()) {
+            cfg.ls_theta_ = std::numeric_limits<double>::quiet_NaN();
+        } else {
+            char* end = nullptr;
+            const double v = std::strtod(t.c_str(), &end);
+            if (end == t.c_str() || *end != '\0' || !std::isfinite(v) || v < 0.0 || v > 1.0) {
+                return fail("--theta must be 'auto' or a finite value in [0, 1]; got '" +
+                            *merged_.ls_theta + "'");
+            }
+            cfg.ls_theta_ = v;
+        }
+    }
+    if (merged_.self_copy) cfg.ls_self_copy_ = *merged_.self_copy;
+    if (merged_.bp_fallback) cfg.ls_bp_fallback_ = *merged_.bp_fallback;
+    if (merged_.recip_batch.has_value()) {
+        if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
+        cfg.ls_recip_batch_ = *merged_.recip_batch;
     }
     if (merged_.prefix && !merged_.prefix->empty()) {
         const io::GenotypeTriple triple = io::resolve_genotype_triple(*merged_.prefix);
