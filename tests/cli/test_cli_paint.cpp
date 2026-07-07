@@ -18,6 +18,7 @@
 // main(); CTest gates on the exit code. Needs NO CUDA device (falls back to the CPU
 // reference backend). argv[1] = the built steppe binary.
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -168,6 +169,102 @@ int main(int argc, char** argv) {
         RunResult r = run_steppe(bin, {"paint", "--prefix", hap}, tmp);
         check(r.exit_code != 0 && r.text.find("--donors") != std::string::npos,
               "missing --donors rejected", r);
+    }
+
+    // 4b. --face localanc smoke: the same self-painted haploid panel runs and emits a
+    //     per-SNP ancestry posterior table (long format). The synthetic panel has one
+    //     population label (PANEL) so P=1 and every posterior is 1 — a trivial but real
+    //     end-to-end exercise of the localanc face + emitter (header + sum-to-1).
+    {
+        const std::filesystem::path outf = tmp / "localanc_smoke.csv";
+        RunResult r = run_steppe(
+            bin, {"paint", "--face", "localanc", "--prefix", hap, "--donors", hap, "--out",
+                  outf.string(), "--format", "csv"}, tmp);
+        bool ok = (r.exit_code == 0);
+        // Parse: recipient,snp_id,chrom,pos_bp,genpos_cM,ancestry_label,posterior. Group the
+        // posterior by (recipient, snp_id) and assert each group sums to ~1.
+        std::map<std::string, double> sum_by_key;
+        bool header_ok = false;
+        std::ifstream cf(outf);
+        std::string line;
+        bool header = true;
+        while (std::getline(cf, line)) {
+            if (header) {
+                header = false;
+                header_ok = line.find("ancestry_label") != std::string::npos &&
+                            line.find("posterior") != std::string::npos;
+                continue;
+            }
+            if (line.empty()) continue;
+            std::vector<std::string> f;
+            std::string tok; std::istringstream ss(line);
+            while (std::getline(ss, tok, ',')) f.push_back(tok);
+            if (f.size() < 7) continue;
+            sum_by_key[f[0] + "|" + f[1]] += std::strtod(f[6].c_str(), nullptr);
+        }
+        ok = ok && header_ok && !sum_by_key.empty();
+        for (const auto& [key, s] : sum_by_key)
+            if (std::fabs(s - 1.0) > 1e-9) {
+                std::printf("  [FAIL] localanc column %s sums to %.6f (expected 1)\n",
+                            key.c_str(), s);
+                ok = false;
+            }
+        check(ok, "--face localanc emits a well-formed sum-to-1 per-SNP posterior table", r);
+    }
+
+    // 4c. OPTIONAL real-data localanc spot check (SKIP-still-PASS unless the env fixture is
+    //     set). Runs `--face localanc` on a REAL admixed phased sample against a labelled
+    //     donor panel and asserts the emitted per-SNP posterior is well-formed (header +
+    //     every column sums to ~1). The FLARE/RFMix concordance itself is scored by
+    //     tests/concordance/localanc_concordance.py (needs the external tool + real panels),
+    //     NOT asserted in CI. REAL data only, no hard-coded ancestry.
+    //       STEPPE_LOCALANC_REAL_RECIP  = admixed recipient triple PREFIX (phased .ind)
+    //       STEPPE_LOCALANC_REAL_DONORS = donor panel triple PREFIX (phased, pop-labelled)
+    //       STEPPE_LOCALANC_REAL_LABELS = --labels file (one label per donor haplotype col)
+    {
+        const char* er = std::getenv("STEPPE_LOCALANC_REAL_RECIP");
+        const char* ed = std::getenv("STEPPE_LOCALANC_REAL_DONORS");
+        const char* el = std::getenv("STEPPE_LOCALANC_REAL_LABELS");
+        if (er == nullptr || ed == nullptr || std::string(er).empty() || std::string(ed).empty()) {
+            std::printf("  [SKIP] real-data localanc spot check "
+                        "(set STEPPE_LOCALANC_REAL_RECIP / _DONORS [/ _LABELS])\n");
+        } else {
+            const std::filesystem::path outf = tmp / "localanc_real.csv";
+            std::vector<std::string> args = {"paint", "--face", "localanc", "--prefix", er,
+                                             "--donors", ed};
+            if (el != nullptr && !std::string(el).empty()) { args.push_back("--labels"); args.push_back(el); }
+            args.push_back("--out"); args.push_back(outf.string());
+            args.push_back("--format"); args.push_back("csv");
+            RunResult r = run_steppe(bin, args, tmp);
+            bool ok = (r.exit_code == 0);
+            std::map<std::string, double> sum_by_key;
+            bool header_ok = false;
+            std::ifstream cf(outf);
+            std::string line;
+            bool header = true;
+            while (std::getline(cf, line)) {
+                if (header) {
+                    header = false;
+                    header_ok = line.find("ancestry_label") != std::string::npos;
+                    continue;
+                }
+                if (line.empty()) continue;
+                std::vector<std::string> f;
+                std::string tok; std::istringstream ss(line);
+                while (std::getline(ss, tok, ',')) f.push_back(tok);
+                if (f.size() < 7) continue;
+                sum_by_key[f[0] + "|" + f[1]] += std::strtod(f[6].c_str(), nullptr);
+            }
+            ok = ok && header_ok && !sum_by_key.empty();
+            int bad = 0;
+            for (const auto& [key, s] : sum_by_key)
+                if (std::fabs(s - 1.0) > 1e-6) { (void)key; ++bad; }
+            if (bad > 0) {
+                std::printf("  [FAIL] %d real localanc columns do not sum to 1\n", bad);
+                ok = false;
+            }
+            check(ok, "real localanc: well-formed per-SNP posterior (every column sums to 1)", r);
+        }
     }
 
     // 5. OPTIONAL real-data diagonal-dominance spot check. Provide a REAL multi-pop

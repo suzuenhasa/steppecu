@@ -41,7 +41,16 @@ namespace steppe::device {
 //   d_checkpts_prev n_recip*nck*K f64  companion checkpoints (alpha at column bi*C-1)
 // When they are null the kernel runs the GATE path and writes d_gamma (byte-identical to
 // Phase 1); when d_acc_cnt is non-null it runs the paint sink and d_gamma is ignored
-// (pass nullptr). Exactly one of {d_gamma, d_acc_cnt} is the live output.
+// (pass nullptr).
+//
+// The final three (defaulted-null) buffers select the LOCALANC per-SNP sink (Phase 3):
+//   d_donor_group  K             i32  ancestry-label index per donor (in [0,P))
+//   d_post         n_recip*M*P   f64  OUTPUT, per-SNP per-label posterior, layout
+//                                     post[(rid*M + l)*P + g] (recipient-major)
+//   P              scalar             number of ancestry labels
+// When d_post is non-null the kernel runs the localanc sink (d_gamma AND d_acc_cnt pass
+// nullptr; d_checkpts_prev is unused). Exactly one of {d_gamma, d_acc_cnt, d_post} is the
+// live output — the host orchestrators guarantee it.
 void launch_ls_forward_backward(const std::uint8_t* d_recipient, const std::uint8_t* d_donors,
                                 const double* d_pi, const double* d_rho, const double* d_mu,
                                 int K, long M, int n_recip, int C, int nck, double* d_gamma,
@@ -49,7 +58,9 @@ void launch_ls_forward_backward(const std::uint8_t* d_recipient, const std::uint
                                 double* d_alpha_blk, double* d_betaA, double* d_betaB,
                                 cudaStream_t stream, const double* d_w = nullptr,
                                 double* d_acc_cnt = nullptr, double* d_acc_len = nullptr,
-                                double* d_checkpts_prev = nullptr);
+                                double* d_checkpts_prev = nullptr,
+                                const int* d_donor_group = nullptr, double* d_post = nullptr,
+                                int P = 0);
 
 }  // namespace steppe::device
 

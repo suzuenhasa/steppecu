@@ -567,6 +567,18 @@ steppe_add_test(NAME li_stephens_coancestry
          COMMAND test_li_stephens_coancestry
                  "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/li_stephens" LABELS "reference;gpu")
 
+# --- Li-Stephens local-ancestry (paint --face localanc, Phase 3) adapter gate ------
+# The fused per-SNP per-label posterior sink vs the kalis-golden-gamma reference (summed
+# by a synthetic partition) + the structural sum-to-1 invariant + P-edge analytic
+# identities + a GPU-vs-CPU sink cross-check. Same golden as the parity/coancestry gates.
+add_executable(test_li_stephens_localanc reference/test_li_stephens_localanc.cu)
+target_link_libraries(test_li_stephens_localanc
+    PRIVATE steppe::device steppe::core steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_li_stephens_localanc PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+steppe_add_test(NAME li_stephens_localanc
+         COMMAND test_li_stephens_localanc
+                 "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/li_stephens" LABELS "reference;gpu")
+
 # --- f-stat sweep parity test ------------------------------------------------
 # Uploads the real 9-pop golden f2 fixture resident to VRAM and runs the GPU-only
 # run_f4_sweep / run_f3_sweep. Asserts: every sweep survivor's est/se/z is

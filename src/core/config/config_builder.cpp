@@ -521,9 +521,9 @@ BuildResult<RunConfig> ConfigBuilder::build() {
             return fail("--face '" + *merged_.face +
                         "' is unknown (paint | localanc | impute | roh | contam)");
         }
-        if (f != "paint") {
-            return fail("--face '" + f + "' is not yet available (v1 ships --face paint; "
-                        "localanc is v1.x, impute/roh/contam are later)");
+        if (f != "paint" && f != "localanc") {
+            return fail("--face '" + f + "' is not yet available (v1 ships paint + localanc; "
+                        "impute/roh/contam are later)");
         }
         cfg.face_ = f;
     }

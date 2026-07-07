@@ -322,6 +322,24 @@ struct LsCoancestry {
     Status status = Status::Ok;
 };
 
+// Li-Stephens LOCAL-ANCESTRY posterior (the `steppe paint --face localanc` output,
+// Phase 3). Per recipient, the per-SNP posterior over ancestry LABELS, folded on-device
+// from the copying posterior gamma WITHOUT materializing the K*M posterior:
+//   post[(r*M + l)*P + g] = sum_{k : group(k)==g} gamma_l(k)
+// Each SNP column sums to 1 over g when the column is informative (gamma is column-
+// normalized and the labels partition the donors); a degenerate all-missing column whose
+// FB denominator underflows to 0 has its gamma (and therefore post_l) zeroed — the same
+// guard the FB applies. Native FP64 (scope §2c reduction carve-out — a reduction, not a
+// GEMM; do NOT emulate). Only the CpuBackend oracle and the CUDA override implement it.
+// Reference: docs/planning/li-stephens-phase3-localanc-face-spec.md §2.
+struct LsLocalAncestry {
+    std::vector<double> post;  // N*M*P, layout post[(r*M + l)*P + g]
+    int P = 0;                 // number of ancestry labels
+    long M = 0;
+    long N = 0;
+    Status status = Status::Ok;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -671,6 +689,27 @@ public:
         throw std::runtime_error(
             "ComputeBackend::ls_paint_coancestry: not implemented by this backend "
             "(the batched GPU coancestry sink is Phase 2; the CpuBackend provides the "
+            "reference oracle)");
+    }
+
+    // ls_localanc: the Li-Stephens LOCAL-ANCESTRY face over N recipient haplotypes against
+    // a K-donor panel partitioned into P ancestry labels (donor_group[k] in [0,P)). Runs
+    // the SAME forward-backward as ls_paint_coancestry and folds gamma_l(k) into the
+    // per-SNP per-label posterior ON-DEVICE (the K*M gamma is never materialized).
+    // `recipients` is recipient-major (N rows of M), `donors` donor-major (K rows of M),
+    // `pi` the per-recipient copying prior (N*K), `rho`/`mu` as in ls_forward_backward. No
+    // genetic weight and no switch term (localanc is the per-position marginal, not the
+    // chunk statistic). Native FP64 (scope §2c). Only the CpuBackend reference oracle and
+    // the CUDA override implement it. Reference: li-stephens-phase3-localanc-face-spec §2.
+    [[nodiscard]] virtual LsLocalAncestry ls_localanc(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const int* donor_group,
+        int K, long M, int N, int P, const Precision& precision) {
+        (void)recipients; (void)donors; (void)pi; (void)rho; (void)mu; (void)donor_group;
+        (void)K; (void)M; (void)N; (void)P; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::ls_localanc: not implemented by this backend "
+            "(the batched GPU local-ancestry sink is Phase 3; the CpuBackend provides the "
             "reference oracle)");
     }
 

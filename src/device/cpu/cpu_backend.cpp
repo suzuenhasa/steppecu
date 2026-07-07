@@ -795,6 +795,132 @@ public:
         return out;
     }
 
+    // ls_localanc: the Li-Stephens LOCAL-ANCESTRY REFERENCE oracle (the `steppe paint
+    // --face localanc` output, Phase 3) — the diff oracle the fused GPU local-ancestry
+    // sink is gated against. For each recipient it runs the SAME per-column-rescaled
+    // native-FP64 forward-backward as ls_paint_coancestry, then keeps the SNP axis and
+    // folds gamma_l(k) into the per-SNP per-label posterior:
+    //   post[(r*M + l)*P + g] = sum_{k : donor_group[k]==g} gamma_l(k)
+    // The per-column gamma denominator is guarded (ginv=0 when denom underflows) exactly
+    // as the gamma path (cpu:649), so a degenerate all-missing column has post_l == 0
+    // rather than NaN. The per-label sums accumulate in NATIVE double (matching the GPU
+    // reduction; the FB internals still reduce in long double). No switch term and no
+    // genetic weight — localanc is the per-position marginal. dev/test only, never a
+    // runtime. Reference: li-stephens-phase3-localanc-face-spec §5.
+    [[nodiscard]] LsLocalAncestry ls_localanc(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const int* donor_group, int K, long M, int N,
+        int P, const Precision& precision) override {
+        (void)precision;  // native FP64 by construction (§2c)
+        LsLocalAncestry out;
+        out.P = P;
+        out.M = M;
+        out.N = N;
+        if (K <= 0 || M <= 0 || N <= 0 || P <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t Ks = static_cast<std::size_t>(K);
+        const std::size_t Ms = static_cast<std::size_t>(M);
+        const std::size_t Ps = static_cast<std::size_t>(P);
+        out.post.assign(static_cast<std::size_t>(N) * Ms * Ps, 0.0);
+
+        std::vector<double> alpha(Ks * Ms, 0.0);  // normalized forward, K x M donor-major
+        std::vector<double> beta(Ks * Ms, 0.0);   // normalized backward
+
+        for (long r = 0; r < N; ++r) {
+            const std::uint8_t* recipient = recipients + static_cast<std::size_t>(r) * Ms;
+            const double* pir = pi + static_cast<std::size_t>(r) * Ks;
+
+            const auto emission = [&](long l, int k) -> double {
+                const std::uint8_t rr = recipient[static_cast<std::size_t>(l)];
+                const std::uint8_t d =
+                    donors[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+                if (rr > 1u || d > 1u) return 1.0;
+                const double m = mu[static_cast<std::size_t>(l)];
+                return (rr == d) ? (1.0 - m) : m;
+            };
+
+            // --- Forward sweep (identical to ls_forward_backward) ---------------
+            {
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double a = pir[static_cast<std::size_t>(k)] * emission(0, k);
+                    alpha[static_cast<std::size_t>(k) * Ms] = a;
+                    s += static_cast<long double>(a);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k) alpha[static_cast<std::size_t>(k) * Ms] *= inv;
+            }
+            for (long l = 1; l < M; ++l) {
+                long double prev_sum = 0.0L;
+                for (int k = 0; k < K; ++k)
+                    prev_sum += static_cast<long double>(
+                        alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)]);
+                const double rl = rho[static_cast<std::size_t>(l)];
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double aprev =
+                        alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)];
+                    const double trans = (1.0 - rl) * aprev +
+                                         rl * pir[static_cast<std::size_t>(k)] *
+                                             static_cast<double>(prev_sum);
+                    const double a = emission(l, k) * trans;
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = a;
+                    s += static_cast<long double>(a);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k)
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+            }
+
+            // --- Backward sweep -------------------------------------------------
+            for (int k = 0; k < K; ++k)
+                beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(M - 1)] = 1.0;
+            for (long l = M - 2; l >= 0; --l) {
+                const double rl = rho[static_cast<std::size_t>(l + 1)];
+                long double T = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double b =
+                        beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                    T += static_cast<long double>(pir[static_cast<std::size_t>(k)]) *
+                         static_cast<long double>(emission(l + 1, k)) * static_cast<long double>(b);
+                }
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double bnext =
+                        beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                    const double b = (1.0 - rl) * emission(l + 1, k) * bnext +
+                                     rl * static_cast<double>(T);
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = b;
+                    s += static_cast<long double>(b);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k)
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+            }
+
+            // --- Fold gamma into the per-SNP per-label posterior (native FP64) --
+            double* post_r = out.post.data() + static_cast<std::size_t>(r) * Ms * Ps;
+            for (long l = 0; l < M; ++l) {
+                long double denom = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const std::size_t o =
+                        static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                    denom += static_cast<long double>(alpha[o]) * static_cast<long double>(beta[o]);
+                }
+                const double ginv = (denom > 0.0L) ? static_cast<double>(1.0L / denom) : 0.0;
+                double* post_l = post_r + static_cast<std::size_t>(l) * Ps;
+                for (int k = 0; k < K; ++k) {
+                    const std::size_t o =
+                        static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                    const double g = alpha[o] * beta[o] * ginv;  // gamma_l(k)
+                    post_l[static_cast<std::size_t>(donor_group[static_cast<std::size_t>(k)])] += g;
+                }
+            }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     // qpfstats_smooth: joint-f2 smoothing solve — reference §12
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

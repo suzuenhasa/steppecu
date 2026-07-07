@@ -26,6 +26,7 @@
 // design.
 //
 // Reference: docs/planning/li-stephens-engine-scope.md §2a.
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -124,17 +125,22 @@ __device__ inline void forward_step(long l, int K, long M,
 
 // The forward-backward kernel — one block per recipient (blockIdx.x = rid).
 //
-// Two output modes, gated by null pointers so the Phase-1 gate path stays byte-
-// identical (§2 of the paint-face spec):
-//   - GATE mode  (gamma_all != nullptr, acc_* == nullptr): stores the K*M copying
-//     posterior exactly as Phase 1 (the parity gate).
-//   - PAINT mode (gamma_all == nullptr, acc_* != nullptr): allocates NO K*M posterior;
-//     folds each gamma_l(k) online into the two per-recipient N*K coancestry
-//     accumulators (chunkcounts, chunklengths). Single writer per donor k within a
-//     block (k = tid, tid+blockDim, ...), so acc_*[rid*K+k] needs no atomics. The
-//     chunkcount switch term needs a_{l-1}: within a recomputed tile that is
-//     alpha_blk[j-1]; at a block's first column (j==0, b0>0) it is the companion
-//     checkpoint checkpts_prev[bi] (the normalized alpha at column b0-1).
+// Three output modes, gated by null pointers so the Phase-1 gate path stays byte-
+// identical (§2 of the paint-face spec). EXACTLY ONE of {gamma_all, acc_cnt_all,
+// post_all} is non-null (the host orchestrators guarantee it; asserted below):
+//   - GATE mode  (gamma_all != nullptr): stores the K*M copying posterior exactly as
+//     Phase 1 (the parity gate).
+//   - PAINT mode (acc_cnt_all != nullptr): allocates NO K*M posterior; folds each
+//     gamma_l(k) online into the two per-recipient N*K coancestry accumulators
+//     (chunkcounts, chunklengths). Single writer per donor k within a block (k = tid,
+//     tid+blockDim, ...), so acc_*[rid*K+k] needs no atomics. The chunkcount switch term
+//     needs a_{l-1}: within a recomputed tile that is alpha_blk[j-1]; at a block's first
+//     column (j==0, b0>0) it is the companion checkpoint checkpts_prev[bi] (the
+//     normalized alpha at column b0-1).
+//   - LOCALANC mode (post_all != nullptr): allocates NO K*M posterior; folds gamma_l(k)
+//     per SNP into the M*P per-label posterior via P masked block reductions per column
+//     (post[(rid*M+l)*P+g] = sum_{k:group(k)==g} gamma_l(k)). No switch term, no genetic
+//     weight, no companion checkpoint (checkpts_prev is null on this path).
 __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
                              const std::uint8_t* __restrict__ donors,
                              const double* __restrict__ pi_all, const double* __restrict__ rho,
@@ -145,17 +151,33 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
                              double* __restrict__ betaB_all,
                              const double* __restrict__ w, double* __restrict__ acc_cnt_all,
                              double* __restrict__ acc_len_all,
-                             double* __restrict__ checkpts_prev_all) {
+                             double* __restrict__ checkpts_prev_all,
+                             const int* __restrict__ donor_group, double* __restrict__ post_all,
+                             int P) {
     const int rid = blockIdx.x;
     const int tid = threadIdx.x;
     const std::size_t Ks = static_cast<std::size_t>(K);
     const std::size_t Ms = static_cast<std::size_t>(M);
-    const bool paint = (acc_cnt_all != nullptr);  // paint sink vs gate posterior
+    // Mode select: exactly one output pointer is non-null (host-guaranteed). The branch
+    // gates are on the OUTPUT POINTERS, never on `!paint` — a null-derived gamma pointer
+    // must never be reached on the localanc path.
+    const bool localanc = (post_all != nullptr);
+    const bool paint = (acc_cnt_all != nullptr);  // paint (coancestry) sink
+    assert(static_cast<int>(gamma_all != nullptr) + static_cast<int>(paint) +
+               static_cast<int>(localanc) ==
+           1);
 
     // Per-recipient views into the backend-owned buffers.
     const std::uint8_t* recipient = recipient_all + static_cast<std::size_t>(rid) * Ms;
     const double* pi = pi_all + static_cast<std::size_t>(rid) * Ks;
-    double* gamma = paint ? nullptr : gamma_all + static_cast<std::size_t>(rid) * Ks * Ms;
+    // Genuinely nullptr on the paint/localanc paths (no nullptr+offset UB): the gate store
+    // is gated on `gamma != nullptr`, so this pointer is never formed-with-offset when null.
+    double* gamma =
+        (gamma_all == nullptr) ? nullptr : gamma_all + static_cast<std::size_t>(rid) * Ks * Ms;
+    // This recipient's M*P localanc block (nullptr off the localanc path).
+    double* post = localanc ? post_all + static_cast<std::size_t>(rid) * Ms *
+                                             static_cast<std::size_t>(P)
+                            : nullptr;
     double* checkpts = checkpts_all + static_cast<std::size_t>(rid) * static_cast<std::size_t>(nck) * Ks;
     double* checkpts_prev =
         paint ? checkpts_prev_all + static_cast<std::size_t>(rid) * static_cast<std::size_t>(nck) * Ks
@@ -238,7 +260,25 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
             for (int k = tid; k < K; k += blockDim.x) locd += alpha_l[k] * beta_cur[k];
             const double denom = block_reduce_sum(locd, sh);
             const double ginv = (denom > 0.0) ? (1.0 / denom) : 0.0;  // guard (cpu:649)
-            if (!paint) {
+            if (localanc) {
+                // LOCALANC mode: P masked block reductions of gamma_l over donors-within-
+                // label into post[l*P + g]. Every thread (incl. tid>=K and non-matching-
+                // label threads, loc==0) calls every block_reduce_sum — the barrier-
+                // collective contract the helper requires. Each k is non-zero for exactly
+                // one g, so this is K gamma-forms + P*K compares per column (P is a handful
+                // of labels). No atomics: donors sharing a label would otherwise collide.
+                // When denom==0 (degenerate column) ginv==0 so post_l is all-zero — the
+                // same guard the gamma path applies; the column sums to 0, not 1.
+                double* post_l = post + static_cast<std::size_t>(l) * static_cast<std::size_t>(P);
+                for (int g = 0; g < P; ++g) {
+                    double loc = 0.0;
+                    for (int k = tid; k < K; k += blockDim.x)
+                        if (donor_group[k] == g) loc += alpha_l[k] * beta_cur[k] * ginv;
+                    const double gsum = block_reduce_sum(loc, sh);  // has its own __syncthreads
+                    if (tid == 0) post_l[g] = gsum;
+                    __syncthreads();  // free `sh` for the next label / column
+                }
+            } else if (!paint) {
                 // GATE mode: store the full K*M posterior (byte-identical to Phase 1).
                 for (int k = tid; k < K; k += blockDim.x)
                     gamma[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] =
@@ -305,12 +345,14 @@ void launch_ls_forward_backward(const std::uint8_t* d_recipient, const std::uint
                                 double* d_checkpts, double* d_alphaA, double* d_alphaB,
                                 double* d_alpha_blk, double* d_betaA, double* d_betaB,
                                 cudaStream_t stream, const double* d_w, double* d_acc_cnt,
-                                double* d_acc_len, double* d_checkpts_prev) {
+                                double* d_acc_len, double* d_checkpts_prev,
+                                const int* d_donor_group, double* d_post, int P) {
     if (K <= 0 || M <= 0 || n_recip <= 0) return;
     ls_fb_kernel<<<n_recip, kBlock, 0, stream>>>(d_recipient, d_donors, d_pi, d_rho, d_mu, K, M,
                                                  C, nck, d_gamma, d_checkpts, d_alphaA, d_alphaB,
                                                  d_alpha_blk, d_betaA, d_betaB, d_w, d_acc_cnt,
-                                                 d_acc_len, d_checkpts_prev);
+                                                 d_acc_len, d_checkpts_prev, d_donor_group, d_post,
+                                                 P);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

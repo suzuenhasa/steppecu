@@ -229,12 +229,182 @@ int run_paint_command(const cfg::RunConfig& config) {
         return cfg::kExitIoError;
     }
 
+    const steppe::Precision prec = steppe::Precision::fp64();
+
+    // ---- Resolve donor labels (the ancestry partition — coancestry columns / localanc
+    //      labels). Shared by both faces; the localanc branch below needs it BEFORE the
+    //      compute (donor_group is a compute input), so it is resolved here. ------------
+    std::vector<std::string> donor_label = per_individual_labels(fe_d.tile);
+    if (!config.labels_file().empty()) {
+        std::ifstream lf(config.labels_file());
+        if (!lf) {
+            std::fprintf(stderr, "steppe paint: cannot open --labels file: %s\n",
+                         config.labels_file().c_str());
+            return cfg::kExitIoError;
+        }
+        std::vector<std::string> file_labels;
+        std::string line;
+        while (std::getline(lf, line)) {
+            std::istringstream ss(line);
+            std::string first, second;
+            if (!(ss >> first)) continue;  // skip blank lines
+            file_labels.push_back((ss >> second) ? second : first);
+        }
+        if (static_cast<int>(file_labels.size()) != K) {
+            std::fprintf(stderr,
+                         "steppe paint: --labels file has %zu labels but the donor panel has "
+                         "%d haplotypes (one label per donor HAPLOTYPE COLUMN, in .ind order; "
+                         "for phased diploid donors that is 2 identical entries per individual)\n",
+                         file_labels.size(), K);
+            return cfg::kExitInvalidConfig;
+        }
+        donor_label = std::move(file_labels);
+    }
+    std::vector<std::string> recip_label = per_individual_labels(fe_r.tile);
+
+    // Distinct donor labels in first-appearance order (the ancestry label set).
+    std::vector<std::string> group_labels;
+    std::unordered_map<std::string, int> group_index;
+    for (int k = 0; k < K; ++k) {
+        const std::string& g = donor_label[static_cast<std::size_t>(k)];
+        if (group_index.emplace(g, static_cast<int>(group_labels.size())).second)
+            group_labels.push_back(g);
+    }
+    const int P = static_cast<int>(group_labels.size());
+
+    // ---- Face branch: localanc (Phase 3) keeps the SNP axis and folds gamma per SNP into
+    //      the M*P per-label posterior; paint (Phase 2, the default below) collapses the
+    //      SNP axis into the N*K coancestry summaries. -----------------------------------
+    if (config.face() == "localanc") {
+        // donor k's ancestry-label index (in [0,P)).
+        std::vector<int> donor_group(static_cast<std::size_t>(K));
+        for (int k = 0; k < K; ++k)
+            donor_group[static_cast<std::size_t>(k)] =
+                group_index[donor_label[static_cast<std::size_t>(k)]];
+
+        // Batched over recipient waves; the K*M gamma never leaves the device (only the
+        // N*M*P per-SNP posterior returns).
+        std::vector<double> post(static_cast<std::size_t>(Nrec) * static_cast<std::size_t>(M) *
+                                     static_cast<std::size_t>(P),
+                                 0.0);
+        const long wave_la = std::max<long>(1, req.recip_batch);
+        try {
+            for (long r0 = 0; r0 < Nrec; r0 += wave_la) {
+                const long nb = std::min<long>(wave_la, Nrec - r0);
+                const steppe::LsLocalAncestry la = be->ls_localanc(
+                    recips.data() + static_cast<std::size_t>(r0) * static_cast<std::size_t>(M),
+                    donors.data(),
+                    pi_all.data() + static_cast<std::size_t>(r0) * static_cast<std::size_t>(K),
+                    rho.data(), mu.data(), donor_group.data(), K, M, static_cast<int>(nb), P, prec);
+                if (la.status != Status::Ok) {
+                    std::fprintf(stderr,
+                                 "steppe paint: localanc run returned a non-Ok status\n");
+                    return cfg::kExitInvalidConfig;
+                }
+                const std::size_t off = static_cast<std::size_t>(r0) *
+                                        static_cast<std::size_t>(M) * static_cast<std::size_t>(P);
+                std::copy(la.post.begin(), la.post.end(), post.begin() + off);
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe paint: localanc run failed: %s\n", e.what());
+            return cfg::kExitIoError;
+        }
+
+        // ---- Emit the per-SNP ancestry posterior (long format), carrying the SNP coords
+        //      the FLARE/RFMix aligner keys on (chrom:pos_bp), so no external join file. --
+        const double kCm_la = steppe::kCentimorgansPerMorgan;
+        const std::size_t Msz = static_cast<std::size_t>(M);
+        const std::size_t Psz = static_cast<std::size_t>(P);
+        if (const auto rc = emit_to_destination(
+                config, "localanc", [&](std::ostream& os, OutputFormat fmt) {
+                    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+                    auto snp_id = [&](long l) -> std::string {
+                        return (static_cast<std::size_t>(l) < snptab.id.size())
+                                   ? snptab.id[static_cast<std::size_t>(l)]
+                                   : ("snp" + std::to_string(l));
+                    };
+                    auto chrom_of = [&](long l) -> int {
+                        return (static_cast<std::size_t>(l) < snptab.chrom.size())
+                                   ? snptab.chrom[static_cast<std::size_t>(l)]
+                                   : 0;
+                    };
+                    auto pos_of = [&](long l) -> double {
+                        return (static_cast<std::size_t>(l) < snptab.physpos.size())
+                                   ? snptab.physpos[static_cast<std::size_t>(l)]
+                                   : 0.0;
+                    };
+                    auto cm_of = [&](long l) -> double {
+                        return (static_cast<std::size_t>(l) < snptab.genpos_morgans.size())
+                                   ? snptab.genpos_morgans[static_cast<std::size_t>(l)] * kCm_la
+                                   : 0.0;
+                    };
+                    if (fmt == OutputFormat::Json) {
+                        os << "[\n";
+                        bool first_rec = true;
+                        for (long r = 0; r < Nrec; ++r) {
+                            if (!first_rec) os << ",\n";
+                            first_rec = false;
+                            const std::string rn =
+                                recip_label[static_cast<std::size_t>(r)] + ":" + std::to_string(r);
+                            os << "  {\"recipient\": " << json_quote(rn) << ", \"snps\": [";
+                            for (long l = 0; l < M; ++l) {
+                                if (l) os << ", ";
+                                os << "{\"snp_id\": " << json_quote(snp_id(l))
+                                   << ", \"chrom\": " << chrom_of(l)
+                                   << ", \"pos_bp\": " << json_double(pos_of(l))
+                                   << ", \"genpos_cM\": " << json_double(cm_of(l))
+                                   << ", \"posterior\": {";
+                                const std::size_t base =
+                                    (static_cast<std::size_t>(r) * Msz +
+                                     static_cast<std::size_t>(l)) * Psz;
+                                for (int gcol = 0; gcol < P; ++gcol) {
+                                    if (gcol) os << ", ";
+                                    os << json_quote(group_labels[static_cast<std::size_t>(gcol)])
+                                       << ": "
+                                       << json_double(post[base + static_cast<std::size_t>(gcol)]);
+                                }
+                                os << "}}";
+                            }
+                            os << "]}";
+                        }
+                        os << "\n]\n";
+                        return;
+                    }
+                    os << "recipient" << sep << "snp_id" << sep << "chrom" << sep << "pos_bp"
+                       << sep << "genpos_cM" << sep << "ancestry_label" << sep << "posterior\n";
+                    for (long r = 0; r < Nrec; ++r) {
+                        const std::string rn =
+                            recip_label[static_cast<std::size_t>(r)] + ":" + std::to_string(r);
+                        for (long l = 0; l < M; ++l) {
+                            const std::size_t base =
+                                (static_cast<std::size_t>(r) * Msz + static_cast<std::size_t>(l)) *
+                                Psz;
+                            for (int gcol = 0; gcol < P; ++gcol) {
+                                os << csv_field(rn, sep) << sep << csv_field(snp_id(l), sep) << sep
+                                   << chrom_of(l) << sep << fmt_double(pos_of(l)) << sep
+                                   << fmt_double(cm_of(l)) << sep
+                                   << csv_field(group_labels[static_cast<std::size_t>(gcol)], sep)
+                                   << sep
+                                   << fmt_double(post[base + static_cast<std::size_t>(gcol)])
+                                   << "\n";
+                            }
+                        }
+                    }
+                })) {
+            return *rc;
+        }
+        std::fprintf(stderr,
+                     "steppe localanc: per-SNP ancestry posterior (%ld recipients x %d labels "
+                     "over %ld SNPs)\n",
+                     Nrec, P, M);
+        return cfg::kExitOk;
+    }
+
     // ---- Batched coancestry run over recipient waves; the K*M posterior never leaves
     //      the device (only the small N*K accumulators return). ------------------------
     std::vector<double> counts(static_cast<std::size_t>(Nrec) * static_cast<std::size_t>(K), 0.0);
     std::vector<double> lengths(static_cast<std::size_t>(Nrec) * static_cast<std::size_t>(K), 0.0);
     const long wave = std::max<long>(1, req.recip_batch);
-    const steppe::Precision prec = steppe::Precision::fp64();
     try {
         for (long r0 = 0; r0 < Nrec; r0 += wave) {
             const long nb = std::min<long>(wave, Nrec - r0);
@@ -255,44 +425,6 @@ int run_paint_command(const cfg::RunConfig& config) {
         std::fprintf(stderr, "steppe paint: coancestry run failed: %s\n", e.what());
         return cfg::kExitIoError;
     }
-
-    // ---- Resolve donor labels (the coancestry columns) ------------------------------
-    std::vector<std::string> donor_label = per_individual_labels(fe_d.tile);
-    if (!config.labels_file().empty()) {
-        std::ifstream lf(config.labels_file());
-        if (!lf) {
-            std::fprintf(stderr, "steppe paint: cannot open --labels file: %s\n",
-                         config.labels_file().c_str());
-            return cfg::kExitIoError;
-        }
-        std::vector<std::string> file_labels;
-        std::string line;
-        while (std::getline(lf, line)) {
-            std::istringstream ss(line);
-            std::string first, second;
-            if (!(ss >> first)) continue;  // skip blank lines
-            file_labels.push_back((ss >> second) ? second : first);
-        }
-        if (static_cast<int>(file_labels.size()) != K) {
-            std::fprintf(stderr,
-                         "steppe paint: --labels file has %zu labels but the donor panel has "
-                         "%d haplotypes (one label per donor, in .ind order)\n",
-                         file_labels.size(), K);
-            return cfg::kExitInvalidConfig;
-        }
-        donor_label = std::move(file_labels);
-    }
-    std::vector<std::string> recip_label = per_individual_labels(fe_r.tile);
-
-    // Distinct donor labels in first-appearance order (the coancestry columns).
-    std::vector<std::string> group_labels;
-    std::unordered_map<std::string, int> group_index;
-    for (int k = 0; k < K; ++k) {
-        const std::string& g = donor_label[static_cast<std::size_t>(k)];
-        if (group_index.emplace(g, static_cast<int>(group_labels.size())).second)
-            group_labels.push_back(g);
-    }
-    const int P = static_cast<int>(group_labels.size());
 
     // Aggregate the small N*K accumulators to N*P_label (never touches the K*M posterior).
     const bool full = config.paint_full();

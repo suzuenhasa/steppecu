@@ -167,6 +167,15 @@ public:
         const double* rho, const double* mu, const double* w, int K, long M, int N,
         const Precision& precision) override;
 
+    // Li-Stephens LOCAL-ANCESTRY FACE (the `steppe paint --face localanc` Phase-3 output).
+    // Batched over N recipients (one block each), the localanc sink folds gamma per SNP
+    // into the M*P per-label posterior on-device; only the N*M*P posterior crosses PCIe
+    // (the K*M gamma is never materialized). Native FP64.
+    [[nodiscard]] LsLocalAncestry ls_localanc(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const int* donor_group, int K, long M, int N,
+        int P, const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,
