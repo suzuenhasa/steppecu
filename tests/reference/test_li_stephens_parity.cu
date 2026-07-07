@@ -20,10 +20,13 @@
 // the CpuBackend reference; it needs NO CUDA device (built by nvcc for link parity
 // with the other reference gates). Self-checking main(); CTest gates on the exit.
 
+#include <cuda_runtime.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -122,9 +125,29 @@ int main(int argc, char** argv) {
     // tight bound. Rescaling + summation-order differences vs kalis make a hard 1e-12
     // optimistic, so the gate uses a measured-and-pinned constant (§3, G5).
     const double kTol = 1e-9;
+    // Gate 3 (GPU vs CpuBackend reference, tighter cross-check): both are FP64 on
+    // the identical formula and differ only by reduction order (the CPU sums in
+    // long double, the GPU tree-reduces in double), so the gap is a handful of ULP
+    // on normalized ~1/K magnitudes — expect ~1e-14, pinned well under 1e-11.
+    const double kTolGpuCpu = 1e-11;
+
+    // The GPU arm (gate 2+3). SKIP cleanly if no CUDA device is visible (local
+    // CPU-only builds stay green; box5090 runs the real gate).
+    int nd = 0;
+    (void)cudaGetDeviceCount(&nd);
+    std::unique_ptr<steppe::ComputeBackend> gpu;
+    if (nd > 0) {
+        gpu = steppe::device::make_cuda_backend(0);
+        std::printf("GPU present (%d device(s)): running the Phase-1 GPU forward-backward gate\n",
+                    nd);
+    } else {
+        std::printf("no CUDA device visible: SKIPPING the GPU arm (CpuBackend gate only)\n");
+    }
 
     int failures = 0;
-    double global_max = 0.0;
+    double global_max = 0.0;         // CPU vs golden
+    double global_max_gpu = 0.0;     // GPU vs golden  (gate 2)
+    double global_max_gpu_cpu = 0.0; // GPU vs CPU     (gate 3)
     for (int r = 0; r < g.R; ++r) {
         const Golden::Rec& rec = g.recs[static_cast<std::size_t>(r)];
         if (rec.alleles.size() != static_cast<std::size_t>(g.M) ||
@@ -148,16 +171,51 @@ int main(int argc, char** argv) {
         }
         if (max_abs > global_max) global_max = max_abs;
         const bool ok = max_abs <= kTol;
-        std::printf("  [%s] recipient %d (self donor %d): max|gamma_steppe - gamma_kalis| = %.3e\n",
+        std::printf("  [%s] recipient %d (self donor %d): max|gamma_cpu - gamma_kalis| = %.3e\n",
                     ok ? " ok " : "FAIL", r, rec.self, max_abs);
         if (!ok) ++failures;
+
+        if (gpu) {
+            const steppe::LsPosterior gpost = gpu->ls_forward_backward(
+                rec.alleles.data(), g.donors.data(), rec.pi.data(), g.rho.data(), g.mu.data(),
+                g.K, g.M, prec);
+            if (gpost.status != steppe::Status::Ok || gpost.gamma.size() != KM) {
+                std::printf("  [FAIL] recipient %d: GPU FB returned status/size error\n", r);
+                ++failures;
+                continue;
+            }
+            double gmax = 0.0, gcmax = 0.0;
+            for (std::size_t i = 0; i < KM; ++i) {
+                const double dg = std::fabs(gpost.gamma[i] - rec.gamma[i]);   // vs golden
+                const double dc = std::fabs(gpost.gamma[i] - post.gamma[i]);  // vs CPU
+                if (dg > gmax) gmax = dg;
+                if (dc > gcmax) gcmax = dc;
+            }
+            if (gmax > global_max_gpu) global_max_gpu = gmax;
+            if (gcmax > global_max_gpu_cpu) global_max_gpu_cpu = gcmax;
+            const bool gok = gmax <= kTol;         // gate 2
+            const bool gcok = gcmax <= kTolGpuCpu; // gate 3
+            std::printf(
+                "  [%s] recipient %d GPU: max|gamma_gpu - gamma_kalis| = %.3e ; "
+                "max|gamma_gpu - gamma_cpu| = %.3e\n",
+                (gok && gcok) ? " ok " : "FAIL", r, gmax, gcmax);
+            if (!gok || !gcok) ++failures;
+        }
     }
 
-    std::printf("global max abs posterior diff: %.3e (tol %.1e)\n", global_max, kTol);
+    std::printf("global max abs posterior diff (CPU vs kalis): %.3e (tol %.1e)\n",
+                global_max, kTol);
+    if (gpu) {
+        std::printf("global max abs posterior diff (GPU vs kalis): %.3e (tol %.1e)\n",
+                    global_max_gpu, kTol);
+        std::printf("global max abs posterior diff (GPU vs CPU):   %.3e (tol %.1e)\n",
+                    global_max_gpu_cpu, kTolGpuCpu);
+    }
     if (failures == 0) {
-        std::printf("\nRESULT: PASS (steppe CpuBackend FB reproduces the kalis posterior near-bit)\n");
+        std::printf("\nRESULT: PASS (steppe FB reproduces the kalis posterior near-bit%s)\n",
+                    gpu ? "; GPU path gated vs golden + CpuBackend reference" : ", CPU only");
         return 0;
     }
-    std::printf("\nRESULT: FAIL (%d recipient(s) exceeded tolerance)\n", failures);
+    std::printf("\nRESULT: FAIL (%d check(s) exceeded tolerance)\n", failures);
     return 1;
 }

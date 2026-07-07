@@ -1,0 +1,81 @@
+// src/device/cuda/cuda_backend_li_stephens.cu
+//
+// Out-of-line CudaBackend::ls_forward_backward — the host orchestrator for the
+// GPU Li-Stephens copying forward-backward (the `steppe paint` FB core, Phase 1).
+// Uploads the FB inputs, launches the block-per-recipient FB kernel with its
+// always-on checkpoint/recompute scratch, and returns the per-column copying
+// posterior gamma (donor-major, K*M). A CUDA TU private to steppe_device.
+//
+// Reference: docs/planning/li-stephens-engine-scope.md §2a.
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+#include "core/internal/nvtx.hpp"
+#include "device/cuda/check.cuh"
+#include "device/cuda/cuda_backend.cuh"
+#include "device/cuda/li_stephens_fb_kernel.cuh"
+
+namespace steppe::device {
+
+LsPosterior CudaBackend::ls_forward_backward(const std::uint8_t* recipient,
+                                             const std::uint8_t* donors, const double* pi,
+                                             const double* rho, const double* mu, int K, long M,
+                                             const Precision& precision) {
+    (void)precision;  // the recurrence runs in native FP64 by construction (§2c)
+    guard_device();
+    STEPPE_NVTX_RANGE("ls_forward_backward");
+    LsPosterior out;
+    out.K = K;
+    out.M = M;
+    if (K <= 0 || M <= 0) {
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // Phase-1 override drives ONE recipient per call (matches the CpuBackend
+    // signature); the kernel itself is batch-ready over the block axis.
+    constexpr int n_recip = 1;
+
+    // Checkpoint stride C = ceil(sqrt(M)); nck = ceil(M/C) blocks. Always on, so
+    // even the M=256 golden exercises the recompute path (never a resident-table
+    // shortcut).
+    int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
+    if (C < 1) C = 1;
+    const int nck = static_cast<int>((M + C - 1) / C);
+
+    const std::size_t Ks = static_cast<std::size_t>(K);
+    const std::size_t Ms = static_cast<std::size_t>(M);
+    const std::size_t KM = Ks * Ms;
+
+    DeviceBuffer<std::uint8_t> dRecip(Ms);        // n_recip == 1
+    DeviceBuffer<std::uint8_t> dDonors(KM);
+    DeviceBuffer<double> dPi(Ks);
+    DeviceBuffer<double> dRho(Ms);
+    DeviceBuffer<double> dMu(Ms);
+    DeviceBuffer<double> dGamma(KM);
+    DeviceBuffer<double> dCheck(static_cast<std::size_t>(nck) * Ks);
+    DeviceBuffer<double> dAlphaA(Ks), dAlphaB(Ks);
+    DeviceBuffer<double> dAlphaBlk(static_cast<std::size_t>(C) * Ks);
+    DeviceBuffer<double> dBetaA(Ks), dBetaB(Ks);
+
+    h2d_async(dRecip, recipient, Ms, stream_.get());
+    h2d_async(dDonors, donors, KM, stream_.get());
+    h2d_async(dPi, pi, Ks, stream_.get());
+    h2d_async(dRho, rho, Ms, stream_.get());
+    h2d_async(dMu, mu, Ms, stream_.get());
+
+    launch_ls_forward_backward(dRecip.data(), dDonors.data(), dPi.data(), dRho.data(), dMu.data(),
+                               K, M, n_recip, C, nck, dGamma.data(), dCheck.data(), dAlphaA.data(),
+                               dAlphaB.data(), dAlphaBlk.data(), dBetaA.data(), dBetaB.data(),
+                               stream_.get());
+
+    out.gamma.assign(KM, 0.0);
+    d2h_async(out.gamma.data(), dGamma, KM, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    out.status = Status::Ok;
+    return out;
+}
+
+}  // namespace steppe::device

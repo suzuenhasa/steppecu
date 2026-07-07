@@ -150,6 +150,14 @@ public:
                                                      int n_curves, double step,
                                                      bool affine) override;
 
+    // Li-Stephens copying forward-backward (the `steppe paint` FB core) — reference §10.
+    // Batched, device-resident, native-FP64 per-column-rescaled, with an always-on
+    // checkpoint/recompute alpha scheme. Returns the per-column copying posterior gamma.
+    [[nodiscard]] LsPosterior ls_forward_backward(
+        const std::uint8_t* recipient, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, int K, long M,
+        const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,
