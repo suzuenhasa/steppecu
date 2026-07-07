@@ -20,6 +20,8 @@ add_library(steppe_device STATIC
     cuda/readv2_mismatch_kernel.cu
     cuda/readv2_bitmatrix.cu
     cuda/cuda_backend_readv2.cu
+    cuda/likelihood_tensor.cu
+    cuda/cuda_backend_likelihood.cu
     cuda/dates_kernel.cu
     cuda/li_stephens_fb_kernel.cu
     cuda/qpfstats_kernel.cu

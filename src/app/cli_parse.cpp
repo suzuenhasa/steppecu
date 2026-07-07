@@ -687,6 +687,18 @@ int run_cli(int argc, char** argv) {
                     "Stage 3: output merged panel PREFIX (writes .geno/.snp/.ind; needs --merge-into)");
     ing->add_option("--min-dp", ingest_args.min_dp, "Ref-block MinDP / variant DP floor (default 8)");
     ing->add_option("--min-gq", ingest_args.min_gq, "Variant GQ floor (default 20)");
+    ing->add_flag("--likelihoods", ingest_args.likelihoods,
+                  "GL mode: read a FORMAT likelihood field (PL/GL/GP) into a normalized "
+                  "[n_site x n_sample x 3] likelihood tensor (the PCAngsd / ancIBD substrate). "
+                  "Does NOT apply the FILTER/DP/GQ floor (GL is soft info); MULTI-SAMPLE");
+    ing->add_option("--gl-field", ingest_args.gl_field,
+                    "Which FORMAT field to read in GL mode: PL | GL | GP (default PL)");
+    ing->add_option("--emit-likelihoods", ingest_args.emit_likelihoods,
+                    "GL mode: write the STPGL1 likelihood-tensor artifact here (uploads the "
+                    "tensor device-resident + a residency checksum; needs a CUDA device)");
+    ing->add_option("--emit-pl-raw", ingest_args.emit_pl_raw,
+                    "GL mode: DEBUG dump of the raw parsed triplets in VCF-native order, self-keyed "
+                    "(rsID/chrom/pos38/sample) for the bit-exact bcftools gate (host-only, no device)");
     ing->add_option("--device", ingest_args.device,
                     "CUDA device ordinal(s) for --emit-tile transpose (default auto)");
     ing->callback([&]() { code = run_ingest(ingest_args); });

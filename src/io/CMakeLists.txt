@@ -23,6 +23,7 @@ add_library(steppe_io STATIC
     target_build.cpp
     vcf_reader.cpp
     panel_merge_writer.cpp
+    likelihood_tensor_writer.cpp
     filter/include_exclude.cpp
     filter/snp_filter.cpp
     filter/mind_prepass.cpp)

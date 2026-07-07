@@ -1101,6 +1101,24 @@ target_link_libraries(test_vcf_build_detect
     PRIVATE steppe::io steppe::api steppe::warnings)
 steppe_add_test(NAME vcf_build_detect_unit COMMAND test_vcf_build_detect LABELS "unit")
 
+# --- GL/PL/GP normalization unit test (host-only, header-only math) -----------
+# Hand-computation gate for io/gl_normalize.hpp (PL/GL/GP -> normalized linear).
+# No VCF, no device, no data. Self-checking; CTest gates on the exit code.
+add_executable(test_gl_normalize unit/test_gl_normalize.cpp)
+target_include_directories(test_gl_normalize PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_gl_normalize PRIVATE steppe::warnings)
+steppe_add_test(NAME gl_normalize_unit COMMAND test_gl_normalize LABELS "unit")
+
+# --- GL reader polarity/parse unit test (host-only, links steppe::io) ---------
+# Drives VcfReader::genotype_likelihoods over a by-construction .vcf + target table
+# and asserts the host tile's panel-A1/A2 polarity swap, multiallelic/non-panel/
+# mismap drops, and GP passthrough — the single silent-corruption risk, pinned with
+# NO GPU (the tile is host-resident). Mirrors test_vcf_build_detect.
+add_executable(test_vcf_gl_parse unit/test_vcf_gl_parse.cpp)
+target_link_libraries(test_vcf_gl_parse
+    PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME vcf_gl_parse_unit COMMAND test_vcf_gl_parse LABELS "unit")
+
 # --- Filter oracle test (real AADR) ------------------------------------------
 # Reads the raw TGENO triple, decodes via the CPU reference backend, builds the
 # filter keep-mask via the io filters, and validates it against an independent
@@ -1386,6 +1404,19 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_ingest steppe_app)
   steppe_add_test(NAME cli_ingest
            COMMAND test_cli_ingest "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
+  # --- `steppe ingest --likelihoods` GL raw-dump + validation gate ----------
+  # Plain C++ host TU (NO CUDA: exercises the host-only --emit-pl-raw path, not the
+  # device --emit-likelihoods). Authors a tiny plain .vcf carrying PL + a target
+  # table and asserts the raw triplet dump reproduces the VCF-native tokens verbatim
+  # (incl. a non-PASS record STILL emitting — GL is soft info) and the flag
+  # validation. Tests the reader's OWN machinery (synthetic OK, readv2-concord
+  # precedent) — NO reported science. Host lane.
+  add_executable(test_cli_ingest_likelihoods cli/test_cli_ingest_likelihoods.cpp)
+  target_link_libraries(test_cli_ingest_likelihoods PRIVATE steppe::warnings)
+  add_dependencies(test_cli_ingest_likelihoods steppe_app)
+  steppe_add_test(NAME cli_ingest_likelihoods
+           COMMAND test_cli_ingest_likelihoods "$<TARGET_FILE:steppe_app>" LABELS "cli")
 
   # --- `steppe readv2` real-data gate (vs the concord ruler) ----------------
   # Plain C++ host TU (spawns the binary; needs a live CUDA device). Runs

@@ -12,6 +12,8 @@
 #ifndef STEPPE_IO_VCF_RECORD_HPP
 #define STEPPE_IO_VCF_RECORD_HPP
 
+#include <cmath>     // std::isfinite — the GL/GP non-finite -> missing guard
+#include <cstdlib>   // std::strtod — the GL/GP float parse (sign/decimal/scientific)
 #include <optional>
 #include <string>
 #include <string_view>
@@ -103,6 +105,24 @@ namespace steppe::io::vcfdetail {
         any = true;
     }
     return any ? std::optional<long long>{v} : std::nullopt;
+}
+
+// Parse a floating-point FORMAT value (FORMAT/GL is negative log10; FORMAT/GP may
+// carry scientific notation like 1e-05) — accepting sign, decimal, and scientific
+// forms, which the non-negative integer parse_int cannot. Returns nullopt on
+// "." / empty / trailing garbage / a NON-FINITE value (the 'nan'/'inf'/'-inf'
+// sentinels Beagle/GLIMPSE can write) so a fully-uninformative or extreme genotype
+// flows to the MISSING path (present_mask=0, uninformative triplet) instead of
+// propagating a NaN into the tensor (NaN sentinels are barred — critic fix #4).
+[[nodiscard]] inline std::optional<double> parse_double(std::string_view s) {
+    if (s.empty() || s == ".") return std::nullopt;
+    const std::string buf(s);              // strtod needs a NUL-terminated buffer
+    const char* b = buf.c_str();
+    char* end = nullptr;
+    const double v = std::strtod(b, &end);
+    if (end != b + buf.size()) return std::nullopt;  // partial / trailing garbage
+    if (!std::isfinite(v)) return std::nullopt;       // nan/inf -> missing path
+    return v;
 }
 
 }  // namespace steppe::io::vcfdetail

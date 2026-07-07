@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include "io/eigenstrat_format.hpp"
+#include "io/gl_normalize.hpp"
 #include "io/gzip_line_reader.hpp"
 #include "io/vcf_record.hpp"
 
@@ -587,6 +588,268 @@ VcfIngestResult VcfReader::genotype() {
     tile.n_individuals = 1;
     tile.pop_offsets = {0, 1};
     tile.pop_labels = {resolved_sample};
+
+    out.counts = counts;
+    return out;
+}
+
+namespace {
+
+// The FORMAT key string for each field.
+[[nodiscard]] const char* gl_field_key(GlField f) {
+    switch (f) {
+        case GlField::PL: return "PL";
+        case GlField::GL: return "GL";
+        case GlField::GP: return "GP";
+    }
+    return "PL";
+}
+
+// One kept variant record per target position for the GL pass — the FORMAT column
+// plus the resolved samples' raw sample columns (NOT floored: GL is soft info). No
+// GT/DP/GQ parse: the triplet is self-contained and the floor is deliberately not
+// applied to the GL tensor.
+struct GlVariantRec {
+    std::string id;
+    std::string ref;
+    std::string alt;
+    std::string format;
+    bool filt_pass = false;
+    std::vector<std::string> samples;  // one per resolved sample column, in tile order
+};
+
+}  // namespace
+
+VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
+                                                            std::vector<RawGlRow>* raw_out) {
+    GzipLineReader reader(vcf_path_);
+    const char* key = gl_field_key(field);
+
+    // --- header: resolve the sample column(s) --------------------------------
+    // MULTI-SAMPLE (critic fix #3): unlike genotype() (single-sample-only), the GL
+    // tensor is genuinely [n_site x n_sample x 3] — with no --sample we resolve
+    // EVERY sample column (>=9), which PCAngsd fundamentally needs. --sample still
+    // selects exactly one.
+    std::vector<int> sample_cols;
+    std::vector<std::string> sample_ids;
+    std::string line;
+    bool saw_chrom_header = false;
+    while (reader.next_line(line)) {
+        if (line.rfind("##", 0) == 0) continue;
+        if (line.rfind("#CHROM", 0) == 0 || (!line.empty() && line[0] == '#')) {
+            const std::vector<std::string_view> h = vd::split(line, '\t');
+            if (h.size() < 10) {
+                throw std::runtime_error(
+                    "io::VcfReader: #CHROM header has no sample column in " + vcf_path_);
+            }
+            if (sample_id_.empty()) {
+                for (std::size_t c = 9; c < h.size(); ++c) {
+                    sample_cols.push_back(static_cast<int>(c));
+                    sample_ids.emplace_back(h[c]);
+                }
+            } else {
+                int sc = -1;
+                for (std::size_t c = 9; c < h.size(); ++c) {
+                    if (h[c] == sample_id_) { sc = static_cast<int>(c); break; }
+                }
+                if (sc < 0) {
+                    throw std::runtime_error("io::VcfReader: sample '" + sample_id_ +
+                                             "' not found in #CHROM header of " + vcf_path_);
+                }
+                sample_cols.push_back(sc);
+                sample_ids.push_back(sample_id_);
+            }
+            saw_chrom_header = true;
+            break;
+        }
+    }
+    if (!saw_chrom_header) {
+        throw std::runtime_error("io::VcfReader: no #CHROM header found in " + vcf_path_);
+    }
+    const int n_sample = static_cast<int>(sample_cols.size());
+    const int max_col = sample_cols.empty() ? 8 : sample_cols.back();
+
+    // --- single streaming pass: keep one variant record per target position ---
+    // Only explicit variant records (ALT != '.') at target positions carry a
+    // likelihood; ref-confidence blocks (ALT == '.') carry no PL/GL/GP and are
+    // skipped (those sites stay missing). Tie-break: prefer FILTER==PASS, else keep
+    // first-seen (deterministic; per-sample GQ can't order a multi-sample record).
+    std::unordered_map<int, std::unordered_map<long long, GlVariantRec>> variant;
+    VcfCounts counts;
+    while (reader.next_line(line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string_view> f = vd::split(line, '\t');
+        if (static_cast<int>(f.size()) <= max_col) continue;  // truncated record
+        ++counts.records_seen;
+
+        std::string_view chrom_sv = f[0];
+        if (chrom_sv.size() > 3 && (chrom_sv[0] == 'c' || chrom_sv[0] == 'C') &&
+            chrom_sv[1] == 'h' && chrom_sv[2] == 'r') {
+            chrom_sv.remove_prefix(3);
+        }
+        const auto chrom_val = vd::parse_int(chrom_sv);
+        if (!chrom_val) continue;
+        const int chrom = static_cast<int>(*chrom_val);
+        const auto ci_it = targets_.by_chrom.find(chrom);
+        if (ci_it == targets_.by_chrom.end()) continue;
+        const ChromIndex& ci = ci_it->second;
+
+        const auto pos_opt = vd::parse_int(f[1]);
+        if (!pos_opt) continue;
+        const long long pos = *pos_opt;
+        if (f[4] == ".") continue;                     // ref-confidence block: no likelihood
+        if (ci.slot.find(pos) == ci.slot.end()) continue;  // not a target position
+        ++counts.variant_at_target;
+
+        const bool filt_pass = (f[6] == "PASS");
+        GlVariantRec rec;
+        rec.id.assign(f[2]);
+        rec.ref.assign(f[3]);
+        rec.alt.assign(f[4]);
+        rec.format.assign(f[8]);
+        rec.filt_pass = filt_pass;
+        rec.samples.reserve(sample_cols.size());
+        for (const int c : sample_cols) rec.samples.emplace_back(f[static_cast<std::size_t>(c)]);
+
+        auto& slot_map = variant[chrom];
+        const auto prev = slot_map.find(pos);
+        if (prev == slot_map.end() || (rec.filt_pass && !prev->second.filt_pass)) {
+            slot_map[pos] = std::move(rec);
+        }
+    }
+
+    // --- resolve every target site in panel order into the tile ---------------
+    LikelihoodResult out;
+    out.sample_id = sample_id_;
+    LikelihoodTile& tile = out.tile;
+    tile.n_site = targets_.sites.size();
+    tile.n_sample = static_cast<std::size_t>(n_sample);
+    tile.field = field;
+    tile.sample_ids = sample_ids;
+    tile.sites.reserve(targets_.sites.size());
+    const std::size_t cells = tile.n_site * tile.n_sample;
+    tile.l.assign(cells * 3, 0.0);
+    tile.present.assign(cells, 0);
+
+    // Default every cell to the uninformative triplet (present=0); a resolved,
+    // valid triplet overwrites it below.
+    for (std::size_t i = 0; i < cells; ++i) {
+        tile.l[i * 3 + 0] = glnorm::kUninformative[0];
+        tile.l[i * 3 + 1] = glnorm::kUninformative[1];
+        tile.l[i * 3 + 2] = glnorm::kUninformative[2];
+    }
+
+    for (std::size_t si = 0; si < targets_.sites.size(); ++si) {
+        const TargetSite& s = targets_.sites[si];
+        LikelihoodSite meta;
+        meta.rsid = s.rsid;
+        meta.chrom = s.chrom;
+        meta.pos37 = s.pos37;
+        meta.pos38 = s.pos38;
+        meta.a1 = s.a1;
+        meta.a2 = s.a2;
+        tile.sites.push_back(std::move(meta));
+
+        // Every (site, sample) starts missing; the guards below leave it that way.
+        counts.gl_missing += n_sample;
+        if (s.palindrome) continue;  // palindrome drop (mirrors the hard-call path)
+
+        const auto vit = variant.find(s.chrom);
+        if (vit == variant.end()) continue;
+        const auto rit = vit->second.find(s.pos38);
+        if (rit == vit->second.end()) continue;  // ref-block / no variant -> missing
+        const GlVariantRec& rec = rit->second;
+
+        // H3 rsID cross-check (mirror the hard-call drop).
+        if (rec.id.rfind("rs", 0) == 0 && rec.id != s.rsid) {
+            ++counts.gl_rsid_mismap;
+            continue;
+        }
+        // Biallelic-only v1: >1 ALT -> skip the whole site.
+        if (rec.alt.find(',') != std::string::npos) {
+            ++counts.gl_multiallelic_skipped;
+            continue;
+        }
+        // Panel A1/A2 polarity, reusing reconcile() exactly (the single silent-
+        // corruption risk). Require REF and ALT to be the two panel alleles; the
+        // tensor's g axis is copies-of-A1 == the hard-call dosage axis.
+        if (rec.ref.size() != 1 || rec.alt.size() != 1 ||
+            rec.ref[0] == '*' || rec.alt[0] == '*') {
+            ++counts.gl_non_panel;
+            continue;
+        }
+        const Recon rr = reconcile(rec.ref[0], s.a1, s.a2);
+        const Recon ra = reconcile(rec.alt[0], s.a1, s.a2);
+        if (rr.which < 0 || ra.which < 0 || rr.which == ra.which) {
+            ++counts.gl_non_panel;
+            continue;
+        }
+        // g == j (ALT copies) when ALT==A1 (no swap); g == 2-j (swap RR<->AA) when
+        // REF==A1. RA (j==1) is invariant.
+        const bool swap = (rr.which == 1);
+
+        const int fi = vd::format_index(rec.format, key);
+        if (fi < 0) {
+            ++counts.gl_field_absent;
+            continue;  // FORMAT lacked the field at this site -> all samples missing
+        }
+
+        for (int k = 0; k < n_sample; ++k) {
+            const std::string_view sub = vd::subfield(rec.samples[static_cast<std::size_t>(k)], fi);
+            const std::vector<std::string_view> toks = vd::split(sub, ',');
+            if (toks.size() != 3 || sub.empty() || sub == ".") continue;  // missing/wrong arity
+
+            std::array<double, 3> lin;  // VCF-native (RR, RA, AA) order
+            bool ok = true;
+            if (field == GlField::PL) {
+                const auto p0 = vd::parse_int(toks[0]);
+                const auto p1 = vd::parse_int(toks[1]);
+                const auto p2 = vd::parse_int(toks[2]);
+                if (!p0 || !p1 || !p2) ok = false;
+                else lin = glnorm::normalize_pl(*p0, *p1, *p2);
+            } else if (field == GlField::GL) {
+                const auto g0 = vd::parse_double(toks[0]);
+                const auto g1 = vd::parse_double(toks[1]);
+                const auto g2 = vd::parse_double(toks[2]);
+                if (!g0 || !g1 || !g2) ok = false;
+                else lin = glnorm::normalize_gl(*g0, *g1, *g2);
+            } else {  // GP
+                const auto g0 = vd::parse_double(toks[0]);
+                const auto g1 = vd::parse_double(toks[1]);
+                const auto g2 = vd::parse_double(toks[2]);
+                if (!g0 || !g1 || !g2) ok = false;
+                else lin = glnorm::normalize_gp(*g0, *g1, *g2);
+            }
+            if (!ok) continue;  // unparseable / non-finite -> stays missing
+
+            // Place into g == copies-of-A1 order.
+            const std::size_t b = tile.base(si, static_cast<std::size_t>(k));
+            if (swap) {
+                tile.l[b + 0] = lin[2];
+                tile.l[b + 1] = lin[1];
+                tile.l[b + 2] = lin[0];
+            } else {
+                tile.l[b + 0] = lin[0];
+                tile.l[b + 1] = lin[1];
+                tile.l[b + 2] = lin[2];
+            }
+            tile.present[tile.mask_index(si, static_cast<std::size_t>(k))] = 1;
+            ++counts.gl_present;
+            --counts.gl_missing;
+
+            if (raw_out != nullptr) {
+                RawGlRow row;
+                row.rsid = s.rsid;
+                row.chrom = s.chrom;
+                row.pos38 = s.pos38;
+                row.sample_id = sample_ids[static_cast<std::size_t>(k)];
+                row.v0.assign(toks[0]);  // VCF-native order, verbatim (pre-swap)
+                row.v1.assign(toks[1]);
+                row.v2.assign(toks[2]);
+                raw_out->push_back(std::move(row));
+            }
+        }
+    }
 
     out.counts = counts;
     return out;

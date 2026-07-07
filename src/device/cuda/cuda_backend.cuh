@@ -295,6 +295,13 @@ public:
     [[nodiscard]] Readv2Pairs readv2_mismatch(const Readv2Bitmatrix& bits, long long n_pairs,
                                               bool tiled) override;
 
+    // GL/PL/GP likelihood tensor upload + residency-proof reduction
+    [[nodiscard]] LikelihoodTensor upload_likelihood_tensor(const double* host_l,
+                                                            const std::uint8_t* host_present,
+                                                            long n_site, int n_sample) override;
+
+    [[nodiscard]] double likelihood_tensor_checksum(const LikelihoodTensor& t) override;
+
     // qpAdm fit: jackknife covariance — reference §11
     [[nodiscard]] JackknifeCov jackknife_cov(const F4Blocks& x,
                                              std::span<const int> block_sizes,

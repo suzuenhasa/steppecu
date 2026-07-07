@@ -11,6 +11,7 @@
 
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +32,8 @@
 #include "io/eigenstrat_format.hpp"
 #include "io/faidx_reader.hpp"
 #include "io/genotype_tile.hpp"
+#include "io/likelihood_tensor_writer.hpp"
+#include "io/likelihood_tile.hpp"
 #include "io/panel_merge_writer.hpp"
 #include "io/target_build.hpp"
 #include "io/target_sites.hpp"
@@ -178,6 +181,39 @@ namespace {
     return true;
 }
 
+// Parse --gl-field (case-insensitive) into the tile field enum.
+[[nodiscard]] bool parse_gl_field(const std::string& s, io::GlField& out) {
+    std::string t;
+    for (char c : s) t += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (t == "PL") { out = io::GlField::PL; return true; }
+    if (t == "GL") { out = io::GlField::GL; return true; }
+    if (t == "GP") { out = io::GlField::GP; return true; }
+    return false;
+}
+
+[[nodiscard]] const char* gl_field_name(io::GlField f) {
+    switch (f) {
+        case io::GlField::PL: return "PL";
+        case io::GlField::GL: return "GL";
+        case io::GlField::GP: return "GP";
+    }
+    return "PL";
+}
+
+// Write the DEBUG raw-triplet dump (VCF-native order, self-keyed) for the bit-exact
+// bcftools gate. TSV: rsID chrom pos38 sample v0 v1 v2.
+[[nodiscard]] bool write_raw_gl(const std::string& path, const std::vector<io::RawGlRow>& rows,
+                                std::string& err) {
+    std::ofstream o(path, std::ios::trunc);
+    if (!o) { err = "cannot open --emit-pl-raw file: " + path; return false; }
+    o << "rsID\tchrom\tpos38\tsample\tv0\tv1\tv2\n";
+    for (const io::RawGlRow& r : rows) {
+        o << r.rsid << '\t' << r.chrom << '\t' << r.pos38 << '\t' << r.sample_id << '\t' << r.v0
+          << '\t' << r.v1 << '\t' << r.v2 << '\n';
+    }
+    return static_cast<bool>(o);
+}
+
 }  // namespace
 
 int run_ingest(const IngestArgs& args) {
@@ -217,6 +253,30 @@ int run_ingest(const IngestArgs& args) {
         return cfg::kExitInvalidConfig;
     }
 
+    // --- GL/PL/GP likelihood-mode flag validation ----------------------------
+    const bool want_gl = args.likelihoods;
+    if (!want_gl && (!args.emit_likelihoods.empty() || !args.emit_pl_raw.empty())) {
+        std::fprintf(stderr, "steppe ingest: --emit-likelihoods/--emit-pl-raw require --likelihoods\n");
+        return cfg::kExitInvalidConfig;
+    }
+    io::GlField gl_field = io::GlField::PL;
+    if (want_gl) {
+        if (!parse_gl_field(args.gl_field, gl_field)) {
+            std::fprintf(stderr, "steppe ingest: --gl-field must be PL, GL or GP (got '%s')\n",
+                         args.gl_field.c_str());
+            return cfg::kExitInvalidConfig;
+        }
+        if (args.vcf.empty()) {
+            std::fprintf(stderr, "steppe ingest: --likelihoods requires --vcf\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (args.emit_likelihoods.empty() && args.emit_pl_raw.empty()) {
+            std::fprintf(stderr, "steppe ingest: --likelihoods needs an output — pass "
+                                 "--emit-likelihoods and/or --emit-pl-raw\n");
+            return cfg::kExitInvalidConfig;
+        }
+    }
+
     // Genotyping is requested by --report/--emit-tile; a bare native --emit-targets
     // builds the table only (no VCF needed — the gate-1 table-reproduction path).
     const bool want_genotype = !args.report.empty() || !args.emit_tile.empty();
@@ -224,10 +284,10 @@ int run_ingest(const IngestArgs& args) {
         std::fprintf(stderr, "steppe ingest: --vcf PATH is required for --report/--emit-tile\n");
         return cfg::kExitInvalidConfig;
     }
-    if (!want_genotype && args.emit_targets.empty() && args.emit_merged.empty()) {
+    if (!want_genotype && !want_gl && args.emit_targets.empty() && args.emit_merged.empty()) {
         std::fprintf(stderr,
                      "steppe ingest: nothing to do — pass --report and/or --emit-tile "
-                     "(and, in native mode, optionally --emit-targets/--emit-merged)\n");
+                     "(or --likelihoods; in native mode, optionally --emit-targets/--emit-merged)\n");
         return cfg::kExitInvalidConfig;
     }
 
@@ -363,7 +423,81 @@ int run_ingest(const IngestArgs& args) {
         return cfg::kExitIoError;
     }
 
-    if (!need_genotype) return cfg::kExitOk;  // native table-only build (gate 1)
+    if (!need_genotype && !want_gl) return cfg::kExitOk;  // native table-only build (gate 1)
+
+    // --- GL/PL/GP likelihood path (independent of the hard-call genotype pass) -
+    if (want_gl) {
+        io::VcfReader::LikelihoodResult glr;
+        std::vector<io::RawGlRow> raw;
+        try {
+            io::VcfReader::Options opts;
+            opts.min_dp = args.min_dp;  // carried but NOT applied to the GL tensor (soft info)
+            opts.min_gq = args.min_gq;
+            io::VcfReader reader(args.vcf, targets, args.sample, opts);
+            glr = reader.genotype_likelihoods(gl_field, args.emit_pl_raw.empty() ? nullptr : &raw);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe ingest: %s\n", e.what());
+            return cfg::kExitIoError;
+        }
+
+        if (!args.emit_pl_raw.empty()) {
+            std::string err;
+            if (!write_raw_gl(args.emit_pl_raw, raw, err)) {
+                std::fprintf(stderr, "steppe ingest: %s\n", err.c_str());
+                return cfg::kExitIoError;
+            }
+        }
+
+        // --emit-likelihoods: upload the tensor device-resident, prove residency
+        // via the device checksum vs the host sum, then write the STPGL1 artifact.
+        if (!args.emit_likelihoods.empty()) {
+            try {
+                steppe::DeviceConfig dc;
+                std::string derr;
+                if (!parse_device(args.device, dc, derr)) {
+                    std::fprintf(stderr, "steppe ingest: %s\n", derr.c_str());
+                    return cfg::kExitInvalidConfig;
+                }
+                device::Resources resources = device::build_resources(dc);
+                if (!require_first_gpu(resources, "ingest")) return cfg::kExitRuntimeError;
+                ComputeBackend& backend = *resources.gpus.front().backend;
+                const io::LikelihoodTile& tile = glr.tile;
+                device::LikelihoodTensor tensor = backend.upload_likelihood_tensor(
+                    tile.l.data(), tile.present.data(), static_cast<long>(tile.n_site),
+                    static_cast<int>(tile.n_sample));
+                const double dev_sum = backend.likelihood_tensor_checksum(tensor);
+                double host_sum = 0.0;
+                for (const double v : tile.l) host_sum += v;
+                const double tol = 1e-6 * (1.0 + std::abs(host_sum));
+                if (std::abs(dev_sum - host_sum) > tol) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: GL device residency check FAILED "
+                                 "(device_sum=%.10g host_sum=%.10g)\n",
+                                 dev_sum, host_sum);
+                    return cfg::kExitRuntimeError;
+                }
+                std::fprintf(stderr,
+                             "steppe ingest: GL tensor device-resident on GPU %d (residency "
+                             "checksum OK: device_sum=%.6f == host_sum=%.6f)\n",
+                             tensor.device_id, dev_sum, host_sum);
+                io::write_likelihood_tensor(args.emit_likelihoods, tile);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "steppe ingest: GL device/write error: %s\n", e.what());
+                return exit_code_for_caught(e);
+            }
+        }
+
+        const io::VcfCounts& gc = glr.counts;
+        std::fprintf(stderr,
+                     "steppe ingest: GL field=%s sites=%zu samples=%zu | present=%lld missing=%lld "
+                     "| multiallelic_skipped=%lld non_panel=%lld field_absent=%lld rsid_mismap=%lld "
+                     "| variant_at_target=%lld records=%lld\n",
+                     gl_field_name(gl_field), glr.tile.n_site, glr.tile.n_sample, gc.gl_present,
+                     gc.gl_missing, gc.gl_multiallelic_skipped, gc.gl_non_panel, gc.gl_field_absent,
+                     gc.gl_rsid_mismap, gc.variant_at_target, gc.records_seen);
+
+        if (!need_genotype) return cfg::kExitOk;  // GL-only invocation done
+    }
 
     io::VcfIngestResult result;
     try {

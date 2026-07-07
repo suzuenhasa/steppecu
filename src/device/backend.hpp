@@ -25,6 +25,7 @@
 #include "device/device_partial.hpp"
 #include "device/device_f2_blocks.hpp"
 #include "device/device_decode_result.hpp"
+#include "device/likelihood_tensor.hpp"
 #include "device/readv2_bitmatrix.hpp"
 #include "device/stream_f2_blocks.hpp"
 
@@ -855,6 +856,27 @@ public:
         throw std::runtime_error(
             "ComputeBackend::readv2_mismatch: not implemented by this backend "
             "(the READv2 all-pairs __popc mismatch sweep requires a CUDA backend)");
+    }
+
+    // GL/PL/GP likelihood tensor (the low-coverage PCA / IBD substrate). Two seams:
+    // upload the host [n_site x n_sample x 3] FP64 tile (+ present mask) into a
+    // resident DeviceBuffer, and a device reduction over it whose sum, compared to
+    // the host sum, proves the tensor is genuinely on-device (a device pointer
+    // consumed by a kernel), not host-only.
+    [[nodiscard]] virtual steppe::device::LikelihoodTensor upload_likelihood_tensor(
+        const double* host_l, const std::uint8_t* host_present, long n_site, int n_sample) {
+        (void)host_l; (void)host_present; (void)n_site; (void)n_sample;
+        throw std::runtime_error(
+            "ComputeBackend::upload_likelihood_tensor: not implemented by this backend "
+            "(the resident GL tensor requires a CUDA backend)");
+    }
+
+    [[nodiscard]] virtual double likelihood_tensor_checksum(
+        const steppe::device::LikelihoodTensor& t) {
+        (void)t;
+        throw std::runtime_error(
+            "ComputeBackend::likelihood_tensor_checksum: not implemented by this backend "
+            "(the GL tensor device reduction requires a CUDA backend)");
     }
 
     [[nodiscard]] virtual RankSweep rank_sweep(const F4Blocks& x,

@@ -38,6 +38,11 @@ struct IngestArgs {
     std::string device;       // OPTIONAL: CUDA device ordinal(s), e.g. "0" (default auto)
     int min_dp = 8;           // ref-block MinDP / variant DP floor (frozen default)
     int min_gq = 20;          // variant GQ floor (frozen default)
+    //   GL/PL/GP likelihood-tensor path (the low-coverage PCA / IBD substrate).
+    bool likelihoods = false; // engage the GL mode (read a FORMAT likelihood field)
+    std::string gl_field = "PL";      // which FORMAT field: PL | GL | GP
+    std::string emit_likelihoods;     // OPTIONAL: the on-disk STPGL1 tensor artifact (needs a device)
+    std::string emit_pl_raw;          // OPTIONAL: DEBUG raw triplet TSV (VCF-native order; host-only)
 };
 
 [[nodiscard]] int run_ingest(const IngestArgs& args);

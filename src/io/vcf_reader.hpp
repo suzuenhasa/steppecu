@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "io/likelihood_tile.hpp"
 #include "io/snp_major_tile.hpp"
 #include "io/target_sites.hpp"
 
@@ -85,6 +86,13 @@ struct VcfCounts {
     long long drop_palindrome = 0, drop_rsid_mismap = 0, drop_ref_change = 0;
     long long records_seen = 0;
     long long variant_at_target = 0;
+    // --- GL/PL/GP likelihood-path counters (separate compute path) ------------
+    long long gl_present = 0;               // (site,sample) cells with a valid triplet
+    long long gl_missing = 0;               // (site,sample) cells left uninformative
+    long long gl_multiallelic_skipped = 0;  // target sites skipped (>1 ALT, biallelic-only v1)
+    long long gl_non_panel = 0;             // target sites dropped (REF/ALT not the panel A1/A2)
+    long long gl_field_absent = 0;          // target variant sites whose FORMAT lacked the field
+    long long gl_rsid_mismap = 0;           // target sites dropped (record rsID != panel rsID)
 };
 
 struct VcfIngestResult {
@@ -107,6 +115,26 @@ public:
               Options opts);
 
     [[nodiscard]] VcfIngestResult genotype();
+
+    // The GL/PL/GP likelihood-tensor result (the separate GL compute path).
+    struct LikelihoodResult {
+        LikelihoodTile tile;
+        VcfCounts counts;
+        std::string sample_id;  // "" -> multi-sample (all columns); else the one column
+    };
+
+    // Read the FORMAT `field` (PL | GL | GP) per (target site, sample) into a
+    // normalized linear likelihood tile in copies-of-A1 (g) order — the SAME axis
+    // as the hard-call dosage, reusing the exact panel A1/A2 reconciliation. Unlike
+    // genotype(), this path is MULTI-SAMPLE (sample_id=="" resolves EVERY sample
+    // column, not just the sole one) and does NOT apply the FILTER / DP / GQ floor:
+    // GL is soft info consumed by low-coverage methods, so a below-floor or non-PASS
+    // record still emits its triplet (present_mask=1). Ref-confidence blocks carry
+    // no PL/GL/GP, so ref-block-only sites are honestly left missing (present=0).
+    // When `raw_out` is non-null it is filled with the pre-normalization,
+    // VCF-native-order tokens (for the --emit-pl-raw bit-exact gate).
+    [[nodiscard]] LikelihoodResult genotype_likelihoods(GlField field,
+                                                        std::vector<RawGlRow>* raw_out = nullptr);
 
 private:
     std::string vcf_path_;
