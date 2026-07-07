@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_core_readv2_readv2.cpp.md
 // src/core/readv2/readv2.cpp — run_readv2, the READv2 windowed-mismatch kinship driver.
 //
 // Host-pure and CUDA-free: it reaches the GPU only through the ComputeBackend seam

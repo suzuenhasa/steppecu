@@ -1,5 +1,7 @@
 // src/app/cmd_ingest.cpp
 //
+// Reference: docs/reference/src_app_cmd_ingest.cpp.md
+//
 // The `steppe ingest` handler: read the target-site table, run the native
 // VcfReader over the .vcf.gz, write the per-site report TSV, and (only when
 // --emit-tile is given) route the SnpMajorTile through the shared device

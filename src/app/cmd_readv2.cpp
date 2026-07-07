@@ -1,5 +1,7 @@
 // src/app/cmd_readv2.cpp
 //
+// Reference: docs/reference/src_app_cmd_readv2.cpp.md
+//
 // The `steppe readv2` command: pseudo-haploid windowed-mismatch kinship. Resolves each
 // selected Genetic ID to its own singleton sweep index (the PER-INDIVIDUAL modeling
 // step, NOT the pop-collapse), fail-fast validates the inputs (samples resolve, N>=2,

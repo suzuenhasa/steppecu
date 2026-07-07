@@ -3,6 +3,8 @@
 // Parses an EIGENSTRAT .ind (or PLINK .fam) into a per-individual SINGLETON partition
 // labelled by Genetic ID — the modeling step READv2 needs so each sample is its own
 // sweep index rather than being collapsed into a pop. Host-pure C++20, no CUDA.
+//
+// Reference: docs/reference/src_io_individual_partition.cpp.md
 #include "io/individual_partition.hpp"
 
 #include <cstddef>

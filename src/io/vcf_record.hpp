@@ -1,5 +1,7 @@
 // src/io/vcf_record.hpp
 //
+// Reference: docs/reference/src_io_vcf_record.hpp.md
+//
 // Small, field-exact VCF text-parse helpers, header-only. Keeps vcf_reader.cpp
 // thin. Every extractor tokenizes on the correct delimiter and matches keys
 // EXACTLY (INFO on ';' up to '=', FORMAT on ':') so a bare "DP=" never matches

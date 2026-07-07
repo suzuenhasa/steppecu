@@ -1,4 +1,5 @@
 // src/app/readv2_shard_writer.cpp — the streaming per-pair READv2 row writer.
+// Reference: docs/reference/src_app_readv2_shard_writer.cpp.md
 #include "app/readv2_shard_writer.hpp"
 
 #include <cstdio>

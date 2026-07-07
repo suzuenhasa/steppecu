@@ -1,5 +1,7 @@
 // src/device/cuda/sweep_unrank.cuh
 //
+// Reference: docs/reference/src_device_cuda_sweep_unrank.cuh.md
+//
 // The combinatorial-number-system unrank shared by the f-stat sweep and READv2.
 // `sweep_unrank(r, P, k, c)` maps a flat rank r in [0, C(P,k)) to the k-subset
 // c[0] < c[1] < ... < c[k-1] of {0..P-1}; `sweep_choose` is the C(n,kk) it walks.

@@ -5,6 +5,8 @@
 // writes one Readv2Word into the resident bit-matrix. Consecutive threads (same
 // sample, adjacent word) read adjacent record bytes and write adjacent 16-byte cells,
 // so both ends are fully coalesced. This inverts decode_af_kernel.
+//
+// Reference: docs/reference/src_device_cuda_readv2_pack_kernel.cu.md
 #include "device/cuda/readv2_pack_kernel.cuh"
 
 #include <cstddef>

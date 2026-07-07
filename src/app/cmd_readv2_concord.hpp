@@ -1,5 +1,7 @@
 // src/app/cmd_readv2_concord.hpp
 //
+// Reference: docs/reference/src_app_cmd_readv2_concord.hpp.md
+//
 // The thin CLI shim for `steppe readv2-concord` — the host-only READv2 concordance
 // validator (the Phase-0 "ruler"; no GPU, no RunConfig, no device). It parses the flags
 // into Readv2ConcordArgs, calls the parse-agnostic arithmetic in readv2_concord.{hpp,cpp},

@@ -1,5 +1,7 @@
 // src/app/readv2_concord.cpp
 //
+// Reference: docs/reference/src_app_readv2_concord.cpp.md
+//
 // The READv2 concordance validator arithmetic (host-only, CUDA-free). See the header for
 // the frozen schema + degree enum. This TU: sniff-parses a READv2 table (CSV or TSV) keyed
 // by column NAME, canonicalizes the unordered pair, builds the 4x4 degree confusion

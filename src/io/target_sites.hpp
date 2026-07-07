@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_io_target_sites.hpp.md
 // src/io/target_sites.hpp
 //
 // TargetSites — the GRCh38 target-site table the native VCF reader genotypes

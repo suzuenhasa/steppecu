@@ -4,6 +4,8 @@
 // owner. Shared by readv2_bitmatrix.cu (the special members) and
 // cuda_backend_readv2.cu (which allocates/packs/reduces it), mirroring
 // device_decode_result_impl.cuh. Private to steppe_device.
+//
+// Reference: docs/reference/src_device_cuda_readv2_bitmatrix_impl.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_READV2_BITMATRIX_IMPL_CUH
 #define STEPPE_DEVICE_CUDA_READV2_BITMATRIX_IMPL_CUH
 

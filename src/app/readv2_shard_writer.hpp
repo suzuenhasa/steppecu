@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_app_readv2_shard_writer.hpp.md
 // src/app/readv2_shard_writer.hpp
 //
 // The incremental per-pair row writer for READv2. Unlike the f-stat sweep's single

@@ -1,5 +1,7 @@
 // src/app/ingest_concord.hpp
 //
+// Reference: docs/reference/src_app_ingest_concord.hpp.md
+//
 // The VCF-ingest concordance validator — the Stage-1 gVCF block-correctness gate
 // arithmetic. Pure host-only, CUDA-free (no device, no RunConfig): it reads TWO
 // per-site report TSVs in the oracle schema (steppe's --a TEST table vs the

@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_app_cmd_readv2_concord.cpp.md
 // src/app/cmd_readv2_concord.cpp
 //
 // The `steppe readv2-concord` CLI shim (host-only): parse flags -> call the arithmetic in

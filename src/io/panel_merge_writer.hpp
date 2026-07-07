@@ -21,6 +21,8 @@
 //   - EIGENSTRAT (ASCII): one appended char per genotype line.
 // TGENO source with a TGENO append is exact; the other two are covered by the
 // by-construction unit test. Pure host C++20 io-leaf — no CUDA.
+//
+// Reference: docs/reference/src_io_panel_merge_writer.hpp.md
 #ifndef STEPPE_IO_PANEL_MERGE_WRITER_HPP
 #define STEPPE_IO_PANEL_MERGE_WRITER_HPP
 

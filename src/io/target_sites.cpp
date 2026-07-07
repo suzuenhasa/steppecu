@@ -1,5 +1,7 @@
 // src/io/target_sites.cpp
 //
+// Reference: docs/reference/src_io_target_sites.cpp.md
+//
 // TargetSites parser — see the header. Builds the per-chrom sorted pos38 index
 // (non-palindromic sites, duplicates kept, last-wins slot map) to mirror the
 // Stage-0 oracle exactly.

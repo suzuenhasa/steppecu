@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_core_readv2_readv2_classify.hpp.md
 // src/core/readv2/readv2_classify.hpp
 //
 // The pure-host READv2 numeric heart: the degree classifier and the z statistic that

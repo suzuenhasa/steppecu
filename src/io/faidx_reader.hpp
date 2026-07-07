@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_io_faidx_reader.hpp.md
 // src/io/faidx_reader.hpp
 //
 // FaidxReader — a native indexed-FASTA (.fai) random-access reader. Fetches the

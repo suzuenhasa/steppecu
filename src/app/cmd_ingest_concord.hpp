@@ -1,5 +1,7 @@
 // src/app/cmd_ingest_concord.hpp
 //
+// Reference: docs/reference/src_app_cmd_ingest_concord.hpp.md
+//
 // The thin CLI shim for `steppe ingest-concord` — the host-only VCF-ingest
 // concordance validator (the Stage-1 gVCF block-correctness gate; no GPU, no
 // RunConfig, no device). Parses flags into IngestConcordArgs, calls the

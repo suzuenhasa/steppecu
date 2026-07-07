@@ -18,6 +18,8 @@
 // SNPs; its unused high bits stay valid=0. That is the single biggest correctness
 // simplifier — the mismatch kernel never splits a popcount across a window edge, and
 // the both-valid AND doubles as the padding mask (scope T2/T5).
+//
+// Reference: docs/reference/src_device_cuda_readv2_layout.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_READV2_LAYOUT_CUH
 #define STEPPE_DEVICE_CUDA_READV2_LAYOUT_CUH
 

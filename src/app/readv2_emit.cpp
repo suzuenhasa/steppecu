@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_app_readv2_emit.cpp.md
 // src/app/readv2_emit.cpp — the frozen-schema READv2 row serializers (csv/tsv/json).
 #include "app/readv2_emit.hpp"
 

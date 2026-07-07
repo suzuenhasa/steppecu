@@ -5,6 +5,8 @@
 // the .ind/.fam and emits one SINGLETON PopGroup per retained sample, labelled by its
 // Genetic ID (the sample identity), in genotype-record order. That singleton index
 // space is exactly what the per-pair all-pairs sweep enumerates. Pure host C++20 io-leaf.
+//
+// Reference: docs/reference/src_io_individual_partition.hpp.md
 #ifndef STEPPE_IO_INDIVIDUAL_PARTITION_HPP
 #define STEPPE_IO_INDIVIDUAL_PARTITION_HPP
 

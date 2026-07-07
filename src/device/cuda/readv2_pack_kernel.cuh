@@ -4,6 +4,8 @@
 // the resident AoS [sample x SNP-window] Readv2Word bit-matrix. Inverts
 // decode_af_kernel (which collapses samples to per-pop AF); here samples stay
 // distinct and the SNP axis fans into allele/valid bits. Private to steppe_device.
+//
+// Reference: docs/reference/src_device_cuda_readv2_pack_kernel.cuh.md
 #ifndef STEPPE_DEVICE_CUDA_READV2_PACK_KERNEL_CUH
 #define STEPPE_DEVICE_CUDA_READV2_PACK_KERNEL_CUH
 

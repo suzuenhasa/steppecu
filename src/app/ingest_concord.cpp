@@ -1,5 +1,7 @@
 // src/app/ingest_concord.cpp
 //
+// Reference: docs/reference/src_app_ingest_concord.cpp.md
+//
 // The VCF-ingest concordance validator arithmetic (host-only, CUDA-free). See the
 // header for the schema + the rsID join over valid-pos38 oracle rows. Exact
 // per-site match of {call, dosage, source, drop_reason}, with the ref-block

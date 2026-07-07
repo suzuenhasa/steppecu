@@ -1,5 +1,7 @@
 // src/app/cmd_ingest.hpp
 //
+// Reference: docs/reference/src_app_cmd_ingest.hpp.md
+//
 // The `steppe ingest` command entry point: steppe's native gVCF-block-aware
 // hardcall VCF reader (the sixth reader arm). Genotypes one sample of a .vcf.gz
 // at a GRCh38 target-site table and emits (a) the per-site report TSV in the

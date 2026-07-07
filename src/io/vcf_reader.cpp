@@ -1,5 +1,7 @@
 // src/io/vcf_reader.cpp
 //
+// Reference: docs/reference/src_io_vcf_reader.cpp.md
+//
 // VcfReader implementation — the gVCF interval-join state machine, a faithful
 // C++ port of the Stage-0 oracle (experiments/nikki-stage0/oracle.py). Every
 // branch is tagged with the oracle line / critique fix it mirrors.

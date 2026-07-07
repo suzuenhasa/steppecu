@@ -1,5 +1,7 @@
 // src/io/gzip_line_reader.hpp
 //
+// Reference: docs/reference/src_io_gzip_line_reader.hpp.md
+//
 // GzipLineReader — a streaming line reader over a .vcf.gz (BGZF or plain gzip)
 // or a plain-text .vcf, backed by zlib. Stage-1 VCF ingestion needs only
 // sequential streaming (no tabix / random access), so a plain zlib inflate over

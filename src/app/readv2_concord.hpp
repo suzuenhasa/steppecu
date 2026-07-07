@@ -1,4 +1,5 @@
 // src/app/readv2_concord.hpp
+// Reference: docs/reference/src_app_readv2_concord.hpp.md
 //
 // The READv2 concordance validator — the Phase-0 "ruler". Pure host-only, CUDA-free
 // arithmetic (no device, no RunConfig): it reads TWO READv2 output tables in the frozen

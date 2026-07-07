@@ -3,6 +3,8 @@
 // Implementation of the format-preserving single-individual panel merge (Stage 3).
 // See the header for the branch overview. Every failure surfaces as
 // std::runtime_error; no CUDA, no core/device dependency.
+//
+// Reference: docs/reference/src_io_panel_merge_writer.cpp.md
 #include "io/panel_merge_writer.hpp"
 
 #include <algorithm>

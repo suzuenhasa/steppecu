@@ -1,5 +1,7 @@
 // src/io/gzip_line_reader.cpp
 //
+// Reference: docs/reference/src_io_gzip_line_reader.cpp.md
+//
 // GzipLineReader implementation — see the header for the concatenated-member
 // (BGZF-as-gzip) rationale. zlib is named only in this TU.
 #include "io/gzip_line_reader.hpp"

@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_io_target_build.cpp.md
 // src/io/target_build.cpp
 //
 // target_build implementation — see the header. Two passes over the panel .snp:

@@ -1,5 +1,7 @@
 // src/device/cuda/readv2_mismatch_kernel.cu
 //
+// Reference: docs/reference/src_device_cuda_readv2_mismatch_kernel.cu.md
+//
 // The READv2 all-pairs windowed-mismatch reduction. The per-word primitive is the
 // whole point (scope §2.1):
 //     comp = Wi.valid & Wj.valid;                 // sites valid in BOTH samples

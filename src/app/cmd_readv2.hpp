@@ -1,5 +1,7 @@
 // src/app/cmd_readv2.hpp
 //
+// Reference: docs/reference/src_app_cmd_readv2.hpp.md
+//
 // The `steppe readv2` command entry point: pseudo-haploid windowed-mismatch kinship
 // over a genotype triple (--prefix). Genotype-path command shaped like `steppe dates`;
 // app-layer C++ only, no CUDA header.

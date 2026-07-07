@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_app_readv2_emit.hpp.md
 // src/app/readv2_emit.hpp
 //
 // The single-row READv2 serializers (csv/tsv/json) matching the frozen Phase-0 schema:

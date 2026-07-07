@@ -5,6 +5,8 @@
 // the DeviceBuffer<Readv2Word> owner lives in a forward-declared Impl (mirrors
 // DeviceDecodeResult). The core driver streams packed genotype chunks into it via the
 // backend, then runs the mismatch sweep against it; the host never touches packed bits.
+//
+// Reference: docs/reference/src_device_readv2_bitmatrix.hpp.md
 #ifndef STEPPE_DEVICE_READV2_BITMATRIX_HPP
 #define STEPPE_DEVICE_READV2_BITMATRIX_HPP
 

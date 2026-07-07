@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_io_faidx_reader.cpp.md
 // src/io/faidx_reader.cpp
 //
 // FaidxReader implementation — see the header. Parses the `.fai` sidecar into a

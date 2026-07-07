@@ -1,5 +1,7 @@
 // src/app/cmd_ingest_concord.cpp
 //
+// Reference: docs/reference/src_app_cmd_ingest_concord.cpp.md
+//
 // The `steppe ingest-concord` CLI shim (host-only): parse flags -> call the
 // arithmetic in ingest_concord.cpp -> render -> exit code. No CUDA, no device,
 // no RunConfig. Mirrors cmd_readv2_concord.

@@ -4,6 +4,8 @@
 // resident [sample x SNP-window] bit-matrix, pack a streamed 2-bit genotype chunk
 // into it, and run the all-pairs __popc windowed-mismatch reduction. A CUDA TU
 // private to the steppe_device target.
+//
+// Reference: docs/reference/src_device_cuda_cuda_backend_readv2.cu.md
 #include <cstddef>
 #include <cstdint>
 #include <vector>

@@ -1,5 +1,7 @@
 // src/io/vcf_reader.hpp
 //
+// Reference: docs/reference/src_io_vcf_reader.hpp.md
+//
 // VcfReader — steppe's native gVCF-block-aware hardcall VCF reader (the sixth
 // reader arm). Host-parsed (zlib gunzip + text parse), it streams a .vcf.gz once
 // to build the gVCF reference-block coverage bitmaps + the per-position variant

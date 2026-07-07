@@ -1,3 +1,4 @@
+// Reference: docs/reference/src_core_readv2_readv2_classify.cpp.md
 // src/core/readv2/readv2_classify.cpp — the pure-host degree classifier + z statistic.
 // No device, no I/O; the single native-FP64 arithmetic the concord gate measures.
 #include "core/readv2/readv2_classify.hpp"

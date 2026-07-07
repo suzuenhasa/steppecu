@@ -1,5 +1,7 @@
 // src/io/target_build.hpp
 //
+// Reference: docs/reference/src_io_target_build.hpp.md
+//
 // target_build — the Stage-2 NATIVE panel harmonizer: builds a TargetSites in
 // memory from the AADR .snp panel (GRCh37), the orchestrated rsID->pos38 lift
 // map, and a FaidxReader over the GRCh38 FASTA. This is the native replacement

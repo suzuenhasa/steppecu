@@ -1,5 +1,7 @@
 // src/device/cuda/readv2_mismatch_kernel.cuh
 //
+// Reference: docs/reference/src_device_cuda_readv2_mismatch_kernel.cuh.md
+//
 // launch_readv2_mismatch: the all-pairs AND-mask / XOR / __popcll windowed-mismatch
 // reduction over the resident [sample x SNP-window] bit-matrix — steppe's first
 // __popc kernel. For every unordered sample pair it produces the four per-pair
