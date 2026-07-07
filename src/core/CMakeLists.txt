@@ -37,6 +37,7 @@ add_library(steppe_core STATIC
     qpadm/model_search_core.cpp
     stats/dstat.cpp
     stats/fst.cpp
+    stats/sfs.cpp
     stats/qpfstats.cpp
     stats/dates.cpp
     stats/li_stephens.cpp

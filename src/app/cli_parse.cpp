@@ -34,6 +34,7 @@
 #include "app/cmd_f4.hpp"
 #include "app/cmd_f4ratio.hpp"
 #include "app/cmd_fst.hpp"
+#include "app/cmd_sfs.hpp"
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpgraph.hpp"
@@ -269,6 +270,7 @@ int run_cli(int argc, char** argv) {
     CliArgs readv2_args;
     CliArgs paint_args;
     CliArgs fst_args;
+    CliArgs sfs_args;
 
     // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
     // to these plain locals, also owned at run_cli scope so they outlive the parse.
@@ -366,6 +368,26 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_fst_command, code);
+
+    register_cmd(app, "sfs",
+        "2D joint site-frequency spectrum between TWO populations: --prefix genotypes + "
+        "--pops A,B -> the (2nA+1)x(2nB+1) integer joint SFS matrix (--fold for the per-pop "
+        "minor-allele SFS, default unfolded; complete-data sites; gated bit-exact vs "
+        "scikit-allel joint_sfs)",
+        sfs_args, Command::Sfs,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
+            add_str_list_flag(s, "--pops", a.pops,
+                              "The TWO populations (A,B; .ind/.fam pop labels)");
+            s->add_flag("--fold,!--unfold", a.sfs_fold,
+                        "Folded (per-pop minor-allele) joint SFS; default unfolded (A1-copy count). "
+                        "v1 restricts to sites with no missing data in either pop (complete-data; a "
+                        "hypergeometric projection is a follow-up)");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_sfs_command, code);
 
     register_cmd(app, "readv2",
         "Pseudo-haploid windowed-mismatch kinship: --prefix genotypes -> per-pair degree + P0_norm",

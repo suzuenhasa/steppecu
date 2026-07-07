@@ -27,6 +27,7 @@
 #include "core/domain/block_partition_rule.hpp"
 #include "core/internal/dates_fit.hpp"
 #include "core/internal/decode_af.hpp"
+#include "core/internal/sfs_hist.hpp"
 #include "core/internal/f2_estimator.hpp"
 #include "core/internal/pchisq.hpp"
 #include "core/internal/qpfstats_jackknife.hpp"
@@ -371,6 +372,68 @@ public:
         out.sum_num = static_cast<double>(sum_num);
         out.sum_den = static_cast<double>(sum_den);
         out.n_valid = n_valid;
+        return out;
+    }
+
+    // joint_sfs_2pop: the 2D joint site-frequency spectrum parity oracle. A host loop
+    // calling the SAME wc_accumulate per-pop fold + sfs_hist.hpp inlines (complete-site
+    // test, per-pop fold, mixed-radix cell index) the GPU kernel uses, accumulating into a
+    // std::int64_t grid — the unit-test oracle (test-only; not user-facing).
+    [[nodiscard]] SfsJoint joint_sfs_2pop(const DecodeTileView& tile, int popA, int popB,
+                                          bool folded) override {
+        SfsJoint out;
+        out.precision_tag = Precision::Kind::Fp64;
+        out.folded = folded;
+
+        const long M = static_cast<long>(tile.n_snp);
+        const int P = tile.n_pop;
+        if (M <= 0 || P <= 0 || popA < 0 || popB < 0 || popA >= P || popB >= P) return out;
+        out.n_total = M;
+
+        const std::size_t segA_begin = tile.pop_offsets[static_cast<std::size_t>(popA)];
+        const std::size_t segA_end = tile.pop_offsets[static_cast<std::size_t>(popA) + 1];
+        const std::size_t segB_begin = tile.pop_offsets[static_cast<std::size_t>(popB)];
+        const std::size_t segB_end = tile.pop_offsets[static_cast<std::size_t>(popB) + 1];
+
+        const long NA = static_cast<long>(segA_end - segA_begin);
+        const long NB = static_cast<long>(segB_end - segB_begin);
+        out.NA = NA;
+        out.NB = NB;
+        if (NA <= 0 || NB <= 0) return out;
+
+        const long extA = core::sfs_axis_extent(NA, folded);
+        const long extB = core::sfs_axis_extent(NB, folded);
+        out.extA = extA;
+        out.extB = extB;
+        out.grid.assign(static_cast<std::size_t>(extA * extB), 0);
+
+        long n_complete = 0;
+        for (long s = 0; s < M; ++s) {
+            const std::size_t byte_in_rec =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+
+            core::WcPerPop A;
+            for (std::size_t g = segA_begin; g < segA_end; ++g) {
+                const std::uint8_t byte = tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                core::wc_accumulate(core::genotype_code(byte, pos_in_byte), A);
+            }
+            core::WcPerPop B;
+            for (std::size_t g = segB_begin; g < segB_end; ++g) {
+                const std::uint8_t byte = tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                core::wc_accumulate(core::genotype_code(byte, pos_in_byte), B);
+            }
+
+            if (!core::sfs_site_complete(A.n, NA, B.n, NB)) continue;
+            const long idx[2] = {core::sfs_axis_index(A.ac, NA, folded),
+                                 core::sfs_axis_index(B.ac, NB, folded)};
+            const long ext[2] = {extA, extB};
+            const long lin = core::sfs_linear_index(idx, ext, 2);
+            out.grid[static_cast<std::size_t>(lin)] += 1;
+            ++n_complete;
+        }
+        out.n_complete = n_complete;
+        out.n_dropped_incomplete = out.n_total - out.n_complete;
         return out;
     }
 

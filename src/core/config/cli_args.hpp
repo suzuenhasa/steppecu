@@ -38,6 +38,7 @@ enum class Command {
     Readv2,
     Paint,
     Fst,
+    Sfs,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -96,6 +97,9 @@ struct CliArgs {
     // `fst` (per-SNP Weir-Cockerham FST) controls
     std::optional<std::string> fst_method;    // wc (Weir-Cockerham 1984; default). hudson is a follow-up.
     std::optional<bool>        fst_per_snp;   // emit the per-SNP FST table (else the summary row)
+
+    // `sfs` (2D joint site-frequency spectrum) controls
+    std::optional<bool>        sfs_fold;      // folded (per-pop minor) SFS; default unfolded (A1 copies)
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

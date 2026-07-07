@@ -82,6 +82,9 @@ public:
     [[nodiscard]] const std::string& fst_method() const noexcept { return fst_method_; }
     [[nodiscard]] bool fst_per_snp()             const noexcept { return fst_per_snp_; }
 
+    // `sfs` (2D joint site-frequency spectrum) controls
+    [[nodiscard]] bool sfs_fold()                const noexcept { return sfs_fold_; }
+
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
@@ -156,6 +159,7 @@ private:
     bool paint_full_ = false;
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
+    bool sfs_fold_ = false;
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

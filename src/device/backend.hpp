@@ -359,6 +359,23 @@ struct FstPerSite {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// SfsJoint — the 2D joint site-frequency spectrum over a population pair (`steppe sfs`).
+// grid is the row-major (extA x extB) integer joint histogram: cell (i, j) at
+// grid[i*extB + j] counts sites with pop-A category i and pop-B category j. A pure
+// integer-count stat (gated BIT-EXACT vs scikit-allel joint_sfs/joint_sfs_folded, NOT
+// AT2). Only sites COMPLETE in both pops (no missing) are histogrammed (§4); folded uses
+// each pop's own within-population minor allele (scikit-allel np.amin(ac, axis=1)).
+struct SfsJoint {
+    std::vector<std::int64_t> grid;   // row-major, length extA*extB
+    long extA = 0, extB = 0;          // category extents (2N+1 unfolded, N+1 folded)
+    long NA = 0, NB = 0;              // individuals per pop (chromosome count = 2N)
+    long n_total = 0;                 // SNPs in the tile
+    long n_complete = 0;              // sites histogrammed (complete in both pops)
+    long n_dropped_incomplete = 0;    // n_total - n_complete
+    bool folded = false;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;  // integer stat; tag informational
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -547,6 +564,19 @@ public:
         (void)tile; (void)popA; (void)popB; (void)summary_include;
         throw std::runtime_error(
             "ComputeBackend::fst_wc_per_site: not implemented by this backend");
+    }
+
+    // joint_sfs_2pop: the 2D joint site-frequency spectrum over the population pair (tile
+    // pop indices popA, popB) accumulated by a GPU joint-histogram over the device-resident
+    // genotype tile — the SAME per-pop A1-copy fold the FST path uses, fed into a joint
+    // grid instead of the WC algebra. `folded` selects the polarity-free per-pop minor
+    // fold (extent N+1) vs the unfolded A1-copy count (extent 2N+1). Only sites complete in
+    // both pops are histogrammed. Default: throw (CUDA/CPU only).
+    [[nodiscard]] virtual SfsJoint joint_sfs_2pop(const DecodeTileView& tile, int popA,
+                                                  int popB, bool folded) {
+        (void)tile; (void)popA; (void)popB; (void)folded;
+        throw std::runtime_error(
+            "ComputeBackend::joint_sfs_2pop: not implemented by this backend");
     }
 
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }

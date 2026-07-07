@@ -366,6 +366,19 @@ target_link_libraries(test_fst_wc
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME fst_wc_unit COMMAND test_fst_wc LABELS "unit")
 
+# --- Host-only unit test of the shared 2D joint-SFS histogram primitive -------
+# Pure C++ TU (no CUDA, no data): pins the __host__ __device__ SFS cell math in
+# core/internal/sfs_hist.hpp (sfs_site_complete / sfs_axis_extent / sfs_axis_index /
+# sfs_linear_index) — the SAME primitive the GPU joint-histogram kernel and the
+# CpuBackend oracle both call — driven over a tiny hand-built 2-pop tile with a known
+# small matrix: unfolded cell placement, folded per-pop-minor reflection (a (4,0) site
+# folds to (0,0) and collapses with a (0,0) site), and a MISSING genotype makes the site
+# incomplete so it is dropped from the complete-data histogram.
+add_executable(test_sfs_hist unit/test_sfs_hist.cpp)
+target_link_libraries(test_sfs_hist
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME sfs_hist_unit COMMAND test_sfs_hist LABELS "unit")
+
 # --- Host-only unit test of the launch-config + host/device headers ----------
 # Pure C++ TU (no CUDA): pins core/internal/launch_config.hpp (cdiv int+long,
 # grid_for, the 32x8 decode block dims) and core/internal/host_device.hpp
@@ -1290,6 +1303,23 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_fst steppe_app)
   steppe_add_test(NAME cli_fst
            COMMAND test_cli_fst
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
+
+  # --- `steppe sfs` 2D joint SFS bit-exact vs scikit-allel gate -------------
+  # Plain C++ host TU (no CUDA): runs the built `steppe sfs --prefix <shared 2-pop .bed>
+  # --pops A,B [--fold|--unfold]` on the GPU and compares its emitted integer joint SFS
+  # matrix CELL-BY-CELL BIT-EXACT to FROZEN scikit-allel joint_sfs / joint_sfs_folded
+  # goldens (a pure integer-count stat -> exact equality, not a float tolerance). The
+  # goldens + meta (2-pop bed prefix + the two pop labels) are frozen once on the box via
+  # the design §9 recipe (plink2 --export vcf -> scikit-allel, same individuals/SNPs/
+  # complete-data restriction/A1-aligned allele). SKIPs (exit 0) when no CUDA device is
+  # visible OR the fixture / golden / meta is absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_sfs cli/test_cli_sfs.cpp)
+  target_link_libraries(test_cli_sfs PRIVATE steppe::warnings)
+  add_dependencies(test_cli_sfs steppe_app)
+  steppe_add_test(NAME cli_sfs
+           COMMAND test_cli_sfs
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
 

@@ -123,6 +123,12 @@ public:
     [[nodiscard]] FstPerSite fst_wc_per_site(const DecodeTileView& tile, int popA, int popB,
                                              std::span<const std::uint8_t> summary_include) override;
 
+    // 2D joint site-frequency spectrum over a population pair (`steppe sfs`) — uploads the
+    // packed tile, launches the joint-histogram kernel over the device tile, and D2H's only
+    // the finished integer grid + the complete-site counter. Integer-count standalone stat.
+    [[nodiscard]] SfsJoint joint_sfs_2pop(const DecodeTileView& tile, int popA, int popB,
+                                          bool folded) override;
+
     // D-statistic block reduction — reference §6
     void dstat_block_reduce_device(const double* dQ, const double* dV, int P, long M,
                                    const int* block_id, int n_block,
