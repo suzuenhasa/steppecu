@@ -176,6 +176,78 @@ steppe dates --prefix v66.p1_HO.aadr.patch.PUB \
 
 ---
 
+## VCF ingestion — genotype a sample against a panel
+
+`steppe ingest` reads one sample's `.vcf.gz` (gVCF ref-blocks included) and genotypes it at a
+panel's sites, harmonizing strand/allele polarity. Point it at an AADR `.snp` panel plus a GRCh38
+FASTA and an `rsID -> pos38` lift map (native mode), or a pre-built 7-column target table (legacy
+mode). It emits any mix of: a per-site report, the built target table, a canonical 2-bit tile, or
+the sample merged into the panel as a size-1 population (which then feeds `extract-f2`). Host-only
+except `--emit-tile` (the one GPU seam). See [data and formats](./data-and-formats.md).
+
+```bash
+# native: genotype a sample at panel sites -> per-site report (no GPU)
+steppe ingest --vcf sample.vcf.gz \
+  --panel v66.p1_1240K.aadr.patch.PUB.snp --fasta GRCh38.fa --lift rsid_pos38.tsv \
+  --sample MYSAMPLE --report sample_report.tsv
+
+# build only the GRCh38 target table (no --vcf needed)
+steppe ingest --panel v66.p1_1240K.aadr.patch.PUB.snp --fasta GRCh38.fa --lift rsid_pos38.tsv \
+  --emit-targets native_targets.tsv
+
+# merge the sample into a panel as a size-1 population (then extract-f2 the merged prefix)
+steppe ingest --vcf sample.vcf.gz \
+  --panel v66.p1_1240K.aadr.patch.PUB.snp --fasta GRCh38.fa --lift rsid_pos38.tsv \
+  --sample MYSAMPLE \
+  --merge-into v66.p1_1240K.aadr.patch.PUB --emit-merged merged_panel
+
+# legacy: a pre-built 7-col target table instead of panel/fasta/lift
+steppe ingest --vcf sample.vcf.gz --targets targets.tsv --report sample_report.tsv
+
+# bit-exact canonical 2-bit tile (the one GPU path)
+steppe ingest --vcf sample.vcf.gz --targets targets.tsv --emit-tile sample.tile --device 0
+```
+
+Tune the gVCF confidence floors with `--min-dp` (default 8) and `--min-gq` (default 20).
+`ingest-concord` (GPU-free) diffs an ingest report against an oracle dosage table and asserts
+per-site `{call, dosage, source, drop_reason}` match:
+
+```bash
+steppe ingest-concord --a sample_report.tsv --b oracle_dosage.tsv
+```
+
+---
+
+## Relatedness — READv2 kinship (needs your own data)
+
+`steppe readv2` detects related pairs from a genotype prefix (`PREFIX.{geno,snp,ind}`, read as
+pseudo-haploid), via an all-pairs windowed-mismatch sweep on the GPU. Every individual is its own
+group; the output is an 8-column per-pair table with a relatedness degree + normalized P0.
+Autosomes only by default (READv2 convention).
+
+```bash
+# all-pairs relatedness over a panel (median-normalized 1000-SNP windows)
+steppe readv2 --prefix v66.p1_1240K.aadr.patch.PUB \
+  --window-snps 1000 --norm median --auto-only --out relatedness.csv
+
+# restrict to a subset of Genetic IDs, drop thin pairs (<10% comparable sites)
+steppe readv2 --prefix v66.p1_1240K.aadr.patch.PUB \
+  --samples keep_ids.txt --min-overlap 0.1 --out relatedness.csv
+
+# huge cohort: stream per-pair rows to shard files, lift the C(N,2) safety cap
+steppe readv2 --prefix v66.p1_1240K.aadr.patch.PUB --shard-dir ./readv2_out --sure
+```
+
+`readv2-concord` (GPU-free) diffs one READv2 table against a reference and asserts the degree
+confusion matrix + P0 concordance — the "READv2 ruler" for validating a run:
+
+```bash
+steppe readv2-concord --a relatedness.csv --b reference.readv2.csv \
+  --degree-agreement-min 0.95 --p0-within-tol-min 0.90 --coverage-min 1.0
+```
+
+---
+
 ## Interop — move an f2 cache to/from ADMIXTOOLS 2 (`.rds`)
 
 `steppe-rds` (installed alongside the CLI, GPU-free) converts between steppe's f2 dir and
@@ -188,6 +260,40 @@ steppe-rds export ~/.local/share/steppe/example ./exported_rds
 
 # an AT2 .rds dir  ->  a steppe f2 cache
 steppe-rds import ./some_at2_rds_dir ./imported_f2_dir
+```
+
+---
+
+## Cache / dataset manager — inspect and verify f2 caches
+
+An f2 cache is a directory (`f2.bin` + `pops.txt` + an optional `meta.json`). The built-in
+`steppe cache` subcommand inspects them header-only, never touching the multi-GB payload:
+
+```bash
+steppe cache ls   ./caches                   # tabulate every cache under a root
+steppe cache show ./caches/aadr_1240K_f2     # header facts + integrity mark + meta.json
+steppe cache verify ./caches/aadr_1240K_f2   # re-hash the payload against its content-address
+```
+
+`steppe-cache` (installed alongside the CLI, GPU-free, stdlib-only) does the same plus pop
+listing, panel discovery, and AADR fetch:
+
+```bash
+steppe-cache ls ./caches --long --sort size                # tabulate (--index memoizes the scan)
+steppe-cache show ./caches/aadr_1240K_f2 --json            # one cache's record as JSON
+steppe-cache pops ./caches/aadr_1240K_f2                   # population labels, one per line
+steppe-cache verify ./caches/aadr_1240K_f2 --check-sources # also re-hash geno/snp/ind
+steppe-cache datasets --dir .                              # which AADR panels (1240K|HO|2M) are present
+steppe-cache get 1240K ./aadr                             # fetch an AADR panel (wraps download-aadr.sh)
+```
+
+From Python (GPU-free):
+
+```python
+import steppe
+steppe.list_caches("./caches")                # a record per cache under a root
+steppe.cache_info("./caches/aadr_1240K_f2")   # full parsed record (like `show --json`)
+steppe.verify_cache("./caches/aadr_1240K_f2", check_sources=True)   # True iff all checks pass
 ```
 
 ---
