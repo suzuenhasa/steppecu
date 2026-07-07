@@ -989,6 +989,20 @@ if(STEPPE_HAVE_GTEST)
 endif()
 steppe_add_test(NAME geno_reader_unit COMMAND test_geno_reader LABELS "unit")
 
+# --- Host-only unit test of io::write_merged_panel (Stage-3 merge writer) ------
+# Pure C++ TU (no CUDA, no real AADR data): hand-authors tiny synthetic panels in
+# all three supported .geno layouts (TGENO individual-major, GENO/PACKEDANCESTRYMAP
+# SNP-major, EIGENSTRAT ASCII), appends a known nikki code vector via
+# write_merged_panel, and asserts the merged output leaves every pre-existing
+# individual's decode byte-identical (gate a), decodes nikki's appended column back
+# to the exact input codes incl. missing (gate b), bumps the packed header's n_ind
+# by one, and appends exactly one .ind row. The GENO n_ind==3 case seeds garbage
+# padding bits to pin the mask-clear-before-OR fix. Links steppe::io only.
+add_executable(test_panel_merge_writer unit/test_panel_merge_writer.cpp)
+target_link_libraries(test_panel_merge_writer
+    PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME panel_merge_writer_unit COMMAND test_panel_merge_writer LABELS "unit")
+
 # --- Host-only unit test of io::read_snp -------------------------------------
 # Pure C++ TU (no CUDA, no real AADR data): writes tiny synthetic .snp fixtures to
 # a temp path and exercises read_snp's token-count column decision plus its

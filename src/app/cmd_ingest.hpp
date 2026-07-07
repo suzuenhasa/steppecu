@@ -27,6 +27,9 @@ struct IngestArgs {
     std::string sample;       // OPTIONAL: sample id (default = the sole sample)
     std::string report;       // OPTIONAL: per-site report TSV (primary artifact)
     std::string emit_tile;    // OPTIONAL: raw canonical 2-bit tile bytes (needs a device)
+    //   Stage 3 (merge): append nikki as a size-1 population into an existing panel.
+    std::string merge_into;   // OPTIONAL: source panel PREFIX (.geno/.snp/.ind) to append into
+    std::string emit_merged;  // OPTIONAL: output merged panel PREFIX (needs --merge-into)
     std::string device;       // OPTIONAL: CUDA device ordinal(s), e.g. "0" (default auto)
     int min_dp = 8;           // ref-block MinDP / variant DP floor (frozen default)
     int min_gq = 20;          // variant GQ floor (frozen default)

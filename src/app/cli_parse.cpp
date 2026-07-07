@@ -635,6 +635,11 @@ int run_cli(int argc, char** argv) {
                     "Per-site report TSV in the oracle schema (the primary Stage-1 artifact)");
     ing->add_option("--emit-tile", ingest_args.emit_tile,
                     "Write the raw canonical 2-bit tile bytes here (needs a CUDA device)");
+    ing->add_option("--merge-into", ingest_args.merge_into,
+                    "Stage 3: source panel PREFIX (.geno/.snp/.ind) to append the genotyped "
+                    "sample into as a size-1 population (requires native --panel + --emit-merged)");
+    ing->add_option("--emit-merged", ingest_args.emit_merged,
+                    "Stage 3: output merged panel PREFIX (writes .geno/.snp/.ind; needs --merge-into)");
     ing->add_option("--min-dp", ingest_args.min_dp, "Ref-block MinDP / variant DP floor (default 8)");
     ing->add_option("--min-gq", ingest_args.min_gq, "Variant GQ floor (default 20)");
     ing->add_option("--device", ingest_args.device,
