@@ -35,6 +35,7 @@
 #include "app/cmd_f4ratio.hpp"
 #include "app/cmd_fst.hpp"
 #include "app/cmd_sfs.hpp"
+#include "app/cmd_pca.hpp"
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpgraph.hpp"
@@ -271,6 +272,7 @@ int run_cli(int argc, char** argv) {
     CliArgs paint_args;
     CliArgs fst_args;
     CliArgs sfs_args;
+    CliArgs pca_args;
 
     // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
     // to these plain locals, also owned at run_cli scope so they outlive the parse.
@@ -388,6 +390,29 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_sfs_command, code);
+
+    register_cmd(app, "pca",
+        "Standalone genotype PCA (Patterson 2006): --prefix genotypes [+ --pops subset] -> "
+        "per-sample PC coordinates (sample/pop/PC1..PCk) + eigenvalues, on the GPU (SYRK "
+        "covariance + cuSOLVER eigen). Optional --emit-html writes a self-contained "
+        "interactive scatter. Gated vs scikit-allel/sklearn PCA (NOT ADMIXTOOLS2)",
+        pca_args, Command::Pca,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
+            add_str_list_flag(s, "--pops", a.pops,
+                              "Populations to include (color groups); omit = ALL populations");
+            s->add_option("-k,--k", a.pca_k, "Number of principal components (default 10)");
+            s->add_flag("--eigenvalues", a.pca_eigenvalues,
+                        "Emit the scree table (pc_index/eigenvalue/var_explained) instead of the "
+                        "per-sample coordinate table");
+            s->add_option("--emit-html", a.pca_emit_html,
+                          "Also write a self-contained interactive scatter HTML (pan/zoom/hover, "
+                          "PC selector, population legend) to this path");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_pca_command, code);
 
     register_cmd(app, "readv2",
         "Pseudo-haploid windowed-mismatch kinship: --prefix genotypes -> per-pair degree + P0_norm",

@@ -39,6 +39,7 @@ enum class Command {
     Paint,
     Fst,
     Sfs,
+    Pca,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -100,6 +101,11 @@ struct CliArgs {
 
     // `sfs` (2D joint site-frequency spectrum) controls
     std::optional<bool>        sfs_fold;      // folded (per-pop minor) SFS; default unfolded (A1 copies)
+
+    // `pca` (standalone genotype PCA) controls
+    std::optional<int>         pca_k;         // number of principal components (default 10)
+    std::optional<bool>        pca_eigenvalues;  // emit the scree table instead of the coord table
+    std::optional<std::string> pca_emit_html;    // also write a self-contained interactive scatter HTML here
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

@@ -376,6 +376,28 @@ struct SfsJoint {
     Precision::Kind precision_tag = Precision::Kind::Fp64;  // integer stat; tag informational
 };
 
+// PcaEig — the device result of the standalone genotype PCA (`steppe pca`): the top-K
+// sample PC coordinates plus the eigen spectrum, produced over the device-resident tile by
+// the Patterson-standardize kernel -> cuBLAS SYRK covariance -> cuSOLVER symmetric eigen
+// -> coord projection. `coords` is row-major N x K with coord(i,k) = eigenvector_i *
+// sqrt(eigenvalue) (== scikit-allel U*S; sign arbitrary per PC); `eigenvalues`/`var_explained`
+// are the top-K descending. n_snp_used counts polymorphic non-empty SNPs (standardized
+// columns); n_snp_monomorphic is the rest (mono/all-missing, contributing zero columns).
+// Only the small N*K + K + counters cross PCIe — the covariance/eigen compute stays on the
+// GPU. precision_tag reflects the covariance SYRK (emulated-FP64 default); the eigen is
+// always native FP64. Gated vs scikit-allel/sklearn PCA, NOT ADMIXTOOLS2.
+struct PcaEig {
+    std::vector<double> coords;         // N*K row-major
+    std::vector<double> eigenvalues;    // K, descending
+    std::vector<double> var_explained;  // K, ratio
+    int N = 0;
+    int K = 0;
+    long n_snp_used = 0;
+    long n_snp_monomorphic = 0;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -577,6 +599,20 @@ public:
         (void)tile; (void)popA; (void)popB; (void)folded;
         throw std::runtime_error(
             "ComputeBackend::joint_sfs_2pop: not implemented by this backend");
+    }
+
+    // pca_covariance_eig: standalone genotype PCA (`steppe pca`) over the device-resident
+    // tile. Patterson-2006 standardizes ALL individuals' diploid dosages on the GPU
+    // (per-SNP center 2p + scale 1/sqrt(p(1-p)), missing -> 0, monomorphic columns zeroed),
+    // forms the sample x sample covariance via cuBLAS SYRK (`precision` = emulated-FP64
+    // default, matmul-heavy), eigendecomposes it with cuSOLVER Dsyevd (native FP64
+    // carve-out), and projects to the top-K PCs (coord = eigenvector*sqrt(eigenvalue)).
+    // `k` is clamped to min(k, N). Default: throw (CUDA/CPU-oracle only).
+    [[nodiscard]] virtual PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+                                                    const Precision& precision) {
+        (void)tile; (void)k; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::pca_covariance_eig: not implemented by this backend");
     }
 
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }

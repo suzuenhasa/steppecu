@@ -29,6 +29,7 @@
 #include "core/internal/decode_af.hpp"
 #include "core/internal/sfs_hist.hpp"
 #include "core/internal/f2_estimator.hpp"
+#include "core/internal/pca_standardize.hpp"
 #include "core/internal/pchisq.hpp"
 #include "core/internal/qpfstats_jackknife.hpp"
 #include "core/internal/small_linalg.hpp"
@@ -434,6 +435,133 @@ public:
         }
         out.n_complete = n_complete;
         out.n_dropped_incomplete = out.n_total - out.n_complete;
+        return out;
+    }
+
+    // pca_covariance_eig: standalone genotype PCA parity oracle (test-only; not user-facing).
+    // Host long-double Patterson standardization (the SAME pca_snp_scale / pca_standardize_one
+    // the GPU kernel calls), a dense Z*Z^T sample covariance, and a cyclic-Jacobi symmetric
+    // eigensolve — coords = eigenvector*sqrt(eigenvalue), top-K descending. Native long double
+    // (never emulated: this is the correctness oracle). The precision argument is ignored.
+    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+                                            const Precision& precision) override {
+        (void)precision;
+        PcaEig out;
+        out.precision_tag = Precision::Kind::Fp64;
+
+        const long N = static_cast<long>(tile.n_individuals);
+        const long M = static_cast<long>(tile.n_snp);
+        if (N <= 0 || M <= 0 || k <= 0) { out.status = Status::InvalidConfig; return out; }
+        const int Nn = static_cast<int>(N);
+        const int K = static_cast<int>(std::min<long>(k, N));
+        const std::size_t Nz = static_cast<std::size_t>(N);
+
+        // Covariance C = Z Z^T (N x N, long double), accumulated one standardized SNP column
+        // at a time as a rank-1 update — the SAME standardization the device path applies.
+        std::vector<long double> C(Nz * Nz, 0.0L);
+        std::vector<long double> z(Nz, 0.0L);
+        long n_used = 0;
+        for (long s = 0; s < M; ++s) {
+            const std::size_t byte =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos = static_cast<int>(s % core::kCodesPerByte);
+            long ac = 0, nn = 0;
+            for (long i = 0; i < N; ++i) {
+                const std::uint8_t code = core::genotype_code(
+                    tile.packed[static_cast<std::size_t>(i) * tile.bytes_per_record + byte], pos);
+                if (core::genotype_valid(code)) { ac += static_cast<long>(code); ++nn; }
+            }
+            const core::PcaSnpScale sc = core::pca_snp_scale(ac, nn);
+            const double inv_scale = sc.used ? (1.0 / std::sqrt(sc.pq)) : 0.0;
+            if (sc.used) ++n_used;
+            for (long i = 0; i < N; ++i) {
+                const std::uint8_t code = core::genotype_code(
+                    tile.packed[static_cast<std::size_t>(i) * tile.bytes_per_record + byte], pos);
+                z[static_cast<std::size_t>(i)] =
+                    static_cast<long double>(core::pca_standardize_one(code, sc.center, inv_scale));
+            }
+            for (long i = 0; i < N; ++i) {
+                const long double zi = z[static_cast<std::size_t>(i)];
+                if (zi == 0.0L) continue;
+                for (long j = 0; j < N; ++j)
+                    C[static_cast<std::size_t>(i) * Nz + static_cast<std::size_t>(j)] +=
+                        zi * z[static_cast<std::size_t>(j)];
+            }
+        }
+
+        // Cyclic-Jacobi symmetric eigensolve; V accumulates the eigenvectors (columns).
+        std::vector<long double> V(Nz * Nz, 0.0L);
+        for (long i = 0; i < N; ++i) V[static_cast<std::size_t>(i) * Nz + static_cast<std::size_t>(i)] = 1.0L;
+        constexpr int kMaxSweeps = 100;
+        auto at = [Nz](std::vector<long double>& A, long r, long c) -> long double& {
+            return A[static_cast<std::size_t>(r) * Nz + static_cast<std::size_t>(c)];
+        };
+        for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+            long double off = 0.0L;
+            for (long p = 0; p < N; ++p)
+                for (long q = p + 1; q < N; ++q) off += at(C, p, q) * at(C, p, q);
+            if (off <= 1e-30L) break;
+            for (long p = 0; p < N; ++p) {
+                for (long q = p + 1; q < N; ++q) {
+                    const long double apq = at(C, p, q);
+                    if (apq == 0.0L) continue;
+                    const long double phi = 0.5L * (at(C, q, q) - at(C, p, p)) / apq;
+                    const long double t = (phi >= 0.0L ? 1.0L : -1.0L) /
+                                          (std::fabs(phi) + std::sqrt(phi * phi + 1.0L));
+                    const long double cs = 1.0L / std::sqrt(t * t + 1.0L);
+                    const long double sn = t * cs;
+                    for (long i = 0; i < N; ++i) {
+                        const long double aip = at(C, i, p);
+                        const long double aiq = at(C, i, q);
+                        at(C, i, p) = cs * aip - sn * aiq;
+                        at(C, i, q) = sn * aip + cs * aiq;
+                    }
+                    for (long i = 0; i < N; ++i) {
+                        const long double api = at(C, p, i);
+                        const long double aqi = at(C, q, i);
+                        at(C, p, i) = cs * api - sn * aqi;
+                        at(C, q, i) = sn * api + cs * aqi;
+                    }
+                    for (long i = 0; i < N; ++i) {
+                        const long double vip = at(V, i, p);
+                        const long double viq = at(V, i, q);
+                        at(V, i, p) = cs * vip - sn * viq;
+                        at(V, i, q) = sn * vip + cs * viq;
+                    }
+                }
+            }
+        }
+
+        std::vector<long double> evals(Nz, 0.0L);
+        for (long i = 0; i < N; ++i) evals[static_cast<std::size_t>(i)] = at(C, i, i);
+        std::vector<int> order(Nz);
+        for (int i = 0; i < Nn; ++i) order[static_cast<std::size_t>(i)] = i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return evals[static_cast<std::size_t>(a)] > evals[static_cast<std::size_t>(b)];
+        });
+        long double total = 0.0L;
+        for (long i = 0; i < N; ++i) total += evals[static_cast<std::size_t>(i)];
+
+        out.coords.assign(Nz * static_cast<std::size_t>(K), 0.0);
+        out.eigenvalues.assign(static_cast<std::size_t>(K), 0.0);
+        out.var_explained.assign(static_cast<std::size_t>(K), 0.0);
+        for (int kk = 0; kk < K; ++kk) {
+            const int col = order[static_cast<std::size_t>(kk)];
+            const long double lambda = evals[static_cast<std::size_t>(col)];
+            const long double scale = lambda > 0.0L ? std::sqrt(lambda) : 0.0L;
+            out.eigenvalues[static_cast<std::size_t>(kk)] = static_cast<double>(lambda);
+            out.var_explained[static_cast<std::size_t>(kk)] =
+                (total != 0.0L) ? static_cast<double>(lambda / total) : 0.0;
+            for (long i = 0; i < N; ++i)
+                out.coords[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                           static_cast<std::size_t>(kk)] =
+                    static_cast<double>(at(V, i, static_cast<long>(col)) * scale);
+        }
+        out.N = Nn;
+        out.K = K;
+        out.n_snp_used = n_used;
+        out.n_snp_monomorphic = M - n_used;
+        out.status = Status::Ok;
         return out;
     }
 

@@ -213,6 +213,9 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.fst_method, args.fst_method);
     take_b(merged_.fst_per_snp, args.fst_per_snp);
     take_b(merged_.sfs_fold, args.sfs_fold);
+    take_i(merged_.pca_k, args.pca_k);
+    take_b(merged_.pca_eigenvalues, args.pca_eigenvalues);
+    take(merged_.pca_emit_html, args.pca_emit_html);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -562,6 +565,12 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.fst_per_snp) cfg.fst_per_snp_ = *merged_.fst_per_snp;
     if (merged_.sfs_fold) cfg.sfs_fold_ = *merged_.sfs_fold;
+    if (merged_.pca_k.has_value()) {
+        if (*merged_.pca_k < 1) return fail("--k must be >= 1 (number of principal components)");
+        cfg.pca_k_ = *merged_.pca_k;
+    }
+    if (merged_.pca_eigenvalues) cfg.pca_eigenvalues_ = *merged_.pca_eigenvalues;
+    if (merged_.pca_emit_html) cfg.pca_emit_html_ = *merged_.pca_emit_html;
     if (merged_.recip_batch.has_value()) {
         if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
         cfg.ls_recip_batch_ = *merged_.recip_batch;

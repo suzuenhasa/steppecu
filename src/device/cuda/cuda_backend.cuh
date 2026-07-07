@@ -129,6 +129,13 @@ public:
     [[nodiscard]] SfsJoint joint_sfs_2pop(const DecodeTileView& tile, int popA, int popB,
                                           bool folded) override;
 
+    // Standalone genotype PCA (`steppe pca`) — uploads the packed tile, SNP-tiles the
+    // Patterson-standardize kernel + cuBLAS SYRK to accumulate the sample x sample
+    // covariance device-resident (emulated-FP64 default), eigendecomposes with cuSOLVER
+    // Dsyevd (native-FP64 carve-out), and D2H's only the top-K coords + eigen spectrum.
+    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+                                            const Precision& precision) override;
+
     // D-statistic block reduction — reference §6
     void dstat_block_reduce_device(const double* dQ, const double* dV, int P, long M,
                                    const int* block_id, int n_block,

@@ -379,6 +379,17 @@ target_link_libraries(test_sfs_hist
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME sfs_hist_unit COMMAND test_sfs_hist LABELS "unit")
 
+# --- Host-only unit test of the shared Patterson PCA standardization primitive ---
+# Pure C++ TU (no CUDA, no data): pins the __host__ __device__ Patterson center/scale/
+# standardize math in core/internal/pca_standardize.hpp (pca_snp_scale / pca_standardize_one)
+# — the SAME primitive the GPU pca kernel and the CpuBackend oracle both call. Hand-computed
+# anchors (p=0.5 -> center 1, inv_scale 2; monomorphic/all-missing -> unused, zeroed column;
+# missing excluded from p and mean-imputed to 0).
+add_executable(test_pca_standardize unit/test_pca_standardize.cpp)
+target_link_libraries(test_pca_standardize
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME pca_standardize_unit COMMAND test_pca_standardize LABELS "unit")
+
 # --- Host-only unit test of the launch-config + host/device headers ----------
 # Pure C++ TU (no CUDA): pins core/internal/launch_config.hpp (cdiv int+long,
 # grid_for, the 32x8 decode block dims) and core/internal/host_device.hpp
@@ -616,6 +627,16 @@ target_link_libraries(test_fstat_sweep_parity
 set_target_properties(test_fstat_sweep_parity PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 steppe_add_test(NAME fstat_sweep_parity
          COMMAND test_fstat_sweep_parity "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "reference;gpu;slow")
+
+# --- steppe pca device eigen test (tiny 2-cluster tile, no AADR) --------------
+# Drives CudaBackend::pca_covariance_eig on a hand-built 2-cluster tile: monomorphic-SNP
+# drop, trace invariance (Σ eigenvalues == Σ Z^2 host-computed), GPU-vs-CpuBackend-oracle
+# per-PC sign-aligned |r| ~ 1, and the PC1 cluster split. SKIPs (exit 0) if no GPU.
+add_executable(test_pca_eig reference/test_pca_eig.cu)
+target_link_libraries(test_pca_eig
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings)
+set_target_properties(test_pca_eig PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+steppe_add_test(NAME pca_eig COMMAND test_pca_eig LABELS "reference;gpu")
 
 # --- qpAdm rotation model-search test ----------------------------------------
 # Reads the real AT2 rotation golden + the co-matching f2 fixture, uploads f2
@@ -1320,6 +1341,24 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_sfs steppe_app)
   steppe_add_test(NAME cli_sfs
            COMMAND test_cli_sfs
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
+
+  # --- `steppe pca` genotype-PCA vs scikit-allel + self-contained HTML gate ---
+  # Plain C++ host TU (no CUDA): runs the built `steppe pca --prefix <bed> --pops ... -k K`
+  # on the GPU and (a) reproduces a FROZEN scikit-allel Patterson-PCA golden — PRIMARY a
+  # rotation/sign-invariant sample x sample Gram (subspace) match, SECONDARY per-PC
+  # sign-aligned |Pearson r|>0.999 on the well-separated leading PCs + var_explained ratios;
+  # (b) emits a self-contained interactive scatter HTML the test proves makes NO network
+  # request (canvas/legend/embedded coord blob present; zero http/cdn/link/fetch egress).
+  # The golden + meta are frozen once on the box via tests/reference/pca_allel_gate.py.
+  # SKIPs (exit 0) when no CUDA device is visible OR the fixture / golden / meta is absent.
+  # NO SYNTHETIC DATA.
+  add_executable(test_cli_pca cli/test_cli_pca.cpp)
+  target_link_libraries(test_cli_pca PRIVATE steppe::warnings)
+  add_dependencies(test_cli_pca steppe_app)
+  steppe_add_test(NAME cli_pca
+           COMMAND test_cli_pca
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
 

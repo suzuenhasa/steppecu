@@ -35,6 +35,8 @@ add_executable(steppe_app
     cmd_qpdstat.cpp
     cmd_fst.cpp
     cmd_sfs.cpp
+    cmd_pca.cpp
+    pca_html_writer.cpp
     cmd_qpfstats.cpp
     cmd_dates.cpp
     cmd_paint.cpp

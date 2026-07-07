@@ -85,6 +85,11 @@ public:
     // `sfs` (2D joint site-frequency spectrum) controls
     [[nodiscard]] bool sfs_fold()                const noexcept { return sfs_fold_; }
 
+    // `pca` (standalone genotype PCA) controls
+    [[nodiscard]] int pca_k()                    const noexcept { return pca_k_; }
+    [[nodiscard]] bool pca_eigenvalues()         const noexcept { return pca_eigenvalues_; }
+    [[nodiscard]] const std::string& pca_emit_html() const noexcept { return pca_emit_html_; }
+
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
     [[nodiscard]] int min_sources()             const noexcept { return min_sources_; }
@@ -160,6 +165,9 @@ private:
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
     bool sfs_fold_ = false;
+    int pca_k_ = 10;
+    bool pca_eigenvalues_ = false;
+    std::string pca_emit_html_;
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

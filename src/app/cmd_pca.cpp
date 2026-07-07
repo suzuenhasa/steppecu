@@ -1,0 +1,180 @@
+// src/app/cmd_pca.cpp
+//
+// The `steppe pca` command — standalone genotype PCA over a genotype triple, computed on the
+// GPU (Patterson-2006 standardize -> cuBLAS SYRK covariance -> cuSOLVER eigen -> top-K
+// projection). App-only and CUDA-free: the GPU is reached only through the run_pca seam.
+// Emits a per-sample PC-coordinate table (sample, pop, PC1..PCk) by default, the scree table
+// (pc_index, eigenvalue, var_explained) with --eigenvalues, and — with --emit-html — a
+// separate self-contained interactive scatter HTML artifact.
+//
+// v1 SCOPE GUARD: the exact dense N x N covariance + symmetric eigensolve, gated vs
+// scikit-allel/sklearn PCA (NOT ADMIXTOOLS2). A nonlinear UMAP embedding (--embed umap), EMU
+// imputation, randomized SVD, and projection of new samples are documented follow-ups.
+#include "app/cmd_pca.hpp"
+
+#include <cstdio>
+#include <exception>
+#include <ostream>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "app/cmd_common.hpp"
+#include "app/cmd_emit.hpp"
+#include "app/exit_code_for_caught.hpp"
+#include "app/pca_html_writer.hpp"
+#include "app/result_emit.hpp"
+#include "core/config/exit_code.hpp"
+#include "device/resources.hpp"
+#include "io/genotype_source.hpp"
+#include "steppe/error.hpp"
+#include "steppe/pca.hpp"
+
+namespace steppe::app {
+
+namespace {
+
+namespace cfg = steppe::config;
+
+const char* status_text(steppe::Status s) {
+    switch (s) {
+        case steppe::Status::Ok: return "ok";
+        case steppe::Status::RankDeficient: return "rank_deficient";
+        case steppe::Status::NonSpdCovariance: return "non_spd";
+        case steppe::Status::ChisqUndefined: return "chisq_undefined";
+        case steppe::Status::DeviceOom: return "device_oom";
+        case steppe::Status::InvalidConfig: return "invalid_config";
+    }
+    return "unknown";
+}
+
+// The per-sample PC-coordinate table: sample<sep>pop<sep>PC1..PCk (one row per sample, in
+// tile order), or a JSON object with the coords + the eigen spectrum.
+void emit_coords(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r) {
+    const int K = r.K;
+    if (fmt == OutputFormat::Json) {
+        os << "{\n  \"eigenvalues\": [";
+        for (int k = 0; k < K; ++k)
+            os << (k ? ", " : "") << json_double(r.eigenvalues[static_cast<std::size_t>(k)]);
+        os << "],\n  \"var_explained\": [";
+        for (int k = 0; k < K; ++k)
+            os << (k ? ", " : "") << json_double(r.var_explained[static_cast<std::size_t>(k)]);
+        os << "],\n  \"samples\": [\n";
+        for (int i = 0; i < r.N; ++i) {
+            os << "    {\"sample\": " << json_quote(r.sample_id[static_cast<std::size_t>(i)])
+               << ", \"pop\": " << json_quote(r.sample_pop[static_cast<std::size_t>(i)])
+               << ", \"coords\": [";
+            for (int k = 0; k < K; ++k) {
+                const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                                        static_cast<std::size_t>(k);
+                os << (k ? ", " : "") << json_double(r.coords[off]);
+            }
+            os << "]}" << (i + 1 < r.N ? ",\n" : "\n");
+        }
+        os << "  ]\n}\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "sample" << sep << "pop";
+    for (int k = 0; k < K; ++k) os << sep << "PC" << (k + 1);
+    os << "\n";
+    for (int i = 0; i < r.N; ++i) {
+        os << csv_field(r.sample_id[static_cast<std::size_t>(i)], sep) << sep
+           << csv_field(r.sample_pop[static_cast<std::size_t>(i)], sep);
+        for (int k = 0; k < K; ++k) {
+            const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                                    static_cast<std::size_t>(k);
+            os << sep << fmt_double(r.coords[off]);
+        }
+        os << "\n";
+    }
+}
+
+// The scree table: pc_index<sep>eigenvalue<sep>var_explained (one row per PC).
+void emit_scree(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r) {
+    const int K = r.K;
+    if (fmt == OutputFormat::Json) {
+        os << "[\n";
+        for (int k = 0; k < K; ++k) {
+            os << "  {\"pc_index\": " << (k + 1)
+               << ", \"eigenvalue\": " << json_double(r.eigenvalues[static_cast<std::size_t>(k)])
+               << ", \"var_explained\": " << json_double(r.var_explained[static_cast<std::size_t>(k)])
+               << "}" << (k + 1 < K ? ",\n" : "\n");
+        }
+        os << "]\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "pc_index" << sep << "eigenvalue" << sep << "var_explained" << "\n";
+    for (int k = 0; k < K; ++k) {
+        os << (k + 1) << sep << fmt_double(r.eigenvalues[static_cast<std::size_t>(k)]) << sep
+           << fmt_double(r.var_explained[static_cast<std::size_t>(k)]) << "\n";
+    }
+}
+
+}  // namespace
+
+int run_pca_command(const cfg::RunConfig& config) {
+    if (config.qpdstat_prefix().empty()) {
+        std::fprintf(stderr, "steppe pca: --prefix PREFIX.{geno,snp,ind} is required\n");
+        return cfg::kExitInvalidConfig;
+    }
+    const int k = config.pca_k();
+    if (k < 1) {
+        std::fprintf(stderr, "steppe pca: -k must be >= 1 (number of principal components)\n");
+        return cfg::kExitInvalidConfig;
+    }
+
+    const std::string& prefix = config.qpdstat_prefix();
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+    const std::vector<std::string>& pops = config.pops();
+
+    steppe::PcaResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (!require_first_gpu(resources, "pca")) return cfg::kExitRuntimeError;
+        result = run_pca(triple.geno, triple.snp, triple.ind,
+                         std::span<const std::string>(pops), k, config.device().precision,
+                         resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe pca: input/device error: %s\n", e.what());
+        return exit_code_for_caught(e);
+    }
+
+    if (result.status != Status::Ok) {
+        std::fprintf(stderr,
+                     "steppe pca: %s (check --prefix, the --pops labels, and that -k <= "
+                     "min(samples, usable SNPs))\n",
+                     status_text(result.status));
+        return cfg::exit_code_for(result.status);
+    }
+
+    // Human diagnostic to stderr (out of the parsed coordinate stream).
+    const double v1 = result.K > 0 ? result.var_explained[0] * 100.0 : 0.0;
+    const double v2 = result.K > 1 ? result.var_explained[1] * 100.0 : 0.0;
+    std::fprintf(stderr,
+                 "steppe pca: %d samples x %ld SNPs used (%ld dropped monomorphic), top-%d PCs; "
+                 "PC1 var=%.2f%%, PC2 var=%.2f%%\n",
+                 result.N, result.n_snp_used, result.n_snp_monomorphic, result.K, v1, v2);
+
+    // The self-contained interactive HTML artifact (separate write path; combinable with --out).
+    if (!config.pca_emit_html().empty()) {
+        if (!write_pca_html(config.pca_emit_html(), result, "pca")) {
+            return cfg::kExitIoError;
+        }
+        std::fprintf(stderr, "steppe pca: wrote self-contained scatter -> %s\n",
+                     config.pca_emit_html().c_str());
+    }
+
+    const bool scree = config.pca_eigenvalues();
+    if (const auto rc = emit_to_destination(
+            config, "pca", [&](std::ostream& os, OutputFormat fmt) {
+                if (scree) emit_scree(os, fmt, result);
+                else emit_coords(os, fmt, result);
+            })) {
+        return *rc;
+    }
+    return cfg::exit_code_for(result.status);
+}
+
+}  // namespace steppe::app
