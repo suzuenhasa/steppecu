@@ -53,6 +53,12 @@ public:
     [[nodiscard]] const std::string& out_file() const noexcept { return out_file_; }
     [[nodiscard]] const std::string& format()   const noexcept { return format_; }
     [[nodiscard]] const std::string& qpdstat_prefix() const noexcept { return qpdstat_prefix_; }
+
+    // READv2 controls
+    [[nodiscard]] const std::string& samples_file() const noexcept { return samples_file_; }
+    [[nodiscard]] int window_snps()             const noexcept { return window_snps_; }
+    [[nodiscard]] const std::string& norm_mode() const noexcept { return norm_mode_; }
+    [[nodiscard]] double min_overlap()          const noexcept { return min_overlap_; }
     [[nodiscard]] const std::string& geno()     const noexcept { return geno_; }
     [[nodiscard]] const std::string& snp()      const noexcept { return snp_; }
     [[nodiscard]] const std::string& ind()      const noexcept { return ind_; }
@@ -113,6 +119,10 @@ private:
     std::string out_file_;
     std::string format_ = "csv";
     std::string qpdstat_prefix_;
+    std::string samples_file_;
+    int window_snps_ = 1000;
+    std::string norm_mode_ = "median";
+    double min_overlap_ = 0.0;
     std::string geno_;
     std::string snp_;
     std::string ind_;

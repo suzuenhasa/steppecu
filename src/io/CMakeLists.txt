@@ -11,6 +11,7 @@
 add_library(steppe_io STATIC
     eigenstrat_format.cpp
     ind_reader.cpp
+    individual_partition.cpp
     snp_reader.cpp
     plink_reader.cpp
     genotype_source.cpp

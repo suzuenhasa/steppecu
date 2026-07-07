@@ -135,6 +135,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.format,      args.format);
     take(merged_.prefix,      args.prefix);
     take(merged_.qpdstat_prefix, args.qpdstat_prefix);
+    take(merged_.samples, args.samples);
+    take(merged_.norm, args.norm);
     take(merged_.graph,       args.graph);
     take(merged_.geno,        args.geno);
     take(merged_.snp,         args.snp);
@@ -195,6 +197,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_d(merged_.diag_f3, args.diag_f3);
     take_b(merged_.constrained, args.constrained);
     take_i(merged_.max_nadmix, args.max_nadmix);
+    take_i(merged_.window_snps, args.window_snps);
+    take_d(merged_.min_overlap, args.min_overlap);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -355,6 +359,9 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         flt.autosomes_only = true;
         flt.drop_monomorphic = true;
     }
+    if (merged_.command == Command::Readv2) {
+        flt.autosomes_only = true;  // READv2 convention: exclude sex chromosomes (--no-auto-only off)
+    }
     if (merged_.autosomes_only.has_value())    flt.autosomes_only = *merged_.autosomes_only;
     if (merged_.drop_monomorphic.has_value())  flt.drop_monomorphic = *merged_.drop_monomorphic;
     if (merged_.transversions_only.has_value()) flt.transversions_only = *merged_.transversions_only;
@@ -473,6 +480,26 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     cfg.pops_  = merged_.pops;
     if (merged_.out_file) cfg.out_file_ = *merged_.out_file;
     if (merged_.qpdstat_prefix) cfg.qpdstat_prefix_ = *merged_.qpdstat_prefix;
+
+    // READv2 controls.
+    if (merged_.samples) cfg.samples_file_ = *merged_.samples;
+    if (merged_.window_snps.has_value()) {
+        if (*merged_.window_snps < 1) return fail("--window-snps must be >= 1");
+        cfg.window_snps_ = *merged_.window_snps;
+    }
+    if (merged_.norm.has_value()) {
+        const std::string n = to_lower(trim(*merged_.norm));
+        if (n != "median" && n != "mean") {
+            return fail("--norm '" + *merged_.norm + "' is unknown (use median | mean)");
+        }
+        cfg.norm_mode_ = n;
+    }
+    if (merged_.min_overlap.has_value()) {
+        if (*merged_.min_overlap < 0.0 || *merged_.min_overlap > 1.0) {
+            return fail("--min-overlap must lie in [0, 1]");
+        }
+        cfg.min_overlap_ = *merged_.min_overlap;
+    }
     if (merged_.prefix && !merged_.prefix->empty()) {
         const io::GenotypeTriple triple = io::resolve_genotype_triple(*merged_.prefix);
         if (!merged_.geno) cfg.geno_ = triple.geno;

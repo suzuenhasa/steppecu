@@ -25,6 +25,7 @@
 #include "device/device_partial.hpp"
 #include "device/device_f2_blocks.hpp"
 #include "device/device_decode_result.hpp"
+#include "device/readv2_bitmatrix.hpp"
 #include "device/stream_f2_blocks.hpp"
 
 namespace steppe {
@@ -714,6 +715,37 @@ public:
         throw std::runtime_error(
             "ComputeBackend::f3_sweep: not implemented by this backend "
             "(the GPU-only sweep requires a CUDA backend)");
+    }
+
+    // READv2 windowed-mismatch kinship — reference §11 (parallel to the f-stat sweep).
+    // Three seams over the resident [sample x SNP-window] bit-matrix: allocate+zero it,
+    // stream 2-bit genotype chunks into it, then run the all-pairs __popc reduction.
+    // The host never touches packed bits; it receives the four per-pair reductions.
+    [[nodiscard]] virtual steppe::device::Readv2Bitmatrix readv2_alloc_bitmatrix(
+        int n_samples, int window_snps, long m0) {
+        (void)n_samples; (void)window_snps; (void)m0;
+        throw std::runtime_error(
+            "ComputeBackend::readv2_alloc_bitmatrix: not implemented by this backend "
+            "(the READv2 packed bit-matrix requires a CUDA backend)");
+    }
+
+    virtual void readv2_pack_chunk(steppe::device::Readv2Bitmatrix& bits,
+                                   const std::uint8_t* chunk_packed,
+                                   std::size_t chunk_bytes_per_record, int n_samples,
+                                   long snp0, long snp_count) {
+        (void)bits; (void)chunk_packed; (void)chunk_bytes_per_record; (void)n_samples;
+        (void)snp0; (void)snp_count;
+        throw std::runtime_error(
+            "ComputeBackend::readv2_pack_chunk: not implemented by this backend "
+            "(the READv2 pack kernel requires a CUDA backend)");
+    }
+
+    [[nodiscard]] virtual steppe::device::Readv2Pairs readv2_mismatch(
+        const steppe::device::Readv2Bitmatrix& bits, long long n_pairs, bool tiled) {
+        (void)bits; (void)n_pairs; (void)tiled;
+        throw std::runtime_error(
+            "ComputeBackend::readv2_mismatch: not implemented by this backend "
+            "(the READv2 all-pairs __popc mismatch sweep requires a CUDA backend)");
     }
 
     [[nodiscard]] virtual RankSweep rank_sweep(const F4Blocks& x,

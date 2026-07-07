@@ -1,0 +1,23 @@
+sampleA	sampleB	expected_degree	raw_anno_tag
+I12437.AG.TW	I12438.AG.TW	second	2.5d
+I12437.AG.TW	I13895.AG.TW	second	2.5d
+I12437.AG.TW	I13898.AG.TW	second	2.5d
+I12437.AG.TW	I21388.AG.TW	second	2.0d
+I12437.AG.TW	I21393.AG.TW	first	1.0d father-son
+I12438.AG.TW	I21388.AG.TW	second	2.0d
+I12438.AG.TW	I21393.AG.TW	unrelated	3.0d
+I13895.AG.TW	I20821.AG.TW	first	1.0d son-father
+I13895.AG.TW	I21388.AG.TW	second	2.0d
+I13898.AG.TW	I21393.AG.TW	unrelated	3.0d
+I20821.AG.TW	I21388.AG.TW	unrelated	3.0d
+I21388.AG.TW	I21393.AG.TW	unrelated	3.0d
+KFJ013.AG	KFJ014.AG	first	1.0d siblings
+KFJ013.AG	KFJ017.AG	second	2.5d
+KFJ013.AG	KFJ018.AG	second	2.5d
+KFJ013.AG	KFJ022.AG	second	2.5d
+KFJ014.AG	KFJ017.AG	second	2.5d
+KFJ014.AG	KFJ018.AG	second	2.5d
+KFJ014.AG	KFJ022.AG	second	2.5d
+KFJ017.AG	KFJ018.AG	first	1.0d father-son
+KFJ017.AG	KFJ022.AG	first	1.0d siblings
+KFJ018.AG	KFJ022.AG	second	2.0d

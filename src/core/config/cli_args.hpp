@@ -35,6 +35,7 @@ enum class Command {
     QpGraphSearch,
     Dates,
     Scan,
+    Readv2,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -72,6 +73,12 @@ struct CliArgs {
     // qpdstat magnitude prefix and f4-ratio 5th column — reference §7
     std::optional<std::string> qpdstat_prefix;
     std::vector<std::string> pop5;
+
+    // READv2 windowed-mismatch kinship inputs
+    std::optional<std::string> samples;       // FILE of Genetic IDs (one per line)
+    std::optional<int>         window_snps;   // non-overlapping SNP-count window
+    std::optional<std::string> norm;          // background: median | mean
+    std::optional<double>      min_overlap;   // drop pairs below this comparable fraction
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

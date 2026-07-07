@@ -409,6 +409,20 @@ target_link_libraries(test_result_emit
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME result_emit_unit COMMAND test_result_emit LABELS "unit")
 
+# --- READv2 classifier + z unit test (host-only) -----------------------------
+# Pure C++ host TU (no CUDA, no GPU, no data): compiles src/core/readv2/
+# readv2_classify.cpp directly and pins degree_from_p0norm at its three normalized-P0
+# cut points plus readv2_z on canned per-window distributions (incl. the n_windows<2
+# and zero-background NaN guards). The device-free numeric heart the concord gate
+# measures. Self-checking executable; CTest gates on the exit code.
+add_executable(test_readv2_classify
+    unit/test_readv2_classify.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/readv2/readv2_classify.cpp)
+target_include_directories(test_readv2_classify PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_readv2_classify
+    PRIVATE steppe::api steppe::warnings)
+steppe_add_test(NAME readv2_classify_unit COMMAND test_readv2_classify LABELS "unit")
+
 # --- qpAdm parity test (BOTH backends) ---------------------------------------
 # Reads the committed 9-pop f2 fixture and runs the single-model qpAdm fit
 # (steppe::run_qpadm) on both backends: the CpuBackend reference (bit-exact diff
@@ -1242,6 +1256,35 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_readv2_concord steppe_app)
   steppe_add_test(NAME cli_readv2_concord
            COMMAND test_cli_readv2_concord "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
+  # --- `steppe readv2` real-data gate (vs the concord ruler) ----------------
+  # Plain C++ host TU (spawns the binary; needs a live CUDA device). Runs
+  # `steppe readv2 --prefix <fixture>/readv2_subset` on the real-AADR relative-pair
+  # subset, then `steppe readv2-concord --a <steppe> --b <oracle>` and asserts
+  # RESULT: PASS. The fixture dir is where make_subset_bed.py writes the autosome-only
+  # PLINK subset (readv2_subset.{bed,bim,fam}) alongside the committed keep_genetic_ids.txt
+  # + readv2_oracle.tsv (recipe default W=/workspace/readv2_oracle). Until that .bed
+  # exists on the box — or with no GPU — the test SKIPs cleanly (exit 0). NO SYNTHETIC
+  # DATA. A SECOND case additionally runs the FULL sex-chromosome-bearing 1240K prefix
+  # (STEPPE_READV2_FULL_PREFIX) to prove steppe's OWN --auto-only restriction on the raw
+  # user code path; it skips when that prefix's genotype matrix is absent.
+  # argv = steppe binary + the fixture dir (STEPPE_READV2_FIXTURE) + the full prefix.
+  #
+  # NOTE: STEPPE_READV2_FIXTURE / _FULL_PREFIX are CACHE PATHs — a build dir configured
+  # before these defaults were corrected keeps the STALE cached value. If ctest #75 SKIPs
+  # with a fixture-absent message pointing at the wrong dir, reconfigure with an explicit
+  # -DSTEPPE_READV2_FIXTURE=/workspace/readv2_oracle (the cache does not auto-update).
+  set(STEPPE_READV2_FIXTURE "/workspace/readv2_oracle"
+      CACHE PATH "READv2 fixture dir (readv2_subset.{bed,bim,fam} + keep_genetic_ids.txt + readv2_oracle.tsv)")
+  set(STEPPE_READV2_FULL_PREFIX "/workspace/data/aadr/1240k/v66.p1_1240K.aadr.patch.PUB"
+      CACHE PATH "Full sex-chromosome-bearing 1240K genotype prefix (proves in-tool --auto-only)")
+  add_executable(test_cli_readv2 cli/test_cli_readv2.cpp)
+  target_link_libraries(test_cli_readv2 PRIVATE steppe::warnings)
+  add_dependencies(test_cli_readv2 steppe_app)
+  steppe_add_test(NAME cli_readv2
+           COMMAND test_cli_readv2 "$<TARGET_FILE:steppe_app>" "${STEPPE_READV2_FIXTURE}"
+                   "${STEPPE_READV2_FULL_PREFIX}"
+           LABELS "cli;gpu")
 
   # --- `steppe extract-f2 -> qpadm` end-to-end gate -------------------------
   # Plain C++ host TU (no CUDA): runs the built `steppe extract-f2` on the raw v66

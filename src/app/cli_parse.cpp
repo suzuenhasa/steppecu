@@ -38,6 +38,7 @@
 #include "app/cmd_qpdstat.hpp"
 #include "app/cmd_qpfstats.hpp"
 #include "app/cmd_qpwave.hpp"
+#include "app/cmd_readv2.hpp"
 #include "app/cmd_rotate.hpp"
 #include "app/cmd_scan.hpp"
 #include "core/config/cli_args.hpp"
@@ -261,6 +262,7 @@ int run_cli(int argc, char** argv) {
     CliArgs f3sweep_args;
     CliArgs qpfstats_args;
     CliArgs dates_args;
+    CliArgs readv2_args;
 
     // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
     // to these plain locals, also owned at run_cli scope so they outlive the parse.
@@ -333,6 +335,32 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_dates_command, code);
+
+    register_cmd(app, "readv2",
+        "Pseudo-haploid windowed-mismatch kinship: --prefix genotypes -> per-pair degree + P0_norm",
+        readv2_args, Command::Readv2,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; pseudo-haploid hardcalls)");
+            s->add_option("--samples", a.samples,
+                          "OPTIONAL file of Genetic IDs (one per line) to restrict to; default = all individuals");
+            s->add_option("--window-snps", a.window_snps,
+                          "Non-overlapping window size in SNPs (READv2 default 1000; --window-cM deferred)");
+            s->add_option("--norm", a.norm,
+                          "All-pairs background normalizer: median (default) | mean");
+            s->add_option("--min-overlap", a.min_overlap,
+                          "Drop a pair with < this fraction of comparable sites (default 0.0)");
+            s->add_flag("--auto-only,!--no-auto-only", a.autosomes_only,
+                        "Restrict the SNP axis to autosomes chr 1-22 (READv2 convention; default on; "
+                        "--no-auto-only to include sex chromosomes)");
+            s->add_option("--shard-dir", a.shard_dir,
+                          "Stream per-pair rows to shard files under this dir (created if absent; vs --out)");
+            s->add_flag("--sure", a.sweep_sure,
+                        "Lift the C(N,2) enumeration cap (mirrors the sweep --sure)");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_readv2_command, code);
 
     register_cmd(app, "qpwave", "qpWave rank sweep (no target; left[0]=ref)", qpwave_args,
         Command::QpWave,

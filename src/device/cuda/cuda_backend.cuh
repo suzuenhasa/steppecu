@@ -258,6 +258,17 @@ public:
                                           const SweepConfig& cfg,
                                           const Precision& precision) override;
 
+    // READv2 windowed-mismatch kinship — reference §8
+    [[nodiscard]] Readv2Bitmatrix readv2_alloc_bitmatrix(int n_samples, int window_snps,
+                                                         long m0) override;
+
+    void readv2_pack_chunk(Readv2Bitmatrix& bits, const std::uint8_t* chunk_packed,
+                           std::size_t chunk_bytes_per_record, int n_samples, long snp0,
+                           long snp_count) override;
+
+    [[nodiscard]] Readv2Pairs readv2_mismatch(const Readv2Bitmatrix& bits, long long n_pairs,
+                                              bool tiled) override;
+
     // qpAdm fit: jackknife covariance — reference §11
     [[nodiscard]] JackknifeCov jackknife_cov(const F4Blocks& x,
                                              std::span<const int> block_sizes,

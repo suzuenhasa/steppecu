@@ -41,6 +41,9 @@ add_executable(steppe_app
     cmd_cache.cpp
     cmd_readv2_concord.cpp
     readv2_concord.cpp
+    cmd_readv2.cpp
+    readv2_emit.cpp
+    readv2_shard_writer.cpp
     result_emit.cpp)
 add_executable(steppe::app ALIAS steppe_app)
 set_target_properties(steppe_app PROPERTIES OUTPUT_NAME steppe)

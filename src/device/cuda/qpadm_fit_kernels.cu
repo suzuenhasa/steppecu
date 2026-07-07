@@ -15,6 +15,7 @@
 #include "core/qpadm/qpadm_bounds.hpp"
 #include "device/cuda/check.cuh"
 #include "device/cuda/qpadm_fit_kernels.cuh"
+#include "device/cuda/sweep_unrank.cuh"
 
 namespace steppe::device {
 
@@ -479,26 +480,9 @@ __global__ void assemble_f3_triples_gather_kernel(const double* __restrict__ f2,
     }
 }
 
-// All-combinations sweep: combinatorial-number-system unrank — reference §12
-__device__ __forceinline__ double sweep_choose(int n, int kk) {
-    if (kk < 0 || n < kk) return 0.0;
-    double num = 1.0;
-    for (int i = 0; i < kk; ++i) num *= static_cast<double>(n - i);
-    double den = 1.0;
-    for (int i = 1; i <= kk; ++i) den *= static_cast<double>(i);
-    return num / den;
-}
-
-__device__ __forceinline__ void sweep_unrank(long long r, int P, int k, int* c) {
-    for (int pos = k - 1; pos >= 0; --pos) {
-        const int kk = pos + 1;
-        int v = kk - 1;
-        while (sweep_choose(v + 1, kk) <= static_cast<double>(r)) ++v;
-        c[pos] = v;
-        r -= static_cast<long long>(sweep_choose(v, kk));
-    }
-}
-
+// All-combinations sweep: combinatorial-number-system unrank — reference §12.
+// sweep_choose / sweep_unrank now live in device/cuda/sweep_unrank.cuh (shared with
+// the READv2 all-pairs mismatch kernel); this TU includes it above.
 __device__ __forceinline__ int sweep_to_f2(int pos, const int* d_subset) {
     return d_subset ? d_subset[pos] : pos;
 }
