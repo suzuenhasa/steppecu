@@ -78,4 +78,71 @@ LsPosterior CudaBackend::ls_forward_backward(const std::uint8_t* recipient,
     return out;
 }
 
+LsCoancestry CudaBackend::ls_paint_coancestry(const std::uint8_t* recipients,
+                                              const std::uint8_t* donors, const double* pi,
+                                              const double* rho, const double* mu, const double* w,
+                                              int K, long M, int N, const Precision& precision) {
+    (void)precision;  // native FP64 by construction (§2c) — the sink is a reduction, not a GEMM
+    guard_device();
+    STEPPE_NVTX_RANGE("ls_paint_coancestry");
+    LsCoancestry out;
+    out.K = K;
+    out.N = N;
+    if (K <= 0 || M <= 0 || N <= 0) {
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // Checkpoint stride C = ceil(sqrt(M)); nck = ceil(M/C) blocks (matches the gate path).
+    int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
+    if (C < 1) C = 1;
+    const int nck = static_cast<int>((M + C - 1) / C);
+
+    const std::size_t Ks = static_cast<std::size_t>(K);
+    const std::size_t Ms = static_cast<std::size_t>(M);
+    const std::size_t Ns = static_cast<std::size_t>(N);
+    const std::size_t KM = Ks * Ms;
+    const std::size_t NK = Ns * Ks;
+    const std::size_t nckK = static_cast<std::size_t>(nck) * Ks;
+
+    // Batched over N recipients: one CUDA block per recipient, donors shared. Only the
+    // small N*K accumulators return to host; the K*M posterior is never allocated.
+    DeviceBuffer<std::uint8_t> dRecip(Ns * Ms);
+    DeviceBuffer<std::uint8_t> dDonors(KM);
+    DeviceBuffer<double> dPi(NK);
+    DeviceBuffer<double> dRho(Ms);
+    DeviceBuffer<double> dMu(Ms);
+    DeviceBuffer<double> dW(Ms);
+    DeviceBuffer<double> dAccCnt(NK);
+    DeviceBuffer<double> dAccLen(NK);
+    DeviceBuffer<double> dCheck(Ns * nckK);
+    DeviceBuffer<double> dCheckPrev(Ns * nckK);
+    DeviceBuffer<double> dAlphaA(NK), dAlphaB(NK);
+    DeviceBuffer<double> dAlphaBlk(Ns * static_cast<std::size_t>(C) * Ks);
+    DeviceBuffer<double> dBetaA(NK), dBetaB(NK);
+
+    h2d_async(dRecip, recipients, Ns * Ms, stream_.get());
+    h2d_async(dDonors, donors, KM, stream_.get());
+    h2d_async(dPi, pi, NK, stream_.get());
+    h2d_async(dRho, rho, Ms, stream_.get());
+    h2d_async(dMu, mu, Ms, stream_.get());
+    h2d_async(dW, w, Ms, stream_.get());
+
+    // Paint mode: gamma output null, accumulators + w + companion checkpoints live.
+    launch_ls_forward_backward(dRecip.data(), dDonors.data(), dPi.data(), dRho.data(), dMu.data(),
+                               K, M, N, C, nck, /*d_gamma=*/nullptr, dCheck.data(), dAlphaA.data(),
+                               dAlphaB.data(), dAlphaBlk.data(), dBetaA.data(), dBetaB.data(),
+                               stream_.get(), dW.data(), dAccCnt.data(), dAccLen.data(),
+                               dCheckPrev.data());
+
+    out.chunkcounts.assign(NK, 0.0);
+    out.chunklengths.assign(NK, 0.0);
+    d2h_async(out.chunkcounts.data(), dAccCnt, NK, stream_.get());
+    d2h_async(out.chunklengths.data(), dAccLen, NK, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    out.status = Status::Ok;
+    return out;
+}
+
 }  // namespace steppe::device

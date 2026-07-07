@@ -158,6 +158,15 @@ public:
         const double* rho, const double* mu, int K, long M,
         const Precision& precision) override;
 
+    // Li-Stephens ChromoPainter coancestry FACE (the `steppe paint` Phase-2 output).
+    // Batched over N recipients (one block each), the paint sink folds gamma into the
+    // per-donor chunkcounts/chunklengths on-device; only the N*K accumulators cross
+    // PCIe (the K*M posterior is never materialized). Native FP64.
+    [[nodiscard]] LsCoancestry ls_paint_coancestry(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const double* w, int K, long M, int N,
+        const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

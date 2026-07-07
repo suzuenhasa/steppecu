@@ -53,6 +53,33 @@ std::vector<double> build_recomb_probs(const std::vector<int>& chrom,
     return rho;
 }
 
+std::vector<double> build_genetic_weights(const std::vector<int>& chrom,
+                                          const std::vector<double>& genpos_morgans) {
+    const std::size_t M = genpos_morgans.size();
+    std::vector<double> w(M, 0.0);
+    const bool have_chrom = chrom.size() == M;
+    for (std::size_t l = 0; l < M; ++l) {
+        double gap_left = 0.0;
+        double gap_right = 0.0;
+        if (l > 0) {
+            const bool same = !have_chrom || (chrom[l] == chrom[l - 1]);
+            if (same) {
+                const double d = genpos_morgans[l] - genpos_morgans[l - 1];
+                gap_left = d > 0.0 ? d : 0.0;
+            }
+        }
+        if (l + 1 < M) {
+            const bool same = !have_chrom || (chrom[l] == chrom[l + 1]);
+            if (same) {
+                const double d = genpos_morgans[l + 1] - genpos_morgans[l];
+                gap_right = d > 0.0 ? d : 0.0;
+            }
+        }
+        w[l] = 0.5 * (gap_left + gap_right);
+    }
+    return w;
+}
+
 std::vector<double> build_uniform_pi(int K, int self) {
     if (K <= 0) return {};
     std::vector<double> pi(static_cast<std::size_t>(K), 0.0);

@@ -209,6 +209,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.self_copy, args.self_copy);
     take_i(merged_.recip_batch, args.recip_batch);
     take_b(merged_.bp_fallback, args.bp_fallback);
+    take_b(merged_.paint_full, args.paint_full);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -548,6 +549,7 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.self_copy) cfg.ls_self_copy_ = *merged_.self_copy;
     if (merged_.bp_fallback) cfg.ls_bp_fallback_ = *merged_.bp_fallback;
+    if (merged_.paint_full) cfg.paint_full_ = *merged_.paint_full;
     if (merged_.recip_batch.has_value()) {
         if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
         cfg.ls_recip_batch_ = *merged_.recip_batch;

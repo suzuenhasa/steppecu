@@ -656,6 +656,145 @@ public:
         return out;
     }
 
+    // ls_paint_coancestry: the Li-Stephens ChromoPainter coancestry REFERENCE oracle
+    // (the `steppe paint` FACE, Phase 2) — the diff oracle the fused GPU coancestry sink
+    // is gated against. For each recipient it runs the SAME per-column-rescaled native-FP64
+    // forward-backward as ls_forward_backward, keeping the normalized forward a_l resident,
+    // and folds gamma into the two per-donor accumulators by the §1 formulas:
+    //   chunklength_k = sum_l gamma_l(k)*w_l
+    //   chunkcount_k  = gamma_0(k) + sum_{l>=1} gamma_l(k)*rho_l*pi_k / ((1-rho_l)*a_{l-1}(k)+rho_l*pi_k)
+    // The switch denominator is guarded (contribute 0 when it is <= 0) so the self donor
+    // under leave-one-out (pi_k=0 => a=0, gamma=0 => 0/0) and rho_l=0 zero-mass donors do
+    // not produce NaN — the identical guard the gamma path uses (cpu:649). The coancestry
+    // sums accumulate in NATIVE double (not long double) so they match the GPU sink by
+    // construction (§2c reduction carve-out; the FB internals still reduce in long double,
+    // exactly as ls_forward_backward). Reference: li-stephens-phase2-paint-face-spec §1,§2.
+    [[nodiscard]] LsCoancestry ls_paint_coancestry(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const double* w, int K, long M, int N,
+        const Precision& precision) override {
+        (void)precision;  // native FP64 by construction (§2c)
+        LsCoancestry out;
+        out.K = K;
+        out.N = N;
+        if (K <= 0 || M <= 0 || N <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t Ks = static_cast<std::size_t>(K);
+        const std::size_t Ms = static_cast<std::size_t>(M);
+        out.chunkcounts.assign(static_cast<std::size_t>(N) * Ks, 0.0);
+        out.chunklengths.assign(static_cast<std::size_t>(N) * Ks, 0.0);
+
+        std::vector<double> alpha(Ks * Ms, 0.0);  // normalized forward, K x M donor-major
+        std::vector<double> beta(Ks * Ms, 0.0);   // normalized backward
+
+        for (long r = 0; r < N; ++r) {
+            const std::uint8_t* recipient = recipients + static_cast<std::size_t>(r) * Ms;
+            const double* pir = pi + static_cast<std::size_t>(r) * Ks;
+
+            const auto emission = [&](long l, int k) -> double {
+                const std::uint8_t rr = recipient[static_cast<std::size_t>(l)];
+                const std::uint8_t d =
+                    donors[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+                if (rr > 1u || d > 1u) return 1.0;
+                const double m = mu[static_cast<std::size_t>(l)];
+                return (rr == d) ? (1.0 - m) : m;
+            };
+
+            // --- Forward sweep (identical to ls_forward_backward) ---------------
+            {
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double a = pir[static_cast<std::size_t>(k)] * emission(0, k);
+                    alpha[static_cast<std::size_t>(k) * Ms] = a;
+                    s += static_cast<long double>(a);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k) alpha[static_cast<std::size_t>(k) * Ms] *= inv;
+            }
+            for (long l = 1; l < M; ++l) {
+                long double prev_sum = 0.0L;
+                for (int k = 0; k < K; ++k)
+                    prev_sum += static_cast<long double>(
+                        alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)]);
+                const double rl = rho[static_cast<std::size_t>(l)];
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double aprev =
+                        alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)];
+                    const double trans = (1.0 - rl) * aprev +
+                                         rl * pir[static_cast<std::size_t>(k)] *
+                                             static_cast<double>(prev_sum);
+                    const double a = emission(l, k) * trans;
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = a;
+                    s += static_cast<long double>(a);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k)
+                    alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+            }
+
+            // --- Backward sweep -------------------------------------------------
+            for (int k = 0; k < K; ++k)
+                beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(M - 1)] = 1.0;
+            for (long l = M - 2; l >= 0; --l) {
+                const double rl = rho[static_cast<std::size_t>(l + 1)];
+                long double T = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double b =
+                        beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                    T += static_cast<long double>(pir[static_cast<std::size_t>(k)]) *
+                         static_cast<long double>(emission(l + 1, k)) * static_cast<long double>(b);
+                }
+                long double s = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const double bnext =
+                        beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l + 1)];
+                    const double b = (1.0 - rl) * emission(l + 1, k) * bnext +
+                                     rl * static_cast<double>(T);
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] = b;
+                    s += static_cast<long double>(b);
+                }
+                const double inv = (s > 0.0L) ? static_cast<double>(1.0L / s) : 0.0;
+                for (int k = 0; k < K; ++k)
+                    beta[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] *= inv;
+            }
+
+            // --- Fold gamma into the two coancestry accumulators (native FP64) --
+            double* cnt = out.chunkcounts.data() + static_cast<std::size_t>(r) * Ks;
+            double* len = out.chunklengths.data() + static_cast<std::size_t>(r) * Ks;
+            for (long l = 0; l < M; ++l) {
+                long double denom = 0.0L;
+                for (int k = 0; k < K; ++k) {
+                    const std::size_t o =
+                        static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                    denom += static_cast<long double>(alpha[o]) * static_cast<long double>(beta[o]);
+                }
+                const double ginv = (denom > 0.0L) ? static_cast<double>(1.0L / denom) : 0.0;
+                const double rl = rho[static_cast<std::size_t>(l)];
+                const double wl = w[static_cast<std::size_t>(l)];
+                for (int k = 0; k < K; ++k) {
+                    const std::size_t o =
+                        static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l);
+                    const double g = alpha[o] * beta[o] * ginv;  // gamma_l(k)
+                    len[static_cast<std::size_t>(k)] += g * wl;
+                    double sw;
+                    if (l == 0) {
+                        sw = g;  // the initial chunk
+                    } else {
+                        const double aprev =
+                            alpha[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l - 1)];
+                        const double pk = pir[static_cast<std::size_t>(k)];
+                        const double den = (1.0 - rl) * aprev + rl * pk;
+                        sw = (den > 0.0) ? g * rl * pk / den : 0.0;  // guard: pi_k=0/rho=0 -> 0
+                    }
+                    cnt[static_cast<std::size_t>(k)] += sw;
+                }
+            }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
     // qpfstats_smooth: joint-f2 smoothing solve — reference §12
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

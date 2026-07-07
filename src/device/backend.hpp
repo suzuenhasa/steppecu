@@ -307,6 +307,21 @@ struct LsPosterior {
     Status status = Status::Ok;
 };
 
+// Li-Stephens ChromoPainter coancestry (the `steppe paint` FACE, Phase 2). For each
+// recipient, the two per-donor coancestry summaries folded on-device from the copying
+// posterior gamma WITHOUT ever materializing the K*M posterior to host:
+//   chunklengths[r*K+k] = sum_l gamma_l(k)*w_l   (Morgans; expected copied length)
+//   chunkcounts [r*K+k] = gamma_0(k) + sum_{l>=1} switch_l(k)   (expected #chunks)
+// Both are recipient-major (N rows of K). Native FP64 (scope §2c reduction carve-out).
+// Reference: docs/planning/li-stephens-phase2-paint-face-spec.md §1, §2.
+struct LsCoancestry {
+    std::vector<double> chunkcounts;   // N*K, recipient-major [r*K + k]
+    std::vector<double> chunklengths;  // N*K, recipient-major [r*K + k], Morgans
+    int K = 0;
+    long N = 0;
+    Status status = Status::Ok;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -634,6 +649,28 @@ public:
         throw std::runtime_error(
             "ComputeBackend::ls_forward_backward: not implemented by this backend "
             "(the batched GPU forward-backward is Phase 1; the CpuBackend provides the "
+            "reference oracle)");
+    }
+
+    // ls_paint_coancestry: the Li-Stephens ChromoPainter coancestry FACE (the `steppe
+    // paint` Phase-2 output) over N recipient haplotypes against a K-donor panel. Runs
+    // the forward-backward per recipient and folds the copying posterior gamma into the
+    // two per-donor coancestry accumulators ON-DEVICE (the K*M posterior is never
+    // materialized in this path — the fused steady-state sink). `recipients` is
+    // recipient-major (N rows of M), `donors` donor-major (K rows of M); `pi` is the
+    // per-recipient copying prior (N*K, self donor zeroed for leave-one-out), `rho`/`mu`
+    // as in ls_forward_backward, `w` the per-SNP genetic-length weight (Morgans,
+    // build_genetic_weights). Native FP64 (scope §2c). Only the CpuBackend reference
+    // oracle and the CUDA override implement it. Reference: li-stephens-phase2 §2.
+    [[nodiscard]] virtual LsCoancestry ls_paint_coancestry(
+        const std::uint8_t* recipients, const std::uint8_t* donors, const double* pi,
+        const double* rho, const double* mu, const double* w, int K, long M, int N,
+        const Precision& precision) {
+        (void)recipients; (void)donors; (void)pi; (void)rho; (void)mu; (void)w;
+        (void)K; (void)M; (void)N; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::ls_paint_coancestry: not implemented by this backend "
+            "(the batched GPU coancestry sink is Phase 2; the CpuBackend provides the "
             "reference oracle)");
     }
 

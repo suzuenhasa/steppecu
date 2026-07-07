@@ -33,12 +33,23 @@ namespace steppe::device {
 //   d_alpha_blk  n_recip*C*K f64  recomputed backward tile (C columns)
 //   d_betaA/B    n_recip*K   f64  backward ping-pong columns
 // C is the checkpoint stride (= ceil(sqrt(M))); nck = ceil(M/C) blocks.
+//
+// The final four (defaulted-null) buffers select the PAINT coancestry sink (Phase 2):
+//   d_w             M             f64  per-SNP genetic-length weight (chunklengths)
+//   d_acc_cnt       n_recip*K     f64  OUTPUT, expected #chunks per donor (recipient-major)
+//   d_acc_len       n_recip*K     f64  OUTPUT, expected copied length per donor (Morgans)
+//   d_checkpts_prev n_recip*nck*K f64  companion checkpoints (alpha at column bi*C-1)
+// When they are null the kernel runs the GATE path and writes d_gamma (byte-identical to
+// Phase 1); when d_acc_cnt is non-null it runs the paint sink and d_gamma is ignored
+// (pass nullptr). Exactly one of {d_gamma, d_acc_cnt} is the live output.
 void launch_ls_forward_backward(const std::uint8_t* d_recipient, const std::uint8_t* d_donors,
                                 const double* d_pi, const double* d_rho, const double* d_mu,
                                 int K, long M, int n_recip, int C, int nck, double* d_gamma,
                                 double* d_checkpts, double* d_alphaA, double* d_alphaB,
                                 double* d_alpha_blk, double* d_betaA, double* d_betaB,
-                                cudaStream_t stream);
+                                cudaStream_t stream, const double* d_w = nullptr,
+                                double* d_acc_cnt = nullptr, double* d_acc_len = nullptr,
+                                double* d_checkpts_prev = nullptr);
 
 }  // namespace steppe::device
 

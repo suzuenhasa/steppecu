@@ -75,6 +75,8 @@ public:
     [[nodiscard]] bool ls_self_copy()            const noexcept { return ls_self_copy_; }
     [[nodiscard]] int  ls_recip_batch()          const noexcept { return ls_recip_batch_; }
     [[nodiscard]] bool ls_bp_fallback()          const noexcept { return ls_bp_fallback_; }
+    // When true, emit the full per-DONOR coancestry matrix; default is per-label.
+    [[nodiscard]] bool paint_full()              const noexcept { return paint_full_; }
 
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
@@ -147,6 +149,7 @@ private:
     bool ls_self_copy_ = false;
     int  ls_recip_batch_ = kLsDefaultRecipBatch;
     bool ls_bp_fallback_ = false;
+    bool paint_full_ = false;
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

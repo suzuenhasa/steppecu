@@ -123,6 +123,18 @@ __device__ inline void forward_step(long l, int K, long M,
 }
 
 // The forward-backward kernel — one block per recipient (blockIdx.x = rid).
+//
+// Two output modes, gated by null pointers so the Phase-1 gate path stays byte-
+// identical (§2 of the paint-face spec):
+//   - GATE mode  (gamma_all != nullptr, acc_* == nullptr): stores the K*M copying
+//     posterior exactly as Phase 1 (the parity gate).
+//   - PAINT mode (gamma_all == nullptr, acc_* != nullptr): allocates NO K*M posterior;
+//     folds each gamma_l(k) online into the two per-recipient N*K coancestry
+//     accumulators (chunkcounts, chunklengths). Single writer per donor k within a
+//     block (k = tid, tid+blockDim, ...), so acc_*[rid*K+k] needs no atomics. The
+//     chunkcount switch term needs a_{l-1}: within a recomputed tile that is
+//     alpha_blk[j-1]; at a block's first column (j==0, b0>0) it is the companion
+//     checkpoint checkpts_prev[bi] (the normalized alpha at column b0-1).
 __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
                              const std::uint8_t* __restrict__ donors,
                              const double* __restrict__ pi_all, const double* __restrict__ rho,
@@ -130,17 +142,26 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
                              double* __restrict__ gamma_all, double* __restrict__ checkpts_all,
                              double* __restrict__ alphaA_all, double* __restrict__ alphaB_all,
                              double* __restrict__ alpha_blk_all, double* __restrict__ betaA_all,
-                             double* __restrict__ betaB_all) {
+                             double* __restrict__ betaB_all,
+                             const double* __restrict__ w, double* __restrict__ acc_cnt_all,
+                             double* __restrict__ acc_len_all,
+                             double* __restrict__ checkpts_prev_all) {
     const int rid = blockIdx.x;
     const int tid = threadIdx.x;
     const std::size_t Ks = static_cast<std::size_t>(K);
     const std::size_t Ms = static_cast<std::size_t>(M);
+    const bool paint = (acc_cnt_all != nullptr);  // paint sink vs gate posterior
 
     // Per-recipient views into the backend-owned buffers.
     const std::uint8_t* recipient = recipient_all + static_cast<std::size_t>(rid) * Ms;
     const double* pi = pi_all + static_cast<std::size_t>(rid) * Ks;
-    double* gamma = gamma_all + static_cast<std::size_t>(rid) * Ks * Ms;
+    double* gamma = paint ? nullptr : gamma_all + static_cast<std::size_t>(rid) * Ks * Ms;
     double* checkpts = checkpts_all + static_cast<std::size_t>(rid) * static_cast<std::size_t>(nck) * Ks;
+    double* checkpts_prev =
+        paint ? checkpts_prev_all + static_cast<std::size_t>(rid) * static_cast<std::size_t>(nck) * Ks
+              : nullptr;
+    double* acc_cnt = paint ? acc_cnt_all + static_cast<std::size_t>(rid) * Ks : nullptr;
+    double* acc_len = paint ? acc_len_all + static_cast<std::size_t>(rid) * Ks : nullptr;
     double* alphaA = alphaA_all + static_cast<std::size_t>(rid) * Ks;
     double* alphaB = alphaB_all + static_cast<std::size_t>(rid) * Ks;
     double* alpha_blk = alpha_blk_all + static_cast<std::size_t>(rid) * static_cast<std::size_t>(C) * Ks;
@@ -148,6 +169,12 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
     double* betaB = betaB_all + static_cast<std::size_t>(rid) * Ks;
 
     __shared__ double sh[kBlock];
+
+    // Paint mode: zero the per-recipient accumulators (each thread owns its k's).
+    if (paint) {
+        for (int k = tid; k < K; k += blockDim.x) { acc_cnt[k] = 0.0; acc_len[k] = 0.0; }
+        __syncthreads();
+    }
 
     // ---- Forward sweep: store ONLY the normalized checkpoint columns ---------
     double* cur = alphaA;
@@ -159,11 +186,17 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
         forward_step(l, K, M, recipient, donors, pi, mu, rho[l], cur, nxt, sh);
         double* tmp = cur;
         cur = nxt;
-        nxt = tmp;
+        nxt = tmp;  // now cur = alpha_l, nxt = alpha_{l-1}
         if (l % C == 0) {
             const int bi = static_cast<int>(l / C);
             double* ck = checkpts + static_cast<std::size_t>(bi) * Ks;
-            for (int k = tid; k < K; k += blockDim.x) ck[k] = cur[k];
+            for (int k = tid; k < K; k += blockDim.x) ck[k] = cur[k];  // alpha_{bi*C}
+            if (paint) {
+                // Companion checkpoint: the column just before this one (bi*C - 1),
+                // needed by the chunkcount switch term at the block's first column.
+                double* ckp = checkpts_prev + static_cast<std::size_t>(bi) * Ks;
+                for (int k = tid; k < K; k += blockDim.x) ckp[k] = nxt[k];  // alpha_{bi*C-1}
+            }
             __syncthreads();
         }
     }
@@ -205,9 +238,35 @@ __global__ void ls_fb_kernel(const std::uint8_t* __restrict__ recipient_all,
             for (int k = tid; k < K; k += blockDim.x) locd += alpha_l[k] * beta_cur[k];
             const double denom = block_reduce_sum(locd, sh);
             const double ginv = (denom > 0.0) ? (1.0 / denom) : 0.0;  // guard (cpu:649)
-            for (int k = tid; k < K; k += blockDim.x)
-                gamma[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] =
-                    alpha_l[k] * beta_cur[k] * ginv;
+            if (!paint) {
+                // GATE mode: store the full K*M posterior (byte-identical to Phase 1).
+                for (int k = tid; k < K; k += blockDim.x)
+                    gamma[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] =
+                        alpha_l[k] * beta_cur[k] * ginv;
+            } else {
+                // PAINT mode: fold gamma_l(k) into the two coancestry accumulators. The
+                // previous-column normalized forward a_{l-1}(k) for the switch term is the
+                // recomputed tile column j-1, or (at the block head, b0>0) the companion
+                // checkpoint; l==0 is the initial chunk (no switch).
+                const double* a_prev = (l == 0) ? nullptr
+                                       : (j >= 1 ? alpha_blk + static_cast<std::size_t>(j - 1) * Ks
+                                                 : checkpts_prev + static_cast<std::size_t>(bi) * Ks);
+                const double rl = rho[static_cast<std::size_t>(l)];
+                const double wl = w[static_cast<std::size_t>(l)];
+                for (int k = tid; k < K; k += blockDim.x) {
+                    const double g = alpha_l[k] * beta_cur[k] * ginv;  // gamma_l(k)
+                    acc_len[k] += g * wl;
+                    double sw;
+                    if (l == 0) {
+                        sw = g;  // the initial chunk
+                    } else {
+                        const double pk = pi[k];
+                        const double den = (1.0 - rl) * a_prev[k] + rl * pk;
+                        sw = (den > 0.0) ? g * rl * pk / den : 0.0;  // guard: pi_k=0/rho=0 -> 0
+                    }
+                    acc_cnt[k] += sw;
+                }
+            }
             __syncthreads();  // finish reading beta_cur before the beta step overwrites it
 
             if (l == 0) break;  // beta_{-1} does not exist (cpu stops at l>=0 producing beta_l)
@@ -245,11 +304,13 @@ void launch_ls_forward_backward(const std::uint8_t* d_recipient, const std::uint
                                 int K, long M, int n_recip, int C, int nck, double* d_gamma,
                                 double* d_checkpts, double* d_alphaA, double* d_alphaB,
                                 double* d_alpha_blk, double* d_betaA, double* d_betaB,
-                                cudaStream_t stream) {
+                                cudaStream_t stream, const double* d_w, double* d_acc_cnt,
+                                double* d_acc_len, double* d_checkpts_prev) {
     if (K <= 0 || M <= 0 || n_recip <= 0) return;
     ls_fb_kernel<<<n_recip, kBlock, 0, stream>>>(d_recipient, d_donors, d_pi, d_rho, d_mu, K, M,
                                                  C, nck, d_gamma, d_checkpts, d_alphaA, d_alphaB,
-                                                 d_alpha_blk, d_betaA, d_betaB);
+                                                 d_alpha_blk, d_betaA, d_betaB, d_w, d_acc_cnt,
+                                                 d_acc_len, d_checkpts_prev);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

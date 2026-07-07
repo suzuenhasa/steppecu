@@ -90,6 +90,7 @@ struct CliArgs {
     std::optional<bool>        self_copy;     // allow a haplotype to copy itself (off = leave-one-out)
     std::optional<int>         recip_batch;   // #recipients resident per wave (the batch/VRAM knob)
     std::optional<bool>        bp_fallback;   // opt into the bp cM-fallback when genpos is absent
+    std::optional<bool>        paint_full;    // emit the per-DONOR coancestry matrix (default per-label)
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

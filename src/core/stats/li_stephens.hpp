@@ -53,6 +53,18 @@ inline constexpr std::uint8_t kLsMissingAllele = 0xFFu;
                                                      const std::vector<double>& genpos_morgans,
                                                      double Ne, int K);
 
+// build_genetic_weights — the per-SNP genetic-length weight w_l (Morgans) used to
+// integrate the copying marginal into an expected copied length (ChromoPainter
+// "chunklengths"). Trapezoidal / midpoint rule: w_l = 1/2*(gap_left + gap_right),
+// where gap_left = g_l - g_{l-1} and gap_right = g_{l+1} - g_l, each attributed only
+// within a chromosome (a chromosome change resets the one-sided gap to 0, the same
+// unlinked convention build_recomb_probs uses) and clamped to >= 0. `chrom` and
+// `genpos_morgans` are the .snp columns in SNP order; genpos must be length M (chrom
+// may be empty -> a single-chromosome panel). Pure host, unit-testable.
+// Reference: docs/planning/li-stephens-phase2-paint-face-spec.md §1c.
+[[nodiscard]] std::vector<double> build_genetic_weights(const std::vector<int>& chrom,
+                                                       const std::vector<double>& genpos_morgans);
+
 // build_uniform_pi — the copying prior over K donors. Uniform 1/K, unless a
 // leave-one-out self index is given (0 <= self < K): that donor's prior is 0 and the
 // remaining K-1 share 1/(K-1) (panel-vs-self painting, §3 decision 4). `self < 0`

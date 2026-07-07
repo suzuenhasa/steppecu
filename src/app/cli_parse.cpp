@@ -398,6 +398,9 @@ int run_cli(int argc, char** argv) {
             s->add_flag("--bp-fallback", a.bp_fallback,
                         "Opt into approximating recombination from a base-pair window when the "
                         ".snp has no genetic map (default off = a missing cM map is a hard error)");
+            s->add_flag("--full", a.paint_full,
+                        "Emit the full per-DONOR coancestry matrix instead of the per-label "
+                        "aggregate (default off = per ancestry/pop label)");
             s->add_flag("--sure", a.sweep_sure,
                         "Lift the O(N*K*M) work cost guard (proceed with a long job)");
             add_output_flags(s, a);
