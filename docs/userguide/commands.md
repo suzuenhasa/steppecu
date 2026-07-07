@@ -30,6 +30,11 @@ steppe qpadm --f2-dir ~/.local/share/steppe/example \
   --jackknife 2 --format json
 ```
 
+> **Measured** (one RTX 5090, `emu40`): a 3-source / 8-outgroup fit against a real 77-population
+> AADR-1240K f2 cache runs in **~0.72 s** (peak host RAM ~0.6 GB, GPU ~12 GB). A single `f3` /
+> `f4` / `qpdstat` triple over the same cache is **~0.47 s** (GPU ~0.5 GB). Timings are the median
+> of 3 timed reps after one warmup, measured with `/usr/bin/time`.
+
 ## qpWave — rank test (no target)
 
 Tests how many ancestry streams relate the `--left` set to the outgroups; `left[0]` is the
@@ -164,6 +169,12 @@ steppe extract-f2 --prefix v66.p1_1240K.aadr.patch.PUB --auto-top-k 700 --maxmis
 # then run any f2-based command above against ./f2_dir instead of the example:
 steppe qpadm --f2-dir f2_dir --target ... --left ... --right ...
 
+# --- measured: building an f2 cache from a real AADR 1240K panel ---
+# 77-population worldwide set, 1,117,641 of 1,233,013 SNPs kept, 713 jackknife blocks:
+#   ~6.1 s  (peak host RAM ~5.5 GB, GPU ~13.7 GB) on one RTX 5090, emu40.
+# It only reads the selected populations' individuals (TGENO is individual-major), so
+# a small pop set off a huge panel stays cheap.
+
 # qpfstats — build a SMOOTHED f2 cache (feed it to qpadm/f4/qpgraph like any f2 dir)
 steppe qpfstats --prefix v66.p1_HO.aadr.patch.PUB \
   --pops Czechia_EBA_CordedWare,Russia_Samara_EBA_Yamnaya,Turkey_N,Mbuti,Han,Papuan,Karitiana \
@@ -216,6 +227,11 @@ per-site `{call, dosage, source, drop_reason}` match:
 steppe ingest-concord --a sample_report.tsv --b oracle_dosage.tsv
 ```
 
+> **Measured** (one RTX 5090, host-only step). Genotyping a **30x WGS gVCF** at the AADR
+> 1240K sites (GRCh38 FASTA + rsID→pos38 lift map, ~1.1M sites emitted) takes **~16.8 s** to a
+> per-site report, or **~19.0 s** with `--merge-into` (which also writes the full ~7.1 GB merged
+> TGENO panel). Peak host RAM ~0.65 GB; no GPU used. Single timed run, `/usr/bin/time`.
+
 ---
 
 ## Relatedness — READv2 kinship (needs your own data)
@@ -237,6 +253,11 @@ steppe readv2 --prefix v66.p1_1240K.aadr.patch.PUB \
 # huge cohort: stream per-pair rows to shard files, lift the C(N,2) safety cap
 steppe readv2 --prefix v66.p1_1240K.aadr.patch.PUB --shard-dir ./readv2_out --sure
 ```
+
+> **Measured** (one RTX 5090, `--samples` subset of a real AADR 1240K panel). 38 samples
+> (703 pairs) → **~1.0 s**; 1,000 samples (499,500 pairs) → **~2.1 s**. Peak host RAM ~0.5–0.7 GB,
+> GPU ~0.7–1.0 GB. `--samples` reads only the kept individuals' columns, so the panel size barely
+> matters — the all-pairs GPU sweep dominates. Single timed run, `/usr/bin/time`.
 
 `readv2-concord` (GPU-free) diffs one READv2 table against a reference and asserts the degree
 confusion matrix + P0 concordance — the "READv2 ruler" for validating a run:
@@ -289,6 +310,12 @@ haplotype copy itself (default off = leave-one-out in the panel-vs-self case). `
 (default 256) is the VRAM knob — recipient haplotypes resident per GPU wave; the full K×M posterior
 never leaves the device. `--sure` lifts the O(N·K·M) cost guard for a long job.
 
+> **Measured** (one RTX 5090, real phased 1000G haplotype panels). A coancestry `paint` run
+> (recipients × a labelled donor panel of a few thousand SNPs) and a per-SNP `--face localanc`
+> run both land around **~0.45 s** (peak host RAM ~0.44 GB, GPU ~0.5–0.7 GB). Median of 3 timed
+> reps after one warmup, `/usr/bin/time`. Cost scales with recipients × donors × SNPs, so a
+> genome-wide painting of a large panel is far larger than these smoke-sized panels.
+
 ---
 
 ## Interop — move an f2 cache to/from ADMIXTOOLS 2 (`.rds`)
@@ -317,6 +344,11 @@ steppe cache ls   ./caches                   # tabulate every cache under a root
 steppe cache show ./caches/aadr_1240K_f2     # header facts + integrity mark + meta.json
 steppe cache verify ./caches/aadr_1240K_f2   # re-hash the payload against its content-address
 ```
+
+> **Measured** (host-only, no GPU). `cache ls` over a directory of caches ~**0.10 s**, `cache show`
+> ~**0.09 s**, and `cache verify` (re-hashing a 64.5 MB f2 payload) ~**0.15 s**; peak host RAM
+> ~0.26 GB. These are header/payload reads, so they stay sub-second regardless of population count.
+> Median of 3 timed reps after one warmup, `/usr/bin/time`.
 
 `steppe-cache` (installed alongside the CLI, GPU-free, stdlib-only) does the same plus pop
 listing, panel discovery, and AADR fetch:
