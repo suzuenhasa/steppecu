@@ -39,6 +39,9 @@ add_executable(steppe_app
     cmd_scan.cpp
     cmd_extract_f2.cpp
     cmd_cache.cpp
+    cmd_ingest.cpp
+    cmd_ingest_concord.cpp
+    ingest_concord.cpp
     cmd_readv2_concord.cpp
     readv2_concord.cpp
     cmd_readv2.cpp

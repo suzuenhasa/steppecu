@@ -27,6 +27,8 @@
 
 #include "app/cmd_cache.hpp"
 #include "app/cmd_extract_f2.hpp"
+#include "app/cmd_ingest.hpp"
+#include "app/cmd_ingest_concord.hpp"
 #include "app/cmd_readv2_concord.hpp"
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
@@ -273,6 +275,11 @@ int run_cli(int argc, char** argv) {
 
     // The host-only READv2 concordance validator args, also owned at run_cli scope.
     Readv2ConcordArgs concord_args;
+
+    // The native VCF-ingest args (self-contained; reaches the GPU only through the
+    // transpose seam for --emit-tile) and the host-only ingest concordance args.
+    IngestArgs ingest_args;
+    IngestConcordArgs ingest_concord_args;
 
     int code = cfg::kExitOk;
 
@@ -601,6 +608,48 @@ int run_cli(int argc, char** argv) {
     rc->add_option("--format", concord_args.format, "report format: text | json (default text)");
     rc->add_option("--out", concord_args.out_path, "write report here (default stdout)");
     rc->callback([&]() { code = run_readv2_concord(concord_args); });
+
+    // The native gVCF-block-aware VCF reader (the sixth reader arm). Self-contained
+    // (no RunConfig): the report path is pure host; --emit-tile builds a device for
+    // the shared canonical transpose only.
+    CLI::App* ing = app.add_subcommand(
+        "ingest",
+        "Native gVCF-block-aware VCF reader: --vcf .vcf.gz + --targets GRCh38 table -> "
+        "per-site genotype report (and, with --emit-tile, the canonical 2-bit tile)");
+    ing->add_option("--vcf", ingest_args.vcf, "Input VCF (.vcf.gz BGZF/gzip or plain .vcf)")->required();
+    ing->add_option("--targets", ingest_args.targets,
+                    "GRCh38 target-site table: rsID chrom [pos37] pos38 A1 A2 ref38")->required();
+    ing->add_option("--sample", ingest_args.sample,
+                    "Sample id to genotype (default: the sole sample in the VCF)");
+    ing->add_option("--report", ingest_args.report,
+                    "Per-site report TSV in the oracle schema (the primary Stage-1 artifact)");
+    ing->add_option("--emit-tile", ingest_args.emit_tile,
+                    "Write the raw canonical 2-bit tile bytes here (needs a CUDA device)");
+    ing->add_option("--min-dp", ingest_args.min_dp, "Ref-block MinDP / variant DP floor (default 8)");
+    ing->add_option("--min-gq", ingest_args.min_gq, "Variant GQ floor (default 20)");
+    ing->add_option("--device", ingest_args.device,
+                    "CUDA device ordinal(s) for --emit-tile transpose (default auto)");
+    ing->callback([&]() { code = run_ingest(ingest_args); });
+
+    // The host-only VCF-ingest concordance validator (the Stage-1 block-correctness
+    // gate): diffs steppe's report (--a) vs the Stage-0 oracle dosage TSV (--b).
+    CLI::App* ic = app.add_subcommand(
+        "ingest-concord",
+        "Validate a steppe ingest report against the Stage-0 oracle dosage TSV (host-only; "
+        "exact {call,dosage,source,drop_reason} match + the ref-block hom-ref subset rate)");
+    ic->add_option("--a", ingest_concord_args.a_path, "steppe's ingest report TSV (TEST)")->required();
+    ic->add_option("--b", ingest_concord_args.b_path, "the Stage-0 oracle dosage TSV (RULER)")->required();
+    ic->add_option("--overall-match-min", ingest_concord_args.overall_match_min,
+                   "overall exact-match PASS floor (default 1.0)");
+    ic->add_option("--refblock-match-min", ingest_concord_args.refblock_match_min,
+                   "ref-block hom-ref subset match PASS floor (default 1.0)");
+    ic->add_option("--variant-match-min", ingest_concord_args.variant_match_min,
+                   "explicit-variant subset match PASS floor (default 1.0)");
+    ic->add_option("--coverage-min", ingest_concord_args.coverage_min,
+                   "oracle-row coverage PASS floor (default 1.0)");
+    ic->add_option("--format", ingest_concord_args.format, "report format: text | json (default text)");
+    ic->add_option("--out", ingest_concord_args.out_path, "write report here (default stdout)");
+    ic->callback([&]() { code = run_ingest_concord(ingest_concord_args); });
 
     CLI11_PARSE(app, argc, argv);
 

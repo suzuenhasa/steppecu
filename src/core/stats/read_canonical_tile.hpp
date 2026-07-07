@@ -13,6 +13,7 @@
 
 #include "io/geno_reader.hpp"
 #include "io/ind_reader.hpp"
+#include "io/snp_major_tile.hpp"
 
 namespace steppe {
 
@@ -26,6 +27,13 @@ namespace core {
                                                    ComputeBackend& backend,
                                                    std::size_t snp_begin,
                                                    std::size_t snp_end);
+
+// transpose_snp_major — the shared SNP-major -> canonical individual-major
+// transpose seam (Identity encoding). Promoted from an anonymous-namespace
+// helper so both the five-arm packed-format funnel and the native VCF ingest
+// path (the sixth arm) share the one on-device transpose. No behavior change.
+[[nodiscard]] io::GenotypeTile transpose_snp_major(const io::SnpMajorTile& src,
+                                                   ComputeBackend& backend);
 
 }  // namespace core
 }  // namespace steppe

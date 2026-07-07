@@ -15,9 +15,8 @@
 
 namespace steppe::core {
 
-namespace {
-
-// Shared SNP-major transpose path — reference §4
+// Shared SNP-major transpose path — reference §4. Declared in the header so the
+// native VCF-ingest path (the sixth reader arm) reuses the one transpose seam.
 io::GenotypeTile transpose_snp_major(const io::SnpMajorTile& src,
                                      ComputeBackend& backend) {
     SnpMajorTileView view;
@@ -40,8 +39,6 @@ io::GenotypeTile transpose_snp_major(const io::SnpMajorTile& src,
     tile.pop_labels = src.pop_labels;
     return tile;
 }
-
-}  // namespace
 
 // Format dispatch — reference §3
 io::GenotypeTile read_canonical_tile(io::GenoReader& reader,

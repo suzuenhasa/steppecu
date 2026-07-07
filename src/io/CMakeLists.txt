@@ -17,6 +17,9 @@ add_library(steppe_io STATIC
     genotype_source.cpp
     geno_reader.cpp
     ploidy_detect.cpp
+    gzip_line_reader.cpp
+    target_sites.cpp
+    vcf_reader.cpp
     filter/include_exclude.cpp
     filter/snp_filter.cpp
     filter/mind_prepass.cpp)
@@ -26,10 +29,12 @@ add_library(steppe::io ALIAS steppe_io)
 target_include_directories(steppe_io PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-# Isolation: links only the CUDA-free surface, never core/device — reference §3
+# Isolation: links only the CUDA-free surface, never core/device — reference §3.
+# ZLIB::ZLIB is PRIVATE: the native VCF reader's gunzip is an implementation detail
+# of the io leaf and stays CUDA-free (zlib is a host library).
 target_link_libraries(steppe_io
     PUBLIC  steppe::api
-    PRIVATE steppe::warnings)
+    PRIVATE steppe::warnings ZLIB::ZLIB)
 
 # Language standard, propagated — reference §4
 target_compile_features(steppe_io PUBLIC cxx_std_20)

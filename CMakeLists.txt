@@ -68,6 +68,11 @@ find_package(CUDAToolkit REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# --- zlib (the native VCF reader's BGZF/gzip gunzip; the one new host dep) -----
+# steppe_io links ZLIB::ZLIB PRIVATE for the gVCF-block-aware .vcf.gz reader; the
+# io leaf stays CUDA-free (zlib is host-only). Must precede add_subdirectory(src/io).
+find_package(ZLIB REQUIRED)
+
 # --- ccache compiler launcher (architecture.md §6; build-iteration only) ------
 # Opt-in via STEPPE_CCACHE (default ON, SteppeOptions.cmake). A no-op when ccache
 # is not installed, so the box's stock build is unaffected. ccache hashes the full

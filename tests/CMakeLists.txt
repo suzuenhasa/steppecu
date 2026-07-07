@@ -1257,6 +1257,32 @@ if(STEPPE_BUILD_CLI)
   steppe_add_test(NAME cli_readv2_concord
            COMMAND test_cli_readv2_concord "$<TARGET_FILE:steppe_app>" LABELS "cli")
 
+  # --- `steppe ingest-concord` host-only gate -------------------------------
+  # Plain C++ host TU (NO CUDA, NO GPU): writes hand-authored TOY ingest-report
+  # TSVs (the oracle schema) and asserts the concordance validator's diff
+  # arithmetic — overall/refblock/variant exact-match counts, coverage, the
+  # null-pos38 oracle-row exclusion, threshold PASS/FAIL, and the fail-fast exit
+  # codes — against known-by-construction expectations. Host lane (needs no device).
+  add_executable(test_cli_ingest_concord cli/test_cli_ingest_concord.cpp)
+  target_link_libraries(test_cli_ingest_concord PRIVATE steppe::warnings)
+  add_dependencies(test_cli_ingest_concord steppe_app)
+  steppe_add_test(NAME cli_ingest_concord
+           COMMAND test_cli_ingest_concord "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
+  # --- `steppe ingest` by-construction reader gate --------------------------
+  # Plain C++ host TU (NO CUDA needed: exercises the --report path, not --emit-tile).
+  # Authors a tiny PLAIN .vcf + target table covering every reader branch (passing
+  # ref block REF==A1->2 and REF==A2->0, site==END boundary, below-floor block,
+  # no-coverage, het/hom-alt, multiallelic, non-panel allele, half-call, palindrome,
+  # strand-flip, rsID-mismap), runs `steppe ingest --report`, and asserts the report
+  # equals the by-construction truth. Tests the reader's OWN machinery (synthetic is
+  # allowed here, readv2-concord precedent) — NO reported science. Host lane.
+  add_executable(test_cli_ingest cli/test_cli_ingest.cpp)
+  target_link_libraries(test_cli_ingest PRIVATE steppe::warnings)
+  add_dependencies(test_cli_ingest steppe_app)
+  steppe_add_test(NAME cli_ingest
+           COMMAND test_cli_ingest "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
   # --- `steppe readv2` real-data gate (vs the concord ruler) ----------------
   # Plain C++ host TU (spawns the binary; needs a live CUDA device). Runs
   # `steppe readv2 --prefix <fixture>/readv2_subset` on the real-AADR relative-pair
