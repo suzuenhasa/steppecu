@@ -37,6 +37,7 @@ enum class Command {
     Scan,
     Readv2,
     Paint,
+    Fst,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -91,6 +92,10 @@ struct CliArgs {
     std::optional<int>         recip_batch;   // #recipients resident per wave (the batch/VRAM knob)
     std::optional<bool>        bp_fallback;   // opt into the bp cM-fallback when genpos is absent
     std::optional<bool>        paint_full;    // emit the per-DONOR coancestry matrix (default per-label)
+
+    // `fst` (per-SNP Weir-Cockerham FST) controls
+    std::optional<std::string> fst_method;    // wc (Weir-Cockerham 1984; default). hudson is a follow-up.
+    std::optional<bool>        fst_per_snp;   // emit the per-SNP FST table (else the summary row)
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

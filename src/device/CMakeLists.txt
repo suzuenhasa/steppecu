@@ -16,6 +16,8 @@ add_library(steppe_device STATIC
     cuda/transpose_canonical_kernel.cu
     cuda/decode_compact_kernel.cu
     cuda/dstat_kernel.cu
+    cuda/fst_wc_kernel.cu
+    cuda/cuda_backend_fst.cu
     cuda/readv2_pack_kernel.cu
     cuda/readv2_mismatch_kernel.cu
     cuda/readv2_bitmatrix.cu

@@ -31,6 +31,7 @@
 #include "core/internal/pchisq.hpp"
 #include "core/internal/qpfstats_jackknife.hpp"
 #include "core/internal/small_linalg.hpp"
+#include "core/internal/wc_fst.hpp"
 #include "core/internal/views.hpp"
 #include "core/qpadm/qpadm_bounds.hpp"
 #include "core/qpadm/qpgraph_model.hpp"
@@ -306,6 +307,70 @@ public:
                 out.n[off] = r.n;
             }
         }
+        return out;
+    }
+
+    // fst_wc_per_site: the per-site Weir & Cockerham 1984 FST parity oracle. A host loop
+    // calling the SAME wc_accumulate / wc_finalize the GPU kernel uses (native FP64), plus
+    // a host Σnum/Σden/n_valid over the (valid && summary-included) sites — reference §4
+    [[nodiscard]] FstPerSite fst_wc_per_site(
+        const DecodeTileView& tile, int popA, int popB,
+        std::span<const std::uint8_t> summary_include) override {
+        FstPerSite out;
+        out.precision_tag = Precision::Kind::Fp64;
+
+        const long M = static_cast<long>(tile.n_snp);
+        const int P = tile.n_pop;
+        if (M <= 0 || P <= 0 || popA < 0 || popB < 0 || popA >= P || popB >= P) return out;
+
+        const std::size_t Mz = static_cast<std::size_t>(M);
+        out.num.assign(Mz, 0.0);
+        out.den.assign(Mz, 0.0);
+        out.fst.assign(Mz, 0.0);
+        out.valid.assign(Mz, std::uint8_t{0});
+
+        const std::size_t segA_begin = tile.pop_offsets[static_cast<std::size_t>(popA)];
+        const std::size_t segA_end = tile.pop_offsets[static_cast<std::size_t>(popA) + 1];
+        const std::size_t segB_begin = tile.pop_offsets[static_cast<std::size_t>(popB)];
+        const std::size_t segB_end = tile.pop_offsets[static_cast<std::size_t>(popB) + 1];
+
+        const bool have_inc = summary_include.size() == Mz;
+        long double sum_num = 0.0L, sum_den = 0.0L;
+        long n_valid = 0;
+
+        for (long s = 0; s < M; ++s) {
+            const std::size_t byte_in_rec =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+
+            core::WcPerPop A;
+            for (std::size_t g = segA_begin; g < segA_end; ++g) {
+                const std::uint8_t byte = tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                core::wc_accumulate(core::genotype_code(byte, pos_in_byte), A);
+            }
+            core::WcPerPop B;
+            for (std::size_t g = segB_begin; g < segB_end; ++g) {
+                const std::uint8_t byte = tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                core::wc_accumulate(core::genotype_code(byte, pos_in_byte), B);
+            }
+
+            const core::WcSite r = core::wc_finalize(A, B);
+            const std::size_t ss = static_cast<std::size_t>(s);
+            out.num[ss] = r.num;
+            out.den[ss] = r.den;
+            out.fst[ss] = r.fst;
+            out.valid[ss] = r.valid ? std::uint8_t{1} : std::uint8_t{0};
+
+            const bool keep = r.valid && (!have_inc || summary_include[ss] != 0);
+            if (keep) {
+                sum_num += static_cast<long double>(r.num);
+                sum_den += static_cast<long double>(r.den);
+                ++n_valid;
+            }
+        }
+        out.sum_num = static_cast<double>(sum_num);
+        out.sum_den = static_cast<double>(sum_den);
+        out.n_valid = n_valid;
         return out;
     }
 

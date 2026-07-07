@@ -210,6 +210,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.recip_batch, args.recip_batch);
     take_b(merged_.bp_fallback, args.bp_fallback);
     take_b(merged_.paint_full, args.paint_full);
+    take(merged_.fst_method, args.fst_method);
+    take_b(merged_.fst_per_snp, args.fst_per_snp);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -550,6 +552,14 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.self_copy) cfg.ls_self_copy_ = *merged_.self_copy;
     if (merged_.bp_fallback) cfg.ls_bp_fallback_ = *merged_.bp_fallback;
     if (merged_.paint_full) cfg.paint_full_ = *merged_.paint_full;
+    if (merged_.fst_method) {
+        const std::string m = to_lower(trim(*merged_.fst_method));
+        if (m != "wc" && m != "hudson") {
+            return fail("--method '" + *merged_.fst_method + "' is unknown (wc | hudson)");
+        }
+        cfg.fst_method_ = m;
+    }
+    if (merged_.fst_per_snp) cfg.fst_per_snp_ = *merged_.fst_per_snp;
     if (merged_.recip_batch.has_value()) {
         if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
         cfg.ls_recip_batch_ = *merged_.recip_batch;

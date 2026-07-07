@@ -117,6 +117,12 @@ public:
         std::span<const std::size_t> pop_individuals, int ploidy, double maxmiss,
         long s_lo) override;
 
+    // Per-site Weir & Cockerham 1984 FST over a population pair (`steppe fst`) — uploads
+    // the packed tile, launches the per-site WC kernel, and runs the device-resident
+    // (native-FP64) masked Σnum/Σden/n_valid reduction. New standalone stat seam.
+    [[nodiscard]] FstPerSite fst_wc_per_site(const DecodeTileView& tile, int popA, int popB,
+                                             std::span<const std::uint8_t> summary_include) override;
+
     // D-statistic block reduction — reference §6
     void dstat_block_reduce_device(const double* dQ, const double* dV, int P, long M,
                                    const int* block_id, int n_block,

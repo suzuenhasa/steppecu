@@ -354,6 +354,18 @@ if(STEPPE_HAVE_GTEST)
 endif()
 steppe_add_test(NAME decode_unit COMMAND test_decode LABELS "unit")
 
+# --- Host-only unit test of the shared Weir & Cockerham FST primitive ---------
+# Pure C++ TU (no CUDA, no data): pins the __host__ __device__ WC per-site FST math
+# in core/internal/wc_fst.hpp (wc_accumulate, wc_finalize) — the SAME primitive the
+# GPU fst kernel and the CpuBackend oracle both call. Hand-computed anchors
+# (FST=1.0 / FST=0.0 with exact a/den), the degenerate n1=n2=1 + all-missing invalid
+# guards (num/den forced to 0, no NaN/inf poison), and a tiny 2-pop packed tile whose
+# monomorphic site is invalid and whose missing genotype is excluded per-site.
+add_executable(test_fst_wc unit/test_fst_wc.cpp)
+target_link_libraries(test_fst_wc
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME fst_wc_unit COMMAND test_fst_wc LABELS "unit")
+
 # --- Host-only unit test of the launch-config + host/device headers ----------
 # Pure C++ TU (no CUDA): pins core/internal/launch_config.hpp (cdiv int+long,
 # grid_for, the 32x8 decode block dims) and core/internal/host_device.hpp
@@ -1262,6 +1274,24 @@ if(STEPPE_BUILD_CLI)
                    "$<TARGET_FILE:steppe_app>"
                    "${STEPPE_AADR_ROOT}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens/at2" LABELS "cli;gpu")
+
+  # --- `steppe fst` per-SNP Weir-Cockerham FST plink2 parity gate -----------
+  # Plain C++ host TU (no CUDA): runs the built `steppe fst --prefix <shared .bed>
+  # --pops A,B --method wc --per-snp` on the GPU and joins its per-SNP table to a
+  # FROZEN plink2 `--fst method=wc report-variants` golden by SNP id, asserting
+  # WC_FST (and FST_NUMER/FST_DENOM when present) agree within 1e-6 on the shared
+  # valid sites, plus the genome-wide summary vs plink2 .fst.summary. Alignment is on
+  # one shared .bed so genotypes are byte-identical and REF/ALT polarity is moot. The
+  # golden + meta (bed prefix + the two pop labels) are frozen once on the box via the
+  # design §7 recipe. SKIPs (exit 0) when no CUDA device is visible OR the fixture /
+  # golden / meta is absent. NO SYNTHETIC DATA.
+  add_executable(test_cli_fst cli/test_cli_fst.cpp)
+  target_link_libraries(test_cli_fst PRIVATE steppe::warnings)
+  add_dependencies(test_cli_fst steppe_app)
+  steppe_add_test(NAME cli_fst
+           COMMAND test_cli_fst
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
 
   # --- `steppe dates` admixture-dating golden gate --------------------------
   # Plain C++ host TU (no CUDA): runs the built `steppe dates --prefix <raw TGENO>

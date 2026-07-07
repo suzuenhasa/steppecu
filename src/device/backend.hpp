@@ -341,6 +341,24 @@ struct LsLocalAncestry {
     Status status = Status::Ok;
 };
 
+// Per-site Weir & Cockerham 1984 FST over one population pair (the `steppe fst` output).
+// num/den/fst/valid are per-SNP in the tile's kept order (length M); a site is `valid`
+// when both pops are sampled, the combined size exceeds 2, and the denominator is finite
+// and non-zero (an invalid site has fst == NaN and num == den == 0.0). sum_num/sum_den
+// are the device-reduced (native-FP64) numerator/denominator sums over the VALID sites
+// flagged for the genome-wide summary (autosomes), and n_valid counts them; the ratio-of-
+// averages fst_ratio = sum_num/sum_den is plink2's `.fst.summary` WC_FST.
+struct FstPerSite {
+    std::vector<double> num;
+    std::vector<double> den;
+    std::vector<double> fst;
+    std::vector<std::uint8_t> valid;
+    double sum_num = 0.0;
+    double sum_den = 0.0;
+    long n_valid = 0;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -514,6 +532,21 @@ public:
         throw std::runtime_error(
             "ComputeBackend::decode_af_compact_filter: not implemented by this backend "
             "(the regime-B device-resident decode seam requires a CUDA backend)");
+    }
+
+    // fst_wc_per_site: the per-site Weir & Cockerham 1984 FST over the population pair
+    // (tile pop indices popA, popB) computed by a GPU kernel over the device-resident
+    // genotype tile — a distinct per-site variance-component reduction (NOT the AF grid,
+    // which drops the allele count n and the observed het h that WC needs). Native FP64.
+    // `summary_include[s] == 1` marks a SNP eligible for the genome-wide summary
+    // (autosomes, mirroring plink2's WC .fst.summary); the device Σ-reduction sums num/den
+    // over sites that are BOTH valid AND summary-included. Default: throw (CUDA/CPU only).
+    [[nodiscard]] virtual FstPerSite fst_wc_per_site(
+        const DecodeTileView& tile, int popA, int popB,
+        std::span<const std::uint8_t> summary_include) {
+        (void)tile; (void)popA; (void)popB; (void)summary_include;
+        throw std::runtime_error(
+            "ComputeBackend::fst_wc_per_site: not implemented by this backend");
     }
 
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }

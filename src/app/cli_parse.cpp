@@ -33,6 +33,7 @@
 #include "app/cmd_f3.hpp"
 #include "app/cmd_f4.hpp"
 #include "app/cmd_f4ratio.hpp"
+#include "app/cmd_fst.hpp"
 #include "app/cmd_fstat_sweep.hpp"
 #include "app/cmd_qpadm.hpp"
 #include "app/cmd_qpgraph.hpp"
@@ -267,6 +268,7 @@ int run_cli(int argc, char** argv) {
     CliArgs dates_args;
     CliArgs readv2_args;
     CliArgs paint_args;
+    CliArgs fst_args;
 
     // The `cache` subcommand is host-only (no GPU, no RunConfig): its args bind
     // to these plain locals, also owned at run_cli scope so they outlive the parse.
@@ -344,6 +346,26 @@ int run_cli(int argc, char** argv) {
             add_common_flags(s, a);
         },
         run_dates_command, code);
+
+    register_cmd(app, "fst",
+        "Per-SNP Weir & Cockerham 1984 FST between TWO populations: --prefix genotypes + "
+        "--pops A,B -> per-SNP FST table (--per-snp) + genome-wide summary (plink2 --fst "
+        "method=wc gated)",
+        fst_args, Command::Fst,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
+            add_str_list_flag(s, "--pops", a.pops,
+                              "The TWO populations to differentiate (A,B; .ind pop labels)");
+            s->add_option("--method", a.fst_method,
+                          "FST estimator: wc (Weir-Cockerham 1984; default). hudson is a follow-up.");
+            s->add_flag("--per-snp", a.fst_per_snp,
+                        "Emit the per-SNP FST table (snp_id/chrom/pos/a1/a2/num/den/fst/valid); "
+                        "default emits the genome-wide summary row");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_fst_command, code);
 
     register_cmd(app, "readv2",
         "Pseudo-haploid windowed-mismatch kinship: --prefix genotypes -> per-pair degree + P0_norm",
