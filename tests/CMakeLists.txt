@@ -1091,6 +1091,16 @@ target_link_libraries(test_target_build
     PRIVATE steppe::io steppe::api steppe::warnings)
 steppe_add_test(NAME target_build_unit COMMAND test_target_build LABELS "unit")
 
+# --- VCF reference-build auto-detection unit test ----------------------------
+# Authors header-only .vcf fixtures and asserts io::detect_vcf_assembly resolves
+# the assembly from the ##contig autosome length (incl. a chr22-only single-chrom
+# VCF) and/or the ##reference token, and fails clearly (Unknown) on absent /
+# conflicting headers. Pure host (no GPU); mirrors test_target_build's idiom.
+add_executable(test_vcf_build_detect unit/test_vcf_build_detect.cpp)
+target_link_libraries(test_vcf_build_detect
+    PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME vcf_build_detect_unit COMMAND test_vcf_build_detect LABELS "unit")
+
 # --- Filter oracle test (real AADR) ------------------------------------------
 # Reads the raw TGENO triple, decodes via the CPU reference backend, builds the
 # filter keep-mask via the io filters, and validates it against an independent

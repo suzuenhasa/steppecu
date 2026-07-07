@@ -653,9 +653,10 @@ int run_cli(int argc, char** argv) {
     // the shared canonical transpose only.
     CLI::App* ing = app.add_subcommand(
         "ingest",
-        "Native gVCF-block-aware VCF reader: --vcf .vcf.gz + a GRCh38 target source "
-        "(--targets table, OR native --panel/--fasta/--lift) -> per-site genotype report "
-        "(and, with --emit-tile, the canonical 2-bit tile)");
+        "Native gVCF-block-aware VCF reader: --vcf .vcf.gz + a target source "
+        "(--targets table, OR native --panel + --fasta). Auto-detects the VCF assembly "
+        "(GRCh37 same-build direct join, or GRCh38 via --lift) -> per-site genotype "
+        "report (and, with --emit-tile, the canonical 2-bit tile)");
     ing->add_option("--vcf", ingest_args.vcf, "Input VCF (.vcf.gz BGZF/gzip or plain .vcf)");
     ing->add_option("--targets", ingest_args.targets,
                     "Stage-1 pre-built GRCh38 target-site table: rsID chrom [pos37] pos38 A1 A2 "
@@ -663,9 +664,14 @@ int run_cli(int argc, char** argv) {
     ing->add_option("--panel", ingest_args.panel,
                     "Stage-2 native: AADR EIGENSTRAT .snp panel (GRCh37) to harmonize");
     ing->add_option("--fasta", ingest_args.fasta,
-                    "Stage-2 native: GRCh38 .fa (needs a sibling .fai) supplying ref38");
+                    "Stage-2 native: build-matched .fa (GRCh38 for a GRCh38 VCF, GRCh37 for a "
+                    "GRCh37 VCF; needs a sibling .fai) supplying ref38");
     ing->add_option("--lift", ingest_args.lift,
-                    "Stage-2 native: orchestrated rsID<TAB>pos38 lift map");
+                    "Stage-2 native: rsID<TAB>pos38 map; REQUIRED for a cross-build VCF "
+                    "(GRCh38/other), AUTO-IDENTITY (ignored) for a same-build GRCh37 VCF");
+    ing->add_option("--assembly", ingest_args.assembly,
+                    "Override VCF build detection: GRCh37 | GRCh38 (default: auto-detect from the "
+                    "VCF header ##reference / ##contig autosome length)");
     ing->add_option("--emit-targets", ingest_args.emit_targets,
                     "Native mode only: write the built 7-col target table here (gate-1 diff)");
     ing->add_option("--sample", ingest_args.sample,

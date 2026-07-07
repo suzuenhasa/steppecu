@@ -13,7 +13,9 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <ostream>
 #include <sstream>
@@ -40,6 +42,37 @@ namespace steppe::app {
 namespace cfg = steppe::config;
 
 namespace {
+
+[[nodiscard]] const char* assembly_name(io::Assembly a) {
+    switch (a) {
+        case io::Assembly::GRCh37: return "GRCh37";
+        case io::Assembly::GRCh38: return "GRCh38";
+        case io::Assembly::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+// Parse the --assembly override (case-insensitive; common aliases). GRCh37/GRCh38
+// only — other builds (T2T…) go through the cross-build path with user --lift.
+[[nodiscard]] bool parse_assembly_flag(const std::string& s, io::Assembly& out) {
+    std::string t;
+    for (char c : s) t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t == "grch37" || t == "hg19" || t == "b37" || t == "37") { out = io::Assembly::GRCh37; return true; }
+    if (t == "grch38" || t == "hg38" || t == "b38" || t == "38") { out = io::Assembly::GRCh38; return true; }
+    return false;
+}
+
+// OPTIONAL convenience (mission item 2): resolve an on-box GRCh37 fasta from the
+// STEPPE_GRCH37_FASTA env var. Returns "" when unset / missing — the caller then
+// falls back to the normal "needs --fasta" error. No downloads, no hardcoded
+// absolute paths (that would be brittle); the gate supplies --fasta explicitly.
+[[nodiscard]] std::string resolve_default_grch37_fasta() {
+    if (const char* p = std::getenv("STEPPE_GRCH37_FASTA")) {
+        std::error_code ec;
+        if (p[0] != '\0' && std::filesystem::exists(p, ec)) return std::string(p);
+    }
+    return "";
+}
 
 [[nodiscard]] const char* call_str(io::VcfCall c) {
     switch (c) {
@@ -149,28 +182,34 @@ namespace {
 
 int run_ingest(const IngestArgs& args) {
     // --- target-site source selection (mutually exclusive) --------------------
-    const bool native = !args.panel.empty() || !args.fasta.empty() || !args.lift.empty();
+    // Native mode is anchored on --panel (the AADR .snp). --fasta/--lift/--assembly/
+    // --emit-targets are native-only knobs; --fasta is required (or auto-resolved for
+    // GRCh37) and --lift is required ONLY for a cross-build (GRCh38/other) VCF —
+    // both are validated after the VCF build is detected (below).
+    const bool native = !args.panel.empty();
     const bool legacy = !args.targets.empty();
+    const bool native_knobs = !args.fasta.empty() || !args.lift.empty() ||
+                              !args.assembly.empty() || !args.emit_targets.empty();
     if (native && legacy) {
         std::fprintf(stderr,
                      "steppe ingest: choose ONE target source — either --targets <table> "
-                     "(Stage-1) OR --panel + --fasta + --lift (Stage-2 native), not both\n");
+                     "(Stage-1) OR --panel (+ --fasta; --lift for a cross-build VCF), not both\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (legacy && native_knobs) {
+        std::fprintf(stderr, "steppe ingest: --fasta/--lift/--assembly/--emit-targets belong to the "
+                             "native --panel build, not the --targets table path\n");
         return cfg::kExitInvalidConfig;
     }
     if (!native && !legacy) {
-        std::fprintf(stderr,
-                     "steppe ingest: no target source — pass --targets <table> OR "
-                     "--panel .snp + --fasta ref.fa + --lift rsid_pos38.tsv\n");
-        return cfg::kExitInvalidConfig;
-    }
-    if (native && (args.panel.empty() || args.fasta.empty() || args.lift.empty())) {
-        std::fprintf(stderr,
-                     "steppe ingest: native target build needs all of --panel, --fasta, --lift\n");
-        return cfg::kExitInvalidConfig;
-    }
-    if (!native && !args.emit_targets.empty()) {
-        std::fprintf(stderr, "steppe ingest: --emit-targets is valid only with the native "
-                             "(--panel/--fasta/--lift) target build\n");
+        if (native_knobs) {
+            std::fprintf(stderr, "steppe ingest: --fasta/--lift/--assembly/--emit-targets given "
+                                 "without --panel; the native build is anchored on --panel <.snp>\n");
+        } else {
+            std::fprintf(stderr,
+                         "steppe ingest: no target source — pass --targets <table> OR "
+                         "--panel .snp (+ --fasta ref.fa; --lift only for a cross-build VCF)\n");
+        }
         return cfg::kExitInvalidConfig;
     }
     if (args.min_dp < 0 || args.min_gq < 0) {
@@ -220,9 +259,94 @@ int run_ingest(const IngestArgs& args) {
     io::TargetSites targets;
     try {
         if (native) {
-            io::FaidxReader fa(args.fasta);
+            // --- resolve the VCF assembly (mission item 1) --------------------
+            io::AssemblyDetection det;
+            bool have_det = false;
+            if (!args.vcf.empty()) {
+                det = io::detect_vcf_assembly(args.vcf);
+                have_det = true;
+                std::fprintf(stderr, "steppe ingest: detected assembly %s (%s)\n",
+                             assembly_name(det.assembly), det.evidence.c_str());
+            }
+            io::Assembly build = io::Assembly::Unknown;
+            if (!args.assembly.empty()) {
+                if (!parse_assembly_flag(args.assembly, build)) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: --assembly must be GRCh37 or GRCh38 (got '%s')\n",
+                                 args.assembly.c_str());
+                    return cfg::kExitInvalidConfig;
+                }
+                if (have_det && det.assembly != io::Assembly::Unknown && det.assembly != build) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: WARNING --assembly %s overrides the header-detected "
+                                 "%s; proceeding with the override\n",
+                                 assembly_name(build), assembly_name(det.assembly));
+                }
+            } else if (have_det) {
+                build = det.assembly;
+                if (build == io::Assembly::Unknown) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: could not detect the VCF assembly from the header "
+                                 "(##reference / ##contig autosome length); pass --assembly "
+                                 "GRCh37|GRCh38\n");
+                    return cfg::kExitInvalidConfig;  // FAIL clearly, never mis-genotype
+                }
+            } else {
+                // Native table-only build (no VCF, e.g. bare --emit-targets): there is
+                // no header to read, so --assembly picks the lift path explicitly.
+                std::fprintf(stderr, "steppe ingest: a native build without --vcf needs --assembly "
+                                     "GRCh37|GRCh38 to select the lift path\n");
+                return cfg::kExitInvalidConfig;
+            }
+
+            // --- branch on the VCF build vs the fixed GRCh37 panel ------------
+            io::TargetBuildOptions bopts;
+            if (build == io::Assembly::GRCh37) {
+                bopts.identity_lift = true;  // same-build direct join, no lift needed
+                if (!args.lift.empty()) {
+                    std::fprintf(stderr, "steppe ingest: NOTE a same-build GRCh37 VCF is lift-free; "
+                                         "ignoring --lift (identity join pos38:=pos37)\n");
+                }
+                // fix #3: the identity path applied to a MISLABELED/lifted VCF silently
+                // mis-genotypes; the only structural guard (H3 rsID cross-check) covers
+                // rsID-bearing records only. Warn loudly when GRCh37 rests on a spoofable
+                // ##reference token ALONE (no corroborating contig length) and no override.
+                if (args.assembly.empty() && have_det && det.from_reference && !det.from_contig) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: WARNING GRCh37 chosen from ##reference alone (no "
+                                 "##contig length to corroborate); a mislabeled/lifted VCF would be "
+                                 "mis-genotyped on the identity path — pass --assembly to confirm\n");
+                }
+            } else {  // GRCh38 (or an --assembly override for another cross build)
+                if (args.lift.empty()) {
+                    std::fprintf(stderr,
+                                 "steppe ingest: a %s VCF against the GRCh37 panel needs --lift "
+                                 "(rsID->pos map); only a same-build GRCh37 VCF is lift-free\n",
+                                 assembly_name(build));
+                    return cfg::kExitInvalidConfig;
+                }
+            }
+
+            // --- resolve the build-matched fasta (GRCh37 may auto-resolve) ----
+            std::string fasta_path = args.fasta;
+            if (fasta_path.empty() && build == io::Assembly::GRCh37) {
+                fasta_path = resolve_default_grch37_fasta();
+                if (!fasta_path.empty()) {
+                    std::fprintf(stderr, "steppe ingest: using STEPPE_GRCH37_FASTA=%s\n",
+                                 fasta_path.c_str());
+                }
+            }
+            if (fasta_path.empty()) {
+                std::fprintf(stderr,
+                             "steppe ingest: native build needs --fasta (a %s reference .fa with a "
+                             "sibling .fai)\n",
+                             assembly_name(build));
+                return cfg::kExitInvalidConfig;
+            }
+
+            io::FaidxReader fa(fasta_path);
             io::TargetBuildCounts tc;
-            targets = io::build_target_sites(args.panel, args.lift, fa, {}, tc);
+            targets = io::build_target_sites(args.panel, args.lift, fa, bopts, tc);
             std::fprintf(stderr,
                          "steppe ingest: native target build | panel_total=%lld autosomal=%lld "
                          "non_rsid=%lld palindromic=%lld dup_rsids=%lld | lift_ok=%lld "

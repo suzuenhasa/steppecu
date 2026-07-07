@@ -29,6 +29,12 @@ namespace steppe::io {
 
 struct TargetBuildOptions {
     bool autosomes_only = true;  // chrom 1..22 (M1); the only supported v1 mode
+    // GRCh37-direct (same-build) mode: the VCF is on the panel's own GRCh37
+    // coordinates, so the rsID/pos join is DIRECT — pos38 := pos37 (identity, no
+    // lift file read) and ref38 is fetched from a GRCh37 fasta at the panel
+    // physpos. lift_no_lift is then definitionally 0 and lift_ok == the surviving
+    // autosomal-rs non-dup rows. The cross-build (GRCh38/other) path is unchanged.
+    bool identity_lift = false;
 };
 
 // Mirrors the oracle load_panel/lift_panel counters (gate-1 counts assertion).
@@ -46,8 +52,9 @@ struct TargetBuildCounts {
 
 // Build the native target-site set.
 //   panel_snp : AADR EIGENSTRAT .snp (GRCh37): id chrom genpos physpos A1 A2
-//   lift_map  : orchestrated rsID<TAB>pos38 map (leading header row tolerated)
-//   fasta     : GRCh38 FaidxReader (supplies ref38)
+//   lift_map  : orchestrated rsID<TAB>pos38 map (leading header row tolerated);
+//               IGNORED when opts.identity_lift (same-build GRCh37, pos38:=pos37)
+//   fasta     : FaidxReader supplying ref38 (GRCh38, or GRCh37 in identity mode)
 // Palindromic sites are KEPT (flag set); only no-lift / dup rows are dropped.
 // Throws std::runtime_error on open/format failure or an out-of-range lift pos38.
 [[nodiscard]] TargetSites build_target_sites(const std::string& panel_snp,

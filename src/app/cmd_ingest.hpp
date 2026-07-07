@@ -21,10 +21,13 @@ struct IngestArgs {
     // Target-site source — exactly one of:
     //   (A) Stage-1 back-compat: a pre-built GRCh38 target-site table.
     std::string targets;      // the GRCh38 target-site table
-    //   (B) Stage-2 native: build the table in-process from panel + FASTA + lift.
-    std::string panel;        // AADR EIGENSTRAT .snp (GRCh37)
-    std::string fasta;        // GRCh38 .fa (expects a sibling .fai) -> ref38
-    std::string lift;         // orchestrated rsID->pos38 map (the one deferred input)
+    //   (B) Stage-2 native: build the table in-process from panel + FASTA (+ lift).
+    std::string panel;        // AADR EIGENSTRAT .snp (GRCh37) — anchors native mode
+    std::string fasta;        // build-matched .fa (GRCh38 for a GRCh38 VCF, GRCh37 for
+                              // a GRCh37 VCF); expects a sibling .fai -> ref38
+    std::string lift;         // rsID->pos38 map: REQUIRED for a cross-build (GRCh38/other)
+                              // VCF; auto-identity (unused) for a same-build GRCh37 VCF
+    std::string assembly;     // OPTIONAL override of VCF build detection: "GRCh37"|"GRCh38"
     std::string emit_targets; // OPTIONAL (native only): dump the built 7-col table
     std::string sample;       // OPTIONAL: sample id (default = the sole sample)
     std::string report;       // OPTIONAL: per-site report TSV (primary artifact)

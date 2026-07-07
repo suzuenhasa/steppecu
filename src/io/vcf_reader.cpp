@@ -8,8 +8,12 @@
 #include "io/vcf_reader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <charconv>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 
@@ -85,10 +89,16 @@ struct VarOut {
 };
 [[nodiscard]] VarOut resolve_variant(const VariantRec& rec, char a1, char a2,
                                      const VcfReader::Options& opts) {
-    // Floor first (H4): PASS, DP>=min_dp, GQ>=min_gq.
+    // Floor first (H4): PASS, DP>=min_dp, GQ>=min_gq. A floor of 0 means "field
+    // not required" — this lets a phased GT-only hardcall VCF (1000G phase3: no
+    // DP/GQ) genotype on the GT alone (--min-dp 0 --min-gq 0). nikki runs the
+    // frozen defaults (min_dp=8, min_gq=20, both > 0) so has_dp/has_gq stay
+    // REQUIRED and its GRCh38 output is byte-identical.
     if (!rec.filt_pass) return {VcfCall::Missing, -1, 0, "not_pass"};
-    if (!rec.has_dp || rec.dp < opts.min_dp) return {VcfCall::Missing, -1, 0, "below_floor"};
-    if (!rec.has_gq || rec.gq < opts.min_gq) return {VcfCall::Missing, -1, 0, "below_floor"};
+    if (opts.min_dp > 0 && (!rec.has_dp || rec.dp < opts.min_dp))
+        return {VcfCall::Missing, -1, 0, "below_floor"};
+    if (opts.min_gq > 0 && (!rec.has_gq || rec.gq < opts.min_gq))
+        return {VcfCall::Missing, -1, 0, "below_floor"};
 
     // Parse the diploid GT.
     const char sep = (rec.gt.find('/') != std::string::npos) ? '/' : '|';
@@ -131,7 +141,163 @@ struct VarOut {
     return {call, a1_copies, flip_any ? 1 : 0, ""};
 }
 
+// --- build detection helpers -------------------------------------------------
+
+// Per-autosome (chr1..) reference length, GRCh37 vs GRCh38. The whole panel is
+// GRCh37, so only these two builds are auto-detected. Several autosomes are
+// listed (not just chr1) so a SINGLE-chromosome VCF — e.g. the 1000G phase3
+// per-chromosome files, chr22 only — is still detectable from its own contig
+// length (critic fix #2).
+struct AutosomeLen {
+    int chrom;
+    long long g37;
+    long long g38;
+};
+constexpr std::array<AutosomeLen, 6> kAutosomeLen = {{
+    {1, 249'250'621, 248'956'422},
+    {2, 243'199'373, 242'193'529},
+    {3, 198'022'430, 198'295'559},
+    {20, 63'025'520, 64'444'167},
+    {21, 48'129'895, 46'709'983},
+    {22, 51'304'566, 50'818'468},
+}};
+
+// Extract the value of `key` from a "##contig=<...>" angle-bracket attr list.
+// Anchors the key to a token boundary ('<' or ',') and bounds the value at the
+// next ',' or '>' so "ID"/"length" never mis-hit a substring inside another
+// value (e.g. assembly=, md5=) (critic fix #6).
+[[nodiscard]] std::optional<std::string_view> contig_attr(std::string_view line, std::string_view key) {
+    const std::size_t lt = line.find('<');
+    if (lt == std::string_view::npos) return std::nullopt;
+    std::string_view inner = line.substr(lt + 1);
+    const std::size_t gt = inner.rfind('>');
+    if (gt != std::string_view::npos) inner = inner.substr(0, gt);
+    std::size_t start = 0;
+    while (start <= inner.size()) {
+        const std::size_t comma = inner.find(',', start);
+        const std::string_view tok =
+            (comma == std::string_view::npos) ? inner.substr(start) : inner.substr(start, comma - start);
+        const std::size_t eq = tok.find('=');
+        if (eq != std::string_view::npos && tok.substr(0, eq) == key) return tok.substr(eq + 1);
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string to_lower(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+[[nodiscard]] bool has_token(const std::string& hay, std::string_view needle) {
+    return hay.find(needle) != std::string::npos;
+}
+
+// Resolve a ##reference VALUE (already lower-cased) to a build, or Unknown when
+// it names neither / both (critic fix #3: a lone ##reference is spoofable — the
+// caller warns when the identity path rests on it alone).
+[[nodiscard]] Assembly reference_assembly(const std::string& val) {
+    const bool r37 =
+        has_token(val, "grch37") || has_token(val, "hg19") || has_token(val, "b37") ||
+        has_token(val, "human_g1k_v37");
+    const bool r38 = has_token(val, "grch38") || has_token(val, "hg38") || has_token(val, "b38");
+    if (r37 && !r38) return Assembly::GRCh37;
+    if (r38 && !r37) return Assembly::GRCh38;
+    return Assembly::Unknown;  // absent or contradictory
+}
+
 }  // namespace
+
+AssemblyDetection detect_vcf_assembly(const std::string& vcf_path) {
+    GzipLineReader reader(vcf_path);
+
+    Assembly contig_asm = Assembly::Unknown;
+    std::string contig_evidence;
+    bool contig_conflict = false;
+
+    Assembly ref_asm = Assembly::Unknown;
+    std::string ref_evidence;
+
+    std::string line;
+    while (reader.next_line(line)) {
+        if (line.rfind("##", 0) != 0) break;  // reached #CHROM / a body line -> stop
+
+        if (line.rfind("##contig", 0) == 0) {
+            const auto id = contig_attr(line, "ID");
+            const auto len = contig_attr(line, "length");
+            if (!id || !len) continue;
+            std::string_view idv = *id;
+            if (idv.size() > 3 && (idv[0] == 'c' || idv[0] == 'C') && idv[1] == 'h' && idv[2] == 'r') {
+                idv.remove_prefix(3);
+            }
+            long long chrom_ll = 0;
+            if (std::from_chars(idv.data(), idv.data() + idv.size(), chrom_ll).ec != std::errc{}) continue;
+            long long length = 0;
+            if (std::from_chars(len->data(), len->data() + len->size(), length).ec != std::errc{}) continue;
+            for (const AutosomeLen& a : kAutosomeLen) {
+                if (a.chrom != static_cast<int>(chrom_ll)) continue;
+                Assembly hit = Assembly::Unknown;
+                if (length == a.g37) hit = Assembly::GRCh37;
+                else if (length == a.g38) hit = Assembly::GRCh38;
+                if (hit == Assembly::Unknown) break;
+                std::string ev = "##contig chr" + std::to_string(a.chrom) + " length=" +
+                                 std::to_string(length) + " -> " +
+                                 (hit == Assembly::GRCh37 ? "GRCh37" : "GRCh38");
+                if (contig_asm == Assembly::Unknown) {
+                    contig_asm = hit;
+                    contig_evidence = std::move(ev);
+                } else if (contig_asm != hit) {
+                    contig_conflict = true;
+                    contig_evidence += " ; " + ev;
+                }
+                break;
+            }
+        } else if (line.rfind("##reference", 0) == 0) {
+            const std::size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const std::string val = to_lower(std::string_view(line).substr(eq + 1));
+            const Assembly a = reference_assembly(val);
+            if (a != Assembly::Unknown) {
+                ref_asm = a;
+                ref_evidence = "##reference '" + line.substr(eq + 1) + "' -> " +
+                               (a == Assembly::GRCh37 ? "GRCh37" : "GRCh38");
+            }
+        }
+    }
+
+    AssemblyDetection out;
+    if (contig_conflict) {
+        out.from_contig = true;
+        out.evidence = "##contig autosome lengths disagree (" + contig_evidence + ")";
+        return out;  // Unknown
+    }
+    if (contig_asm != Assembly::Unknown && ref_asm != Assembly::Unknown && contig_asm != ref_asm) {
+        out.from_contig = true;
+        out.from_reference = true;
+        out.evidence = "conflict: " + contig_evidence + " vs " + ref_evidence;
+        return out;  // Unknown (fail-clear)
+    }
+    if (contig_asm != Assembly::Unknown) {
+        out.assembly = contig_asm;
+        out.from_contig = true;
+        out.evidence = contig_evidence;
+        if (ref_asm == contig_asm) {
+            out.from_reference = true;
+            out.evidence += " (corroborated by " + ref_evidence + ")";
+        }
+        return out;
+    }
+    if (ref_asm != Assembly::Unknown) {
+        out.assembly = ref_asm;
+        out.from_reference = true;
+        out.evidence = ref_evidence;
+        return out;
+    }
+    out.evidence = "no ##contig autosome length or recognizable ##reference token in the header";
+    return out;  // Unknown
+}
 
 VcfReader::VcfReader(std::string vcf_path, const TargetSites& targets, std::string sample_id,
                      Options opts)
@@ -234,7 +400,12 @@ VcfIngestResult VcfReader::genotype() {
                 const int di = vd::format_index(format, "DP");
                 depth = vd::parse_int(vd::subfield(sample, di));
             }
-            const bool passing = filt_pass && depth.has_value() && *depth >= opts_.min_dp;
+            // Same "floor of 0 = field not required" relaxation as the variant
+            // path (fix #4, kept symmetric): a GT-only gVCF ref block carrying no
+            // depth still counts as passing when --min-dp 0. At the frozen default
+            // (min_dp=8 > 0) depth is REQUIRED, so nikki is byte-identical.
+            const bool passing =
+                filt_pass && (opts_.min_dp <= 0 || (depth.has_value() && *depth >= opts_.min_dp));
 
             const auto lo = std::lower_bound(ci.pos.begin(), ci.pos.end(), pos);
             const auto hi = std::upper_bound(ci.pos.begin(), ci.pos.end(), e);  // inclusive END

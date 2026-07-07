@@ -30,7 +30,7 @@ namespace {
 int g_failures = 0;
 
 struct Cell {
-    std::string call, dosage, source, drop_reason, flip;
+    std::string call, dosage, source, drop_reason, flip, pos37, pos38;
 };
 
 void expect(const std::map<std::string, Cell>& rep, const std::string& rs, const std::string& call,
@@ -81,6 +81,8 @@ std::map<std::string, Cell> parse_report(const std::filesystem::path& p) {
         // rsID chrom pos37 pos38 A1 A2 call dosage source flip drop_reason
         if (c.size() < 10) continue;
         Cell cell;
+        cell.pos37 = c[2];
+        cell.pos38 = c[3];
         cell.call = c[6];
         cell.dosage = c[7];
         cell.source = c[8];
@@ -203,11 +205,13 @@ int main(int argc, char** argv) {
     expect(rep, "rs_dotref",  "missing", "NA",  "none",     "no_refbase");
 
     // ---- fix (b): the GQ==0 tie-break, exercised with --min-gq 0 --min-dp 1 --
-    // At the default floor GQ==0 is below the floor either way (unobservable). Only
-    // when GQ==0 clears the floor does the tie-break decide the kept record. With
-    // the fix the no-GQ record (first-seen) is kept and, carrying no GQ, resolves
-    // to missing/below_floor; WITHOUT the fix the GQ==0 record (1/1) wins and
-    // resolves to homalt/0 — so this single assertion distinguishes fixed vs not.
+    // A floor of 0 now means "field not required" (the GT-only hardcall relaxation),
+    // so at --min-gq 0 --min-dp 1 the GQ gate is skipped and DP=30 clears --min-dp 1.
+    // The better() tie-break still DECIDES which duplicate-POS record is kept, and
+    // this assertion still distinguishes fixed-vs-not: WITH the fix the no-GQ record
+    // (first-seen, GT 0/1) is kept -> het/1; WITHOUT it the GQ==0 record (GT 1/1)
+    // wins -> homalt/0. (Under the pre-relaxation code the no-GQ record instead
+    // resolved to missing/below_floor via the !has_gq branch — that path is gone.)
     {
         const std::filesystem::path rpath0 = tmp / "report_gq0.tsv";
         const std::filesystem::path logf0 = tmp / "ingest_gq0.log";
@@ -220,7 +224,7 @@ int main(int argc, char** argv) {
             ++g_failures;
         }
         const auto rep0 = parse_report(rpath0);
-        expect(rep0, "rs_gq0", "missing", "NA", "variant", "below_floor");
+        expect(rep0, "rs_gq0", "het", "1", "variant", "");
     }
 
     // The strand-flip site must carry flip=1.
@@ -228,6 +232,96 @@ int main(int argc, char** argv) {
         const auto it = rep.find("rs_flip");
         if (it == rep.end() || it->second.flip != "1") {
             std::printf("  [FAIL] rs_flip flip flag != 1\n");
+            ++g_failures;
+        }
+    }
+
+    // ---- GRCh37 same-build DIRECT path (auto-detect, no --lift) --------------
+    // A GRCh37 VCF against the fixed-GRCh37 panel joins directly: pos38 := pos37
+    // (identity), ref38 from a GRCh37 fasta at the panel physpos, no lift file.
+    // The fixture is a phased GT-only hardcall VCF (FORMAT=GT; no DP/GQ) genotyped
+    // at --min-dp 0 --min-gq 0 — this also exercises the floor relaxation on BOTH
+    // the variant path and the ref-confidence block (no depth field, --min-dp 0).
+    {
+        const std::filesystem::path g37dir = tmp / "g37";
+        std::filesystem::create_directories(g37dir, ec);
+        // panel .snp (GRCh37): id chrom genpos physpos A1 A2
+        const std::filesystem::path snp = g37dir / "panel.snp";
+        {
+            std::ofstream s(snp, std::ios::trunc);
+            s << "rsA\t1\t0.0\t5\tA\tG\n";    // variant target at physpos 5
+            s << "rsB\t1\t0.0\t10\tC\tT\n";   // ref-block homref target at physpos 10
+        }
+        // GRCh37 fasta: contig "1" = NNNNANNNNC (pos5='A', pos10='C') + .fai.
+        const std::filesystem::path fa = g37dir / "ref.fa";
+        {
+            std::ofstream f(fa, std::ios::binary | std::ios::trunc);
+            f << ">1\nNNNNANNNNC\n";
+        }
+        {
+            std::ofstream fi(g37dir / "ref.fa.fai", std::ios::binary | std::ios::trunc);
+            fi << "1\t10\t3\t10\t11\n";
+        }
+        // GRCh37 VCF (chr1 contig length 249250621), GT-only hardcalls.
+        const std::filesystem::path v37 = g37dir / "g37.vcf";
+        {
+            std::ofstream v(v37, std::ios::trunc);
+            v << "##fileformat=VCFv4.2\n";
+            v << "##contig=<ID=1,length=249250621>\n";
+            v << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n";
+            v << "1\t5\trsA\tA\tG\t.\tPASS\t.\tGT\t0/1\n";           // -> het 1
+            v << "1\t8\t.\tA\t.\t.\tPASS\tEND=12\tGT\t0/0\n";        // passing block over pos10
+        }
+        const std::filesystem::path r37 = g37dir / "report.tsv";
+        const std::filesystem::path log37 = g37dir / "ingest.log";
+        const int rc37 = run_steppe(bin, {"ingest", "--vcf", v37.string(), "--panel", snp.string(),
+                                          "--fasta", fa.string(), "--report", r37.string(),
+                                          "--min-dp", "0", "--min-gq", "0"},
+                                    log37);
+        if (rc37 != 0) {
+            std::printf("  [FAIL] GRCh37 direct-path ingest exit=%d (log follows)\n", rc37);
+            std::ifstream lf(log37);
+            std::stringstream ss; ss << lf.rdbuf();
+            std::printf("%s\n", ss.str().c_str());
+            ++g_failures;
+        }
+        // stderr must report the detected GRCh37 assembly.
+        {
+            std::ifstream lf(log37);
+            std::stringstream ss; ss << lf.rdbuf();
+            if (ss.str().find("detected assembly GRCh37") == std::string::npos) {
+                std::printf("  [FAIL] GRCh37 direct-path: 'detected assembly GRCh37' not in stderr\n");
+                ++g_failures;
+            }
+        }
+        const auto rep37 = parse_report(r37);
+        expect(rep37, "rsA", "het", "1", "variant", "");
+        expect(rep37, "rsB", "homref", "2", "refblock", "");
+        // identity join: pos38 == pos37 on every row.
+        for (const char* rs : {"rsA", "rsB"}) {
+            const auto it = rep37.find(rs);
+            if (it == rep37.end() || it->second.pos37 != it->second.pos38) {
+                std::printf("  [FAIL] GRCh37 direct-path %s: pos37 != pos38 (identity join)\n", rs);
+                ++g_failures;
+            }
+        }
+
+        // ---- negative: a GRCh38 VCF against the GRCh37 panel needs --lift -----
+        const std::filesystem::path v38 = g37dir / "g38.vcf";
+        {
+            std::ofstream v(v38, std::ios::trunc);
+            v << "##fileformat=VCFv4.2\n";
+            v << "##contig=<ID=1,length=248956422>\n";  // GRCh38 chr1 length
+            v << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n";
+            v << "1\t5\trsA\tA\tG\t.\tPASS\t.\tGT\t0/1\n";
+        }
+        const std::filesystem::path log38 = g37dir / "ingest38.log";
+        const int rc38 = run_steppe(bin, {"ingest", "--vcf", v38.string(), "--panel", snp.string(),
+                                          "--fasta", fa.string(), "--report",
+                                          (g37dir / "r38.tsv").string()},
+                                    log38);
+        if (rc38 != 2) {  // cfg::kExitInvalidConfig == 2
+            std::printf("  [FAIL] GRCh38-no-lift should exit InvalidConfig(2), got %d\n", rc38);
             ++g_failures;
         }
     }

@@ -33,6 +33,27 @@
 
 namespace steppe::io {
 
+// --- VCF reference-build auto-detection --------------------------------------
+// The assembly a VCF's coordinates are on. The AADR panel is fixed GRCh37, so a
+// GRCh37 VCF joins the panel directly (identity, no lift) while a GRCh38 VCF must
+// be lifted. Unknown -> the caller fails clearly rather than mis-genotyping.
+enum class Assembly { GRCh37, GRCh38, Unknown };
+
+struct AssemblyDetection {
+    Assembly assembly = Assembly::Unknown;
+    std::string evidence;         // human string for the stderr report, e.g.
+                                  // "##contig chr22 length=51304566 -> GRCh37"
+    bool from_reference = false;  // a ##reference token resolved the build
+    bool from_contig = false;     // a ##contig autosome length resolved the build
+};
+
+// Detect the assembly from the VCF header ALONE (## and #CHROM lines; never a
+// body record). The contig length is the decisive, unspoofable signal; a
+// ##reference token corroborates it or resolves an absent/ambiguous contig. A
+// contig-vs-reference disagreement yields Unknown (fail-clear). Cheap (a few KB
+// of inflate); independent of VcfReader::genotype(). Throws on file-open failure.
+[[nodiscard]] AssemblyDetection detect_vcf_assembly(const std::string& vcf_path);
+
 // The resolved call class (report label — never recomputed from dosage).
 enum class VcfCall { Homref, Het, Homalt, Missing, Dropped };
 

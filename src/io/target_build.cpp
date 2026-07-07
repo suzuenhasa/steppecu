@@ -134,7 +134,9 @@ TargetSites build_target_sites(const std::string& panel_snp, const std::string& 
     counts.panel_dup_rsids = static_cast<long long>(dup.size());  // len(dup) (critic fix #3)
 
     // --- pass 2: lift join + native ref38 fetch + assemble --------------------
-    const std::unordered_map<std::string, long long> lift = read_lift_map(lift_map);
+    // GRCh37-direct (identity_lift) skips the lift file entirely: pos38 := pos37.
+    std::unordered_map<std::string, long long> lift;
+    if (!opts.identity_lift) lift = read_lift_map(lift_map);
 
     TargetSites ts;
     ts.sites.reserve(rows.size());
@@ -143,13 +145,18 @@ TargetSites build_target_sites(const std::string& panel_snp, const std::string& 
             ++counts.lift_dropped_dup;  // ROWS dropped (n_dropdup); per-occurrence
             continue;
         }
-        const auto lit = lift.find(r.rsid);
-        if (lit == lift.end()) {  // no lift -> dropped (oracle:86-90)
-            ++counts.lift_no_lift;
-            continue;
+        long long pos38 = 0;
+        if (opts.identity_lift) {
+            pos38 = r.pos37;  // same-build identity join (lift_no_lift stays 0)
+        } else {
+            const auto lit = lift.find(r.rsid);
+            if (lit == lift.end()) {  // no lift -> dropped (oracle:86-90)
+                ++counts.lift_no_lift;
+                continue;
+            }
+            pos38 = lit->second;
         }
         ++counts.lift_ok;
-        const long long pos38 = lit->second;
 
         TargetSite s;
         s.rsid = r.rsid;
