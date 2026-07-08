@@ -28,6 +28,7 @@
 #include "app/cmd_cache.hpp"
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_ibd.hpp"
+#include "app/cmd_roh.hpp"
 #include "app/cmd_ingest.hpp"
 #include "app/cmd_ingest_concord.hpp"
 #include "app/cmd_readv2_concord.hpp"
@@ -289,6 +290,7 @@ int run_cli(int argc, char** argv) {
     // transpose seam for --emit-tile) and the host-only ingest concordance args.
     IngestArgs ingest_args;
     IbdArgs ibd_args;
+    RohArgs roh_args;
     IngestConcordArgs ingest_concord_args;
 
     int code = cfg::kExitOk;
@@ -809,6 +811,41 @@ int run_cli(int argc, char** argv) {
     ibd->add_option("--summary", ibd_args.summary, "Per-pair summary path (default <out>.summary, or stderr)");
     ibd->add_option("--format", ibd_args.format, "Output field separator: tsv | csv (default tsv)");
     ibd->callback([&]() { code = run_ibd(ibd_args); });
+
+    // The `roh` subcommand (hapROH runs-of-homozygosity): self-contained args, like `ibd`.
+    // Reads the TARGET ancient triple + the phased reference-haplotype panel triple, runs
+    // the (K+1)-state copying FB, calls ROH segments, and writes the segment + summary tables.
+    CLI::App* roh = app.add_subcommand(
+        "roh",
+        "hapROH runs-of-homozygosity: --prefix TARGET ancient triple + --ref-panel phased "
+        "reference-haplotype panel triple -> per-ROH-segment table (> cutoff-post) and a per-"
+        "individual ROH summary (sum_roh / n_roh per length bin)");
+    roh->add_option("--prefix", roh_args.prefix,
+                    "TARGET ancient genotype triple prefix (pseudo-haploid 1240K)")
+        ->required();
+    roh->add_option("--ref-panel", roh_args.ref_panel,
+                    "Phased reference-haplotype panel triple prefix (staged from the HDF5)")
+        ->required();
+    roh->add_option("--samples", roh_args.samples,
+                    "OPTIONAL target subset FILE (one pop label/line; default all target individuals)");
+    roh->add_option("--exclude-pops", roh_args.exclude_pops,
+                    "OPTIONAL comma-separated panel population labels to drop (hapROH exclude_pops)");
+    roh->add_option("--e-rate", roh_args.e_rate, "Genotype/miscopy error (haploid emission; default 0.01)");
+    roh->add_option("--roh-in", roh_args.roh_in, "ROH-in rate per Morgan (default 1)");
+    roh->add_option("--roh-out", roh_args.roh_out, "ROH-out rate per Morgan (default 20)");
+    roh->add_option("--roh-jump", roh_args.roh_jump, "ROH-jump rate per Morgan (default 300)");
+    roh->add_option("--in-val", roh_args.in_val, "Initial per-state probability (default 1e-4)");
+    roh->add_option("--cutoff-post", roh_args.cutoff_post,
+                    "Per-SNP ROH-posterior calling threshold (default 0.999)");
+    roh->add_option("--roh-bins", roh_args.roh_bins, "Summary length bins in cM (default 4,8,12,20)");
+    roh->add_option("--n-ref", roh_args.n_ref,
+                    "Reference INDIVIDUALS to use (K = 2*n_ref haplotypes; 0 = all panel columns)");
+    roh->add_option("--device", roh_args.device, "CUDA device ordinal (default auto)");
+    roh->add_option("--out", roh_args.out, "Per-segment table path (default stdout)");
+    roh->add_option("--summary", roh_args.summary,
+                    "Per-individual summary path (default <out>.summary, or stderr)");
+    roh->add_option("--format", roh_args.format, "Output field separator: tsv | csv (default tsv)");
+    roh->callback([&]() { code = run_roh(roh_args); });
 
     // The host-only VCF-ingest concordance validator (the Stage-1 block-correctness
     // gate): diffs steppe's report (--a) vs the Stage-0 oracle dosage TSV (--b).

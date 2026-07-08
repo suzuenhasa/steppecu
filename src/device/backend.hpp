@@ -355,6 +355,20 @@ struct AncibdPosterior {
     Status status = Status::Ok;
 };
 
+// hapROH per-target ROH posterior (the `steppe roh` FB output). p_roh is the per-SNP
+// ROH posterior 1 - gamma_0(l) for each target, target-major p_roh[target*M + l], over
+// the M kept sites. Only the small n_target*M posterior returns to host; the (K+1)-state
+// copying scan (with checkpoint/recompute over the K-donor panel) stays device-resident.
+// Native FP64 (the FB is a sub-one product scan — the reduction carve-out, NOT the
+// emulated default). Only the CpuBackend oracle and the CUDA override implement it.
+// Reference: docs/planning/haproh-face-spec.md §3.
+struct RohPosterior {
+    std::vector<double> p_roh;  // n_target*M, target-major [target*M + l]
+    int n_target = 0;
+    long M = 0;
+    Status status = Status::Ok;
+};
+
 // Per-site Weir & Cockerham 1984 FST over one population pair (the `steppe fst` output).
 // num/den/fst/valid are per-SNP in the tile's kept order (length M); a site is `valid`
 // when both pops are sampled, the combined size exceeds 2, and the denominator is finite
@@ -846,6 +860,26 @@ public:
         (void)n_pair; (void)in_val; (void)p_min; (void)min_error; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::ancibd_fb: not implemented by this backend (the CpuBackend "
+            "provides the reference oracle; the CUDA override runs the device kernel)");
+    }
+
+    // roh_fb: the hapROH (K+1)-state copying forward-backward (the `steppe roh` FB core).
+    // Runs the pooled O(K)-per-column scaled scan block-per-target over the device-
+    // resident reference-haplotype panel (with checkpoint/recompute), returning the
+    // per-SNP ROH posterior 1 - gamma_0(l).
+    //   ob       n_target*M   target observed alleles {0,1,missing} (target-major)
+    //   refhaps  K*M          reference-haplotype panel bytes {0,1,missing} (donor-major)
+    //   p        M            per-SNP panel allele frequency
+    //   T        M*9          per-SNP transition tensor (roh_build_transition)
+    // Native FP64. Default: throw (the CpuBackend oracle + the CUDA override implement it).
+    [[nodiscard]] virtual RohPosterior roh_fb(const std::uint8_t* ob, const std::uint8_t* refhaps,
+                                              const double* p, const double* T, int K, long M,
+                                              int n_target, double e_rate, double in_val,
+                                              const Precision& precision) {
+        (void)ob; (void)refhaps; (void)p; (void)T; (void)K; (void)M; (void)n_target;
+        (void)e_rate; (void)in_val; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::roh_fb: not implemented by this backend (the CpuBackend "
             "provides the reference oracle; the CUDA override runs the device kernel)");
     }
 

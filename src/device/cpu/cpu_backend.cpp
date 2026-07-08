@@ -27,6 +27,7 @@
 #include "core/domain/block_partition_rule.hpp"
 #include "core/internal/dates_fit.hpp"
 #include "core/stats/ancibd_fb.hpp"
+#include "core/stats/roh_fb.hpp"
 #include "core/stats/ancibd_model.hpp"
 #include "core/internal/decode_af.hpp"
 #include "core/internal/sfs_hist.hpp"
@@ -1103,6 +1104,35 @@ public:
             const double* rowBb = hts.data() + static_cast<std::size_t>(2 * i2 + 1) * Ms;
             core::ancibd_fb_pair(rowAa, rowAb, rowBa, rowBb, p, T, M, pr,
                                  out.p_ibd.data() + static_cast<std::size_t>(q) * Ms);
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // roh_fb: the hapROH (K+1)-state copying forward-backward REFERENCE oracle (the
+    // `steppe roh` FB core) — the diff oracle the GPU kernel is gated against. Runs the
+    // scalar pooled (K+1)-state native-FP64 scaled scan (core::roh_fb_target, a port of
+    // hapROH's fwd_bkwd_scaled_lowmem) once per target over the shared panel.
+    [[nodiscard]] RohPosterior roh_fb(const std::uint8_t* ob, const std::uint8_t* refhaps,
+                                      const double* p, const double* T, int K, long M, int n_target,
+                                      double e_rate, double in_val,
+                                      const Precision& precision) override {
+        (void)precision;  // native FP64 by construction
+        RohPosterior out;
+        out.n_target = n_target;
+        out.M = M;
+        if (K <= 0 || M <= 0 || n_target <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t Ms = static_cast<std::size_t>(M);
+        core::RohParams pr;
+        pr.e_rate = e_rate;
+        pr.in_val = in_val;
+
+        out.p_roh.assign(static_cast<std::size_t>(n_target) * Ms, 0.0);
+        for (int t = 0; t < n_target; ++t) {
+            const std::uint8_t* obt = ob + static_cast<std::size_t>(t) * Ms;
+            core::roh_fb_target(obt, refhaps, p, T, K, M, pr,
+                                out.p_roh.data() + static_cast<std::size_t>(t) * Ms);
         }
         out.status = Status::Ok;
         return out;

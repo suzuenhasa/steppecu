@@ -204,6 +204,14 @@ public:
                                             double p_min, double min_error,
                                             const Precision& precision) override;
 
+    // hapROH (K+1)-state copying forward-backward (the `steppe roh` FB core). Runs the
+    // pooled scaled scan block-per-target over the device-resident reference-haplotype
+    // panel (checkpoint/recompute); only the n_target*M ROH posterior returns.
+    [[nodiscard]] RohPosterior roh_fb(const std::uint8_t* ob, const std::uint8_t* refhaps,
+                                      const double* p, const double* T, int K, long M, int n_target,
+                                      double e_rate, double in_val,
+                                      const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

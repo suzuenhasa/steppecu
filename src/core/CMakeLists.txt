@@ -44,6 +44,7 @@ add_library(steppe_core STATIC
     stats/li_stephens.cpp
     stats/li_stephens_validate.cpp
     stats/ancibd_segments.cpp
+    stats/roh_segments.cpp
     stats/decode_keep_autosomes.cpp
     stats/read_canonical_tile.cpp
     stats/genotype_front_end.cpp
