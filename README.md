@@ -43,6 +43,12 @@ streaming pass over the genotypes builds an f2 cache; after that the tensor stay
 and every fit runs device-side, so a model fit does zero host round-trips. That's most of why it's
 fast.
 
+Beyond that f-statistics core, Steppe also ingests bring-your-own genotypes (VCF, GRCh37/38
+auto-detected), computes standalone population statistics (per-SNP and all-pairs **FST**, the joint
+**SFS**, genotype **PCA**), detects relatedness (**READv2**), paints chromosomes (Li-Stephens), and
+runs a low-coverage / ancient-DNA family — **PCAngsd**, **ancIBD**, **hapROH** — each gated against
+its field-standard reference tool (plink2, scikit-allel, PCAngsd, ancIBD, hapROH), on the GPU.
+
 > **Steppe is a GPU product.** A CUDA-13 GPU is required at runtime; there is no CPU runtime path
 > (the bundled `CpuBackend` is a test/parity oracle only).
 
@@ -149,7 +155,7 @@ all live in the **[user guide](docs/userguide/)** — start with **[getting star
 
 ## Commands
 
-`steppe --help` lists the **15 subcommands** (all compute runs on the GPU); the
+`steppe --help` lists the **25 subcommands** (all compute runs on the GPU); the
 **[user guide](docs/userguide/)** has a page per command explaining every flag with runnable examples.
 
 | Command | What it does |
@@ -169,6 +175,16 @@ all live in the **[user guide](docs/userguide/)** — start with **[getting star
 | `qpdstat` | D-statistic: `--f2-dir` reports f4 (f2-path), or `--prefix` reports the genotype-path normalized-D. |
 | `qpfstats` | Genotype-path joint f2 smoother (the AADR-missingness remedy); emits an f2 dir. |
 | `dates` | Admixture dating (DATES): generations since admixture from the ancestry-covariance decay. |
+| `ingest` | Genotype a (b)gzipped VCF sample onto a target panel (GRCh37/38 auto-detected); `--likelihoods` emits a GPU GL/PL/GP tensor. |
+| `cache` | Inspect/verify a local f2 cache and fetch AADR panels (the dataset manager). |
+| `readv2` | GPU pseudo-haploid relatedness (READv2) — all-pairs kinship degree over your own data. |
+| `paint` | Li-Stephens chromosome painting — coancestry and per-SNP local ancestry (`--face`). |
+| `fst` | Per-SNP Weir & Cockerham FST between two populations, or the whole population×population matrix (`--all-pairs`). |
+| `sfs` | 2D joint site-frequency spectrum between two populations (folded or unfolded). |
+| `pca` | Patterson-2006 genotype PCA (scales to the full AADR cohort) with an optional interactive HTML scatter. |
+| `pcangsd` | Low-coverage PCA / individual allele frequencies from genotype likelihoods (a beagle GL file). |
+| `ibd` | ancIBD IBD-segment detection between imputed ancient individuals. |
+| `roh` | hapROH runs-of-homozygosity for an ancient genome against a phased reference panel. |
 
 **Precision & output.** `--precision emu40` (default: emulated-FP64 / Ozaki for the
 matmul-heavy paths, native FP64 for the cancellation-sensitive stats) · `emu32` · `fp64`
