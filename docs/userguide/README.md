@@ -114,6 +114,18 @@ Almost every command below needs an f2-dir from step 2 first, so start there.
   GPU-bound pass.
 - **[qpfstats](./qpfstats.md)** — turn a genotype dataset into a smoothed f2 directory you can
   then feed to qpadm/f4/qpgraph.
+- **[fst](./fst.md)** — per-SNP Weir & Cockerham FST between two populations, or the whole
+  population×population FST matrix (`--all-pairs`) in one GPU pass.
+- **[sfs](./sfs.md)** — the 2D joint site-frequency spectrum between two populations (folded or
+  unfolded), gated bit-exact vs scikit-allel.
+- **[pca](./pca.md)** — Patterson-2006 genotype PCA (scales to the full AADR cohort) with an
+  optional self-contained interactive HTML scatter.
+- **[pcangsd](./pcangsd.md)** — low-coverage PCA / individual allele frequencies from genotype
+  likelihoods (a beagle GL file), the PCAngsd method.
+- **[ibd](./ibd.md)** — ancIBD IBD-segment detection between imputed ancient individuals.
+- **[roh](./roh.md)** — hapROH runs-of-homozygosity for ancient genomes against a phased panel.
+- **[likelihood reader](./likelihood-reader.md)** — `ingest --likelihoods`: parse GL/PL/GP into a
+  GPU-resident likelihood tensor (the shared input for pcangsd and ibd).
 - **[data and formats](./data-and-formats.md)** — supported genotype formats and how steppe
   reads them.
 - **[precision and tiers](./precision-and-tiers.md)** — the `--precision` matmul modes

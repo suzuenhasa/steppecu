@@ -214,7 +214,7 @@ correctness-and-parity result, not a speed claim.
 
 ## 9. See also
 
-- [extract-f2](../userguide/extract-f2.md) / [f-statistics](../userguide/f-statistics.md) —
+- [extract-f2](./extract-f2.md) / [f-statistics](./f-statistics.md) —
   the f2-cache-based population statistics (a different family; FST needs no cache).
-- [data-and-formats](../userguide/data-and-formats.md) — the genotype input
+- [data-and-formats](./data-and-formats.md) — the genotype input
   formats the shared decode front-end accepts.
