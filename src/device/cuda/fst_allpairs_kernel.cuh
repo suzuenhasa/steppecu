@@ -6,6 +6,8 @@
 // core/internal/wc_fst.hpp (so the matrix values cannot drift from the single-pair kernel),
 // and the pair enumeration via the closed-form k=2 unrank in sweep_unrank.cuh. The kernel
 // bodies live in fst_allpairs_kernel.cu.
+//
+// Reference: docs/reference/src_device_cuda_fst_allpairs_kernel.cuh.md
 
 #include <cstddef>
 #include <cstdint>

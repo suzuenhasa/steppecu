@@ -1,4 +1,5 @@
 // src/device/cuda/fst_allpairs_kernel.cu
+// Reference: docs/reference/src_device_cuda_fst_allpairs_kernel.cu.md
 //
 // GPU kernels for the all-pairs Weir & Cockerham 1984 FST matrix (`steppe fst --all-pairs`),
 // plus their thin host launch wrappers. The design (docs/planning/fst-all-pairs-scope.md):
@@ -33,7 +34,7 @@ using core::WcSite;
 
 namespace {
 
-// Sufficient-stat decode — reference §3. One thread per (pop p, SNP s_local).
+// Sufficient-stat decode — reference §2. One thread per (pop p, SNP s_local).
 __global__ void fst_suffstat_decode_kernel(const std::uint8_t* __restrict__ packed,
                                            std::size_t bytes_per_record,
                                            const std::size_t* __restrict__ pop_offsets, int P,
@@ -69,7 +70,7 @@ __global__ void fst_suffstat_decode_kernel(const std::uint8_t* __restrict__ pack
 // is sized to it). 256 = kDecodeBlockX * kDecodeBlockY, a memory-bandwidth-friendly power of two.
 constexpr int kFstAccumBlock = 256;
 
-// All-pairs accumulate — reference §4. ONE BLOCK per pair (was one THREAD per pair): the block's
+// All-pairs accumulate — reference §3. ONE BLOCK per pair (was one THREAD per pair): the block's
 // threads stride-share the tile's SNPs, each holds a private partial (num/den/cnt), then a
 // shared-memory tree reduction folds the block's partials and thread 0 ADDS the block total into
 // the persistent per-pair Σ. One block owns each distinct r, so the += needs no atomic and the

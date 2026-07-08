@@ -1,5 +1,6 @@
 #pragma once
 // src/device/cuda/pca_truncated_eig.cuh
+// Reference: docs/reference/src_device_cuda_pca_truncated_eig.cuh.md
 //
 // Randomized subspace-iteration top-K eigensolver for a device-resident, column-major
 // N x N SPD covariance (the `steppe pca` GRM). It replaces the full-spectrum

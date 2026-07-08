@@ -13,6 +13,8 @@
 //   V      = Q * Yb         (N x L lifted Ritz vecs)  (Dgemm emulated)
 // The L ascending Ritz values Wb approximate C's top-L eigenvalues; the top K (well-separated)
 // are the PCs. Extra workspace is O(N*L) (~190 MB at N=23k, L=256), not O(N^2).
+//
+// Reference: docs/reference/src_device_cuda_pca_truncated_eig.cu.md
 #include "device/cuda/pca_truncated_eig.cuh"
 
 #include <algorithm>

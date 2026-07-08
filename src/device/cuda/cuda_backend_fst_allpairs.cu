@@ -1,4 +1,5 @@
 // src/device/cuda/cuda_backend_fst_allpairs.cu
+// Reference: docs/reference/src_device_cuda_cuda_backend_fst_allpairs.cu.md
 //
 // CudaBackend override for the all-pairs Weir & Cockerham 1984 FST matrix
 // (`steppe fst --all-pairs`). It uploads the packed genotype tile device-resident, then
