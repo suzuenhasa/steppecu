@@ -232,6 +232,27 @@ steppe ingest-concord --a sample_report.tsv --b oracle_dosage.tsv
 > per-site report, or **~19.0 s** with `--merge-into` (which also writes the full ~7.1 GB merged
 > TGENO panel). Peak host RAM ~0.65 GB; no GPU used. Single timed run, `/usr/bin/time`.
 
+### GL mode — read per-site genotype likelihoods (`--likelihoods`)
+
+`--likelihoods` switches ingest into a **multi-sample** GL reader: it pulls one FORMAT
+likelihood field (`--gl-field PL|GL|GP`, default `PL`) into a normalized
+`[n_site × n_sample × 3]` likelihood tensor — the substrate the `pcangsd` and `ibd` paths
+consume. Unlike the genotyping path it does NOT apply the FILTER/DP/GQ floor (a GL is soft
+information). `--emit-likelihoods` writes the `STPGL1` tensor artifact and uploads it
+device-resident with a residency checksum (the one GPU seam in GL mode).
+
+```bash
+# read PL into a normalized GL tensor at a target table's sites, write the STPGL1 artifact
+steppe ingest --likelihoods --vcf sample.vcf.gz --targets targets.tsv \
+  --gl-field PL --emit-likelihoods sample.stpgl1 --device 0
+```
+
+> **Measured** (one RTX 5090, `--device 0`). Reading `PL` from a **30x WGS gVCF**
+> (13.9M records) joined to the 1.1M-site 1240K target table — 475,265 sites with PL present →
+> a device-resident GL tensor — takes **~12.3 s** (peak host RAM ~0.72 GB). The wall is
+> dominated by scanning the 13.9M-record VCF; the tensor upload is device-resident. Median of 3
+> timed reps after one warmup, `/usr/bin/time`.
+
 ---
 
 ## Relatedness — READv2 kinship (needs your own data)
@@ -315,6 +336,80 @@ never leaves the device. `--sure` lifts the O(N·K·M) cost guard for a long job
 > run both land around **~0.45 s** (peak host RAM ~0.44 GB, GPU ~0.5–0.7 GB). Median of 3 timed
 > reps after one warmup, `/usr/bin/time`. Cost scales with recipients × donors × SNPs, so a
 > genome-wide painting of a large panel is far larger than these smoke-sized panels.
+
+---
+
+## Population statistics — FST, SFS, PCA (needs your own data)
+
+These read a genotype prefix (`PREFIX.{geno,snp,ind}`, EIGENSTRAT/PLINK/…) and compute a classic
+population statistic straight on the GPU. Point `--prefix` at your own panel.
+
+```bash
+# Weir & Cockerham 1984 FST between two populations (per-SNP table; else genome-wide summary row)
+steppe fst --prefix v66_fit9_ped --pops Han,Papuan --method wc --per-snp --out fst.tsv
+
+# 2D joint site-frequency spectrum between two populations (--fold = per-pop minor-allele SFS)
+steppe sfs --prefix v66_fit9_ped --pops Han,Papuan --fold --out sfs.tsv
+
+# Patterson-2006 genotype PCA, top-k PCs (SYRK covariance + cuSOLVER eigen)
+steppe pca --prefix v66_fit9_ped -k 12 --out pca.tsv
+```
+
+`fst` is pairwise Weir-Cockerham (`--method wc`; `--per-snp` for the per-SNP
+`num/den/fst/valid` table, else the genome-wide ratio-of-averages summary row) — gated vs
+`plink2 --fst method=wc`. `sfs` builds the integer `(2nA+1)×(2nB+1)` joint spectrum over
+complete-data sites (`--fold` for the polarity-free per-pop minor-allele SFS, default unfolded) —
+gated bit-exact vs scikit-allel `joint_sfs`. `pca` takes `-k` PCs and optionally `--eigenvalues`
+(the scree table) or `--emit-html` (a self-contained interactive scatter) — gated vs
+scikit-allel/sklearn PCA (NOT ADMIXTOOLS 2).
+
+> **Measured** (one RTX 5090, `--device 0`, on a real AADR v66 fixture — 430 samples ×
+> ~584k variants; Han vs Papuan). `fst` (per-SNP, 425,234 valid sites) ~**3.15 s**; `sfs`
+> (folded 154×47 over 380,265 complete sites) ~**2.17 s**; `pca` (`-k 12` over 522,483
+> polymorphic SNPs) ~**2.53 s** (peak host RAM ~0.5–0.7 GB). Median of 3 timed reps after one
+> warmup, `/usr/bin/time`. HONEST NOTE: at this gate size a mature multithreaded CPU tool wins —
+> `plink2 --fst` finishes sub-second on the same pair — because steppe pays a fixed
+> GPU-context-init + full-decode cost per run. steppe's GPU advantage is a large-model / scale
+> story, not this small fixture.
+
+---
+
+## Low-coverage & ancient DNA — PCAngsd, IBD, ROH (needs your own data)
+
+The genotype-likelihood / imputed-haplotype family for low-coverage and ancient samples. Each
+matches a specific reference tool (gated) and is self-contained (no f2 dir).
+
+```bash
+# PCAngsd: low-coverage PCA from a beagle GL file, top-e PCs (iterative IAF-EM + GL covariance)
+steppe pcangsd --beagle input.beagle.gz -e 2 --out pcangsd_out
+
+# ancIBD: IBD-segment detection between imputed ancient individuals (phased GT + GP)
+steppe ibd --gp-vcf imputed.vcf.gz --targets targets.tsv --map map.cM --af panel_af.tsv \
+  --min-cm 8 --out ibd.tsv
+
+# hapROH: runs-of-homozygosity for one ancient target vs a phased reference panel
+steppe roh --prefix TARGET_triple --ref-panel phased_panel_triple --n-ref 2504 --out roh.csv
+```
+
+`pcangsd` reads a 3-GL-per-individual beagle file, runs the individual-allele-frequency EM
+(`--iter`/`--tole`), builds a GL-weighted covariance and takes `-e` PCs, writing
+`PREFIX.{cov,eigenvec,eigenval}` — gated vs the `pcangsd` package. `ibd` runs a per-pair 5-state
+forward-backward over imputed GP at target sites (needs `--map` in cM and a panel `--af`),
+calling segments ≥ `--min-cm` — gated vs `pip ancIBD`. `roh` runs the (K+1)-state copying FB of a
+target ancient triple against a phased reference panel (`--n-ref` reference individuals ⇒
+K = 2·n_ref haplotypes; the default 2504 is safe, a very large `--n-ref` above ~5000 is
+rejected up front), calling ROH segments — gated vs `pip hapROH/hapsburg`.
+
+> **Measured** (one RTX 5090, `--device 0`). `pcangsd` on the popgen.dk Demo2 beagle
+> (100 low-coverage samples × ~50k SNPs, `-e 2`, 100 plain-EM FP64 iters) ~**3.66 s** (peak host
+> RAM ~0.72 GB; median of 3 after warmup). `ibd` on the ancIBD Hazelton chr20 tutorial
+> (28.5k sites × 15 pairs) ~**1.8 s** for the GPU forward-backward — this figure is from the gate
+> run (that dataset was since cleaned off the disk-tight box, so it is not a fresh re-time).
+> `roh` on a real 1000G-1240K phased-panel run is **not separately timed** (the ~912 MB Zenodo
+> panel was cleaned under disk pressure and no wall was logged at the gate). HONEST NOTE: on the
+> tiny Demo2 fixture the reference `pcangsd` (10 SQUAREM float32 iters, 16 CPU threads) finishes
+> ~1 s — steppe runs more, heavier FP64 iterations to the same fixed point, so it is slower on
+> this smoke size; the GPU win is a scale story.
 
 ---
 
