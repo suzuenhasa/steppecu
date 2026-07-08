@@ -3,7 +3,7 @@
 Per-SNP FST between two populations — the classic Weir & Cockerham 1984
 estimator, computed on the GPU straight from a genotype triple.
 
-## What it does
+## 1. What it does
 
 FST answers a simple question: **how different are two populations at each
 site?** A value near 0 means the two groups have basically the same allele
@@ -33,7 +33,7 @@ You get two things out:
 The genome-wide summary is always echoed to stderr as a one-line human
 diagnostic, whichever output mode you pick.
 
-## The method, and what it matches
+## 2. The method, and what it matches
 
 The estimator is Weir & Cockerham 1984 — the standard variance-component FST
 that treats the two populations as samples and corrects for finite sample size.
@@ -59,7 +59,53 @@ compared per-SNP against `plink2 --fst method=wc report-variants`:
 - Pearson r = 0.999999999999.
 - Genome-wide summary FST = **0.177817**, matching plink2 to every printed digit.
 
-## Inputs
+## 3. All-pairs: the whole population × population FST matrix
+
+`--all-pairs` flips `steppe fst` from a single 2-population query into a full
+**P×P genome-wide WC FST matrix** — every population against every other, in one
+GPU pass. It decodes the genotypes once into per-population sufficient statistics,
+then sweeps all `C(P, 2)` pairs on the device and assembles a symmetric P×P matrix
+with a zero diagonal. Each cell is the same genome-wide **ratio-of-averages**
+(`sum(num)/sum(den)`) you'd get from the single-pair path — and it's **bit-exact**
+against that path, pair for pair; `--all-pairs` is just the batched, decode-once
+way to get the whole grid at once.
+
+You pick the populations one of two ways:
+
+- **`--pops A,B,C,…`** — an explicit set of labels.
+- **`--min-n N`** — every population in the file that has at least `N` individuals
+  (`--min-n 1`, the default, is *all* populations). Mutually exclusive with an
+  explicit `--pops` set.
+
+The output is a labelled matrix: a population-label header row and a leading label
+column, symmetric with a zero diagonal (in JSON, `{"pops": [...], "fst": [[...]]}`).
+A cell is `NaN` when a pair shares no valid site. Because a large panel can mean a
+lot of pairs, there's a safety cap on the pair count; pass `--sure` to lift it (or
+restrict `--pops` / raise `--min-n`). Note the cap is on the *pair count* — the
+actual work is `C(P,2) × M` accumulations, so a very large P at full SNPs can still
+be a long run even under the cap.
+
+**Where this earns its keep.** The value of `--all-pairs` is the **large-panel**
+regime — hundreds to thousands of populations, the kind of full-panel FST grid you
+build for QC, a population-structure atlas, or curating which pops to keep. It is
+*not* the tool for a single 2-pop question; for that a mature CPU tool is fine.
+
+**Measured** (real AADR, 1.15–1.23M SNPs, vs `plink2 --fst CATPHENO --threads 384`
+computing the same all-pairs matrix, one RTX 5090, `--device 0`):
+
+| populations | pairs | steppe vs plink2 |
+|---|---|---|
+| 109 | 5,886 | **3.95×** |
+| 267 | 35,511 | **19.9×** |
+| 502 | 125,751 | **29.5×** |
+| 3,898 (full panel) | 7.6M | **22 min** vs plink2's projected **~18.5 hr** (**~50×**) |
+
+There's a **crossover around ~60 populations**: below it plink2 wins (steppe's
+fixed GPU-context and small-problem overhead dominate), above it steppe pulls away
+fast, and by the hundreds-of-pops range — exactly the regime you'd actually want a
+full matrix for — it's an order of magnitude or more ahead.
+
+## 4. Inputs
 
 A genotype triple, passed as a `--prefix`: `PREFIX.geno`, `PREFIX.snp`,
 `PREFIX.ind` (EIGENSTRAT), or the equivalent PLINK / other supported multi-format
@@ -67,7 +113,7 @@ inputs the shared decode front-end reads. The two `--pops` labels must be
 population names that appear in the `.ind` (or the PLINK family/population
 column).
 
-## Outputs
+## 5. Outputs
 
 Either the genome-wide summary row or, with `--per-snp`, the full per-SNP table.
 
@@ -77,20 +123,28 @@ Per-SNP columns: `snp_id`, `chrom`, `pos_bp`, `a1`, `a2`, `popA`, `popB`,
 `fst_num`, `fst_den`, `fst`, `valid`. Here `fst_num` is plink2's `FST_NUMER`,
 `fst_den` is `FST_DENOM`, and `fst` is `WC_FST` (`NaN` on an invalid site).
 
-## Flags
+With `--all-pairs`, instead a labelled **P×P matrix**: a population-label header
+row plus a leading label column, symmetric with a zero diagonal (JSON:
+`{"pops": [...], "fst": [[...]]}`), each cell the genome-wide ratio-of-averages
+for that pair.
+
+## 6. Flags
 
 | flag | what it does | default |
 |---|---|---|
 | `--prefix TEXT` | Genotype triple prefix — reads `PREFIX.{geno,snp,ind}` (EIGENSTRAT / PLINK / …). Required. | — |
-| `--pops A,B` | The **two** populations to differentiate. Must name exactly two, and they must be different. | — |
+| `--pops A,B` | The **two** populations to differentiate. With `--all-pairs`, instead the explicit set of populations for the matrix. | — |
+| `--all-pairs` | Compute the whole **P×P** genome-wide WC FST matrix over the selected populations in one GPU pass, instead of a single pair. | off |
+| `--min-n INT` | (`--all-pairs` only) Include every population with at least this many individuals. `1` = all pops. Mutually exclusive with an explicit `--pops` set. | `1` |
+| `--sure` | (`--all-pairs` only) Lift the safety cap on the C(P,2) pair count for very large population sets. | off |
 | `--method TEXT` | FST estimator. Only `wc` (Weir-Cockerham 1984) is available today; `hudson` is a documented follow-up. | `wc` |
-| `--per-snp` | Emit the per-SNP FST table instead of just the genome-wide summary row. | off (summary) |
+| `--per-snp` | Emit the per-SNP FST table instead of just the genome-wide summary row. (Single-pair mode only.) | off (summary) |
 | `--out TEXT` | Write to this file. | stdout |
 | `--format TEXT` | Output format: `csv`, `tsv`, or `json`. | `csv` |
 | `--device TEXT` | CUDA device (single ordinal; GPU-only, there is no `cpu`). Multi-GPU is parked. | `auto` |
 | `--precision TEXT` | Shared matmul-precision flag. **No effect on FST** — FST always runs native FP64 regardless of what you pass. | `emu40` |
 
-## Example
+## 7. Example
 
 The measured gate command — Han vs Papuan on the AADR PLINK fixture, per-SNP TSV:
 
@@ -112,6 +166,20 @@ steppe fst: Han vs Papuan — WC FST(ratio-of-averages) = 0.177817 over 425234 v
 and writes the per-SNP table to `fst.tsv`. Drop `--per-snp` to get just the
 one-row genome-wide summary.
 
+The all-pairs matrix — every population with at least 5 individuals, one GPU pass:
+
+```
+steppe fst --all-pairs \
+  --prefix /path/to/v66.p1_1240K.aadr.patch.PUB \
+  --min-n 5 \
+  --device 0 \
+  --out fst_matrix.tsv --format tsv
+```
+
+Or restrict to an explicit set with `--pops A,B,C,…`. For the full-panel matrix
+(thousands of populations, millions of pairs), add `--sure` to lift the pair-count
+cap.
+
 **Measured wall-clock:** ~3.15 s on box5090 (Release build, single RTX 5090,
 `--device 0`) for the 430-sample × 584,131-variant fixture above — median of 3
 runs, ~505 MB peak RSS. On a gate this small, plink2 (a mature multithreaded CPU
@@ -120,11 +188,13 @@ GPU-context startup plus the full multi-format decode. steppe's GPU advantage is
 a large-model / scale story, not this one fixture; treat the ~3 s here as a
 correctness-and-parity result, not a speed claim.
 
-## Caveats and gotchas
+## 8. Caveats and gotchas
 
-- **Exactly two populations.** `--pops` must name two *different* labels. There's
-  no `--all-pairs` yet — all-pairs, Hudson's estimator, windowed FST, PBS, and a
-  block-jackknife standard error are all documented follow-ups, not shipped.
+- **Two populations, or the whole matrix.** Without `--all-pairs`, `--pops` must
+  name two *different* labels. With `--all-pairs` it computes the full P×P matrix
+  over the selected set instead (`--per-snp` is single-pair only). Hudson's
+  estimator, windowed FST, PBS, and a block-jackknife standard error are still
+  documented follow-ups, not shipped.
 - **Autosomes only.** The summary and the valid-site count cover autosomal sites;
   the genome-wide FST is over those.
 - **Invalid sites are honest `NaN`s.** A site is valid only if both groups have at
@@ -142,7 +212,7 @@ correctness-and-parity result, not a speed claim.
 - **GPU only.** Like the rest of steppe there is no CPU runtime; the CPU WC
   implementation exists purely as the parity oracle behind the tests.
 
-## See also
+## 9. See also
 
 - [extract-f2](../userguide/extract-f2.md) / [f-statistics](../userguide/f-statistics.md) —
   the f2-cache-based population statistics (a different family; FST needs no cache).

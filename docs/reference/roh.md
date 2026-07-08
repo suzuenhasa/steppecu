@@ -78,19 +78,33 @@ Full test suite: ctest 107/107, including the new `roh_model_unit`,
 
 ## 4. Speed
 
-**Not measured.** This is the one relatedness-family face with no defensible
-wall-clock number. The 912 MB real gate panel was cleaned off the disk-tight box
-after the gate (panels are not re-downloaded), and no steppe wall-clock was
-recorded at the gate itself — the commit notes only that `roh_fb_kernel` was 100%
-of GPU time, not how long it ran. Rather than quote the tiny synthetic `cli_roh`
-test fixture (which is not the real-panel run) or fabricate a figure, the honest
-report is: unmeasured.
+The original single-target gate (§3) was **not wall-clock timed** — the commit
+notes only that `roh_fb_kernel` was 100% of GPU time, and the 912 MB real panel was
+cleaned off the disk-tight box afterward. What *is* measured is the **batch
+throughput**: because ROH is a per-individual method, the real workload is a *stack*
+of ancients scanned against the same panel, and that is where steppe now has a
+defensible number.
 
-The reference tool's wall-clock was likewise **not separately timed at the gate**.
-For context, hapsburg runs a single-threaded numpy forward-backward; at the gate
-its low-ROH control run (see §8) had still not finished after a long grind while
-steppe's GPU run was long done — but that is an observation, not a timed
-comparison, so no speedup is claimed.
+A batch reformulation (panel uploaded to the device **once**, donor rows gathered
+**on-device** from the resident copy, and the per-target work-items run through a
+bounded **3-slot look-ahead stream pipeline** so each target's host input-build and
+segment-calling overlap its neighbours' GPU forward-backward) lifted batch
+throughput **2.84×** — GPU duty went from **57% to 77%** — with output **bit-
+identical** to the serial path (same compaction, same reference-haplotype bytes,
+same forward-backward, same in-order segments).
+
+Measured batch throughput (real AADR ancients vs the phased reference panel, one
+RTX 5090, `--device 0`):
+
+- **~138 ancients / minute** on the chromosome-subset panel used at the gate
+- **~85 ancients / hour** projected genome-wide (all chromosomes)
+- **~90× vs pip hapROH**, projected against hapsburg's single-threaded numpy
+  forward-backward
+
+The hapROH comparison is a projection, not a head-to-head timed run: hapsburg runs
+a single-threaded numpy forward-backward per individual, and at the gate its low-ROH
+control (see §8) had still not finished after a long grind while steppe's run was
+long done. The ~90× is scaled from that per-individual cost, not a stopwatch race.
 
 ## 5. Inputs
 
@@ -175,6 +189,13 @@ The HMM knobs — `--e-rate` (0.01), `--roh-in` (1), `--roh-out` (20), `--roh-ju
 `hapsb_ind` values and normally need no touching; they exist so the model is
 reproducible, not so you tune it.
 
+**Batching a stack of ancients.** There is no separate batch flag: a target triple
+holding many individuals (or `--samples` selecting several) is scanned as one batch
+against the same panel, and the panel-resident overlap pipeline (§9) kicks in
+automatically — the panel is uploaded once and the targets share it. That batch path
+is where the throughput in §4 comes from, and its output is byte-identical to
+running each target on its own.
+
 ## 8. Honest caveats
 
 - **The low-ROH control is confirmed correct, but not yet cross-checked against
@@ -214,8 +235,19 @@ checkpoint/recompute at stride `ceil(sqrt(M))` because `K × M` is too large to 
 resident); with no device visible it falls back to the CPU oracle so the command
 still works in a test/CI setting. The forward-backward runs in native FP64.
 
-Source: `src/app/cmd_roh.cpp` (CLI + driver), `src/core/stats/roh_model.hpp`
-(emission + transition rate table + the `roh_prior_valid` guard),
-`src/core/stats/roh_fb.hpp` (the forward-backward interface),
-`src/core/stats/roh_segments.{hpp,cpp}` (segment calling + summary),
-`src/device/cuda/roh_fb_kernel.cu` (the GPU kernel). Committed in 5f80ea9.
+Over a batch of targets the driver uploads the panel **once**
+(`roh_upload_panel`) and feeds the `(target, chromosome)` work-items through a
+bounded look-ahead stream pipeline (`roh_fb_batch`, 3 slots): each item's host
+input-build (phase P) and segment-calling (phase C) overlap its neighbours' GPU
+forward-backward, and the selected donor rows are gathered on-device from the
+resident panel rather than re-copied from the host. This is a **pure scheduling
+change** — the per-target compaction, reference-haplotype bytes, forward-backward,
+and in-order segment append are all identical, so batch output is byte-for-byte the
+same as running the targets one at a time.
+
+Source: `src/app/cmd_roh.cpp` (CLI + driver + the batch scheduler),
+`src/core/stats/roh_model.hpp` (emission + transition rate table + the
+`roh_prior_valid` guard), `src/core/stats/roh_fb.hpp` (the forward-backward
+interface), `src/core/stats/roh_segments.{hpp,cpp}` (segment calling + summary),
+`src/device/cuda/roh_fb_kernel.cu` (the GPU kernel). Committed in 5f80ea9; the
+panel-resident batch pipeline in b67bef6.

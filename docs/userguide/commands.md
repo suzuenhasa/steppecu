@@ -348,6 +348,9 @@ population statistic straight on the GPU. Point `--prefix` at your own panel.
 # Weir & Cockerham 1984 FST between two populations (per-SNP table; else genome-wide summary row)
 steppe fst --prefix v66_fit9_ped --pops Han,Papuan --method wc --per-snp --out fst.tsv
 
+# all-pairs: the whole population×population FST matrix in ONE GPU pass (the large-panel win)
+steppe fst --all-pairs --prefix v66.p1_1240K.aadr.patch.PUB --min-n 5 --out fst_matrix.tsv
+
 # 2D joint site-frequency spectrum between two populations (--fold = per-pop minor-allele SFS)
 steppe sfs --prefix v66_fit9_ped --pops Han,Papuan --fold --out sfs.tsv
 
@@ -357,11 +360,16 @@ steppe pca --prefix v66_fit9_ped -k 12 --out pca.tsv
 
 `fst` is pairwise Weir-Cockerham (`--method wc`; `--per-snp` for the per-SNP
 `num/den/fst/valid` table, else the genome-wide ratio-of-averages summary row) — gated vs
-`plink2 --fst method=wc`. `sfs` builds the integer `(2nA+1)×(2nB+1)` joint spectrum over
+`plink2 --fst method=wc`. `--all-pairs` instead computes the full **P×P** genome-wide FST matrix
+over the selected populations (`--pops A,B,…` or `--min-n N`; `--sure` lifts the pair-count cap)
+in one GPU pass — every cell bit-exact vs the single-pair path; this is the large-panel workload
+where the GPU pulls ahead. `sfs` builds the integer `(2nA+1)×(2nB+1)` joint spectrum over
 complete-data sites (`--fold` for the polarity-free per-pop minor-allele SFS, default unfolded) —
 gated bit-exact vs scikit-allel `joint_sfs`. `pca` takes `-k` PCs and optionally `--eigenvalues`
 (the scree table) or `--emit-html` (a self-contained interactive scatter) — gated vs
-scikit-allel/sklearn PCA (NOT ADMIXTOOLS 2).
+scikit-allel/sklearn PCA (NOT ADMIXTOOLS 2). Its eigensolve is a Halko randomized top-k solver, so
+PCA now runs the **full AADR cohort** (23,089 samples × 1.23M SNPs, ~6.5 min, 18 GB peak) — the
+old full-spectrum solver OOM'd there.
 
 > **Measured** (one RTX 5090, `--device 0`, on a real AADR v66 fixture — 430 samples ×
 > ~584k variants; Han vs Papuan). `fst` (per-SNP, 425,234 valid sites) ~**3.15 s**; `sfs`
@@ -370,7 +378,10 @@ scikit-allel/sklearn PCA (NOT ADMIXTOOLS 2).
 > warmup, `/usr/bin/time`. HONEST NOTE: at this gate size a mature multithreaded CPU tool wins —
 > `plink2 --fst` finishes sub-second on the same pair — because steppe pays a fixed
 > GPU-context-init + full-decode cost per run. steppe's GPU advantage is a large-model / scale
-> story, not this small fixture.
+> story, not this small fixture — and that story is **`--all-pairs`**: the whole pop×pop matrix
+> runs **29.5× faster than plink2** at 502 populations (125,751 pairs), and the entire **3,898-pop
+> AADR matrix (7.6M pairs) in ~22 min** vs plink2's projected ~18.5 hr (crossover ~60 pops — below
+> it plink2 still wins).
 
 ---
 
@@ -398,7 +409,9 @@ forward-backward over imputed GP at target sites (needs `--map` in cM and a pane
 calling segments ≥ `--min-cm` — gated vs `pip ancIBD`. `roh` runs the (K+1)-state copying FB of a
 target ancient triple against a phased reference panel (`--n-ref` reference individuals ⇒
 K = 2·n_ref haplotypes; the default 2504 is safe, a very large `--n-ref` above ~5000 is
-rejected up front), calling ROH segments — gated vs `pip hapROH/hapsburg`.
+rejected up front), calling ROH segments — gated vs `pip hapROH/hapsburg`. A stack of ancients
+runs through a panel-resident + 3-slot look-ahead stream pipeline (**2.84× batch throughput**, GPU
+duty 57→77%, output bit-identical), and steppe is ~**90×** the single-threaded hapROH crawl.
 
 > **Measured** (one RTX 5090, `--device 0`). `pcangsd` on the popgen.dk Demo2 beagle
 > (100 low-coverage samples × ~50k SNPs, `-e 2`, 100 plain-EM FP64 iters) ~**3.66 s** (peak host

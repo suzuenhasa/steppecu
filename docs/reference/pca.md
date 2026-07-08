@@ -48,7 +48,12 @@ use — PCA adds no new decode of its own.
 With the standardized `N x M` matrix `Z` (N samples, M usable SNPs), steppe forms
 the `N x N` covariance `C = Z Zᵀ` with a SNP-tiled cuBLAS **SYRK**, accumulated
 tile by tile so the whole genotype block never has to sit in VRAM at once. It then
-eigendecomposes `C` with cuSOLVER's symmetric solver. The PC coordinate is
+pulls the **top-K eigenpairs** out of `C` with a **Halko randomized eigensolver** —
+rather than solving the whole `N`-wide spectrum and throwing away everything past
+PC-K, it sketches the leading K-dimensional subspace with a couple of matmul passes
+and solves only the tiny K-sized problem inside it. That is exactly the PCA you
+asked for (you plot PC1..PCk, never the tail), and it is what lets the full AADR
+cohort fit in memory — see §7. The PC coordinate is
 
 ```
 coord(sample i, PC k) = eigenvector_k(i) * sqrt(eigenvalue_k)
@@ -154,6 +159,21 @@ polymorphic SNPs, 61,648 dropped monomorphic, top-12 PCs), steppe runs in **2.53
 oracle was not separately wall-clocked at the gate, so there is no head-to-head
 speedup number to quote here.
 
+**Full-cohort measured wall-clock:** the same command, pointed at the entire
+AADR v66 1240K panel instead of the 9-pop fixture —
+
+```
+steppe pca --prefix PREFIX_v66_1240K -k 10 --device 0 --out pca_full.tsv --format tsv
+```
+
+— runs the whole **23,089-sample × 1.23M-SNP** cohort in **6:24** at **18 GB peak
+VRAM** on a single RTX 5090. This used to be impossible: the old full-spectrum
+eigensolve wanted an 8.5 GB workspace and OOM'd the full cohort outright. The Halko
+top-K solver needs only ~190 MB of workspace, so the complete cohort now goes
+through in one pass. The top-10 PCs it returns match the old full-spectrum solver
+to **|r| = 1.0 on PC1–4** and **≥ 0.99998 on PC5–10** — the truncation costs you
+nothing you would ever plot.
+
 ---
 
 ## 6. The interactive HTML artifact
@@ -175,11 +195,18 @@ change (see caveats).
 
 ## 7. Honest caveats
 
-- **This is exact dense PCA, sized for AADR fixtures.** It forms the full `N x N`
-  covariance and does a full symmetric eigensolve — right for hundreds to a few
-  thousand samples. It is **not** a randomized-SVD biobank solver; at very large N
-  the dense eigensolve is the wall. Randomized SVD for biobank-scale N is a
-  documented follow-up, not built.
+- **It scales to the full AADR cohort, and returns the top-K PCs.** steppe forms
+  the full `N x N` covariance, then pulls the leading K eigenpairs out of it with a
+  Halko randomized eigensolver instead of solving the whole `N`-wide spectrum. That
+  swap is what lifted the old ~22k-sample cap: the full-spectrum solve needed an
+  8.5 GB workspace and OOM'd the whole cohort, while the Halko path needs ~190 MB,
+  so the complete **23,089-sample × 1.23M-SNP** panel now runs (**6:24, 18 GB peak
+  VRAM**, one RTX 5090). What you get back is exactly the K PCs you asked for with
+  `-k` — there is no full spectrum to inspect past that — and those top PCs match
+  the old full solver (|r| = 1.0 on PC1–4, ≥ 0.99998 on PC5–10). The one remaining
+  wall is the covariance itself: it is still a dense `N x N` matrix, so truly
+  biobank-scale N (hundreds of thousands of samples and up) is still out of reach —
+  but the whole present AADR cohort sits comfortably inside the envelope.
 - **No UMAP (yet).** A nonlinear `--embed umap` axis is a documented follow-up and
   is deliberately **not** built — steppe takes no RAPIDS / cuML dependency for it.
   The coord output and HTML schema are shaped so it can be added later without a
