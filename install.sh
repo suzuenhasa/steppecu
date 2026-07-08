@@ -2,7 +2,7 @@
 # steppe installer: fetch the prebuilt CLI, install a CUDA-aware launcher, and preflight.
 #
 #   curl -fsSL https://raw.githubusercontent.com/suzuenhasa/steppecu/main/install.sh | bash
-#   bash install.sh --dir ~/.local/bin --tag v0.1.0
+#   bash install.sh --dir ~/.local/bin --tag v0.2.0
 #
 # steppe needs a CUDA 13 runtime. This diagnoses that up front with an actionable message
 # (not the opaque "libcudart.so.13: cannot open shared object file" loader error), and the
@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO="suzuenhasa/steppecu"
-TAG="v0.1.0"
+TAG="v0.2.0"
 DIR="${HOME}/.local/bin"
 
 while [ $# -gt 0 ]; do

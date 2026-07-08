@@ -82,14 +82,14 @@ steppe --help
 ```
 
 Or do it by hand — three manual paths below; the prebuilt CLI + wheel are attached to the
-[v0.1.0 release](https://github.com/suzuenhasa/steppecu/releases/tag/v0.1.0) and download over
+[v0.2.0 release](https://github.com/suzuenhasa/steppecu/releases/tag/v0.2.0) and download over
 plain `curl` (no GitHub auth). **(1) is simplest: one binary, no Python, no build.**
 
 ### 1. Prebuilt CLI — no build
 A single standalone executable (a fatbinary for every supported GPU):
 
 ```bash
-curl -L -o steppe https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe
+curl -L -o steppe https://github.com/suzuenhasa/steppecu/releases/download/v0.2.0/steppe
 chmod +x steppe
 ./steppe --version
 ```
@@ -102,8 +102,8 @@ CUDA 13. Point the loader at it if needed: `export LD_LIBRARY_PATH=/usr/local/cu
 The wheel bundles the `steppe` command-line tool (**every** subcommand, incl. `scan` and the
 f4/f3 sweeps) **and** the importable Python package — so one `pip install` gives you both:
 ```bash
-curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/steppe-0.1.0-cp312-abi3-linux_x86_64.whl
-pip install ./steppe-0.1.0-cp312-abi3-linux_x86_64.whl
+curl -L -O https://github.com/suzuenhasa/steppecu/releases/download/v0.2.0/steppe-0.2.0-cp312-abi3-linux_x86_64.whl
+pip install ./steppe-0.2.0-cp312-abi3-linux_x86_64.whl
 steppe --version                                       # the CLI — now on your PATH
 python -c "import steppe; print(steppe.__version__)"   # and the Python API
 ```
@@ -142,7 +142,7 @@ steppe qpadm --f2-dir ~/.local/share/steppe/example \
 Built from source, or want it by hand? Grab the same example directly:
 ```bash
 mkdir example && curl -fsSL \
-  https://github.com/suzuenhasa/steppecu/releases/download/v0.1.0/example_f2.tar.gz \
+  https://github.com/suzuenhasa/steppecu/releases/download/v0.2.0/example_f2.tar.gz \
   | tar xz -C example
 ```
 
@@ -259,7 +259,7 @@ qpAdm weights, chi-square, p, and the block-jackknife standard errors match to b
 
 If it helped your work, please cite the software:
 
-> Steppe (v0.1.0). https://github.com/suzuenhasa/steppecu
+> Steppe (v0.2.0). https://github.com/suzuenhasa/steppecu
 
 And please **also cite ADMIXTOOLS 2 and the underlying methods** — they're the science Steppe reruns;
 see [Acknowledgments](#acknowledgments) for the references.

@@ -13,7 +13,7 @@ Like the CLI, this is a **GPU product** — there is no CPU fallback. On a machi
 The Python API comes from the wheel (install route 3 in the [README](../../README.md)):
 
 ```bash
-pip install steppe-0.1.0-cp312-abi3-linux_x86_64.whl
+pip install steppe-0.2.0-cp312-abi3-linux_x86_64.whl
 python -c "import steppe; print(steppe.__version__)"
 ```
 

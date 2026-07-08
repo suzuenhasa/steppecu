@@ -18,7 +18,7 @@ cmake_minimum_required(VERSION 3.28)          # box ships cmake 3.28; CMAKE_CUDA
                                               # single-arch (sm_120) structure-lift on the box.
 
 project(steppe
-        VERSION 0.1.0
+        VERSION 0.2.0
         DESCRIPTION "GPU/CUDA qpAdm: f-statistics & model fitting"
         LANGUAGES CXX CUDA)
 
