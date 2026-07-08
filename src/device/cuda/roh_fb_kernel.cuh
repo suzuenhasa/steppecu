@@ -43,6 +43,20 @@ void launch_roh_fb(const std::uint8_t* d_ob, const std::uint8_t* d_refhaps, cons
                    double* d_alphaA, double* d_alphaB, double* d_alpha_blk, double* d_a0_blk,
                    double* d_betaA, double* d_betaB, cudaStream_t stream);
 
+// Gather one work-item's compacted donor-major reference-haplotype scratch from the
+// ONCE-resident panel (the batch-overlap residency — replaces the per-item host K*M gather
+// + re-upload with a single device gather over the shared panel). For k in [0,K), l in
+// [0,M):  d_refhaps[k*M + l] = d_panel[d_donor_map[k]*Mp + d_site_map[l]]  — byte-for-byte
+// the panel bytes the serial host loop copied, so the FB input is identical. K<=0 || M<=0
+// launches nothing (empty items produce no ROH posterior).
+//   d_panel     Kpanel*Mp    u8   resident donor-major panel bytes
+//   d_donor_map K            i32  resident-panel row per selected donor
+//   d_site_map  M            i32  panel column (KeptSite::panel_l) per kept site
+//   d_refhaps   K*M          u8   OUTPUT compacted donor-major scratch (FB input)
+void launch_roh_gather(const std::uint8_t* d_panel, const int* d_donor_map,
+                       const int* d_site_map, int K, long M, long Mp, std::uint8_t* d_refhaps,
+                       cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_ROH_FB_KERNEL_CUH

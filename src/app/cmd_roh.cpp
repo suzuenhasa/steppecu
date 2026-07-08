@@ -388,62 +388,94 @@ int run_roh(const RohArgs& args) {
     // Exact-hapROH parity path (only_calls=True, docs §3b option 1): run ONE target per FB
     // launch on the target's OWN covered (non-missing) sites, rebuilding the map/allele-freq/
     // transition on that subset — so a target-missing site is DROPPED, not emitted uniform.
-    // The kernel is batch-ready over targets (n_target>1, the shared-axis scale path); the CLI
-    // uses per-target compaction because the concordance gate wants site-for-site parity.
-    for (int t = 0; t < Ntgt; ++t) {
+    //
+    // BATCH-OVERLAP SCHEDULING (pure performance; output BIT-IDENTICAL by construction): the
+    // panel is uploaded to the device ONCE (roh_upload_panel), and the (t, ch) work-items run
+    // through a bounded look-ahead stream pipeline (roh_fb_batch) so each item's host input-
+    // build (phase P) + segment-calling (phase C) overlaps its neighbours' GPU forward-backward.
+    // Nothing about WHAT is computed changes: same per-target compaction, same refhaps bytes
+    // (now gathered on-device from the resident panel), same FB, same in-order segment append.
+    const int nchrom = static_cast<int>(chroms.size());
+    (void)Ks;  // K-derived scratch is now owned device-side by roh_fb_batch
+
+    // The panel is uploaded ONCE as-is (Kpanel_all rows of Mp) with the selected-donor row map
+    // panel_cols[] — the on-device gather reproduces panel_hap[panel_cols[k]*Mps + panel_l]
+    // byte-for-byte (no second host copy). Both panel_hap and panel_cols outlive the batch call.
+    RohPanelHandle panel = be->roh_upload_panel(panel_hap.data(), Kpanel_all,
+                                                static_cast<long>(Mp), panel_cols.data(), K);
+
+    // Mmax bounds every item's M: an item's kept-site count never exceeds its chromosome's
+    // intersected-site count. Sizing scratch to this upper bound avoids scanning target coverage.
+    long Mmax = 0;
+    for (int ch : chroms)
+        Mmax = std::max<long>(Mmax, static_cast<long>(by_chrom[ch].size()));
+
+    // The target's non-missing covered sites on a chromosome (in the pre-sorted morgan order);
+    // recomputed identically in both the builder and the consumer (cheap O(sites-on-chrom)).
+    auto make_cov = [&](int t, int ch) -> std::vector<const KeptSite*> {
         const std::size_t tcol = static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
-        for (int ch : chroms) {
-            const std::vector<KeptSite>& sr = by_chrom[ch];
-            // Gather this target's non-missing covered sites on this chromosome.
-            std::vector<const KeptSite*> cov;
-            cov.reserve(sr.size());
-            for (const KeptSite& s : sr) {
-                const std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
-                if (a <= 1u) cov.push_back(&s);
-            }
-            const long M = static_cast<long>(cov.size());
-            if (M <= 0) continue;
-            const std::size_t Ms = static_cast<std::size_t>(M);
-
-            std::vector<std::uint8_t> ob(Ms, core::kLsMissingAllele);
-            std::vector<std::uint8_t> refhaps(Ks * Ms, core::kLsMissingAllele);
-            std::vector<double> pvec(Ms, 0.5);
-            std::vector<double> gpos(Ms, 0.0);
-            std::vector<long long> bp(Ms, 0);
-            for (long l = 0; l < M; ++l) {
-                const KeptSite& s = *cov[static_cast<std::size_t>(l)];
-                const std::size_t ls = static_cast<std::size_t>(l);
-                pvec[ls] = s.p_freq;
-                gpos[ls] = s.morgan;
-                bp[ls] = s.bp;
-                std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
-                if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
-                ob[ls] = a;
-                for (int kk = 0; kk < K; ++kk)
-                    refhaps[static_cast<std::size_t>(kk) * Ms + ls] =
-                        panel_hap[static_cast<std::size_t>(panel_cols[static_cast<std::size_t>(kk)]) *
-                                      Mps + s.panel_l];
-            }
-            const std::vector<double> T = core::roh_build_transition(gpos, pr, K);
-
-            RohPosterior post;
-            try {
-                post = be->roh_fb(ob.data(), refhaps.data(), pvec.data(), T.data(), K, M,
-                                  /*n_target=*/1, pr.e_rate, pr.in_val, prec);
-            } catch (const std::exception& e) {
-                std::fprintf(stderr, "steppe roh: FB failed on chromosome %d: %s\n", ch, e.what());
-                return exit_code_for_caught(e);
-            }
-            if (post.status != Status::Ok) {
-                std::fprintf(stderr,
-                             "steppe roh: FB returned a non-Ok status on chromosome %d\n", ch);
-                return cfg::kExitRuntimeError;
-            }
-
-            std::vector<core::RohSegment> segs = core::roh_call_segments(
-                gpos, bp, post.p_roh, ch, tgt_iid[static_cast<std::size_t>(t)], pr);
-            for (core::RohSegment& sg : segs) all_segments.push_back(std::move(sg));
+        const std::vector<KeptSite>& sr = by_chrom[ch];
+        std::vector<const KeptSite*> cov;
+        cov.reserve(sr.size());
+        for (const KeptSite& s : sr) {
+            const std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+            if (a <= 1u) cov.push_back(&s);
         }
+        return cov;
+    };
+
+    // Phase P: fill work-item i's GPU inputs (ob with the polarity flip, the panel-column
+    // site_map, allele-freq p, transition T). i = t*nchrom + ch-index, the SAME (t-outer,
+    // ch-inner) order as the serial loop — so the consumer drains in the identical order.
+    RohItemBuilder build = [&](long i, std::uint8_t* ob, int* site_map, double* p,
+                               double* T) -> long {
+        const int t = static_cast<int>(i / nchrom);
+        const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
+        const std::vector<const KeptSite*> cov = make_cov(t, ch);
+        const long M = static_cast<long>(cov.size());
+        if (M <= 0) return 0;  // empty item — skipped, exactly like the serial `continue`
+        const std::size_t tcol = static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
+        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+        for (long l = 0; l < M; ++l) {
+            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+            const std::size_t ls = static_cast<std::size_t>(l);
+            p[ls] = s.p_freq;
+            gpos[ls] = s.morgan;
+            site_map[ls] = static_cast<int>(s.panel_l);
+            std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+            if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
+            ob[ls] = a;
+        }
+        const std::vector<double> Tv = core::roh_build_transition(gpos, pr, K);
+        std::copy(Tv.begin(), Tv.end(), T);
+        return M;
+    };
+
+    // Phase C: call ROH segments on item i's posterior, in STRICT item order — appended to
+    // all_segments in the identical (t, ch) order as the serial path (byte-stable output).
+    RohPosteriorConsumer consume = [&](long i, const double* p_roh, long M) {
+        const int t = static_cast<int>(i / nchrom);
+        const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
+        const std::vector<const KeptSite*> cov = make_cov(t, ch);
+        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+        std::vector<long long> bp(static_cast<std::size_t>(M), 0);
+        for (long l = 0; l < M; ++l) {
+            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+            gpos[static_cast<std::size_t>(l)] = s.morgan;
+            bp[static_cast<std::size_t>(l)] = s.bp;
+        }
+        std::vector<core::RohSegment> segs = core::roh_call_segments(
+            gpos, bp, std::vector<double>(p_roh, p_roh + M), ch,
+            tgt_iid[static_cast<std::size_t>(t)], pr);
+        for (core::RohSegment& sg : segs) all_segments.push_back(std::move(sg));
+    };
+
+    try {
+        be->roh_fb_batch(panel, static_cast<long>(Ntgt) * static_cast<long>(nchrom), Mmax,
+                         pr.e_rate, pr.in_val, prec, build, consume);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe roh: FB failed: %s\n", e.what());
+        return exit_code_for_caught(e);
     }
 
     // Pass the full ordered target list so every target gets a summary row — a zero-ROH

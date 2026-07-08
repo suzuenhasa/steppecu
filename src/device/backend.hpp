@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -368,6 +370,35 @@ struct RohPosterior {
     long M = 0;
     Status status = Status::Ok;
 };
+
+// RohPanelHandle — an opaque handle to the ONCE-uploaded, run-resident hapROH reference
+// panel (the `steppe roh` batch-overlap residency). `host_panel` is the donor-major
+// decoded panel bytes (Kpanel rows of Mp, the CLI's `panel_hap`); `donor_map[k]` (length
+// K) is the resident-panel ROW of selected donor k (the CLI's `panel_cols`). The CUDA
+// override also parks the panel + donor_map in device memory (owned via `device`); the
+// CpuBackend leaves `device` null and gathers from `host_panel` in the fallback. Both the
+// backing arrays outlive every roh_fb_batch call (owned by the caller for the whole run).
+struct RohPanelHandle {
+    std::shared_ptr<void> device;              // CUDA: resident panel + donor_map; CPU: null
+    const std::uint8_t* host_panel = nullptr;  // Kpanel*Mp donor-major decoded panel bytes
+    const int* donor_map = nullptr;            // K, resident-panel row per selected donor
+    int Kpanel = 0;                            // donor columns (rows) in the resident panel
+    int K = 0;                                 // selected donors (donor_map length)
+    long Mp = 0;                               // panel site count (column stride)
+};
+
+// RohItemBuilder — fill work-item i's GPU-facing inputs into the provided (pinned)
+// destinations, each sized to Mmax, and RETURN the item's kept-site count M (<= Mmax; 0
+// skips the item). ob[l] = target observed allele {0,1,missing}; site_map[l] = the panel
+// column (KeptSite::panel_l) of kept site l; p[l] = per-SNP panel allele frequency;
+// T[l*9+..] = per-SNP transition tensor. Called AHEAD of the GPU (phase P) by the pipeline.
+using RohItemBuilder =
+    std::function<long(long i, std::uint8_t* ob, int* site_map, double* p, double* T)>;
+
+// RohPosteriorConsumer — invoked in STRICT item order (i = 0,1,2,...) with item i's ROH
+// posterior 1 - gamma_0 (M values); the segment-caller (phase C). Strict order makes the
+// emitted segment table byte-stable regardless of GPU completion order.
+using RohPosteriorConsumer = std::function<void(long i, const double* p_roh, long M)>;
 
 // Per-site Weir & Cockerham 1984 FST over one population pair (the `steppe fst` output).
 // num/den/fst/valid are per-SNP in the tile's kept order (length M); a site is `valid`
@@ -962,6 +993,58 @@ public:
         throw std::runtime_error(
             "ComputeBackend::roh_fb: not implemented by this backend (the CpuBackend "
             "provides the reference oracle; the CUDA override runs the device kernel)");
+    }
+
+    // roh_upload_panel: park the hapROH reference panel ONCE for the whole batch run (the
+    // batch-overlap residency). `host_panel` is Kpanel rows of Mp donor-major decoded bytes;
+    // `donor_map[k]` (length K) is the resident-panel row of selected donor k. Returns a
+    // handle the batch driver reuses across every target — the K*Mp panel is uploaded/gathered
+    // ONCE, never per target. Default: a host-only handle (no device residency) — the CpuBackend
+    // fallback gathers straight from host_panel. Pure residency plumbing (no compute).
+    [[nodiscard]] virtual RohPanelHandle roh_upload_panel(const std::uint8_t* host_panel,
+                                                          int Kpanel, long Mp, const int* donor_map,
+                                                          int K) {
+        RohPanelHandle h;
+        h.host_panel = host_panel;
+        h.donor_map = donor_map;
+        h.Kpanel = Kpanel;
+        h.K = K;
+        h.Mp = Mp;
+        return h;
+    }
+
+    // roh_fb_batch: run the (K+1)-state FB over N work-items against the ONCE-resident panel,
+    // OVERLAPPING each item's host input-build (phase P) and segment-calling (phase C) with the
+    // GPU forward-backward of neighbouring items (the batch-overlap pipeline). `build` fills each
+    // item's GPU inputs (phase P, run AHEAD); `consume` receives each item's posterior in STRICT
+    // item order (phase C). Bit-identical to calling roh_fb per item and consuming in order — it
+    // changes only WHEN work happens, never WHAT is computed. Default: the SERIAL CpuBackend
+    // oracle path (build -> gather refhaps from host_panel -> roh_fb -> consume, in order).
+    virtual void roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, double e_rate,
+                              double in_val, const Precision& precision,
+                              const RohItemBuilder& build, const RohPosteriorConsumer& consume) {
+        const int K = panel.K;
+        if (K <= 0 || Mmax <= 0) return;
+        const std::size_t Mm = static_cast<std::size_t>(Mmax);
+        std::vector<std::uint8_t> ob(Mm);
+        std::vector<int> site_map(Mm);
+        std::vector<double> p(Mm), T(Mm * 9);
+        std::vector<std::uint8_t> refhaps(static_cast<std::size_t>(K) * Mm);
+        for (long i = 0; i < N; ++i) {
+            const long M = build(i, ob.data(), site_map.data(), p.data(), T.data());
+            if (M <= 0) continue;  // empty item — skipped, exactly like the serial `continue`
+            const std::size_t Ms = static_cast<std::size_t>(M);
+            for (int k = 0; k < K; ++k) {
+                const std::size_t base =
+                    static_cast<std::size_t>(panel.donor_map[k]) * static_cast<std::size_t>(panel.Mp);
+                for (long l = 0; l < M; ++l)
+                    refhaps[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)] =
+                        panel.host_panel[base + static_cast<std::size_t>(site_map[static_cast<std::size_t>(l)])];
+            }
+            RohPosterior post =
+                roh_fb(ob.data(), refhaps.data(), p.data(), T.data(), K, M, 1, e_rate, in_val, precision);
+            consume(i, post.p_roh.data(), M);
+        }
     }
 
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_smooth(std::span<const double> x,

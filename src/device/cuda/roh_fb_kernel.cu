@@ -241,4 +241,38 @@ void launch_roh_fb(const std::uint8_t* d_ob, const std::uint8_t* d_refhaps, cons
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
+namespace {
+
+// Compacted device gather: refhaps[k*M + l] = panel[donor_map[k]*Mp + site_map[l]], flat
+// grid-strided over the K*M output — the batch-overlap replacement for the per-item host
+// K*M panel gather + PCIe re-upload. Pure indirection over bytes; touches no FB math.
+__global__ void roh_gather_kernel(const std::uint8_t* __restrict__ panel,
+                                  const int* __restrict__ donor_map,
+                                  const int* __restrict__ site_map, int K, long M, long Mp,
+                                  std::uint8_t* __restrict__ refhaps) {
+    const long total = static_cast<long>(K) * M;
+    const long stride = static_cast<long>(gridDim.x) * blockDim.x;
+    for (long i = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x; i < total; i += stride) {
+        const int k = static_cast<int>(i / M);
+        const long l = i - static_cast<long>(k) * M;
+        refhaps[static_cast<std::size_t>(i)] =
+            panel[static_cast<std::size_t>(donor_map[k]) * static_cast<std::size_t>(Mp) +
+                  static_cast<std::size_t>(site_map[static_cast<std::size_t>(l)])];
+    }
+}
+
+}  // namespace
+
+void launch_roh_gather(const std::uint8_t* d_panel, const int* d_donor_map,
+                       const int* d_site_map, int K, long M, long Mp, std::uint8_t* d_refhaps,
+                       cudaStream_t stream) {
+    if (K <= 0 || M <= 0) return;  // empty item — no gather (matches the FB launch guard)
+    const long total = static_cast<long>(K) * M;
+    long grid = (total + kBlock - 1) / kBlock;
+    if (grid > 65535) grid = 65535;  // the grid-stride loop covers the remainder
+    roh_gather_kernel<<<static_cast<unsigned>(grid), kBlock, 0, stream>>>(
+        d_panel, d_donor_map, d_site_map, K, M, Mp, d_refhaps);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
 }  // namespace steppe::device

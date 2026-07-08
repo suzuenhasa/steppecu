@@ -220,6 +220,18 @@ public:
                                       double e_rate, double in_val,
                                       const Precision& precision) override;
 
+    // hapROH batch-overlap residency + pipeline (the `steppe roh` batch scheduling). Uploads
+    // the reference panel + donor map ONCE to device memory (roh_upload_panel), then runs the
+    // per-target FBs through a bounded look-ahead stream pipeline (roh_fb_batch) so each
+    // target's host input-build + segment-calling overlaps its neighbours' GPU forward-backward.
+    // Bit-identical to the serial roh_fb path — only the scheduling/residency changes.
+    [[nodiscard]] RohPanelHandle roh_upload_panel(const std::uint8_t* host_panel, int Kpanel,
+                                                  long Mp, const int* donor_map, int K) override;
+
+    void roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, double e_rate, double in_val,
+                      const Precision& precision, const RohItemBuilder& build,
+                      const RohPosteriorConsumer& consume) override;
+
     // PCAngsd GL-PCA (the `steppe pcangsd` core). Uploads the host GL tile to a
     // resident LikelihoodTensor (residency-checksummed), runs the IAF EM +
     // GL-weighted covariance device-resident (emMAF/E-build/dCov kernels + SYRK gram
