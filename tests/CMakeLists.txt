@@ -366,6 +366,17 @@ target_link_libraries(test_fst_wc
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME fst_wc_unit COMMAND test_fst_wc LABELS "unit")
 
+# --- Host-only unit test of the `steppe fst --all-pairs` reformulation ---------
+# Pure C++ TU (no CUDA, no data): reproduces the decode-once + sweep_unrank(k=2) +
+# wc_finalize matrix combine over a tiny 3-pop x 2-SNP tile using the SAME shared
+# core/internal/wc_fst.hpp primitives the GPU all-pairs kernel calls, and asserts the P x P
+# matrix matches hand anchors AND the direct single-pair computation for every pair
+# (symmetric, zero diagonal) — pinning the reformulation host-side.
+add_executable(test_fst_all_pairs unit/test_fst_all_pairs.cpp)
+target_link_libraries(test_fst_all_pairs
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME fst_all_pairs_unit COMMAND test_fst_all_pairs LABELS "unit")
+
 # --- Host-only unit test of the shared 2D joint-SFS histogram primitive -------
 # Pure C++ TU (no CUDA, no data): pins the __host__ __device__ SFS cell math in
 # core/internal/sfs_hist.hpp (sfs_site_complete / sfs_axis_extent / sfs_axis_index /
@@ -1354,6 +1365,21 @@ if(STEPPE_BUILD_CLI)
   add_dependencies(test_cli_fst steppe_app)
   steppe_add_test(NAME cli_fst
            COMMAND test_cli_fst
+                   "$<TARGET_FILE:steppe_app>"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
+
+  # --- `steppe fst --all-pairs` matrix parity-inheritance gate --------------
+  # Drives the built `steppe fst --all-pairs --pops A,B` on the real AADR bed fixture and
+  # asserts the P x P WC FST matrix cell (A,B) equals the plink2-gated single-pair
+  # `steppe fst --pops A,B` genome-wide fst_ratio (absolute tolerance 1e-9; the per-SNP
+  # num/den are bit-exact by construction), plus symmetry + zero diagonal — so the matrix
+  # inherits the single-pair plink2 parity. Reuses the single-pair fixture/meta. SKIPs
+  # (exit 0) with no CUDA device or absent fixture/meta. NO SYNTHETIC DATA.
+  add_executable(test_cli_fst_all_pairs cli/test_cli_fst_all_pairs.cpp)
+  target_link_libraries(test_cli_fst_all_pairs PRIVATE steppe::warnings)
+  add_dependencies(test_cli_fst_all_pairs steppe_app)
+  steppe_add_test(NAME cli_fst_all_pairs
+           COMMAND test_cli_fst_all_pairs
                    "$<TARGET_FILE:steppe_app>"
                    "${CMAKE_CURRENT_SOURCE_DIR}/reference/goldens" LABELS "cli;gpu")
 

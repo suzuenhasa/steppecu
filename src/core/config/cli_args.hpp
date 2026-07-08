@@ -98,6 +98,7 @@ struct CliArgs {
     // `fst` (per-SNP Weir-Cockerham FST) controls
     std::optional<std::string> fst_method;    // wc (Weir-Cockerham 1984; default). hudson is a follow-up.
     std::optional<bool>        fst_per_snp;   // emit the per-SNP FST table (else the summary row)
+    std::optional<bool>        fst_all_pairs; // compute the all-pairs (P x P) WC FST matrix
 
     // `sfs` (2D joint site-frequency spectrum) controls
     std::optional<bool>        sfs_fold;      // folded (per-pop minor) SFS; default unfolded (A1 copies)

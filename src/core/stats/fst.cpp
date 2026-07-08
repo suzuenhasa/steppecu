@@ -124,4 +124,87 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
     return res;
 }
 
+FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& snp,
+                                  const std::string& ind, const std::vector<std::string>& pops,
+                                  int min_n, bool sure, device::Resources& resources) {
+    FstMatrixResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+
+    ComputeBackend& be = device::primary_backend(resources);
+
+    // Population selection: an explicit set (the emitted matrix order) or ALL pops with
+    // N >= min_n. Mirrors run_pca's decode-once front-end (io::PopSelection), no new reader.
+    io::PopSelection sel;
+    if (!pops.empty()) {
+        sel.mode = io::PopSelection::Mode::Explicit;
+        sel.labels.assign(pops.begin(), pops.end());
+    } else {
+        sel.mode = io::PopSelection::Mode::MinN;
+        sel.min_n = (min_n >= 1) ? static_cast<std::size_t>(min_n) : std::size_t{1};
+    }
+
+    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    const io::GenotypeTile& tile = fe.tile;
+    const io::SnpTable& snptab = fe.snptab;
+
+    const int P = static_cast<int>(tile.n_pop());
+    const long M = static_cast<long>(tile.n_snp);
+    res.pops = tile.pop_labels;  // cell (i,j) is labeled by the tile pop order the unrank uses
+    if (P < 2 || M <= 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    // Force diploid (the WC accumulator reads each code as a diploid dosage; the ploidy vector
+    // only sizes the view). Autosome summary mask, identical block to the single-pair run_fst.
+    const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
+    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+
+    const std::size_t Mz = static_cast<std::size_t>(M);
+    std::vector<std::uint8_t> summary_include(Mz, 0);
+    for (std::size_t s = 0; s < Mz && s < snptab.chrom.size(); ++s) {
+        const int chr = snptab.chrom[s];
+        summary_include[s] =
+            (chr >= kAutosomeChromMin && chr <= kAutosomeChromMax) ? std::uint8_t{1}
+                                                                   : std::uint8_t{0};
+    }
+
+    const FstMatrix mat =
+        be.fst_wc_all_pairs(view, std::span<const std::uint8_t>(summary_include), sure);
+    res.enumerated = mat.enumerated;
+    res.capped = mat.capped;
+    res.precision_tag = mat.precision_tag;
+    res.status = mat.status;
+    if (mat.status != Status::Ok) return res;
+
+    // Expand the per-pair Σ vectors into the symmetric P x P matrix. The device enumerated
+    // pairs by the flat rank r = j*(j-1)/2 + i (i < j) — the exact ordering readv2_unrank_pair
+    // inverts — so iterate (i < j) and index pair vectors by that same r. Diagonal = 0; an
+    // all-invalid pair (den == 0) gets the NaN sentinel, mirroring run_fst's fst_ratio guard.
+    const std::size_t Pz = static_cast<std::size_t>(P);
+    res.fst.assign(Pz * Pz, 0.0);
+    res.num.assign(Pz * Pz, 0.0);
+    res.den.assign(Pz * Pz, 0.0);
+    res.n_valid.assign(Pz * Pz, 0L);
+    for (int j = 1; j < P; ++j) {
+        for (int i = 0; i < j; ++i) {
+            const std::size_t r =
+                static_cast<std::size_t>(j) * static_cast<std::size_t>(j - 1) / 2u +
+                static_cast<std::size_t>(i);
+            const double num = mat.pair_num[r];
+            const double den = mat.pair_den[r];
+            const double fst = (den != 0.0) ? (num / den) : std::nan("");
+            const std::size_t ij = static_cast<std::size_t>(i) * Pz + static_cast<std::size_t>(j);
+            const std::size_t ji = static_cast<std::size_t>(j) * Pz + static_cast<std::size_t>(i);
+            res.fst[ij] = res.fst[ji] = fst;
+            res.num[ij] = res.num[ji] = num;
+            res.den[ij] = res.den[ji] = den;
+            res.n_valid[ij] = res.n_valid[ji] = mat.pair_cnt[r];
+        }
+    }
+
+    res.status = Status::Ok;
+    return res;
+}
+
 }  // namespace steppe

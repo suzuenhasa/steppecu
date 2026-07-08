@@ -387,6 +387,23 @@ struct FstPerSite {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// FstMatrix — the device result of the all-pairs WC FST combine (`steppe fst --all-pairs`).
+// pair_num/pair_den/pair_cnt are the per-pair genome-wide sums over the C(P,2) upper-
+// triangular pairs, indexed by the flat rank r that readv2_unrank_pair(r, P) inverts to
+// (i, j) with i < j (r = j*(j-1)/2 + i). The host expands these into the symmetric P x P
+// matrix. Native FP64 (the reduction carve-out). Only the small 3*C(P,2) vectors cross PCIe
+// — the per-(pop,SNP) sufficient-stat decode + the P^2 combine stay device-resident.
+struct FstMatrix {
+    std::vector<double> pair_num;   // C(P,2), Σ WC numerator a per pair
+    std::vector<double> pair_den;   // C(P,2), Σ WC denominator per pair
+    std::vector<long>   pair_cnt;   // C(P,2), valid-site count per pair
+    int P = 0;
+    std::size_t enumerated = 0;     // C(P,2)
+    bool capped = false;            // C(P,2) > the maxcomb cap and sure==false
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 // SfsJoint — the 2D joint site-frequency spectrum over a population pair (`steppe sfs`).
 // grid is the row-major (extA x extB) integer joint histogram: cell (i, j) at
 // grid[i*extB + j] counts sites with pop-A category i and pop-B category j. A pure
@@ -642,6 +659,21 @@ public:
         (void)tile; (void)popA; (void)popB; (void)summary_include;
         throw std::runtime_error(
             "ComputeBackend::fst_wc_per_site: not implemented by this backend");
+    }
+
+    // fst_wc_all_pairs: the all-pairs WC FST matrix (`steppe fst --all-pairs`). Decodes the
+    // per-(pop, SNP) sufficient statistic {n, ac, het} ONCE (streamed by SNP-tile) and folds
+    // every C(P,2) pair's wc_finalize into the genome-wide per-pair Σnum/Σden/n_valid on the
+    // GPU (sweep_unrank k=2 -> the SAME shared wc_finalize the single-pair path uses).
+    // `summary_include[s] == 1` marks a SNP eligible for the genome-wide sum (autosomes,
+    // matching the single-pair path). `sure` lifts the C(P,2) maxcomb cap. Native FP64.
+    // Default: throw (CUDA only; the product is GPU-only for the all-pairs sweep).
+    [[nodiscard]] virtual FstMatrix fst_wc_all_pairs(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include, bool sure) {
+        (void)tile; (void)summary_include; (void)sure;
+        throw std::runtime_error(
+            "ComputeBackend::fst_wc_all_pairs: not implemented by this backend "
+            "(the GPU-only all-pairs sufficient-stat combine requires a CUDA backend)");
     }
 
     // joint_sfs_2pop: the 2D joint site-frequency spectrum over the population pair (tile

@@ -81,6 +81,7 @@ public:
     // `fst` (per-SNP Weir-Cockerham FST) controls
     [[nodiscard]] const std::string& fst_method() const noexcept { return fst_method_; }
     [[nodiscard]] bool fst_per_snp()             const noexcept { return fst_per_snp_; }
+    [[nodiscard]] bool fst_all_pairs()           const noexcept { return fst_all_pairs_; }
 
     // `sfs` (2D joint site-frequency spectrum) controls
     [[nodiscard]] bool sfs_fold()                const noexcept { return sfs_fold_; }
@@ -164,6 +165,7 @@ private:
     bool paint_full_ = false;
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
+    bool fst_all_pairs_ = false;
     bool sfs_fold_ = false;
     int pca_k_ = 10;
     bool pca_eigenvalues_ = false;

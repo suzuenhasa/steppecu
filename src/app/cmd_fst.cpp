@@ -100,6 +100,97 @@ void emit_per_snp(std::ostream& os, OutputFormat fmt, const steppe::FstResult& r
     }
 }
 
+// The all-pairs (P x P) genome-wide WC FST matrix: a pop-label header row + a leading label
+// column, symmetric with a zero diagonal (JSON = {pops:[...], fst:[[...]]}). A cell is the
+// ratio-of-averages Σnum/Σden for that pair (NaN when every shared site is invalid).
+void emit_matrix(std::ostream& os, OutputFormat fmt, const steppe::FstMatrixResult& r) {
+    const std::size_t P = r.pops.size();
+    if (fmt == OutputFormat::Json) {
+        os << "{\n  \"pops\": [";
+        for (std::size_t i = 0; i < P; ++i)
+            os << (i ? ", " : "") << json_quote(r.pops[i]);
+        os << "],\n  \"fst\": [\n";
+        for (std::size_t i = 0; i < P; ++i) {
+            os << "    [";
+            for (std::size_t j = 0; j < P; ++j)
+                os << (j ? ", " : "") << json_double(r.fst[i * P + j]);
+            os << "]" << (i + 1 < P ? ",\n" : "\n");
+        }
+        os << "  ]\n}\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "pop";
+    for (std::size_t j = 0; j < P; ++j) os << sep << csv_field(r.pops[j], sep);
+    os << "\n";
+    for (std::size_t i = 0; i < P; ++i) {
+        os << csv_field(r.pops[i], sep);
+        for (std::size_t j = 0; j < P; ++j) os << sep << fmt_double(r.fst[i * P + j]);
+        os << "\n";
+    }
+}
+
+// The all-pairs matrix path (`steppe fst --all-pairs`). Sits ABOVE the single-pair 2-pop
+// guard so single-pair semantics are unchanged. wc only in v1 (hudson is a follow-up).
+int run_fst_all_pairs_command(const cfg::RunConfig& config) {
+    const std::string method = config.fst_method();
+    if (method != "wc") {
+        std::fprintf(stderr,
+                     "steppe fst: --method '%s' is not available (v1 ships wc = Weir-Cockerham "
+                     "1984; hudson is a follow-up)\n",
+                     method.c_str());
+        return cfg::kExitInvalidConfig;
+    }
+
+    const std::string& prefix = config.qpdstat_prefix();
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+    const std::vector<std::string>& pops = config.pops();
+    const io::PopSelection& sel = config.pop_selection();
+    const int min_n =
+        (sel.mode == io::PopSelection::Mode::MinN) ? static_cast<int>(sel.min_n) : 1;
+
+    steppe::FstMatrixResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (!require_first_gpu(resources, "fst")) return cfg::kExitRuntimeError;
+        result = run_fst_all_pairs(triple.geno, triple.snp, triple.ind, pops, min_n,
+                                   config.sweep_sure(), resources);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe fst: input/device error: %s\n", e.what());
+        return exit_code_for_caught(e);
+    }
+
+    if (result.capped) {
+        std::fprintf(stderr,
+                     "steppe fst --all-pairs: refusing to enumerate %zu population pairs "
+                     "(> the maxcomb cap). Pass --sure to override, or restrict --pops / raise "
+                     "--min-n. (the cap is on the PAIR COUNT; note total work is C(P,2)*M "
+                     "accumulations — a very large P at full SNPs can still be a long run.)\n",
+                     result.enumerated);
+        return cfg::kExitInvalidConfig;
+    }
+    if (result.status != Status::Ok) {
+        std::fprintf(stderr,
+                     "steppe fst --all-pairs: %s (need >= 2 populations; check --prefix and the "
+                     "--pops / --min-n selection)\n",
+                     status_text(result.status));
+        return cfg::exit_code_for(result.status);
+    }
+
+    std::fprintf(stderr,
+                 "steppe fst --all-pairs: %zu populations, %zu pairs -> %zux%zu WC FST matrix "
+                 "(genome-wide ratio-of-averages over autosomes)\n",
+                 result.pops.size(), result.enumerated, result.pops.size(), result.pops.size());
+
+    if (const auto rc = emit_to_destination(
+            config, "fst", [&](std::ostream& os, OutputFormat fmt) {
+                emit_matrix(os, fmt, result);
+            })) {
+        return *rc;
+    }
+    return cfg::exit_code_for(result.status);
+}
+
 }  // namespace
 
 int run_fst_command(const cfg::RunConfig& config) {
@@ -107,6 +198,9 @@ int run_fst_command(const cfg::RunConfig& config) {
         std::fprintf(stderr,
                      "steppe fst: --prefix PREFIX.{geno,snp,ind} is required\n");
         return cfg::kExitInvalidConfig;
+    }
+    if (config.fst_all_pairs()) {
+        return run_fst_all_pairs_command(config);
     }
     const std::vector<std::string>& pops = config.pops();
     if (pops.size() != 2) {

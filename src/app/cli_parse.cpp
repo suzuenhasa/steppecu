@@ -360,13 +360,23 @@ int run_cli(int argc, char** argv) {
     register_cmd(app, "fst",
         "Per-SNP Weir & Cockerham 1984 FST between TWO populations: --prefix genotypes + "
         "--pops A,B -> per-SNP FST table (--per-snp) + genome-wide summary (plink2 --fst "
-        "method=wc gated)",
+        "method=wc gated). --all-pairs -> the P x P genome-wide WC FST matrix over a pop set",
         fst_args, Command::Fst,
         [](CLI::App* s, CliArgs& a) {
             s->add_option("--prefix", a.qpdstat_prefix,
                           "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
             add_str_list_flag(s, "--pops", a.pops,
-                              "The TWO populations to differentiate (A,B; .ind pop labels)");
+                              "Populations: the TWO to differentiate (A,B), or (with --all-pairs) "
+                              "the explicit set for the matrix; .ind pop labels");
+            s->add_flag("--all-pairs", a.fst_all_pairs,
+                        "Compute the all-pairs (P x P) genome-wide WC FST matrix over the "
+                        "selected populations (--pops set, or --min-n for all pops with N>=min-n)");
+            s->add_option("--min-n", a.min_n,
+                          "(--all-pairs) include every population with at least this many "
+                          "individuals (default 1 = all pops); mutually exclusive with --pops");
+            s->add_flag("--sure", a.sweep_sure,
+                        "(--all-pairs) lift the C(P,2) pair-count cap for very large pop sets "
+                        "(mirrors the f-stat sweep --sure)");
             s->add_option("--method", a.fst_method,
                           "FST estimator: wc (Weir-Cockerham 1984; default). hudson is a follow-up.");
             s->add_flag("--per-snp", a.fst_per_snp,

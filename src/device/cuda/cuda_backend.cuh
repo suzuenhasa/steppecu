@@ -123,6 +123,14 @@ public:
     [[nodiscard]] FstPerSite fst_wc_per_site(const DecodeTileView& tile, int popA, int popB,
                                              std::span<const std::uint8_t> summary_include) override;
 
+    // All-pairs WC FST matrix (`steppe fst --all-pairs`) — uploads the packed tile, streams
+    // the SNP axis by tile decoding the per-(pop,SNP) sufficient stat {n,ac,het} ONCE, and
+    // folds every C(P,2) pair's wc_finalize into the persistent per-pair Σ on the GPU
+    // (sweep_unrank k=2). Only the C(P,2) pair vectors cross PCIe. Native FP64.
+    [[nodiscard]] FstMatrix fst_wc_all_pairs(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
+        bool sure) override;
+
     // 2D joint site-frequency spectrum over a population pair (`steppe sfs`) — uploads the
     // packed tile, launches the joint-histogram kernel over the device tile, and D2H's only
     // the finished integer grid + the complete-site counter. Integer-count standalone stat.

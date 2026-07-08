@@ -212,6 +212,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.paint_full, args.paint_full);
     take(merged_.fst_method, args.fst_method);
     take_b(merged_.fst_per_snp, args.fst_per_snp);
+    take_b(merged_.fst_all_pairs, args.fst_all_pairs);
     take_b(merged_.sfs_fold, args.sfs_fold);
     take_i(merged_.pca_k, args.pca_k);
     take_b(merged_.pca_eigenvalues, args.pca_eigenvalues);
@@ -564,6 +565,7 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         cfg.fst_method_ = m;
     }
     if (merged_.fst_per_snp) cfg.fst_per_snp_ = *merged_.fst_per_snp;
+    if (merged_.fst_all_pairs) cfg.fst_all_pairs_ = *merged_.fst_all_pairs;
     if (merged_.sfs_fold) cfg.sfs_fold_ = *merged_.sfs_fold;
     if (merged_.pca_k.has_value()) {
         if (*merged_.pca_k < 1) return fail("--k must be >= 1 (number of principal components)");

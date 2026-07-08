@@ -1,3 +1,4 @@
 /workspace/data/aadr/fixtures_eig/v66_fit9_ped
 Han
 Papuan
+Mbuti

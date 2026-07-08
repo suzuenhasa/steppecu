@@ -58,6 +58,40 @@ struct FstResult {
                                 const std::string& popB,
                                 device::Resources& resources);
 
+// FstMatrixResult — the all-pairs (P x P) genome-wide WC FST matrix. Every cell (i,j) is
+// the ratio-of-averages fst_ratio = Σnum/Σden the single-pair path reports for that pair
+// over the SAME autosomal valid sites (per-SNP num/den are bit-exact vs the single-pair
+// kernel — the shared wc_finalize on integer-exact {n,ac,het}; the genome-wide Σ agrees to
+// FP64 round-off, not last-ULP-identical, because the reductions differ in order — see
+// docs/planning/fst-all-pairs-scope.md §7). Symmetric, zero diagonal; a pair whose every
+// shared site is invalid (den == 0) gets the NaN sentinel, mirroring run_fst.
+struct FstMatrixResult {
+    std::vector<std::string> pops;    // row/col order (length P), tile pop order
+    std::vector<double> fst;          // P*P row-major, symmetric, diag 0.0 (NaN if den==0)
+    std::vector<double> num;          // P*P row-major, Σ WC numerator a  (diag 0)
+    std::vector<double> den;          // P*P row-major, Σ WC denominator   (diag 0)
+    std::vector<long>   n_valid;      // P*P row-major, per-pair valid-site count (diag 0)
+
+    std::size_t enumerated = 0;       // C(P,2) pairs enumerated
+    bool capped = false;              // refused: C(P,2) > the maxcomb cap and no --sure
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
+// run_fst_all_pairs — the GPU all-pairs WC FST matrix driver. Decodes the panel ONCE into a
+// per-(pop, SNP) sufficient-statistic tensor {n, ac, het}, streamed by SNP-tile, then
+// combines all C(P,2) pairs on-device (sweep_unrank k=2 -> wc_finalize -> per-pair Σ). When
+// `pops` is non-empty it selects exactly those populations (order = the emitted matrix
+// order); otherwise ALL populations with at least `min_n` individuals are used. `sure` lifts
+// the C(P,2) maxcomb cap for very large P (mirrors the f-stat sweep --sure).
+[[nodiscard]] FstMatrixResult run_fst_all_pairs(const std::string& geno,
+                                                const std::string& snp,
+                                                const std::string& ind,
+                                                const std::vector<std::string>& pops,
+                                                int min_n,
+                                                bool sure,
+                                                device::Resources& resources);
+
 }  // namespace steppe
 
 #endif  // STEPPE_FST_HPP
