@@ -77,6 +77,18 @@ struct RohParams {
     double roh_min_l_final = 0.04;    // post-merge length cut (Morgan)
 };
 
+// Column-0 forward-prior validity (roh_fb.hpp / naive_fb3): the non-ROH prior
+// alpha_0(0) = 1 - K*in_val must stay a probability in [0,1]. It turns NEGATIVE once
+// K*in_val >= 1 (K = 2*n_ref selected reference haplotypes), i.e. n_ref >= 1/(2*in_val)
+// (~5000 at the in_val=1e-4 default; the 1000G n_ref=2504 -> K=5008 -> K*in_val=0.5008
+// sits safely inside). hapsburg carries the same latent 1 - K*in_val and silently emits
+// the broken (negative) prior past this point; steppe fails fast on it instead. Returns
+// true when the (K, in_val) pair keeps a valid non-negative prior. Pure predicate — the
+// ROH model/kernel math is untouched.
+[[nodiscard]] STEPPE_HD inline bool roh_prior_valid(int K, double in_val) {
+    return static_cast<double>(K) * in_val < 1.0;
+}
+
 // ---------------------------------------------------------------------------
 // Emission (Model_Emissions.give_emission, emissions.py, e_model="haploid").
 //

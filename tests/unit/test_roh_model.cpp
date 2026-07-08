@@ -161,6 +161,16 @@ int main() {
         }
     }
 
+    // --- 5) column-0 prior fail-fast predicate (roh_prior_valid) -----------------
+    // alpha_0(0) = 1 - K*in_val must stay non-negative; the guard trips once K*in_val >= 1.
+    // K = 2*n_ref, in_val=1e-4 default: n_ref=2504 (K=5008) is valid, n_ref>=5000 (K>=10000)
+    // is not. Boundary K*in_val == 1 is rejected (prior would be exactly 0 then negative).
+    check(roh_prior_valid(2 * 2504, 1e-4), "prior valid at 1000G default n_ref=2504");
+    check(roh_prior_valid(2 * 4999, 1e-4), "prior valid just below n_ref=5000");
+    check(!roh_prior_valid(2 * 5000, 1e-4), "prior invalid at K*in_val==1 (n_ref=5000)");
+    check(!roh_prior_valid(2 * 6000, 1e-4), "prior invalid at n_ref=6000");
+    check(roh_prior_valid(10000, 1e-6), "raising --in-val to 1e-6 revalidates a big panel");
+
     if (g_fail == 0) std::printf("test_roh_model: all checks passed\n");
     return g_fail == 0 ? 0 : 1;
 }

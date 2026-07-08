@@ -163,6 +163,22 @@ int run_roh(const RohArgs& args) {
     pr.in_val = args.in_val;
     pr.cutoff_post = args.cutoff_post;
 
+    // Fail-fast: with --n-ref set, K = 2*n_ref reference haplotypes and the column-0
+    // forward prior alpha_0(0) = 1 - K*in_val (roh_fb.hpp) turns NEGATIVE once
+    // 2*n_ref*in_val >= 1 (n_ref >= 1/(2*in_val), ~5000 at the 1e-4 default). Reject up
+    // front rather than emit hapsburg's silently-broken negative prior. The 1000G default
+    // n_ref=2504 (K=5008, product 0.5008) is safely inside. Checked again below against the
+    // ACTUAL selected K for the --n-ref 0 (all-panel) path.
+    if (args.n_ref > 0 && !core::roh_prior_valid(2 * args.n_ref, pr.in_val)) {
+        std::fprintf(stderr,
+                     "steppe roh: --n-ref %d with --in-val %g makes the column-0 ROH prior "
+                     "1 - 2*n_ref*in_val = %g negative (need 2*n_ref*in_val < 1, i.e. n_ref < "
+                     "%g). Lower --n-ref or --in-val.\n",
+                     args.n_ref, pr.in_val, 1.0 - 2.0 * static_cast<double>(args.n_ref) * pr.in_val,
+                     1.0 / (2.0 * pr.in_val));
+        return cfg::kExitInvalidConfig;
+    }
+
     // --- read target + panel front-ends (host CpuBackend as io/transpose oracle) ---
     core::GenotypeFrontEnd fe_t, fe_p;
     try {
@@ -213,6 +229,16 @@ int run_roh(const RohArgs& args) {
                      "steppe roh: need >= 2 reference haplotype columns after exclude/n-ref (got "
                      "%d of %d)\n",
                      K, Kpanel_all);
+        return cfg::kExitInvalidConfig;
+    }
+    // Same column-0 prior guard against the ACTUAL selected K (catches an oversized all-panel
+    // run where --n-ref was left at 0 but the panel itself has >= 1/in_val haplotype columns).
+    if (!core::roh_prior_valid(K, pr.in_val)) {
+        std::fprintf(stderr,
+                     "steppe roh: %d selected reference haplotypes with --in-val %g make the "
+                     "column-0 ROH prior 1 - K*in_val = %g negative (need K*in_val < 1). Cap the "
+                     "panel with --n-ref or raise --in-val.\n",
+                     K, pr.in_val, 1.0 - static_cast<double>(K) * pr.in_val);
         return cfg::kExitInvalidConfig;
     }
 

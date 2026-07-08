@@ -177,6 +177,37 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- fail-fast: --n-ref 6000 with the 1e-4 default in_val makes the column-0 ROH
+    //      prior 1 - 2*n_ref*in_val = 1 - 1.2 negative -> must be rejected up front -----
+    {
+        const std::filesystem::path l3 = tmp / "v3.log";
+        const int rc3 = run_steppe(bin,
+                                   {"roh", "--prefix", target, "--ref-panel", panel, "--out",
+                                    (tmp / "x3.tsv").string(), "--n-ref", "6000"},
+                                   l3);
+        if (rc3 == 0) {
+            std::printf("  [FAIL] --n-ref 6000 should be rejected (negative column-0 prior)\n");
+            ++g_fail;
+        }
+    }
+    // ---- and the guard must NOT fire at the safe 1000G default n_ref=2504 -------------
+    {
+        const std::filesystem::path l4 = tmp / "v4.log";
+        const int rc4 = run_steppe(bin,
+                                   {"roh", "--prefix", target, "--ref-panel", panel, "--out",
+                                    (tmp / "x4.tsv").string(), "--summary",
+                                    (tmp / "x4.sum").string(), "--n-ref", "2504"},
+                                   l4);
+        if (rc4 != 0) {
+            std::printf("  [FAIL] --n-ref 2504 is safe (K*in_val=0.5) but was rejected, exit=%d\n",
+                        rc4);
+            std::ifstream lf(l4);
+            std::stringstream ss; ss << lf.rdbuf();
+            std::printf("%s\n", ss.str().c_str());
+            ++g_fail;
+        }
+    }
+
     std::filesystem::remove_all(tmp, ec);
     if (g_fail == 0) {
         std::printf("\nRESULT: PASS (steppe roh wiring + CPU FB + ROH call + validation correct)\n");
