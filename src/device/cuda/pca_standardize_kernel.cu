@@ -87,21 +87,69 @@ __global__ void pca_standardize_kernel(const std::uint8_t* __restrict__ packed,
     Z[t] = core::pca_standardize_one(code, center[sl], inv_scale[sl]);
 }
 
-// One thread per (sample i, PC k): coord[i*K + k] = evec[i + (N-1-k)*N] * sqrt(eval[N-1-k]).
+// One thread per (sample i, PC k): coord[i*K + k] = evec[i + (ncol-1-k)*N] * sqrt(eval[ncol-1-k]).
+// evec is a column-major N x ncol block (leading dim N); ascending eigenvalues put the largest
+// pair in the last column, so PC k reads column ncol-1-k.
 __global__ void pca_coords_kernel(const double* __restrict__ evec,
-                                  const double* __restrict__ eval, int N, int K,
+                                  const double* __restrict__ eval, int N, int ncol, int K,
                                   double* __restrict__ coords) {
     const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
     const long total = static_cast<long>(N) * static_cast<long>(K);
     if (t >= total) return;
     const int i = static_cast<int>(t / static_cast<long>(K));
     const int k = static_cast<int>(t % static_cast<long>(K));
-    const int col = N - 1 - k;  // ascending eigenvalues -> largest at the tail
+    const int col = ncol - 1 - k;  // ascending eigenvalues -> largest at the tail
     const double lambda = eval[col];
     const double scale = lambda > 0.0 ? sqrt(lambda) : 0.0;
     coords[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) + static_cast<std::size_t>(k)] =
         evec[static_cast<std::size_t>(i) + static_cast<std::size_t>(col) * static_cast<std::size_t>(N)] *
         scale;
+}
+
+// splitmix64 finalizer (counter-based, stateless) — one 64-bit mix step.
+__device__ __forceinline__ unsigned long long pca_splitmix64(unsigned long long x) {
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+// One thread per element: two counter-based uniforms in (0,1) -> Box-Muller -> one N(0,1).
+__global__ void pca_fill_omega_kernel(double* __restrict__ omega, std::size_t n_elem,
+                                      unsigned long long seed) {
+    const std::size_t t =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (t >= n_elem) return;
+    // Two independent 64-bit streams keyed on (seed, element index) — no shared state.
+    const unsigned long long h0 = pca_splitmix64(seed ^ (t * 2ULL + 0ULL));
+    const unsigned long long h1 = pca_splitmix64(seed ^ (t * 2ULL + 1ULL));
+    // Map to (0,1): keep the top 53 bits, nudge off 0 so log() is finite.
+    constexpr double kInv53 = 1.0 / 9007199254740992.0;  // 2^-53
+    double u1 = (static_cast<double>(h0 >> 11) + 0.5) * kInv53;
+    const double u2 = (static_cast<double>(h1 >> 11) + 0.5) * kInv53;
+    if (u1 < 1e-300) u1 = 1e-300;
+    const double r = sqrt(-2.0 * log(u1));
+    const double theta = 6.283185307179586476925286766559 * u2;  // 2*pi
+    omega[t] = r * cos(theta);
+}
+
+// Block reduction of the column-major diagonal C[i + i*N] into *out via one atomicAdd/block.
+__global__ void pca_trace_kernel(const double* __restrict__ C, int N,
+                                 double* __restrict__ out) {
+    __shared__ double sdata[kPcaBlock];
+    double local = 0.0;
+    for (long i = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x; i < N;
+         i += static_cast<long>(gridDim.x) * blockDim.x) {
+        local += C[static_cast<std::size_t>(i) + static_cast<std::size_t>(i) *
+                                                    static_cast<std::size_t>(N)];
+    }
+    sdata[threadIdx.x] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) atomicAdd(out, sdata[0]);
 }
 
 }  // namespace
@@ -130,14 +178,35 @@ void launch_pca_standardize(const std::uint8_t* d_packed, std::size_t bytes_per_
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
-void launch_pca_coords(const double* d_evec, const double* d_eval, int N, int K,
+void launch_pca_coords(const double* d_evec, const double* d_eval, int N, int ncol, int K,
                        double* d_coords, cudaStream_t stream) {
-    if (N <= 0 || K <= 0) return;
+    if (N <= 0 || K <= 0 || ncol <= 0) return;
     const long total = static_cast<long>(N) * static_cast<long>(K);
     const int grid = core::grid_for_x(
         total, kPcaBlock, "pca coords gridDim.x (N*K axis) exceeds kMaxGridX");
     pca_coords_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
-        d_evec, d_eval, N, K, d_coords);
+        d_evec, d_eval, N, ncol, K, d_coords);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_fill_omega(double* d_omega, std::size_t n_elem, unsigned long long seed,
+                           cudaStream_t stream) {
+    if (n_elem == 0) return;
+    const int grid = core::grid_for_x(
+        static_cast<long>(n_elem), kPcaBlock,
+        "pca omega gridDim.x (N*L axis) exceeds kMaxGridX");
+    pca_fill_omega_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_omega, n_elem, seed);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_trace(const double* d_C, int N, double* d_out, cudaStream_t stream) {
+    if (N <= 0) return;
+    // A modest fixed grid; the block-stride loop covers any N and each block does one atomicAdd.
+    int grid = static_cast<int>((static_cast<long>(N) + kPcaBlock - 1) / kPcaBlock);
+    if (grid < 1) grid = 1;
+    if (grid > 1024) grid = 1024;
+    pca_trace_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(d_C, N, d_out);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

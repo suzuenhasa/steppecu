@@ -23,6 +23,7 @@ add_library(steppe_device STATIC
     cuda/sfs_hist_kernel.cu
     cuda/cuda_backend_sfs.cu
     cuda/pca_standardize_kernel.cu
+    cuda/pca_truncated_eig.cu
     cuda/cuda_backend_pca.cu
     cuda/pcangsd_kernels.cu
     cuda/cuda_backend_pcangsd.cu

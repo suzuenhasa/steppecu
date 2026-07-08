@@ -229,7 +229,8 @@ PcangsdFit CudaBackend::pcangsd_fit(const double* host_l, const std::uint8_t* ho
         return out;
     }
     DeviceBuffer<double> dCoords(static_cast<std::size_t>(N) * static_cast<std::size_t>(K));
-    launch_pca_coords(dCeig.data(), dwC.data(), N, K, dCoords.data(), stream_.get());
+    // pcangsd keeps the full N-column eigenvector block (ncol = N).
+    launch_pca_coords(dCeig.data(), dwC.data(), N, N, K, dCoords.data(), stream_.get());
 
     // --- optional individual allele-2 frequencies ----------------------------
     DeviceBuffer<double> d_pi(want_pi ? NMw : std::size_t{1});

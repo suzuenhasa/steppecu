@@ -679,6 +679,17 @@ target_link_libraries(test_pca_eig
 set_target_properties(test_pca_eig PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 steppe_add_test(NAME pca_eig COMMAND test_pca_eig LABELS "reference;gpu")
 
+# --- truncated top-K eigensolver unit test (planted spectrum, no genotype path) ----
+# Drives steppe::device::pca_truncated_topk directly on planted C = W Λ Wᵀ matrices:
+# separated top-4 eigenpairs (Ritz value + sign-aligned |r|) and a degenerate 2-D
+# eigenspace (subspace-membership, since the vectors are non-unique). SKIPs (exit 0) if no GPU.
+add_executable(test_pca_truncated_eig reference/test_pca_truncated_eig.cu)
+target_link_libraries(test_pca_truncated_eig
+    PRIVATE steppe::core steppe::device steppe::core_internal steppe::api steppe::warnings
+            CUDA::cudart CUDA::cublas CUDA::cusolver)
+set_target_properties(test_pca_truncated_eig PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+steppe_add_test(NAME pca_truncated_eig COMMAND test_pca_truncated_eig LABELS "reference;gpu")
+
 # --- qpAdm rotation model-search test ----------------------------------------
 # Reads the real AT2 rotation golden + the co-matching f2 fixture, uploads f2
 # resident to VRAM, and runs the batched, multi-GPU-sharded rotation
