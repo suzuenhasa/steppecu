@@ -3,7 +3,7 @@
 Notable changes to Steppe. Format loosely follows [Keep a Changelog](https://keepachangelog.com/);
 each entry is grounded in the commit that landed it.
 
-## Unreleased
+## 0.2.0 — 2026-07-08
 
 The low-coverage / relatedness / population-statistics family, plus three GPU reformulations. Every
 feature is gated on **real AADR data** against its field-standard reference tool (never AT2 for these
