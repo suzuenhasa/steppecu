@@ -62,3 +62,7 @@ docs/*
 docs/examples/notebooks/*.html
 docs/commentdump/*
 !docs/commentdump/extract_comments.py
+
+# bench harness generated output (regenerate with: cmake --build --target bench)
+tests/bench/out/
+tests/bench/__pycache__/

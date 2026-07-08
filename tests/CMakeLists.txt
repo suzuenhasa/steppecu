@@ -1746,3 +1746,17 @@ if(STEPPE_BUILD_PYTHON)
   # CTest does not build, so the `cmake --build` step (which builds _core) must
   # precede `ctest`.
 endif()
+
+# --- Validation & benchmark harness (custom target; NOT in the default ctest run) ---
+# Turns the 8-row FST/PCA validation table into a re-runnable artifact on REAL AADR.
+# Needs the box + a numpy<2 venv (auto-bootstrapped) + plink2, so it is a manual
+# `cmake --build --target bench`, not a ctest gate. See tests/bench/README.md.
+add_custom_target(bench
+  COMMAND ${CMAKE_COMMAND} -E env LD_LIBRARY_PATH=/usr/local/cuda/lib64 TMPDIR=/workspace/tmp
+          python3 ${CMAKE_CURRENT_SOURCE_DIR}/bench/run_bench.py
+          --steppe $<TARGET_FILE:steppe_app>
+          --fit9 /workspace/data/aadr/fixtures_eig/v66_fit9_ped
+          --full /workspace/data/aadr/1240k/v66.p1_1240K.aadr.patch.PUB
+          --out ${CMAKE_CURRENT_SOURCE_DIR}/bench/out
+  DEPENDS steppe_app
+  USES_TERMINAL VERBATIM)
