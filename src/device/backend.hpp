@@ -426,6 +426,34 @@ struct PcaEig {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// PcangsdFit — the device result of the PCAngsd genotype-likelihood PCA (`steppe
+// pcangsd`): the GL-weighted, individual-allele-frequency covariance C (the .cov),
+// the top-e PC coordinates + eigen spectrum, the per-site population allele-2
+// frequency, and (optionally) the individual allele-2 frequencies. Produced over
+// the device-resident GL tensor by the IAF EM (emMAF -> updateNormal init ->
+// updatePCAngsd loop -> covPCAngsd), reusing the cuBLAS SYRK gram + cuSOLVER Dsyevd
+// eigen from the `steppe pca` path. `cov` is N*N row-major; `coords` is N*e row-
+// major (eigenvector*sqrt(eigenvalue), sign arbitrary per PC). Gated vs the
+// reference pcangsd package (NOT ADMIXTOOLS2); concordance, not bit-exact, since
+// pcangsd uses float32 internally. precision_tag reflects the gram SYRK
+// (emulated-FP64 default); the EM elementwise + the eigen are native FP64.
+struct PcangsdFit {
+    std::vector<double> cov;            // N*N row-major
+    std::vector<double> coords;         // N*e row-major
+    std::vector<double> eigenvalues;    // e, descending
+    std::vector<double> var_explained;  // e, ratio
+    std::vector<double> freq;           // M_used, population allele-2 freq (kept sites)
+    std::vector<double> pi;             // M_used*N individual allele-2 freq (empty unless requested)
+    int N = 0;
+    int e = 0;
+    long M_used = 0;
+    long M_total = 0;
+    int iters_run = 0;
+    double final_rmse = 0.0;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -861,6 +889,27 @@ public:
         throw std::runtime_error(
             "ComputeBackend::ancibd_fb: not implemented by this backend (the CpuBackend "
             "provides the reference oracle; the CUDA override runs the device kernel)");
+    }
+
+    // pcangsd_fit: the PCAngsd GL-PCA (the `steppe pcangsd` core). Takes the host
+    // site-major likelihood tile (l[(site*n_sample+i)*3 + g], g = copies of A1) +
+    // the present mask; the CUDA override uploads it to a resident LikelihoodTensor
+    // (residency-checksummed) and runs the IAF EM (emMAF -> updateNormal init ->
+    // updatePCAngsd loop -> covPCAngsd) with the cuBLAS SYRK gram + cuSOLVER Dsyevd
+    // eigen device-resident; the CpuBackend runs the reference oracle. `e` is the
+    // number of PCs / IAF rank; the emMAF (maf_iter/maf_tol) + loop (max_iter/tol)
+    // budgets mirror pcangsd's defaults. `want_pi` also returns the individual
+    // allele-2 frequencies. Native FP64 EM; emulated-FP64 gram SYRK (via precision).
+    [[nodiscard]] virtual PcangsdFit pcangsd_fit(const double* host_l,
+                                                 const std::uint8_t* host_present, long n_site,
+                                                 int n_sample, int e, int max_iter, double tol,
+                                                 double maf, int maf_iter, double maf_tol,
+                                                 bool want_pi, const Precision& precision) {
+        (void)host_l; (void)host_present; (void)n_site; (void)n_sample; (void)e; (void)max_iter;
+        (void)tol; (void)maf; (void)maf_iter; (void)maf_tol; (void)want_pi; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::pcangsd_fit: not implemented by this backend (the CpuBackend "
+            "provides the reference oracle; the CUDA override runs the device kernels)");
     }
 
     // roh_fb: the hapROH (K+1)-state copying forward-backward (the `steppe roh` FB core).

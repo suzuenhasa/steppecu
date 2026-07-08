@@ -212,6 +212,15 @@ public:
                                       double e_rate, double in_val,
                                       const Precision& precision) override;
 
+    // PCAngsd GL-PCA (the `steppe pcangsd` core). Uploads the host GL tile to a
+    // resident LikelihoodTensor (residency-checksummed), runs the IAF EM +
+    // GL-weighted covariance device-resident (emMAF/E-build/dCov kernels + SYRK gram
+    // + cuSOLVER Dsyevd), returns the N*N cov + N*e coords + spectrum + freq/pi.
+    [[nodiscard]] PcangsdFit pcangsd_fit(const double* host_l, const std::uint8_t* host_present,
+                                         long n_site, int n_sample, int e, int max_iter, double tol,
+                                         double maf, int maf_iter, double maf_tol, bool want_pi,
+                                         const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

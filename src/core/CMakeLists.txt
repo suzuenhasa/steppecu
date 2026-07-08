@@ -39,6 +39,7 @@ add_library(steppe_core STATIC
     stats/fst.cpp
     stats/sfs.cpp
     stats/pca.cpp
+    stats/pcangsd.cpp
     stats/qpfstats.cpp
     stats/dates.cpp
     stats/li_stephens.cpp

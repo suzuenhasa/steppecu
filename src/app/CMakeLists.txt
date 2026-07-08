@@ -47,6 +47,7 @@ add_executable(steppe_app
     cmd_ingest.cpp
     cmd_ibd.cpp
     cmd_roh.cpp
+    cmd_pcangsd.cpp
     cmd_ingest_concord.cpp
     ingest_concord.cpp
     cmd_readv2_concord.cpp

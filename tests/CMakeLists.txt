@@ -485,6 +485,18 @@ add_executable(test_roh_model unit/test_roh_model.cpp)
 target_link_libraries(test_roh_model PRIVATE steppe::core steppe::warnings)
 steppe_add_test(NAME roh_model_unit COMMAND test_roh_model LABELS "unit")
 
+# Beagle-GL reader (`steppe pcangsd` ingest arm): the reversed-triplet placement,
+# present flags, site metadata, and the column-count / bad-header throws.
+add_executable(test_beagle_reader unit/beagle_reader_test.cpp)
+target_link_libraries(test_beagle_reader PRIVATE steppe::io steppe::api steppe::warnings)
+steppe_add_test(NAME beagle_reader_unit COMMAND test_beagle_reader LABELS "unit")
+
+# PCAngsd EM + GL-weighted covariance reference (core::pcangsd_reference oracle):
+# the posterior/E_dosage hand value + full-fit covariance/PCA properties.
+add_executable(test_pcangsd_em unit/pcangsd_em_test.cpp)
+target_link_libraries(test_pcangsd_em PRIVATE steppe::core steppe::warnings)
+steppe_add_test(NAME pcangsd_em_unit COMMAND test_pcangsd_em LABELS "unit")
+
 # Host segment caller + summary for `steppe roh`: call_roh chain + combine_ROH_df bins.
 add_executable(test_roh_segments unit/test_roh_segments.cpp)
 target_link_libraries(test_roh_segments PRIVATE steppe::core steppe::warnings)
@@ -1423,6 +1435,15 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_roh PRIVATE steppe::warnings)
   add_dependencies(test_cli_roh steppe_app)
   steppe_add_test(NAME cli_roh COMMAND test_cli_roh "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
+  # --- `steppe pcangsd` (PCAngsd GL-PCA) wiring gate -------------------------
+  # Authors a tiny plain-text beagle file (4 individuals, certain genotypes); runs
+  # the full beagle-parse -> IAF EM -> covariance/PCA -> emit path on the CPU
+  # reference backend (no GPU in CI) and checks the output shapes + flag validation.
+  add_executable(test_cli_pcangsd cli/test_cli_pcangsd.cpp)
+  target_link_libraries(test_cli_pcangsd PRIVATE steppe::warnings)
+  add_dependencies(test_cli_pcangsd steppe_app)
+  steppe_add_test(NAME cli_pcangsd COMMAND test_cli_pcangsd "$<TARGET_FILE:steppe_app>" LABELS "cli")
 
   # --- `steppe qpfstats` genotype-path smoothed-f2-tensor golden gate --------
   # Plain C++ host TU (no CUDA): runs the built `steppe qpfstats --prefix <raw TGENO>

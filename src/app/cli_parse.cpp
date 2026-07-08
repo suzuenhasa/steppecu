@@ -29,6 +29,7 @@
 #include "app/cmd_extract_f2.hpp"
 #include "app/cmd_ibd.hpp"
 #include "app/cmd_roh.hpp"
+#include "app/cmd_pcangsd.hpp"
 #include "app/cmd_ingest.hpp"
 #include "app/cmd_ingest_concord.hpp"
 #include "app/cmd_readv2_concord.hpp"
@@ -291,6 +292,7 @@ int run_cli(int argc, char** argv) {
     IngestArgs ingest_args;
     IbdArgs ibd_args;
     RohArgs roh_args;
+    PcangsdArgs pcangsd_args;
     IngestConcordArgs ingest_concord_args;
 
     int code = cfg::kExitOk;
@@ -846,6 +848,41 @@ int run_cli(int argc, char** argv) {
                     "Per-individual summary path (default <out>.summary, or stderr)");
     roh->add_option("--format", roh_args.format, "Output field separator: tsv | csv (default tsv)");
     roh->callback([&]() { code = run_roh(roh_args); });
+
+    // The `pcangsd` subcommand (PCAngsd genotype-likelihood PCA): self-contained args,
+    // like `ibd`/`roh`. Reads a beagle GL file, runs the individual-allele-frequency EM +
+    // GL-weighted covariance + top-e PCA device-resident, writes PREFIX.{cov,eigenvec,
+    // eigenval} (+ optional .freq / .pi). Gated vs the reference pcangsd package.
+    CLI::App* pca_gl = app.add_subcommand(
+        "pcangsd",
+        "PCAngsd genotype-likelihood PCA: --beagle GL file -e PCs -> a GL-weighted "
+        "covariance + PCA from per-site genotype likelihoods for low-coverage samples, via "
+        "the iterative individual-allele-frequency EM. Writes PREFIX.{cov,eigenvec,eigenval}");
+    pca_gl->add_option("--beagle", pcangsd_args.beagle,
+                       "Beagle GL file (.beagle.gz / plain; 3 GL cols/individual: AA,Aa,aa)")
+        ->required();
+    pca_gl->add_option("-e,--eig", pcangsd_args.eig,
+                       "Number of PCs / IAF rank (pcangsd -e; required >= 1 in v1)")
+        ->required();
+    pca_gl->add_option("--iter", pcangsd_args.iter,
+                       "Main-loop iteration cap (default 100; the EM is unaccelerated plain "
+                       "fixed-point, so at a tight --tole it commonly runs to this cap — size it up "
+                       "for tighter tolerances)");
+    pca_gl->add_option("--tole", pcangsd_args.tole, "Main-loop convergence RMSD (default 1e-5)");
+    pca_gl->add_option("--maf", pcangsd_args.maf, "Per-site minor-allele-freq filter (default 0.05)");
+    pca_gl->add_option("--maf-iter", pcangsd_args.maf_iter, "emMAF iteration cap (default 500)");
+    pca_gl->add_option("--maf-tole", pcangsd_args.maf_tole, "emMAF convergence RMSD (default 1e-6)");
+    pca_gl->add_flag("--emit-freq", pcangsd_args.emit_freq,
+                     "Also write PREFIX.freq (per-site population allele-2 frequency)");
+    pca_gl->add_flag("--emit-iaf", pcangsd_args.emit_iaf,
+                     "Also write PREFIX.pi (N*M individual allele-2 frequencies; large)");
+    pca_gl->add_option("--precision", pcangsd_args.precision,
+                       "Gram SYRK precision: emu | fp64 (default emu; EM + eigen are native FP64)");
+    pca_gl->add_option("--device", pcangsd_args.device, "CUDA device ordinal (default auto)");
+    pca_gl->add_option("--out", pcangsd_args.out, "Output PREFIX (writes PREFIX.cov/.eigenvec/.eigenval)")
+        ->required();
+    pca_gl->add_option("--format", pcangsd_args.format, "Matrix field separator: tsv | csv (default tsv)");
+    pca_gl->callback([&]() { code = run_pcangsd_cmd(pcangsd_args); });
 
     // The host-only VCF-ingest concordance validator (the Stage-1 block-correctness
     // gate): diffs steppe's report (--a) vs the Stage-0 oracle dosage TSV (--b).

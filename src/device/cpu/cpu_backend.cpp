@@ -29,6 +29,7 @@
 #include "core/stats/ancibd_fb.hpp"
 #include "core/stats/roh_fb.hpp"
 #include "core/stats/ancibd_model.hpp"
+#include "core/stats/pcangsd_em.hpp"
 #include "core/internal/decode_af.hpp"
 #include "core/internal/sfs_hist.hpp"
 #include "core/internal/f2_estimator.hpp"
@@ -564,6 +565,37 @@ public:
         out.K = K;
         out.n_snp_used = n_used;
         out.n_snp_monomorphic = M - n_used;
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // pcangsd_fit: the PCAngsd GL-PCA REFERENCE oracle (test-only; not user-facing).
+    // Runs the host reference EM (core::pcangsd_reference) in native double — the
+    // SAME emMAF -> updateNormal -> updatePCAngsd -> covPCAngsd math the CUDA
+    // kernels reproduce on the device. The precision argument is ignored (the
+    // reference is always native double).
+    [[nodiscard]] PcangsdFit pcangsd_fit(const double* host_l, const std::uint8_t* host_present,
+                                         long n_site, int n_sample, int e, int max_iter, double tol,
+                                         double maf, int maf_iter, double maf_tol, bool want_pi,
+                                         const Precision& precision) override {
+        (void)host_present; (void)precision;
+        const core::PcangsdRef r = core::pcangsd_reference(host_l, n_site, n_sample, e, max_iter,
+                                                           tol, maf, maf_iter, maf_tol, want_pi);
+        PcangsdFit out;
+        out.precision_tag = Precision::Kind::Fp64;
+        if (!r.ok) { out.status = Status::InvalidConfig; return out; }
+        out.cov = r.cov;
+        out.coords = r.coords;
+        out.eigenvalues = r.eigenvalues;
+        out.var_explained = r.var_explained;
+        out.freq = r.freq;
+        out.pi = r.pi;
+        out.N = r.N;
+        out.e = r.e;
+        out.M_used = r.M_used;
+        out.M_total = r.M_total;
+        out.iters_run = r.iters_run;
+        out.final_rmse = r.final_rmse;
         out.status = Status::Ok;
         return out;
     }
