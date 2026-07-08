@@ -27,6 +27,7 @@
 
 #include "app/cmd_cache.hpp"
 #include "app/cmd_extract_f2.hpp"
+#include "app/cmd_ibd.hpp"
 #include "app/cmd_ingest.hpp"
 #include "app/cmd_ingest_concord.hpp"
 #include "app/cmd_readv2_concord.hpp"
@@ -287,6 +288,7 @@ int run_cli(int argc, char** argv) {
     // The native VCF-ingest args (self-contained; reaches the GPU only through the
     // transpose seam for --emit-tile) and the host-only ingest concordance args.
     IngestArgs ingest_args;
+    IbdArgs ibd_args;
     IngestConcordArgs ingest_concord_args;
 
     int code = cfg::kExitOk;
@@ -771,6 +773,42 @@ int run_cli(int argc, char** argv) {
     ing->add_option("--device", ingest_args.device,
                     "CUDA device ordinal(s) for --emit-tile transpose (default auto)");
     ing->callback([&]() { code = run_ingest(ingest_args); });
+
+    // ancIBD IBD-segment detection between pairs of ancient individuals from imputed
+    // GP at 1240K sites (a per-pair 5-state forward-backward HMM, block-per-pair on
+    // the GPU). Self-contained (no RunConfig): reads the phased GT + GP through the
+    // shipped likelihood reader, runs the FB, and writes the segment + summary tables.
+    CLI::App* ibd = app.add_subcommand(
+        "ibd",
+        "ancIBD IBD-segment detection: --gp-vcf imputed.vcf.gz (phased GT + GP) + a target "
+        "source (--targets OR --panel + --fasta) + --map + --af -> per-pair IBD segments "
+        "(>= --min-cm cM) and a per-pair relatedness summary");
+    ibd->add_option("--gp-vcf", ibd_args.vcf, "Imputed VCF (.vcf.gz/.vcf) with phased GT + GP FORMAT")->required();
+    ibd->add_option("--targets", ibd_args.targets, "Pre-built target-site table (mutually exclusive with --panel)");
+    ibd->add_option("--panel", ibd_args.panel, "Native: AADR EIGENSTRAT .snp panel (with --fasta)");
+    ibd->add_option("--fasta", ibd_args.fasta, "Native: build-matched .fa (+ .fai)");
+    ibd->add_option("--lift", ibd_args.lift, "Native: rsID->pos map (cross-build VCF only)");
+    ibd->add_option("--assembly", ibd_args.assembly, "Override VCF build detection: GRCh37 | GRCh38");
+    ibd->add_option("--map", ibd_args.map, "Per-site genetic map FILE (rsID<ws>pos)")->required();
+    ibd->add_option("--map-unit", ibd_args.map_unit, "Map file unit: cm | morgan (default cm)");
+    ibd->add_option("--af", ibd_args.af, "Per-site derived (ALT) allele-freq FILE (rsID<ws>freq)");
+    ibd->add_option("--af-mode", ibd_args.af_mode, "AF source: panel (--af) | sample (in-sample) | half (0.5)");
+    ibd->add_option("--samples", ibd_args.samples, "OPTIONAL sample-subset FILE (one IID/line; default all)");
+    ibd->add_option("--pairs", ibd_args.pairs, "OPTIONAL explicit pair FILE (iid1<ws>iid2/line; default all C(n,2))");
+    ibd->add_option("--ibd-in", ibd_args.ibd_in, "IBD-in rate (default 1)");
+    ibd->add_option("--ibd-out", ibd_args.ibd_out, "IBD-out rate (default 10)");
+    ibd->add_option("--ibd-jump", ibd_args.ibd_jump, "IBD-jump rate (default 400)");
+    ibd->add_option("--in-val", ibd_args.in_val, "Initial per-IBD-state probability (default 1e-4)");
+    ibd->add_option("--min-error", ibd_args.min_error, "Haplotype-certainty cap (default 1e-3)");
+    ibd->add_option("--p-min", ibd_args.p_min, "Derived-AF clamp in the emission (default 1e-3)");
+    ibd->add_option("--post-cutoff", ibd_args.post_cutoff, "Per-SNP IBD-posterior calling threshold (default 0.99)");
+    ibd->add_option("--max-gap-cm", ibd_args.max_gap_cm, "Adjacent-block merge gap in cM (default 0.75)");
+    ibd->add_option("--min-cm", ibd_args.min_cm, "Called-segment length floor in cM (default 8)");
+    ibd->add_option("--device", ibd_args.device, "CUDA device ordinal (default auto)");
+    ibd->add_option("--out", ibd_args.out, "Per-segment table path (default stdout)");
+    ibd->add_option("--summary", ibd_args.summary, "Per-pair summary path (default <out>.summary, or stderr)");
+    ibd->add_option("--format", ibd_args.format, "Output field separator: tsv | csv (default tsv)");
+    ibd->callback([&]() { code = run_ibd(ibd_args); });
 
     // The host-only VCF-ingest concordance validator (the Stage-1 block-correctness
     // gate): diffs steppe's report (--a) vs the Stage-0 oracle dosage TSV (--b).

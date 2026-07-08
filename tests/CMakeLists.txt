@@ -472,6 +472,13 @@ target_link_libraries(test_li_stephens_validate
     PRIVATE steppe::core steppe::io steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME li_stephens_validate_unit COMMAND test_li_stephens_validate LABELS "unit")
 
+# --- ancIBD model unit gate (`steppe ibd`) -----------------------------------
+# Host math: emission ratio, 3x3 transition expm, the 5-state scaled forward-
+# backward (vs the numpy fwd_bkwd_scaled reference), and segment calling / summary.
+add_executable(test_ancibd_model unit/test_ancibd_model.cpp)
+target_link_libraries(test_ancibd_model PRIVATE steppe::core steppe::warnings)
+steppe_add_test(NAME ancibd_model_unit COMMAND test_ancibd_model LABELS "unit")
+
 # --- qpAdm parity test (BOTH backends) ---------------------------------------
 # Reads the committed 9-pop f2 fixture and runs the single-model qpAdm fit
 # (steppe::run_qpadm) on both backends: the CpuBackend reference (bit-exact diff
@@ -1388,6 +1395,14 @@ if(STEPPE_BUILD_CLI)
   target_link_libraries(test_cli_paint PRIVATE steppe::warnings)
   add_dependencies(test_cli_paint steppe_app)
   steppe_add_test(NAME cli_paint COMMAND test_cli_paint "$<TARGET_FILE:steppe_app>" LABELS "cli")
+
+  # --- `steppe ibd` (ancIBD) wiring gate -------------------------------------
+  # Authors a tiny phased imputed VCF + targets + map + AF and runs the full path
+  # on the CPU reference backend (no GPU in CI). Depends on steppe_app.
+  add_executable(test_cli_ibd cli/test_cli_ibd.cpp)
+  target_link_libraries(test_cli_ibd PRIVATE steppe::warnings)
+  add_dependencies(test_cli_ibd steppe_app)
+  steppe_add_test(NAME cli_ibd COMMAND test_cli_ibd "$<TARGET_FILE:steppe_app>" LABELS "cli")
 
   # --- `steppe qpfstats` genotype-path smoothed-f2-tensor golden gate --------
   # Plain C++ host TU (no CUDA): runs the built `steppe qpfstats --prefix <raw TGENO>

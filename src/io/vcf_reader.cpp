@@ -621,7 +621,8 @@ struct GlVariantRec {
 }  // namespace
 
 VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
-                                                            std::vector<RawGlRow>* raw_out) {
+                                                            std::vector<RawGlRow>* raw_out,
+                                                            bool ancibd_native) {
     GzipLineReader reader(vcf_path_);
     const char* key = gl_field_key(field);
 
@@ -730,6 +731,11 @@ VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
     const std::size_t cells = tile.n_site * tile.n_sample;
     tile.l.assign(cells * 3, 0.0);
     tile.present.assign(cells, 0);
+    // ancIBD path: keep the phased haplotype bits (native REF/ALT) alongside the tensor.
+    if (ancibd_native) {
+        tile.native_order = true;
+        tile.phased_gt.assign(cells * 2, 0xFFu);  // 0xFF = missing/unset
+    }
 
     // Default every cell to the uninformative triplet (present=0); a resolved,
     // valid triplet overwrites it below.
@@ -752,7 +758,13 @@ VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
 
         // Every (site, sample) starts missing; the guards below leave it that way.
         counts.gl_missing += n_sample;
-        if (s.palindrome) continue;  // palindrome drop (mirrors the hard-call path)
+        // Palindrome (A/T, C/G) drop on the hard-call path (strand-ambiguity guard).
+        // The ancIBD-native GP path KEEPS palindromes: the imputed VCF is already on
+        // the panel's strand (GP is never reconciled against a panel), so the ambiguity
+        // does not apply, and reference ancIBD retains these sites. Dropping them ran
+        // steppe on ~1.5% fewer markers and pushed a genuinely-related pair below the
+        // summary snp_cm density floor. See vcf_reader.hpp `ancibd_native`.
+        if (s.palindrome && !ancibd_native) continue;
 
         const auto vit = variant.find(s.chrom);
         if (vit == variant.end()) continue;
@@ -793,6 +805,8 @@ VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
             ++counts.gl_field_absent;
             continue;  // FORMAT lacked the field at this site -> all samples missing
         }
+        // ancIBD path: locate the GT subfield once per record for the phased-bit read.
+        const int gt_fi = ancibd_native ? vd::format_index(rec.format, "GT") : -1;
 
         for (int k = 0; k < n_sample; ++k) {
             const std::string_view sub = vd::subfield(rec.samples[static_cast<std::size_t>(k)], fi);
@@ -822,9 +836,11 @@ VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
             }
             if (!ok) continue;  // unparseable / non-finite -> stays missing
 
-            // Place into g == copies-of-A1 order.
+            // Place into g == copies-of-A1 order — UNLESS the ancIBD-native path asked
+            // for VCF-native (RR, RA, AA) order (so g0=P(hom-REF), g1=P(het) feed
+            // LoadH5Multi2.get_haplo_prob on the REF/ALT axis, matching ancIBD exactly).
             const std::size_t b = tile.base(si, static_cast<std::size_t>(k));
-            if (swap) {
+            if (swap && !ancibd_native) {
                 tile.l[b + 0] = lin[2];
                 tile.l[b + 1] = lin[1];
                 tile.l[b + 2] = lin[0];
@@ -836,6 +852,31 @@ VcfReader::LikelihoodResult VcfReader::genotype_likelihoods(GlField field,
             tile.present[tile.mask_index(si, static_cast<std::size_t>(k))] = 1;
             ++counts.gl_present;
             --counts.gl_missing;
+
+            // ancIBD path: parse the two phased haplotype allele bits (native REF/ALT).
+            // The GT value is "a|b" (phased; GLIMPSE output) — map '0'->0 (REF/ancestral),
+            // '1'->1 (ALT/derived), anything else -> missing. Phase is load-bearing for
+            // ancIBD's haplotype-sharing states, so an UNPHASED ('/') heterozygote has no
+            // defined hap order and its bits are left missing (0xFF) rather than assigned an
+            // arbitrary order; a homozygous '/' call is phase-invariant and is kept.
+            if (ancibd_native && gt_fi >= 0) {
+                const std::string_view gtv =
+                    vd::subfield(rec.samples[static_cast<std::size_t>(k)], gt_fi);
+                const bool phased = gtv.find('|') != std::string_view::npos;
+                const char asep = phased ? '|' : '/';
+                const std::vector<std::string_view> ga = vd::split(gtv, asep);
+                if (ga.size() == 2 && ga[0].size() == 1 && ga[1].size() == 1) {
+                    const bool unphased_het = !phased && ga[0] != ga[1];
+                    if (!unphased_het) {
+                        const auto bit = [](char c) -> std::uint8_t {
+                            return (c == '0') ? 0u : (c == '1') ? 1u : 0xFFu;
+                        };
+                        const std::size_t pb = tile.phase_base(si, static_cast<std::size_t>(k));
+                        tile.phased_gt[pb + 0] = bit(ga[0][0]);
+                        tile.phased_gt[pb + 1] = bit(ga[1][0]);
+                    }
+                }
+            }
 
             if (raw_out != nullptr) {
                 RawGlRow row;

@@ -48,12 +48,25 @@ struct LikelihoodTile {
     std::vector<std::string> sample_ids;   // n_sample
     std::vector<LikelihoodSite> sites;     // n_site, panel order
 
+    // ancIBD path only (the --ancibd-native read): the phased haplotype hardcall bit
+    // per (site, sample, haplotype), VCF-NATIVE {0 = REF/ancestral, 1 = ALT/derived,
+    // 0xFF = missing/unphased}, SITE-MAJOR. Empty unless the reader was asked to keep
+    // phase (the PCAngsd GP path leaves it empty). When populated, `l` is stored in
+    // VCF-NATIVE (RR, RA, AA) order too (NOT the A1-copy swap) so g0/g1 + these bits
+    // feed LoadH5Multi2.get_haplo_prob directly. Reference: ancibd-face-spec §0b, §4.1.
+    std::vector<std::uint8_t> phased_gt;   // 2*n_site*n_sample (haplotype-minor)
+    bool native_order = false;             // true -> `l` is VCF-native, phased_gt filled
+
     // Flat index of the g-triplet base for (site, sample) in `l`.
     [[nodiscard]] std::size_t base(std::size_t site, std::size_t sample) const noexcept {
         return (site * n_sample + sample) * 3;
     }
     [[nodiscard]] std::size_t mask_index(std::size_t site, std::size_t sample) const noexcept {
         return site * n_sample + sample;
+    }
+    // Flat index of the first (of two) phased allele bit for (site, sample).
+    [[nodiscard]] std::size_t phase_base(std::size_t site, std::size_t sample) const noexcept {
+        return (site * n_sample + sample) * 2;
     }
 };
 

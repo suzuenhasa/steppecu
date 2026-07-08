@@ -133,8 +133,18 @@ public:
     // no PL/GL/GP, so ref-block-only sites are honestly left missing (present=0).
     // When `raw_out` is non-null it is filled with the pre-normalization,
     // VCF-native-order tokens (for the --emit-pl-raw bit-exact gate).
+    //
+    // When `ancibd_native` is true (the `steppe ibd` path): (a) the triplet is stored
+    // in VCF-NATIVE (RR, RA, AA) order — the A1-copy polarity swap is NOT applied, so
+    // g0=P(hom-REF), g1=P(het) feed ancIBD's emission on the REF/ALT axis exactly; and
+    // (b) the tile's phased_gt buffer is filled with the two phased haplotype allele
+    // bits (from splitting the GT subfield on `|`). Phase is load-bearing for ancIBD's
+    // haplotype-sharing states, so an unphased `/` HETEROZYGOTE has no defined hap order
+    // and its bits are left MISSING (0xFF) rather than an arbitrary order; a homozygous
+    // `/` call is phase-invariant and is kept. Reference: ancibd-face-spec §4.1.
     [[nodiscard]] LikelihoodResult genotype_likelihoods(GlField field,
-                                                        std::vector<RawGlRow>* raw_out = nullptr);
+                                                        std::vector<RawGlRow>* raw_out = nullptr,
+                                                        bool ancibd_native = false);
 
 private:
     std::string vcf_path_;

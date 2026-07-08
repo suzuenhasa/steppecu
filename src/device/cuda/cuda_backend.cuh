@@ -195,6 +195,15 @@ public:
         const double* rho, const double* mu, const int* donor_group, int K, long M, int N,
         int P, const Precision& precision) override;
 
+    // ancIBD 5-state pairwise forward-backward (the `steppe ibd` FB core). Derives the
+    // haplotype ancestral-prob table from the device GP tensor + phased bits, then runs
+    // the 5-state scaled scan block-per-pair; only the n_pair*M IBD posterior returns.
+    [[nodiscard]] AncibdPosterior ancibd_fb(const double* gp3, const std::uint8_t* phased2,
+                                            const double* p, const double* T, const int* pair_idx,
+                                            int n_sample, long M, int n_pair, double in_val,
+                                            double p_min, double min_error,
+                                            const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

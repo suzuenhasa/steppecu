@@ -341,6 +341,20 @@ struct LsLocalAncestry {
     Status status = Status::Ok;
 };
 
+// ancIBD per-pair IBD posterior (the `steppe ibd` FB output). p_ibd is the per-SNP
+// IBD posterior 1 - post[0] for each pair, pair-major p_ibd[pair*M + l], over the M
+// run sites. Only the small n_pair*M posterior returns to host; the derived
+// haplotype-probability table + the 5-state scan stay device-resident. Native FP64
+// (the FB is a sub-one product scan — the reduction carve-out, NOT the emulated
+// default). Only the CpuBackend oracle and the CUDA override implement it.
+// Reference: docs/planning/ancibd-face-spec.md §3.
+struct AncibdPosterior {
+    std::vector<double> p_ibd;  // n_pair*M, pair-major [pair*M + l]
+    int n_pair = 0;
+    long M = 0;
+    Status status = Status::Ok;
+};
+
 // Per-site Weir & Cockerham 1984 FST over one population pair (the `steppe fst` output).
 // num/den/fst/valid are per-SNP in the tile's kept order (length M); a site is `valid`
 // when both pops are sampled, the combined size exceeds 2, and the denominator is finite
@@ -811,6 +825,28 @@ public:
             "ComputeBackend::ls_localanc: not implemented by this backend "
             "(the batched GPU local-ancestry sink is Phase 3; the CpuBackend provides the "
             "reference oracle)");
+    }
+
+    // ancibd_fb: the ancIBD 5-state pairwise forward-backward (the `steppe ibd` FB
+    // core). Derives the per-haplotype ancestral-allele table from the device GP
+    // tensor + phased-GT bits (LoadH5Multi2.get_haplo_prob) and runs the 5-state
+    // scaled scan block-per-pair, returning the per-SNP IBD posterior 1 - post[0].
+    //   gp3      M*n_sample*3  site-major GP triplet (VCF-native order; g0,g1 used)
+    //   phased2  M*n_sample*2  site-major phased GT allele bits {0,1}
+    //   p        M             per-SNP derived (ALT) allele freq
+    //   T        M*9           per-SNP transition tensor (ancibd_build_transition)
+    //   pair_idx n_pair*2      the two sample indices per pair
+    // Native FP64. Default: throw (the CpuBackend oracle + the CUDA override implement it).
+    [[nodiscard]] virtual AncibdPosterior ancibd_fb(const double* gp3, const std::uint8_t* phased2,
+                                                    const double* p, const double* T,
+                                                    const int* pair_idx, int n_sample, long M,
+                                                    int n_pair, double in_val, double p_min,
+                                                    double min_error, const Precision& precision) {
+        (void)gp3; (void)phased2; (void)p; (void)T; (void)pair_idx; (void)n_sample; (void)M;
+        (void)n_pair; (void)in_val; (void)p_min; (void)min_error; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::ancibd_fb: not implemented by this backend (the CpuBackend "
+            "provides the reference oracle; the CUDA override runs the device kernel)");
     }
 
     [[nodiscard]] virtual QpfstatsSmooth qpfstats_smooth(std::span<const double> x,

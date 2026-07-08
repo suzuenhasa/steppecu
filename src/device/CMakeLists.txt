@@ -30,6 +30,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_likelihood.cu
     cuda/dates_kernel.cu
     cuda/li_stephens_fb_kernel.cu
+    cuda/ancibd_fb_kernel.cu
     cuda/qpfstats_kernel.cu
     cuda/qpfstats_jackknife_kernel.cu
     cuda/ratio_block_jackknife_kernel.cu
@@ -37,6 +38,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_qpgraph.cu
     cuda/cuda_backend_dates.cu
     cuda/cuda_backend_li_stephens.cu
+    cuda/cuda_backend_ancibd.cu
     cuda/cuda_backend_decode.cu
     cuda/cuda_backend_dstat.cu
     cuda/cuda_backend_qpfstats.cu

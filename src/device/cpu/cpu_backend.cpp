@@ -26,6 +26,8 @@
 
 #include "core/domain/block_partition_rule.hpp"
 #include "core/internal/dates_fit.hpp"
+#include "core/stats/ancibd_fb.hpp"
+#include "core/stats/ancibd_model.hpp"
 #include "core/internal/decode_af.hpp"
 #include "core/internal/sfs_hist.hpp"
 #include "core/internal/f2_estimator.hpp"
@@ -1046,6 +1048,61 @@ public:
                     cnt[static_cast<std::size_t>(k)] += sw;
                 }
             }
+        }
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // ancibd_fb: the ancIBD 5-state pairwise forward-backward REFERENCE oracle (the
+    // `steppe ibd` FB core) — the diff oracle the GPU kernel is gated against. Derives
+    // the per-haplotype ancestral-prob table from the GP tensor + phased-GT bits
+    // (LoadH5Multi2.get_haplo_prob), then runs the scalar native-FP64 5-state scaled
+    // scan (core::ancibd_fb_pair, an exact port of cfunc.pyx fwd_bkwd_scaled) per pair.
+    [[nodiscard]] AncibdPosterior ancibd_fb(const double* gp3, const std::uint8_t* phased2,
+                                            const double* p, const double* T, const int* pair_idx,
+                                            int n_sample, long M, int n_pair, double in_val,
+                                            double p_min, double min_error,
+                                            const Precision& precision) override {
+        (void)precision;  // native FP64 by construction
+        AncibdPosterior out;
+        out.n_pair = n_pair;
+        out.M = M;
+        if (n_sample <= 0 || M <= 0 || n_pair <= 0) { out.status = Status::Ok; return out; }
+
+        const std::size_t Ms = static_cast<std::size_t>(M);
+        const std::size_t nsamp = static_cast<std::size_t>(n_sample);
+
+        // Derive hts[(2*sample+h)*M + site] on host (mirrors the derive_hts kernel).
+        std::vector<double> hts(2 * nsamp * Ms, 0.0);
+        for (long site = 0; site < M; ++site) {
+            for (int s = 0; s < n_sample; ++s) {
+                const std::size_t gb =
+                    (static_cast<std::size_t>(site) * nsamp + static_cast<std::size_t>(s)) * 3;
+                const std::size_t pb =
+                    (static_cast<std::size_t>(site) * nsamp + static_cast<std::size_t>(s)) * 2;
+                double hA, hB;
+                core::ancibd_haplo_prob(gp3[gb + 0], gp3[gb + 1], phased2[pb + 0], phased2[pb + 1],
+                                        min_error, hA, hB);
+                hts[static_cast<std::size_t>(2 * s + 0) * Ms + static_cast<std::size_t>(site)] = hA;
+                hts[static_cast<std::size_t>(2 * s + 1) * Ms + static_cast<std::size_t>(site)] = hB;
+            }
+        }
+
+        core::AncibdParams pr;
+        pr.in_val = in_val;
+        pr.p_min = p_min;
+        pr.min_error = min_error;
+
+        out.p_ibd.assign(static_cast<std::size_t>(n_pair) * Ms, 0.0);
+        for (int q = 0; q < n_pair; ++q) {
+            const int i1 = pair_idx[2 * q + 0];
+            const int i2 = pair_idx[2 * q + 1];
+            const double* rowAa = hts.data() + static_cast<std::size_t>(2 * i1 + 0) * Ms;
+            const double* rowAb = hts.data() + static_cast<std::size_t>(2 * i1 + 1) * Ms;
+            const double* rowBa = hts.data() + static_cast<std::size_t>(2 * i2 + 0) * Ms;
+            const double* rowBb = hts.data() + static_cast<std::size_t>(2 * i2 + 1) * Ms;
+            core::ancibd_fb_pair(rowAa, rowAb, rowBa, rowBb, p, T, M, pr,
+                                 out.p_ibd.data() + static_cast<std::size_t>(q) * Ms);
         }
         out.status = Status::Ok;
         return out;
