@@ -14,6 +14,8 @@ The **f2-based** examples run against the bundled 10-population example that the
 
 Every command takes `--device <n>` (default `0`) and, where it produces a result,
 `--format csv|tsv|json` (default `csv`) and `--out FILE`. They're omitted below for brevity.
+(`roh` also accepts a **comma-separated device list** — `--device 0,1,2,3` — to shard an ancient
+cohort across multiple GPUs; the output is byte-identical to a single-GPU run.)
 
 ---
 
@@ -398,28 +400,35 @@ steppe pcangsd --beagle input.beagle.gz -e 2 --out pcangsd_out
 steppe ibd --gp-vcf imputed.vcf.gz --targets targets.tsv --map map.cM --af panel_af.tsv \
   --min-cm 8 --out ibd.tsv
 
-# hapROH: runs-of-homozygosity for one ancient target vs a phased reference panel
+# hapROH: runs-of-homozygosity for ancient target(s) vs a phased reference panel
 steppe roh --prefix TARGET_triple --ref-panel phased_panel_triple --n-ref 2504 --out roh.csv
+# ...shard an ancient cohort across GPUs (targets split across the listed devices, output identical):
+steppe roh --prefix cohort_triple --ref-panel phased_panel_triple --device 0,1,2,3 --out roh.csv
 ```
 
 `pcangsd` reads a 3-GL-per-individual beagle file, runs the individual-allele-frequency EM
 (`--iter`/`--tole`), builds a GL-weighted covariance and takes `-e` PCs, writing
 `PREFIX.{cov,eigenvec,eigenval}` — gated vs the `pcangsd` package. `ibd` runs a per-pair 5-state
 forward-backward over imputed GP at target sites (needs `--map` in cM and a panel `--af`),
-calling segments ≥ `--min-cm` — gated vs `pip ancIBD`. `roh` runs the (K+1)-state copying FB of a
-target ancient triple against a phased reference panel (`--n-ref` reference individuals ⇒
+calling segments ≥ `--min-cm` — gated vs `pip ancIBD`. `roh` runs the (K+1)-state copying FB of
+ancient target(s) against a phased reference panel (`--n-ref` reference individuals ⇒
 K = 2·n_ref haplotypes; the default 2504 is safe, a very large `--n-ref` above ~5000 is
-rejected up front), calling ROH segments — gated vs `pip hapROH/hapsburg`. A stack of ancients
-runs through a panel-resident + 3-slot look-ahead stream pipeline (**2.84× batch throughput**, GPU
-duty 57→77%, output bit-identical), and steppe is ~**90×** the single-threaded hapROH crawl.
+rejected up front), calling ROH segments — byte-identical to `pip hapROH/hapsburg`. A cohort runs
+as a **wave-batched grid** (hundreds of ancients resident on the GPU at once) with a
+**multi-threaded host prep**; pass a comma-separated **device list** (`--device 0,1,2,3`) to shard
+the cohort across GPUs — task-parallel, output byte-identical to one GPU. `STEPPE_ROH_THREADS` caps
+the prep thread pool and `STEPPE_ROH_TIMING=1` prints the per-stage prep timing.
 
 > **Measured** (one RTX 5090, `--device 0`). `pcangsd` on the popgen.dk Demo2 beagle
 > (100 low-coverage samples × ~50k SNPs, `-e 2`, 100 plain-EM FP64 iters) ~**3.66 s** (peak host
 > RAM ~0.72 GB; median of 3 after warmup). `ibd` on the ancIBD Hazelton chr20 tutorial
 > (28.5k sites × 15 pairs) ~**1.8 s** for the GPU forward-backward — this figure is from the gate
 > run (that dataset was since cleaned off the disk-tight box, so it is not a fresh re-time).
-> `roh` on a real 1000G-1240K phased-panel run is **not separately timed** (the ~912 MB Zenodo
-> panel was cleaned under disk pressure and no wall was logged at the gate). HONEST NOTE: on the
+> `roh` (real 1000G chr3 panel, K=5008, one RTX 5090): a **512-ancient cohort in ~27 s**
+> (~1,100 ancients/min), and it shards across GPUs — a 2,048-ancient cohort runs 92.6 s (1 GPU) →
+> 57 s (2) → 37 s (4), byte-identical at every device count. The win is scale-shaped: the
+> wave-batched grid lifted the kernel off ~1% GPU utilization, and multi-GPU adds a further
+> ~1.6–2.9× (task-parallel, capped by the shared read/decode prep, not the GPUs). HONEST NOTE: on the
 > tiny Demo2 fixture the reference `pcangsd` (10 SQUAREM float32 iters, 16 CPU threads) finishes
 > ~1 s — steppe runs more, heavier FP64 iterations to the same fixed point, so it is slower on
 > this smoke size; the GPU win is a scale story.
