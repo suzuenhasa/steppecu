@@ -24,6 +24,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -86,17 +87,32 @@ namespace {
     return lab;
 }
 
+// Parse a "--device" ordinal list into a DeviceConfig (empty/"auto" -> default). A
+// comma-separated list (e.g. "0,1") fills dc.devices with every ordinal — the multi-device
+// dispatch reads more than one; the single path uses front(). Mirrors cmd_ingest.cpp.
 [[nodiscard]] bool parse_device(const std::string& raw, steppe::DeviceConfig& dc, std::string& err) {
     std::string s;
     for (char c : raw)
         if (!std::isspace(static_cast<unsigned char>(c))) s += c;
     if (s.empty() || s == "auto") return true;
-    try {
-        dc.devices.push_back(std::stoi(s));
-    } catch (...) {
-        err = "--device ordinal '" + raw + "' is not an integer";
-        return false;
+    std::vector<int> ords;
+    std::size_t start = 0;
+    while (start <= s.size()) {
+        const std::size_t comma = s.find(',', start);
+        const std::string tok =
+            s.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!tok.empty()) {
+            try {
+                ords.push_back(std::stoi(tok));
+            } catch (...) {
+                err = "--device ordinal '" + tok + "' is not an integer";
+                return false;
+            }
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
     }
+    dc.devices = std::move(ords);
     return true;
 }
 
@@ -354,67 +370,70 @@ int run_roh(const RohArgs& args) {
         return cfg::kExitInvalidConfig;
     }
 
-    // --- backend (GPU when visible, else the CPU reference oracle) ------------------
-    std::unique_ptr<ComputeBackend> be;
-    try {
-        steppe::DeviceConfig dc;
+    // --- parse + validate the --device ordinal list --------------------------------
+    steppe::DeviceConfig dc;
+    {
         std::string derr;
         if (!parse_device(args.device, dc, derr)) {
             std::fprintf(stderr, "steppe roh: %s\n", derr.c_str());
             return cfg::kExitInvalidConfig;
         }
-        int dev = dc.devices.empty() ? 0 : dc.devices.front();
-        be = (device::visible_device_count() > 0) ? device::make_cuda_backend(dev)
-                                                   : device::make_cpu_backend();
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe roh: device init failed: %s\n", e.what());
-        return cfg::kExitIoError;
     }
+    // Stable-dedup so a repeated ordinal (e.g. --device 0,0) collapses to a single device
+    // (and never uploads the panel twice to the same GPU or double-counts a target).
+    {
+        std::vector<int> uniq;
+        std::unordered_set<int> seen;
+        for (int d : dc.devices)
+            if (seen.insert(d).second) uniq.push_back(d);
+        dc.devices = std::move(uniq);
+    }
+    const int n_visible = device::visible_device_count();
+    // Ordinal range-validation applies ONLY on the GPU path. When no GPU is visible the run
+    // falls back to the CpuBackend oracle, which ignores the ordinal entirely — so --device N
+    // (any N) must stay reachable there exactly as before (CI / no-GPU box / tests).
+    if (n_visible > 0) {
+        for (int d : dc.devices) {
+            if (d < 0 || d >= n_visible) {
+                std::fprintf(stderr,
+                             "steppe roh: --device ordinal %d is out of range (%d GPU%s visible)\n",
+                             d, n_visible, n_visible == 1 ? "" : "s");
+                return cfg::kExitInvalidConfig;
+            }
+        }
+    }
+    // Multi-device dispatch only when the user named >1 distinct ordinal AND >1 GPU is visible.
+    // A single --device N (or the CPU-oracle fallback) stays on the single-device path below,
+    // byte-identical to the pre-multi-GPU reference.
+    const bool multi_device = (dc.devices.size() > 1) && (n_visible > 1);
+
     const steppe::Precision prec = steppe::Precision::fp64();
 
-    // --- per-chromosome forward-backward + segment calling -------------------------
+    // --- shared per-chromosome prep (identical inputs for BOTH device paths) --------
     std::vector<int> chroms;
     for (const auto& kv : by_chrom) chroms.push_back(kv.first);
     std::sort(chroms.begin(), chroms.end());
-
-    std::vector<core::RohSegment> all_segments;
-    const std::size_t Ks = static_cast<std::size_t>(K);
-
     // Pre-sort each chromosome's intersected sites by genetic position (shared over targets).
     for (int ch : chroms)
         std::sort(by_chrom[ch].begin(), by_chrom[ch].end(),
                   [](const KeptSite& a, const KeptSite& b) { return a.morgan < b.morgan; });
-
-    // Exact-hapROH parity path (only_calls=True, docs §3b option 1): run ONE target per FB
-    // launch on the target's OWN covered (non-missing) sites, rebuilding the map/allele-freq/
-    // transition on that subset — so a target-missing site is DROPPED, not emitted uniform.
-    //
-    // BATCH-OVERLAP SCHEDULING (pure performance; output BIT-IDENTICAL by construction): the
-    // panel is uploaded to the device ONCE (roh_upload_panel), and the (t, ch) work-items run
-    // through a bounded look-ahead stream pipeline (roh_fb_batch) so each item's host input-
-    // build (phase P) + segment-calling (phase C) overlaps its neighbours' GPU forward-backward.
-    // Nothing about WHAT is computed changes: same per-target compaction, same refhaps bytes
-    // (now gathered on-device from the resident panel), same FB, same in-order segment append.
     const int nchrom = static_cast<int>(chroms.size());
-    (void)Ks;  // K-derived scratch is now owned device-side by roh_fb_batch
-
-    // The panel is uploaded ONCE as-is (Kpanel_all rows of Mp) with the selected-donor row map
-    // panel_cols[] — the on-device gather reproduces panel_hap[panel_cols[k]*Mps + panel_l]
-    // byte-for-byte (no second host copy). Both panel_hap and panel_cols outlive the batch call.
-    RohPanelHandle panel = be->roh_upload_panel(panel_hap.data(), Kpanel_all,
-                                                static_cast<long>(Mp), panel_cols.data(), K);
 
     // Mmax bounds every item's M: an item's kept-site count never exceeds its chromosome's
-    // intersected-site count. Sizing scratch to this upper bound avoids scanning target coverage.
+    // intersected-site count. The SAME global Mmax is reused on every device (it is the wave
+    // kernel's Mstride) — every chromosome runs on every device, so a per-device recompute
+    // would coincide anyway; reuse the global to avoid ambiguity.
     long Mmax = 0;
     for (int ch : chroms)
         Mmax = std::max<long>(Mmax, static_cast<long>(by_chrom[ch].size()));
 
     // The target's non-missing covered sites on a chromosome (in the pre-sorted morgan order);
-    // recomputed identically in both the builder and the consumer (cheap O(sites-on-chrom)).
+    // recomputed identically in the builder and the consumer (cheap O(sites-on-chrom)). Uses
+    // by_chrom.at() (const lookup) so D device threads may call it concurrently without racing
+    // the map — every ch is already a key, so no insertion/rehash ever occurs.
     auto make_cov = [&](int t, int ch) -> std::vector<const KeptSite*> {
         const std::size_t tcol = static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
-        const std::vector<KeptSite>& sr = by_chrom[ch];
+        const std::vector<KeptSite>& sr = by_chrom.at(ch);
         std::vector<const KeptSite*> cov;
         cov.reserve(sr.size());
         for (const KeptSite& s : sr) {
@@ -424,58 +443,237 @@ int run_roh(const RohArgs& args) {
         return cov;
     };
 
-    // Phase P: fill work-item i's GPU inputs (ob with the polarity flip, the panel-column
-    // site_map, allele-freq p, transition T). i = t*nchrom + ch-index, the SAME (t-outer,
-    // ch-inner) order as the serial loop — so the consumer drains in the identical order.
-    RohItemBuilder build = [&](long i, std::uint8_t* ob, int* site_map, double* p,
-                               double* T) -> long {
-        const int t = static_cast<int>(i / nchrom);
-        const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
-        const std::vector<const KeptSite*> cov = make_cov(t, ch);
-        const long M = static_cast<long>(cov.size());
-        if (M <= 0) return 0;  // empty item — skipped, exactly like the serial `continue`
-        const std::size_t tcol = static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
-        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
-        for (long l = 0; l < M; ++l) {
-            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
-            const std::size_t ls = static_cast<std::size_t>(l);
-            p[ls] = s.p_freq;
-            gpos[ls] = s.morgan;
-            site_map[ls] = static_cast<int>(s.panel_l);
-            std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
-            if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
-            ob[ls] = a;
-        }
-        const std::vector<double> Tv = core::roh_build_transition(gpos, pr, K);
-        std::copy(Tv.begin(), Tv.end(), T);
-        return M;
-    };
+    std::vector<core::RohSegment> all_segments;
 
-    // Phase C: call ROH segments on item i's posterior, in STRICT item order — appended to
-    // all_segments in the identical (t, ch) order as the serial path (byte-stable output).
-    RohPosteriorConsumer consume = [&](long i, const double* p_roh, long M) {
-        const int t = static_cast<int>(i / nchrom);
-        const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
-        const std::vector<const KeptSite*> cov = make_cov(t, ch);
-        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
-        std::vector<long long> bp(static_cast<std::size_t>(M), 0);
-        for (long l = 0; l < M; ++l) {
-            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
-            gpos[static_cast<std::size_t>(l)] = s.morgan;
-            bp[static_cast<std::size_t>(l)] = s.bp;
+    if (!multi_device) {
+        // ============================ SINGLE-DEVICE PATH ============================
+        // Byte-identical to the pre-multi-GPU reference binary. One backend (GPU front()
+        // ordinal, or the CpuBackend oracle when no GPU is visible), one panel upload, one
+        // roh_fb_batch over ALL Ntgt*nchrom items, in-order segment append to all_segments.
+        std::unique_ptr<ComputeBackend> be;
+        try {
+            const int dev = dc.devices.empty() ? 0 : dc.devices.front();
+            be = (n_visible > 0) ? device::make_cuda_backend(dev) : device::make_cpu_backend();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe roh: device init failed: %s\n", e.what());
+            return cfg::kExitIoError;
         }
-        std::vector<core::RohSegment> segs = core::roh_call_segments(
-            gpos, bp, std::vector<double>(p_roh, p_roh + M), ch,
-            tgt_iid[static_cast<std::size_t>(t)], pr);
-        for (core::RohSegment& sg : segs) all_segments.push_back(std::move(sg));
-    };
 
-    try {
-        be->roh_fb_batch(panel, static_cast<long>(Ntgt) * static_cast<long>(nchrom), Mmax,
-                         pr.e_rate, pr.in_val, prec, build, consume);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "steppe roh: FB failed: %s\n", e.what());
-        return exit_code_for_caught(e);
+        // Exact-hapROH parity path (only_calls=True, docs §3b option 1): run ONE target per FB
+        // launch on the target's OWN covered (non-missing) sites, rebuilding the map/allele-
+        // freq/transition on that subset — so a target-missing site is DROPPED, not emitted
+        // uniform.
+        //
+        // The panel is uploaded ONCE as-is (Kpanel_all rows of Mp) with the selected-donor row
+        // map panel_cols[] — the on-device gather reproduces panel_hap[panel_cols[k]*Mps +
+        // panel_l] byte-for-byte (no second host copy). panel_hap and panel_cols outlive the
+        // batch call.
+        RohPanelHandle panel = be->roh_upload_panel(panel_hap.data(), Kpanel_all,
+                                                    static_cast<long>(Mp), panel_cols.data(), K);
+
+        // Phase P: fill work-item i's GPU inputs (ob with the polarity flip, the panel-column
+        // site_map, allele-freq p, transition T). i = t*nchrom + ch-index, the SAME (t-outer,
+        // ch-inner) order as the serial loop — so the consumer drains in the identical order.
+        RohItemBuilder build = [&](long i, std::uint8_t* ob, int* site_map, double* p,
+                                   double* T) -> long {
+            const int t = static_cast<int>(i / nchrom);
+            const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
+            const std::vector<const KeptSite*> cov = make_cov(t, ch);
+            const long M = static_cast<long>(cov.size());
+            if (M <= 0) return 0;  // empty item — skipped, exactly like the serial `continue`
+            const std::size_t tcol =
+                static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
+            std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+            for (long l = 0; l < M; ++l) {
+                const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+                const std::size_t ls = static_cast<std::size_t>(l);
+                p[ls] = s.p_freq;
+                gpos[ls] = s.morgan;
+                site_map[ls] = static_cast<int>(s.panel_l);
+                std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+                if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
+                ob[ls] = a;
+            }
+            const std::vector<double> Tv = core::roh_build_transition(gpos, pr, K);
+            std::copy(Tv.begin(), Tv.end(), T);
+            return M;
+        };
+
+        // Phase C: call ROH segments on item i's posterior, in STRICT item order — appended to
+        // all_segments in the identical (t, ch) order as the serial path (byte-stable output).
+        RohPosteriorConsumer consume = [&](long i, const double* p_roh, long M) {
+            const int t = static_cast<int>(i / nchrom);
+            const int ch = chroms[static_cast<std::size_t>(i % nchrom)];
+            const std::vector<const KeptSite*> cov = make_cov(t, ch);
+            std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+            std::vector<long long> bp(static_cast<std::size_t>(M), 0);
+            for (long l = 0; l < M; ++l) {
+                const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+                gpos[static_cast<std::size_t>(l)] = s.morgan;
+                bp[static_cast<std::size_t>(l)] = s.bp;
+            }
+            std::vector<core::RohSegment> segs = core::roh_call_segments(
+                gpos, bp, std::vector<double>(p_roh, p_roh + M), ch,
+                tgt_iid[static_cast<std::size_t>(t)], pr);
+            for (core::RohSegment& sg : segs) all_segments.push_back(std::move(sg));
+        };
+
+        try {
+            be->roh_fb_batch(panel, static_cast<long>(Ntgt) * static_cast<long>(nchrom), Mmax,
+                             pr.e_rate, pr.in_val, prec, build, consume);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe roh: FB failed: %s\n", e.what());
+            return exit_code_for_caught(e);
+        }
+    } else {
+        // ============================ MULTI-DEVICE PATH =============================
+        // In-process dispatch across dc.devices. DECODE-ONCE / PANEL-ONCE: everything above is
+        // shared read-only state (never written after prep). Each device gets its OWN thread +
+        // its OWN CudaBackend + its OWN device-resident panel copy (no P2P assumed), and runs
+        // roh_fb_batch over a DISJOINT subset of targets. Each target is computed on exactly one
+        // device; segments merge in global item order -> byte-identical to the single path.
+        //
+        // BYTE-IDENTITY CAVEAT: guaranteed only across IDENTICAL-architecture devices. The FB
+        // reduction is a tree with no atomics (deterministic), but roh_call_segments hard-
+        // thresholds the posterior (p_roh[l] > cutoff_post), so a single-ULP cross-arch delta
+        // would flip a boundary. box5090b's 2x RTX 5090 are same sm_120/driver/toolkit ->
+        // deterministic. A heterogeneous multi-GPU box is UNSUPPORTED for this path.
+        const int D = static_cast<int>(dc.devices.size());
+
+        // WORK PROXY M_i: the total FB column count target t drives = sum over chromosomes of
+        // its non-missing covered-site count (== make_cov length summed) — the true work.
+        std::vector<long> work(static_cast<std::size_t>(Ntgt), 0);
+        for (int t = 0; t < Ntgt; ++t) {
+            long m = 0;
+            for (int ch : chroms) m += static_cast<long>(make_cov(t, ch).size());
+            work[static_cast<std::size_t>(t)] = m;
+        }
+
+        // GREEDY LONGEST-PROCESSING-TIME: sort targets by work DESC (tie-break ascending index
+        // for determinism), assign each to the least-loaded device. 4/3-optimal makespan -> both
+        // GPUs finish together. Whole targets (all nchrom chrom-items) go to ONE device, which
+        // is what makes the lock-free merge below correct.
+        std::vector<int> order(static_cast<std::size_t>(Ntgt));
+        for (int t = 0; t < Ntgt; ++t) order[static_cast<std::size_t>(t)] = t;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            const long wa = work[static_cast<std::size_t>(a)];
+            const long wb = work[static_cast<std::size_t>(b)];
+            if (wa != wb) return wa > wb;
+            return a < b;
+        });
+        std::vector<std::vector<int>> Td(static_cast<std::size_t>(D));
+        std::vector<long> load(static_cast<std::size_t>(D), 0);
+        for (int t : order) {
+            int best = 0;
+            for (int d = 1; d < D; ++d)
+                if (load[static_cast<std::size_t>(d)] < load[static_cast<std::size_t>(best)])
+                    best = d;
+            Td[static_cast<std::size_t>(best)].push_back(t);
+            load[static_cast<std::size_t>(best)] += work[static_cast<std::size_t>(t)];
+        }
+
+        // ORDERED-MERGE buckets: gi = t*nchrom + ch-index is unique per (t, ch). Pre-sized to
+        // Ntgt*nchrom BEFORE spawning and NEVER resized; each gi is written by exactly one
+        // thread (its owning device), so the threads touch DISJOINT elements -> race-free, no
+        // lock. An empty/target-missing item leaves its bucket default-empty (consume unfired),
+        // exactly as the single path emits nothing for it.
+        std::vector<std::vector<core::RohSegment>> seg_by_item(static_cast<std::size_t>(Ntgt) *
+                                                               static_cast<std::size_t>(nchrom));
+
+        std::vector<std::exception_ptr> errs(static_cast<std::size_t>(D));
+        std::vector<std::thread> threads;
+        threads.reserve(static_cast<std::size_t>(D));
+        for (int d = 0; d < D; ++d) {
+            if (Td[static_cast<std::size_t>(d)].empty()) continue;  // nothing to do on device d
+            threads.emplace_back([&, d]() {
+                try {
+                    // Construct the backend INSIDE the thread so the primary-context bind +
+                    // workspace/stream alloc land on dev[d] on THIS host thread (CUDA's current
+                    // device is per-thread; guard_device() rebinds it on every backend call).
+                    const int dev = dc.devices[static_cast<std::size_t>(d)];
+                    std::unique_ptr<ComputeBackend> be_d = device::make_cuda_backend(dev);
+                    RohPanelHandle panel_d = be_d->roh_upload_panel(
+                        panel_hap.data(), Kpanel_all, static_cast<long>(Mp), panel_cols.data(), K);
+
+                    const std::vector<int>& mine = Td[static_cast<std::size_t>(d)];
+                    const long Nlocal = static_cast<long>(mine.size()) * static_cast<long>(nchrom);
+
+                    // Local item j -> (td = j/nchrom, ci = j%nchrom); global target t = mine[td].
+                    // The per-item fill is byte-identical to the single path, just target-indexed
+                    // through Td[d].
+                    RohItemBuilder build_d = [&](long j, std::uint8_t* ob, int* site_map, double* p,
+                                                 double* T) -> long {
+                        const int td = static_cast<int>(j / nchrom);
+                        const int ci = static_cast<int>(j % nchrom);
+                        const int t = mine[static_cast<std::size_t>(td)];
+                        const int ch = chroms[static_cast<std::size_t>(ci)];
+                        const std::vector<const KeptSite*> cov = make_cov(t, ch);
+                        const long M = static_cast<long>(cov.size());
+                        if (M <= 0) return 0;
+                        const std::size_t tcol =
+                            static_cast<std::size_t>(tgt_cols[static_cast<std::size_t>(t)]);
+                        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+                        for (long l = 0; l < M; ++l) {
+                            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+                            const std::size_t ls = static_cast<std::size_t>(l);
+                            p[ls] = s.p_freq;
+                            gpos[ls] = s.morgan;
+                            site_map[ls] = static_cast<int>(s.panel_l);
+                            std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+                            if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
+                            ob[ls] = a;
+                        }
+                        const std::vector<double> Tv = core::roh_build_transition(gpos, pr, K);
+                        std::copy(Tv.begin(), Tv.end(), T);
+                        return M;
+                    };
+
+                    // Recover the GLOBAL bucket gi = t*nchrom + ci and write this item's segments
+                    // there. Strict per-device item order + disjoint gi across devices == the
+                    // single path's ascending-i append, reconstructed by the global-order merge.
+                    RohPosteriorConsumer consume_d = [&](long j, const double* p_roh, long M) {
+                        const int td = static_cast<int>(j / nchrom);
+                        const int ci = static_cast<int>(j % nchrom);
+                        const int t = mine[static_cast<std::size_t>(td)];
+                        const int ch = chroms[static_cast<std::size_t>(ci)];
+                        const std::size_t gi =
+                            static_cast<std::size_t>(t) * static_cast<std::size_t>(nchrom) +
+                            static_cast<std::size_t>(ci);
+                        const std::vector<const KeptSite*> cov = make_cov(t, ch);
+                        std::vector<double> gpos(static_cast<std::size_t>(M), 0.0);
+                        std::vector<long long> bp(static_cast<std::size_t>(M), 0);
+                        for (long l = 0; l < M; ++l) {
+                            const KeptSite& s = *cov[static_cast<std::size_t>(l)];
+                            gpos[static_cast<std::size_t>(l)] = s.morgan;
+                            bp[static_cast<std::size_t>(l)] = s.bp;
+                        }
+                        seg_by_item[gi] = core::roh_call_segments(
+                            gpos, bp, std::vector<double>(p_roh, p_roh + M), ch,
+                            tgt_iid[static_cast<std::size_t>(t)], pr);
+                    };
+
+                    be_d->roh_fb_batch(panel_d, Nlocal, Mmax, pr.e_rate, pr.in_val, prec, build_d,
+                                       consume_d);
+                } catch (...) {
+                    errs[static_cast<std::size_t>(d)] = std::current_exception();
+                }
+            });
+        }
+        for (std::thread& th : threads) th.join();
+        // Rethrow the first device error into the existing catch semantics.
+        for (int d = 0; d < D; ++d) {
+            if (errs[static_cast<std::size_t>(d)]) {
+                try {
+                    std::rethrow_exception(errs[static_cast<std::size_t>(d)]);
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "steppe roh: FB failed: %s\n", e.what());
+                    return exit_code_for_caught(e);
+                }
+            }
+        }
+        // MERGE in GLOBAL item order -> reproduces the single-device ascending-i append exactly.
+        for (std::vector<core::RohSegment>& bucket : seg_by_item)
+            for (core::RohSegment& sg : bucket) all_segments.push_back(std::move(sg));
     }
 
     // Pass the full ordered target list so every target gets a summary row — a zero-ROH
