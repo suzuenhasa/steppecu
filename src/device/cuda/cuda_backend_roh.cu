@@ -12,7 +12,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "core/internal/nvtx.hpp"
@@ -37,6 +40,72 @@ struct RohResidentPanel {
     long Mp = 0;
     int K = 0;
 };
+
+// F2: default upper bound on the Phase-P host-build worker threads (mirrors cmd_roh.cpp's
+// kRohDefaultThreadCap). Multi-device dispatch runs D device host-threads, each spawning up to
+// this many build workers, so a modest cap keeps D*cap under the box core count.
+constexpr std::size_t kRohBuildThreadCap = 64;
+
+// Read the Phase-P build thread cap from STEPPE_ROH_THREADS. cuda_backend_roh.cu is a SEPARATE
+// translation unit from cmd_roh.cpp (whose roh_thread_cap() is file-local), so it needs its OWN
+// getenv — otherwise the parity harness's STEPPE_ROH_THREADS=1 (forced-serial) invariance proof
+// would never reach this region. A positive integer pins the cap (=1 forces the fully-serial
+// Phase-P, matching the reference binary); unset/invalid -> kRohBuildThreadCap.
+[[nodiscard]] std::size_t roh_build_thread_cap() {
+    const char* e = std::getenv("STEPPE_ROH_THREADS");
+    if (e != nullptr && *e != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 1) return static_cast<std::size_t>(v);
+    }
+    return kRohBuildThreadCap;
+}
+
+// Final clamped block/thread count for a wave of Wc items:
+// T = max(1, min(hardware_concurrency(), STEPPE_ROH_THREADS cap, n)). Capping by n means a small
+// wave never over-spawns; hardware_concurrency()==0 falls back to serial. Deterministic in n.
+[[nodiscard]] std::size_t roh_build_T(std::size_t n) {
+    if (n == 0) return 0;
+    const unsigned hw = std::thread::hardware_concurrency();
+    const std::size_t base = (hw == 0) ? std::size_t{1} : static_cast<std::size_t>(hw);
+    std::size_t T = std::min<std::size_t>({base, roh_build_thread_cap(), n});
+    return std::max<std::size_t>(std::size_t{1}, T);
+}
+
+// Partition [0, n) into T contiguous ascending blocks (T = roh_build_T(n)) and run
+// fn(begin, end, block_index) on one std::thread per non-empty block, then join. T==1 (or a tiny
+// wave) runs fn inline with no thread spawn. Mirrors cmd_roh.cpp::parallel_blocks EXACTLY: each
+// worker body is wrapped so a throw (e.g. bad_alloc from build()'s local gpos/Tv/cov vectors) is
+// captured as an exception_ptr and rethrown AFTER join — an uncaught throw crossing a std::thread
+// boundary would call std::terminate. Because every item writes only its OWN disjoint output
+// slice, concurrent blocks are order-independent and byte-identical to the serial fill.
+template <typename Fn>
+void parallel_blocks_roh(std::size_t n, Fn&& fn) {
+    const std::size_t T = roh_build_T(n);
+    if (T <= 1) {
+        if (n > 0) fn(std::size_t{0}, n, std::size_t{0});
+        return;
+    }
+    const std::size_t block = (n + T - 1) / T;  // ceil, so T blocks cover [0, n)
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    std::vector<std::exception_ptr> errs(T);
+    for (std::size_t b = 0; b < T; ++b) {
+        const std::size_t begin = b * block;
+        if (begin >= n) break;  // ceil rounding can leave trailing blocks empty
+        const std::size_t end = std::min(n, begin + block);
+        threads.emplace_back([&fn, &errs, begin, end, b]() {
+            try {
+                fn(begin, end, b);
+            } catch (...) {
+                errs[b] = std::current_exception();
+            }
+        });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& e : errs)
+        if (e) std::rethrow_exception(e);
+}
 
 }  // namespace
 
@@ -188,25 +257,35 @@ void CudaBackend::roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, d
 
     for (long w0 = 0; w0 < N; w0 += W) {
         const long Wc = std::min<long>(W, N - w0);  // items in this wave
-        // Phase P: build each item into its wave-strided pinned slot; record M/C/nck.
-        for (long j = 0; j < Wc; ++j) {
-            std::uint8_t* ob_j = h_ob.data() + static_cast<std::size_t>(j) * Mm;
-            int* map_j = h_map.data() + static_cast<std::size_t>(j) * Mm;
-            double* p_j = h_p.data() + static_cast<std::size_t>(j) * Mm;
-            double* T_j = h_T.data() + static_cast<std::size_t>(j) * Mm * 9;
-            const long M = build(w0 + j, ob_j, map_j, p_j, T_j);
-            h_M.data()[j] = static_cast<int>(M);
-            if (M > 0) {
-                int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
-                if (C < 1) C = 1;
-                const int nck = static_cast<int>((M + C - 1) / C);
-                h_C.data()[j] = C;
-                h_nck.data()[j] = nck;
-            } else {
-                h_C.data()[j] = 1;
-                h_nck.data()[j] = 0;
+        // Phase P: build each item into its wave-strided pinned slot; record M/C/nck. F2:
+        // PARALLELIZED across the wave items. Each item j writes ONLY its own disjoint pinned
+        // slice (ob/map/p/T at stride j*Mm) + its own h_M/h_C/h_nck[j] scalar, and build() reads
+        // only const shared prep (make_cov over const by_chrom/tgt_hap + the pure
+        // roh_build_transition) — so concurrent per-item builds are order-independent and
+        // byte-identical to the old serial fill. The JOIN happens before the H2D of [0,Wc), so
+        // the uploaded bytes are exactly the serial-fill bytes. STEPPE_ROH_THREADS=1 forces this
+        // fully serial (parity harness invariance proof). Consume (Phase C) stays strictly serial.
+        parallel_blocks_roh(static_cast<std::size_t>(Wc),
+                            [&](std::size_t j0, std::size_t j1, std::size_t) {
+            for (std::size_t j = j0; j < j1; ++j) {
+                std::uint8_t* ob_j = h_ob.data() + j * Mm;
+                int* map_j = h_map.data() + j * Mm;
+                double* p_j = h_p.data() + j * Mm;
+                double* T_j = h_T.data() + j * Mm * 9;
+                const long M = build(w0 + static_cast<long>(j), ob_j, map_j, p_j, T_j);
+                h_M.data()[j] = static_cast<int>(M);
+                if (M > 0) {
+                    int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
+                    if (C < 1) C = 1;
+                    const int nck = static_cast<int>((M + C - 1) / C);
+                    h_C.data()[j] = C;
+                    h_nck.data()[j] = nck;
+                } else {
+                    h_C.data()[j] = 1;
+                    h_nck.data()[j] = 0;
+                }
             }
-        }
+        });
         // H2D the used [0,Wc) region (gaps M_j<Mmax within an item are never read by a block).
         const std::size_t Wcz = static_cast<std::size_t>(Wc);
         h2d_async(dOb, h_ob.data(), Wcz * Mm, stream_.get());

@@ -370,13 +370,13 @@ int run_roh(const RohArgs& args) {
         tgt_iid.push_back(tgt_lab[static_cast<std::size_t>(g)] + ":" + std::to_string(g));
     const int Ntgt = static_cast<int>(tgt_cols.size());
 
-    // --- decode both panels to haploid allele bytes --------------------------------
+    // --- decode the panel to haploid allele bytes ----------------------------------
+    // F1: the panel decode stays full-genome (the intersect + p_freq read the whole panel by
+    // (chrom,pos)); the TARGET decode is deferred to a COMPACT kept-site-only pass after the
+    // intersect (below), since tgt_hap is consumed ONLY by make_cov/build over the kept sites.
     const RohClock::time_point t_pdec0 = RohClock::now();
     const std::vector<std::uint8_t> panel_hap = decode_haplotypes(fe_p.tile, Mp);
     roh_tick("panel decode", t_pdec0);
-    const RohClock::time_point t_tdec0 = RohClock::now();
-    const std::vector<std::uint8_t> tgt_hap = decode_haplotypes(fe_t.tile, Mt);
-    roh_tick("target decode", t_tdec0);
 
     // --- intersect target ∩ panel by (chrom, physpos); enforce the polarity contract,
     //     grouped by chromosome ------------------------------------------------------
@@ -402,9 +402,10 @@ int run_roh(const RohArgs& args) {
         double morgan;
         long long bp;
         double p_freq;
-        std::size_t panel_l;  // panel site index
-        std::size_t tgt_l;    // target site index
-        bool flip;            // flip the target allele bit (consistent strand flip)
+        std::size_t panel_l;   // panel site index
+        std::size_t tgt_l;     // target site index (source row in the FULL target tile)
+        bool flip;             // flip the target allele bit (consistent strand flip)
+        std::size_t kept_row;  // F1: compact row of this site in the kept-only target decode
     };
     std::unordered_map<int, std::vector<KeptSite>> by_chrom;
     long long n_drop_nomatch = 0, n_drop_polarity = 0;
@@ -454,7 +455,7 @@ int run_roh(const RohArgs& args) {
         const double morgan = (lp < fe_p.snptab.genpos_morgans.size())
                                   ? fe_p.snptab.genpos_morgans[lp]
                                   : 0.0;
-        out = KeptSite{ch, morgan, pos, p_freq, lp, lts, flip};
+        out = KeptSite{ch, morgan, pos, p_freq, lp, lts, flip, /*kept_row=*/0};
         return SiteOutcome::Keep;
     };
 
@@ -516,6 +517,48 @@ int run_roh(const RohArgs& args) {
                      n_drop_nomatch, n_drop_polarity);
         return cfg::kExitInvalidConfig;
     }
+
+    // --- F1: compact kept-site target decode ---------------------------------------
+    // by_chrom membership is now final (the later morgan-sort only PERMUTES each chrom's vector;
+    // every KeptSite carries its own kept_row, so the relabeling survives the sort). Assign each
+    // kept site a dense compact row and record its source row in the FULL target tile, then
+    // decode ONLY those n_kept rows (~76k chr3 sites) instead of the whole Mt genome (~1.23M).
+    // Bit-identical to the old full decode_haplotypes: the SAME
+    // haploid_allele_from_code(genotype_code(rec[byte], pos)) is applied at the SAME (g, tgt_l),
+    // just written to the compact row instead of column tgt_l. Iteration order over by_chrom is
+    // irrelevant — the compact buffer is a pure relabeling, and each consumer reads its own site
+    // through s.kept_row.
+    std::vector<std::size_t> kept_tgt_l;
+    kept_tgt_l.reserve(static_cast<std::size_t>(n_kept));
+    {
+        std::size_t row = 0;
+        for (auto& kv : by_chrom)
+            for (KeptSite& s : kv.second) {
+                s.kept_row = row++;
+                kept_tgt_l.push_back(s.tgt_l);
+            }
+    }
+    const std::size_t n_kept_rows = kept_tgt_l.size();
+
+    // Columns = full Ntgt_all (fe_t.tile.n_individuals) so tcol (= tgt_cols[t]) indexing is
+    // unchanged; rows = n_kept_rows (compact). Parallelized over the individual/haplotype axis
+    // exactly like decode_haplotypes: each block writes disjoint rows [g0,g1), integer-only.
+    const RohClock::time_point t_tdec0 = RohClock::now();
+    std::vector<std::uint8_t> tgt_hap(static_cast<std::size_t>(fe_t.tile.n_individuals) * n_kept_rows,
+                                      core::kLsMissingAllele);
+    parallel_blocks(fe_t.tile.n_individuals, [&](std::size_t g0, std::size_t g1, std::size_t) {
+        for (std::size_t g = g0; g < g1; ++g) {
+            const std::uint8_t* rec = fe_t.tile.packed.data() + g * fe_t.tile.bytes_per_record;
+            for (std::size_t r = 0; r < n_kept_rows; ++r) {
+                const std::size_t l = kept_tgt_l[r];
+                const std::size_t byte = l / core::kCodesPerByte;
+                const int pos = static_cast<int>(l % core::kCodesPerByte);
+                tgt_hap[g * n_kept_rows + r] =
+                    core::haploid_allele_from_code(core::genotype_code(rec[byte], pos));
+            }
+        }
+    });
+    roh_tick("target decode", t_tdec0);
 
     // --- parse + validate the --device ordinal list --------------------------------
     steppe::DeviceConfig dc;
@@ -584,7 +627,7 @@ int run_roh(const RohArgs& args) {
         std::vector<const KeptSite*> cov;
         cov.reserve(sr.size());
         for (const KeptSite& s : sr) {
-            const std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+            const std::uint8_t a = tgt_hap[tcol * n_kept_rows + s.kept_row];
             if (a <= 1u) cov.push_back(&s);
         }
         return cov;
@@ -637,7 +680,7 @@ int run_roh(const RohArgs& args) {
                 p[ls] = s.p_freq;
                 gpos[ls] = s.morgan;
                 site_map[ls] = static_cast<int>(s.panel_l);
-                std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+                std::uint8_t a = tgt_hap[tcol * n_kept_rows + s.kept_row];
                 if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
                 ob[ls] = a;
             }
@@ -766,7 +809,7 @@ int run_roh(const RohArgs& args) {
                             p[ls] = s.p_freq;
                             gpos[ls] = s.morgan;
                             site_map[ls] = static_cast<int>(s.panel_l);
-                            std::uint8_t a = tgt_hap[tcol * Mts + s.tgt_l];
+                            std::uint8_t a = tgt_hap[tcol * n_kept_rows + s.kept_row];
                             if (a <= 1u && s.flip) a = static_cast<std::uint8_t>(1u - a);
                             ob[ls] = a;
                         }
