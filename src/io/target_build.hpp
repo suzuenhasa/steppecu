@@ -62,6 +62,16 @@ struct TargetBuildCounts {
                                              const TargetBuildOptions& opts,
                                              TargetBuildCounts& counts);
 
+// Build the native target-site set WITHOUT a reference FASTA — the consumer-raw
+// (23andMe / AncestryDNA / MyHeritage) path. GRCh37 identity join (pos38 := pos37,
+// no lift file read), ref38 left '.' (the consumer reader reconciles the two
+// observed alleles against the panel A1/A2 directly and never consults ref38).
+// Same autosome/rsID filter, strict 1:1 de-dup, and palindrome flag as the fasta
+// path. Throws std::runtime_error on open/format failure.
+[[nodiscard]] TargetSites build_target_sites_noref(const std::string& panel_snp,
+                                                   const TargetBuildOptions& opts,
+                                                   TargetBuildCounts& counts);
+
 // Dump a TargetSites as the 7-col table (rsID chrom pos37 pos38 A1 A2 ref38) for
 // the gate-1 diff against the orchestrated emit_target_table.py output.
 void write_target_table(const std::string& path, const TargetSites& ts);

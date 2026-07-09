@@ -18,6 +18,9 @@ namespace steppe::app {
 
 struct IngestArgs {
     std::string vcf;          // the .vcf.gz / .vcf (required to genotype)
+    std::string raw;          // OPTIONAL: consumer DTC raw-genotype file (23andMe / AncestryDNA /
+                              // MyHeritage; GRCh37) — the input in --raw mode, replaces --vcf and
+                              // needs neither --fasta nor --lift (ref38 unused; identity join)
     // Target-site source — exactly one of:
     //   (A) Stage-1 back-compat: a pre-built GRCh38 target-site table.
     std::string targets;      // the GRCh38 target-site table

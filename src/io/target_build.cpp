@@ -74,11 +74,12 @@ struct PanelRow {
     return m;
 }
 
-}  // namespace
-
-TargetSites build_target_sites(const std::string& panel_snp, const std::string& lift_map,
-                               FaidxReader& fasta, const TargetBuildOptions& opts,
-                               TargetBuildCounts& counts) {
+// Shared body for build_target_sites (fasta) and build_target_sites_noref (no
+// fasta): a null `fasta` leaves ref38 as '.' — the consumer-raw path reconciles
+// the two observed alleles against the panel A1/A2 directly and never reads ref38.
+[[nodiscard]] TargetSites build_impl(const std::string& panel_snp, const std::string& lift_map,
+                                     FaidxReader* fasta, const TargetBuildOptions& opts,
+                                     TargetBuildCounts& counts) {
     counts = TargetBuildCounts{};
 
     // --- pass 1: parse + filter the panel, count per-rsID multiplicity --------
@@ -166,7 +167,8 @@ TargetSites build_target_sites(const std::string& panel_snp, const std::string& 
         s.a1 = r.a1;
         s.a2 = r.a2;
         // Native ref38 for EVERY lifted site, palindrome or not (critic fix #2).
-        s.ref38 = fasta.base_at(std::to_string(r.chrom), pos38);
+        // The consumer-raw path passes no fasta -> ref38 stays '.' (unused there).
+        s.ref38 = (fasta != nullptr) ? fasta->base_at(std::to_string(r.chrom), pos38) : '.';
         s.palindrome = r.pal;
         ts.sites.push_back(std::move(s));
     }
@@ -175,6 +177,23 @@ TargetSites build_target_sites(const std::string& panel_snp, const std::string& 
     // Shared per-chrom index (identical to read_target_sites' construction).
     build_chrom_index(ts);
     return ts;
+}
+
+}  // namespace
+
+TargetSites build_target_sites(const std::string& panel_snp, const std::string& lift_map,
+                               FaidxReader& fasta, const TargetBuildOptions& opts,
+                               TargetBuildCounts& counts) {
+    return build_impl(panel_snp, lift_map, &fasta, opts, counts);
+}
+
+TargetSites build_target_sites_noref(const std::string& panel_snp,
+                                     const TargetBuildOptions& opts_in,
+                                     TargetBuildCounts& counts) {
+    // GRCh37 identity join, no lift file, no reference FASTA (ref38 := '.').
+    TargetBuildOptions opts = opts_in;
+    opts.identity_lift = true;
+    return build_impl(panel_snp, /*lift_map=*/"", /*fasta=*/nullptr, opts, counts);
 }
 
 void write_target_table(const std::string& path, const TargetSites& ts) {

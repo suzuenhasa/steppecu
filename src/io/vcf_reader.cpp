@@ -17,6 +17,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "io/allele_reconcile.hpp"
 #include "io/eigenstrat_format.hpp"
 #include "io/gl_normalize.hpp"
 #include "io/gzip_line_reader.hpp"
@@ -28,35 +29,8 @@ namespace {
 
 namespace vd = steppe::io::vcfdetail;
 
-[[nodiscard]] char up(char c) {
-    return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-}
-
-[[nodiscard]] char complement(char b) {
-    switch (up(b)) {
-        case 'A': return 'T';
-        case 'T': return 'A';
-        case 'C': return 'G';
-        case 'G': return 'C';
-        default: return 'N';
-    }
-}
-
-// reconcile(base, A1, A2) -> which in {+1=A1, 0=A2, -1=none}, flip flag.
-// Same strand first, then complement (oracle.py reconcile(), spec §5c).
-struct Recon {
-    int which = -1;  // +1 == A1, 0 == A2, -1 == neither
-    bool flip = false;
-};
-[[nodiscard]] Recon reconcile(char base, char a1, char a2) {
-    const char b = up(base);
-    if (b == a1) return {1, false};
-    if (b == a2) return {0, false};
-    const char cb = complement(b);
-    if (cb == a1) return {1, true};
-    if (cb == a2) return {0, true};
-    return {-1, false};
-}
+// up()/complement()/reconcile()/Recon are shared with consumer_raw_reader via
+// io/allele_reconcile.hpp (hoisted out of this file; behaviour unchanged).
 
 // One tie-broken variant record kept per target position.
 struct VariantRec {

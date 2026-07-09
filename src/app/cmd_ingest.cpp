@@ -29,6 +29,7 @@
 #include "core/config/exit_code.hpp"
 #include "core/stats/read_canonical_tile.hpp"
 #include "device/resources.hpp"
+#include "io/consumer_raw_reader.hpp"
 #include "io/eigenstrat_format.hpp"
 #include "io/faidx_reader.hpp"
 #include "io/genotype_tile.hpp"
@@ -45,6 +46,16 @@ namespace steppe::app {
 namespace cfg = steppe::config;
 
 namespace {
+
+[[nodiscard]] const char* raw_layout_name(io::RawLayout l) {
+    switch (l) {
+        case io::RawLayout::TwentyThreeAndMe: return "23andMe";
+        case io::RawLayout::AncestryDNA: return "AncestryDNA";
+        case io::RawLayout::MyHeritage: return "MyHeritage";
+        case io::RawLayout::Unknown: return "unknown";
+    }
+    return "unknown";
+}
 
 [[nodiscard]] const char* assembly_name(io::Assembly a) {
     switch (a) {
@@ -226,6 +237,34 @@ int run_ingest(const IngestArgs& args) {
     const bool legacy = !args.targets.empty();
     const bool native_knobs = !args.fasta.empty() || !args.lift.empty() ||
                               !args.assembly.empty() || !args.emit_targets.empty();
+
+    // --- consumer-raw (23andMe / AncestryDNA / MyHeritage) mode ---------------
+    // --raw replaces --vcf as the genotype input: a GRCh37 hardcall export joined
+    // to the native --panel by identity (no --fasta / --lift; ref38 unused). It is
+    // mutually exclusive with --vcf, requires the native --panel source, and cannot
+    // supply GL/PL/GP soft info (those need a VCF).
+    const bool raw_mode = !args.raw.empty();
+    if (raw_mode) {
+        if (!args.vcf.empty()) {
+            std::fprintf(stderr, "steppe ingest: choose ONE genotype input — --vcf OR --raw, not both\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (legacy) {
+            std::fprintf(stderr, "steppe ingest: --raw is a native-panel path; anchor it on --panel "
+                                 "<.snp>, not the --targets table\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (!native) {
+            std::fprintf(stderr, "steppe ingest: --raw needs --panel <.snp> (the GRCh37 AADR panel to "
+                                 "harmonize the consumer file against)\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (args.likelihoods) {
+            std::fprintf(stderr, "steppe ingest: --likelihoods requires --vcf; a consumer raw file "
+                                 "carries no GL/PL/GP soft info\n");
+            return cfg::kExitInvalidConfig;
+        }
+    }
     if (native && legacy) {
         std::fprintf(stderr,
                      "steppe ingest: choose ONE target source — either --targets <table> "
@@ -280,8 +319,8 @@ int run_ingest(const IngestArgs& args) {
     // Genotyping is requested by --report/--emit-tile; a bare native --emit-targets
     // builds the table only (no VCF needed — the gate-1 table-reproduction path).
     const bool want_genotype = !args.report.empty() || !args.emit_tile.empty();
-    if (want_genotype && args.vcf.empty()) {
-        std::fprintf(stderr, "steppe ingest: --vcf PATH is required for --report/--emit-tile\n");
+    if (want_genotype && args.vcf.empty() && !raw_mode) {
+        std::fprintf(stderr, "steppe ingest: --vcf (or --raw) is required for --report/--emit-tile\n");
         return cfg::kExitInvalidConfig;
     }
     if (!want_genotype && !want_gl && args.emit_targets.empty() && args.emit_merged.empty()) {
@@ -298,8 +337,8 @@ int run_ingest(const IngestArgs& args) {
             std::fprintf(stderr, "steppe ingest: --emit-merged requires --merge-into <panel prefix>\n");
             return cfg::kExitInvalidConfig;
         }
-        if (args.vcf.empty()) {
-            std::fprintf(stderr, "steppe ingest: --emit-merged needs --vcf (the sample to merge)\n");
+        if (args.vcf.empty() && !raw_mode) {
+            std::fprintf(stderr, "steppe ingest: --emit-merged needs --vcf or --raw (the sample to merge)\n");
             return cfg::kExitInvalidConfig;
         }
         // The column-alignment guard keys nikki's call onto the panel row by BOTH
@@ -318,7 +357,30 @@ int run_ingest(const IngestArgs& args) {
     // --- build (native) or read (legacy) the target-site set ------------------
     io::TargetSites targets;
     try {
-        if (native) {
+        if (native && raw_mode) {
+            // --- consumer-raw native build: GRCh37 identity, no fasta/lift -----
+            // The panel is fixed GRCh37 and consumer files are GRCh37 too, so the
+            // join is direct (pos38 := pos37) and ref38 is unused (the reader
+            // reconciles the two observed alleles against the panel A1/A2). Warn
+            // that GRCh37 is assumed (consumer files carry no header the detector
+            // reads) and note any ignored native-VCF knobs.
+            std::fprintf(stderr, "steppe ingest: --raw mode assumes GRCh37 (consumer files carry no "
+                                 "detectable ##reference); identity join, ref38 unused\n");
+            if (!args.fasta.empty() || !args.lift.empty() || !args.assembly.empty()) {
+                std::fprintf(stderr, "steppe ingest: NOTE --raw ignores --fasta/--lift/--assembly "
+                                     "(no reference base or liftover is needed)\n");
+            }
+            io::TargetBuildOptions bopts;
+            io::TargetBuildCounts tc;
+            targets = io::build_target_sites_noref(args.panel, bopts, tc);
+            std::fprintf(stderr,
+                         "steppe ingest: consumer-raw target build | panel_total=%lld autosomal=%lld "
+                         "non_rsid=%lld palindromic=%lld dup_rsids=%lld | dropped_dup=%lld | "
+                         "emitted=%lld\n",
+                         tc.panel_total, tc.panel_autosomal, tc.panel_non_rsid, tc.panel_palindromic,
+                         tc.panel_dup_rsids, tc.lift_dropped_dup, tc.emitted);
+            if (!args.emit_targets.empty()) io::write_target_table(args.emit_targets, targets);
+        } else if (native) {
             // --- resolve the VCF assembly (mission item 1) --------------------
             io::AssemblyDetection det;
             bool have_det = false;
@@ -501,11 +563,18 @@ int run_ingest(const IngestArgs& args) {
 
     io::VcfIngestResult result;
     try {
-        io::VcfReader::Options opts;
-        opts.min_dp = args.min_dp;
-        opts.min_gq = args.min_gq;
-        io::VcfReader reader(args.vcf, targets, args.sample, opts);
-        result = reader.genotype();
+        if (raw_mode) {
+            io::ConsumerRawReader reader(args.raw, targets, args.sample);
+            result = reader.genotype();
+            std::fprintf(stderr, "steppe ingest: consumer raw layout detected = %s\n",
+                         raw_layout_name(reader.layout()));
+        } else {
+            io::VcfReader::Options opts;
+            opts.min_dp = args.min_dp;
+            opts.min_gq = args.min_gq;
+            io::VcfReader reader(args.vcf, targets, args.sample, opts);
+            result = reader.genotype();
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe ingest: %s\n", e.what());
         return cfg::kExitIoError;

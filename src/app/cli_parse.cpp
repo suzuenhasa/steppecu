@@ -743,6 +743,10 @@ int run_cli(int argc, char** argv) {
         "(GRCh37 same-build direct join, or GRCh38 via --lift) -> per-site genotype "
         "report (and, with --emit-tile, the canonical 2-bit tile)");
     ing->add_option("--vcf", ingest_args.vcf, "Input VCF (.vcf.gz BGZF/gzip or plain .vcf)");
+    ing->add_option("--raw", ingest_args.raw,
+                    "Consumer raw-genotype file (23andMe / AncestryDNA / MyHeritage; layout "
+                    "auto-detected; .txt/.csv/.gz). GRCh37 identity join against native --panel; "
+                    "needs neither --fasta nor --lift. Mutually exclusive with --vcf");
     ing->add_option("--targets", ingest_args.targets,
                     "Stage-1 pre-built GRCh38 target-site table: rsID chrom [pos37] pos38 A1 A2 "
                     "ref38 (mutually exclusive with --panel/--fasta/--lift)");
