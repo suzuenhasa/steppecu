@@ -8,13 +8,14 @@
 // n_target*M ROH posterior. A CUDA TU private to steppe_device.
 //
 // Reference: docs/planning/haproh-face-spec.md §3
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 #include "core/internal/nvtx.hpp"
-#include "device/cuda/block_sink.cuh"  // kStreamStagingSlots (the shared 3-slot pipeline depth)
 #include "device/cuda/check.cuh"
 #include "device/cuda/cuda_backend.cuh"
 #include "device/cuda/device_buffer.cuh"
@@ -137,92 +138,101 @@ void CudaBackend::roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, d
         return;
     }
 
-    // Scratch is sized ONCE to the batch-wide max item length Mmax (each item only touches
-    // its own [0,M)). Checkpoint stride bound: C(M) = ceil(sqrt(M)) <= ceil(sqrt(Mmax)) =
-    // Cmax, and nck(M) = ceil(M/C(M)) <= Cmax for all M <= Mmax — so both the C and the nck
-    // scratch dimensions are safely bounded by Cmax (mirrors cuda_backend_roh.cu sizing).
+    // WAVE BATCHING: replace the 3-slot look-ahead pipeline (which kept only ~2-3 blocks
+    // resident on a 170-SM GPU) with a single grid of W item-blocks per wave. One block per
+    // item (blockIdx.x = item within the wave), each block indexing the ONCE-resident panel
+    // DIRECTLY via its site_map (PanelRefhaps) — no per-item compacted refhaps gather, so the
+    // per-item VRAM footprint drops from ~K*Mmax bytes (~145 MB) to ~16 MB and hundreds of
+    // items run concurrently. Bit-identical to the old per-item path: same FB math, same
+    // per-item site axis / neighbor distances (per-item ob/site_map/p/T/M/C/nck from build),
+    // build() ascending + consume() ascending -> byte-stable seg + summary.
+    //
+    // Scratch is sized to the WAVE width W (not N). Checkpoint stride bound: C(M)=ceil(sqrt(M))
+    // <= ceil(sqrt(Mmax))=Cmax and nck(M)=ceil(M/C(M)) <= Cmax for all M<=Mmax, so both the
+    // per-item C-tile and the nck checkpoint axis are bounded by Cmax (nckstride == Cstride).
     const std::size_t Ks = static_cast<std::size_t>(K);
     const std::size_t Mm = static_cast<std::size_t>(Mmax);
     int Cmax = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(Mmax))));
     if (Cmax < 1) Cmax = 1;
     const std::size_t Cs = static_cast<std::size_t>(Cmax);
 
-    // One look-ahead pipeline slot: its own stream + event, pinned host inputs/posterior
-    // (built AHEAD in phase P, drained in phase C), and persistent device scratch reused
-    // every item so no per-item cudaMalloc/cudaFree stalls the stream.
-    struct Slot {
-        Stream stream{};
-        Event ev{};
-        PinnedBuffer<std::uint8_t> h_ob;
-        PinnedBuffer<int> h_map;
-        PinnedBuffer<double> h_p, h_T, h_post;
-        DeviceBuffer<std::uint8_t> dOb, dRefhaps;
-        DeviceBuffer<int> dMap;
-        DeviceBuffer<double> dP, dT, dProh;
-        DeviceBuffer<double> dCheckRoh, dCheck0, dAlphaA, dAlphaB, dAlphaBlk, dA0Blk, dBetaA, dBetaB;
-        long item = -1;
-        long M = 0;
-    };
-    const int S = kStreamStagingSlots;  // the 3-slot depth (block_sink StagingRing constant)
-    std::vector<Slot> slots(static_cast<std::size_t>(S));
-    for (Slot& s : slots) {
-        s.h_ob = PinnedBuffer<std::uint8_t>(Mm);
-        s.h_map = PinnedBuffer<int>(Mm);
-        s.h_p = PinnedBuffer<double>(Mm);
-        s.h_T = PinnedBuffer<double>(Mm * 9);
-        s.h_post = PinnedBuffer<double>(Mm);
-        s.dOb = DeviceBuffer<std::uint8_t>(Mm);
-        s.dRefhaps = DeviceBuffer<std::uint8_t>(Ks * Mm);
-        s.dMap = DeviceBuffer<int>(Mm);
-        s.dP = DeviceBuffer<double>(Mm);
-        s.dT = DeviceBuffer<double>(Mm * 9);
-        s.dProh = DeviceBuffer<double>(Mm);
-        s.dCheckRoh = DeviceBuffer<double>(Cs * Ks);
-        s.dCheck0 = DeviceBuffer<double>(Cs);
-        s.dAlphaA = DeviceBuffer<double>(Ks);
-        s.dAlphaB = DeviceBuffer<double>(Ks);
-        s.dAlphaBlk = DeviceBuffer<double>(Cs * Ks);
-        s.dA0Blk = DeviceBuffer<double>(Cs);
-        s.dBetaA = DeviceBuffer<double>(Ks);
-        s.dBetaB = DeviceBuffer<double>(Ks);
-    }
+    // Wave width W from the FREE VRAM (the panel is already resident). Per-item device bytes:
+    //   ob(Mm) + site_map(4*Mm) + p(8*Mm) + T(72*Mm) + proh(8*Mm)
+    //   + check_roh(8*Cs*Ks) + check0(8*Cs) + alpha_blk(8*Cs*Ks) + a0_blk(8*Cs)
+    //   + alphaA/B + betaA/B (4 * 8*Ks). Reserve 1 GB headroom, then take 90%.
+    const std::size_t per_item = Mm * 1 + Mm * 4 + Mm * 8 + Mm * 9 * 8 + Mm * 8 + Cs * Ks * 8 +
+                                 Cs * 8 + Cs * Ks * 8 + Cs * 8 + Ks * 8 * 4 + 64;
+    std::size_t freeB = 0, totalB = 0;
+    STEPPE_CUDA_CHECK(cudaMemGetInfo(&freeB, &totalB));
+    const std::size_t reserve = static_cast<std::size_t>(1) << 30;  // 1 GB headroom
+    std::size_t budget = (freeB > reserve) ? (freeB - reserve) : (freeB / 2);
+    budget = static_cast<std::size_t>(static_cast<double>(budget) * 0.9);
+    long W = (per_item > 0) ? static_cast<long>(budget / per_item) : N;
+    if (W < 1) W = 1;
+    if (W > N) W = N;
+    const std::size_t Wz = static_cast<std::size_t>(W);
 
-    // Ordered look-ahead: issue up to S items ahead, drain in STRICT item order (a slot is
-    // reused only after item (issue-S) has been drained — guaranteed by (issue-drain)<S — so
-    // its buffers/event are free). Draining in item order makes the consumer's segment output
-    // byte-stable regardless of which stream finishes first.
-    long issue = 0, drain = 0;
-    while (drain < N) {
-        while (issue < N && (issue - drain) < S) {
-            Slot& s = slots[static_cast<std::size_t>(issue % S)];
-            const long M = build(issue, s.h_ob.data(), s.h_map.data(), s.h_p.data(), s.h_T.data());
-            s.item = issue;
-            s.M = M;
+    // ONE set of wave-strided pinned + device buffers, sized to W (not N), reused every wave.
+    PinnedBuffer<std::uint8_t> h_ob(Wz * Mm);
+    PinnedBuffer<int> h_map(Wz * Mm);
+    PinnedBuffer<double> h_p(Wz * Mm), h_T(Wz * Mm * 9), h_post(Wz * Mm);
+    PinnedBuffer<int> h_M(Wz), h_C(Wz), h_nck(Wz);
+    DeviceBuffer<std::uint8_t> dOb(Wz * Mm);
+    DeviceBuffer<int> dMap(Wz * Mm);
+    DeviceBuffer<double> dP(Wz * Mm), dT(Wz * Mm * 9), dProh(Wz * Mm);
+    DeviceBuffer<int> dM(Wz), dC(Wz), dNck(Wz);
+    DeviceBuffer<double> dCheckRoh(Wz * Cs * Ks), dCheck0(Wz * Cs);
+    DeviceBuffer<double> dAlphaA(Wz * Ks), dAlphaB(Wz * Ks);
+    DeviceBuffer<double> dAlphaBlk(Wz * Cs * Ks), dA0Blk(Wz * Cs);
+    DeviceBuffer<double> dBetaA(Wz * Ks), dBetaB(Wz * Ks);
+
+    for (long w0 = 0; w0 < N; w0 += W) {
+        const long Wc = std::min<long>(W, N - w0);  // items in this wave
+        // Phase P: build each item into its wave-strided pinned slot; record M/C/nck.
+        for (long j = 0; j < Wc; ++j) {
+            std::uint8_t* ob_j = h_ob.data() + static_cast<std::size_t>(j) * Mm;
+            int* map_j = h_map.data() + static_cast<std::size_t>(j) * Mm;
+            double* p_j = h_p.data() + static_cast<std::size_t>(j) * Mm;
+            double* T_j = h_T.data() + static_cast<std::size_t>(j) * Mm * 9;
+            const long M = build(w0 + j, ob_j, map_j, p_j, T_j);
+            h_M.data()[j] = static_cast<int>(M);
             if (M > 0) {
                 int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
                 if (C < 1) C = 1;
                 const int nck = static_cast<int>((M + C - 1) / C);
-                const std::size_t Ms = static_cast<std::size_t>(M);
-                h2d_async(s.dOb, s.h_ob.data(), Ms, s.stream.get());
-                h2d_async(s.dMap, s.h_map.data(), Ms, s.stream.get());
-                h2d_async(s.dP, s.h_p.data(), Ms, s.stream.get());
-                h2d_async(s.dT, s.h_T.data(), Ms * 9, s.stream.get());
-                launch_roh_gather(res->panel.data(), res->donor_map.data(), s.dMap.data(), K, M,
-                                  res->Mp, s.dRefhaps.data(), s.stream.get());
-                launch_roh_fb(s.dOb.data(), s.dRefhaps.data(), s.dP.data(), s.dT.data(), K, M,
-                              /*n_target=*/1, C, nck, e_rate, in_val, s.dProh.data(),
-                              s.dCheckRoh.data(), s.dCheck0.data(), s.dAlphaA.data(),
-                              s.dAlphaB.data(), s.dAlphaBlk.data(), s.dA0Blk.data(),
-                              s.dBetaA.data(), s.dBetaB.data(), s.stream.get());
-                d2h_async(s.h_post.data(), s.dProh, Ms, s.stream.get());
+                h_C.data()[j] = C;
+                h_nck.data()[j] = nck;
+            } else {
+                h_C.data()[j] = 1;
+                h_nck.data()[j] = 0;
             }
-            s.ev.record(s.stream);
-            ++issue;
         }
-        Slot& d = slots[static_cast<std::size_t>(drain % S)];
-        d.ev.synchronize();  // normally already satisfied — we run S items ahead of the drain
-        if (d.M > 0) consume(d.item, d.h_post.data(), d.M);
-        ++drain;
+        // H2D the used [0,Wc) region (gaps M_j<Mmax within an item are never read by a block).
+        const std::size_t Wcz = static_cast<std::size_t>(Wc);
+        h2d_async(dOb, h_ob.data(), Wcz * Mm, stream_.get());
+        h2d_async(dMap, h_map.data(), Wcz * Mm, stream_.get());
+        h2d_async(dP, h_p.data(), Wcz * Mm, stream_.get());
+        h2d_async(dT, h_T.data(), Wcz * Mm * 9, stream_.get());
+        h2d_async(dM, h_M.data(), Wcz, stream_.get());
+        h2d_async(dC, h_C.data(), Wcz, stream_.get());
+        h2d_async(dNck, h_nck.data(), Wcz, stream_.get());
+
+        // ONE grid launch: Wc item-blocks, each indexing the resident panel directly.
+        launch_roh_fb_wave(dOb.data(), res->panel.data(), res->donor_map.data(), dMap.data(),
+                           dP.data(), dT.data(), dM.data(), dC.data(), dNck.data(), K, res->Mp,
+                           /*Mstride*/static_cast<long>(Mmax), /*Cstride*/static_cast<long>(Cmax),
+                           static_cast<int>(Wc), e_rate, in_val, dProh.data(), dCheckRoh.data(),
+                           dCheck0.data(), dAlphaA.data(), dAlphaB.data(), dAlphaBlk.data(),
+                           dA0Blk.data(), dBetaA.data(), dBetaB.data(), stream_.get());
+
+        d2h_async(h_post.data(), dProh, Wcz * Mm, stream_.get());
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+        // Phase C: consume in STRICT item order (each item reads only its own [0,M)).
+        for (long j = 0; j < Wc; ++j) {
+            const long M = h_M.data()[j];
+            if (M > 0) consume(w0 + j, h_post.data() + static_cast<std::size_t>(j) * Mm, M);
+        }
     }
 }
 

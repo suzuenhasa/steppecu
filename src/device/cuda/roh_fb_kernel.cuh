@@ -43,6 +43,29 @@ void launch_roh_fb(const std::uint8_t* d_ob, const std::uint8_t* d_refhaps, cons
                    double* d_alphaA, double* d_alphaB, double* d_alpha_blk, double* d_a0_blk,
                    double* d_betaA, double* d_betaB, cudaStream_t stream);
 
+// Wave-batched (K+1)-state scaled forward-backward: ONE grid of W item-blocks
+// (blockIdx.x = item index within the wave), each block indexing the ONCE-resident donor-
+// major panel DIRECTLY through the per-item site_map (no per-item compacted refhaps gather).
+// Same block-per-item FB body as launch_roh_fb — bit-identical math — but hundreds of items
+// resident concurrently instead of the 3-stream pipeline's ~2-3. All device pointers owned
+// by the backend; per-item M/C/nck come from the d_M/d_C/d_nck arrays, buffers are strided
+// by the batch-wide Mstride (= Mmax) / Cstride (= Cmax = nck bound); site_map is strided by
+// Mstride too. The panel accessor returns panel[donor_map[k]*Mp + site_map[l]] — byte-for-
+// byte the value roh_gather wrote into the old compacted refhaps, so the FB input is identical.
+//   d_ob        W*Mstride    u8   per-item observed alleles (item-major)
+//   d_panel     Kpanel*Mp    u8   ONCE-resident donor-major panel bytes
+//   d_donor_map K            i32  resident-panel row per selected donor
+//   d_site_map  W*Mstride    i32  per-item panel column (KeptSite::panel_l) per kept site
+//   d_p/d_T     W*Mstride(*9) f64 per-item allele frequency / transition tensor
+//   d_M/d_C/d_nck  W         i32  per-item kept-site count / checkpoint stride / block count
+void launch_roh_fb_wave(const std::uint8_t* d_ob, const std::uint8_t* d_panel,
+                        const int* d_donor_map, const int* d_site_map, const double* d_p,
+                        const double* d_T, const int* d_M, const int* d_C, const int* d_nck,
+                        int K, long Mp, long Mstride, long Cstride, int W, double e_rate,
+                        double in_val, double* d_proh, double* d_check_roh, double* d_check0,
+                        double* d_alphaA, double* d_alphaB, double* d_alpha_blk, double* d_a0_blk,
+                        double* d_betaA, double* d_betaB, cudaStream_t stream);
+
 // Gather one work-item's compacted donor-major reference-haplotype scratch from the
 // ONCE-resident panel (the batch-overlap residency — replaces the per-item host K*M gather
 // + re-upload with a single device gather over the shared panel). For k in [0,K), l in

@@ -16,6 +16,19 @@
 // throughout (the underflow-prone sub-one product scan — the reduction carve-out, NOT
 // the emulated-matmul default).
 //
+// ONE templated FB body (`roh_fb_kernel_t<Ref>`), TWO thin launchers over the SAME math:
+//   - launch_roh_fb       — the non-batch oracle (CudaBackend::roh_fb, tests): a shared
+//                           compacted K*M refhaps via the Compact accessor, uniform M/C/nck.
+//   - launch_roh_fb_wave  — the batch path (CudaBackend::roh_fb_batch): a single grid of W
+//                           item-blocks, each indexing the ONCE-resident panel DIRECTLY via
+//                           the Panel accessor (donor_map/site_map indirection folded in),
+//                           with per-item M/C/nck arrays. Feeds hundreds of blocks per wave.
+// The Panel accessor returns panel[donor_map[k]*Mp + site_map[l]] — byte-for-byte the value
+// the old per-item roh_gather wrote into the compacted refhaps — so both paths are bit-
+// identical: the FB recursions, the grid-stride reduction order over K, the native-FP64
+// per-column rescale, the column-0 prior, emissions and transitions are ALL unchanged; only
+// WHERE a refhaps byte is fetched and the per-block buffer base offsets differ.
+//
 // Reference: docs/planning/haproh-face-spec.md §3
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +44,38 @@ namespace steppe::device {
 namespace {
 
 inline constexpr int kBlock = 256;  // power of two: the tree reduction requires it
+
+// Refhaps accessors — the ONLY difference between the two FB paths. operator()(blk, k, l)
+// returns the reference-haplotype byte for donor k at kept site l of block/item blk. Both
+// return exactly the byte the CPU oracle / old roh_gather placed at refhaps[k*M + l], so
+// no floating-point op sees a different input in either path.
+
+// Non-batch: a shared compacted donor-major refhaps, row stride = M (blk unused — every
+// target scans the same panel-compacted axis).
+struct CompactRefhaps {
+    const std::uint8_t* r;
+    long M;
+    __device__ std::uint8_t operator()(int /*blk*/, int k, long l) const {
+        return r[static_cast<std::size_t>(k) * static_cast<std::size_t>(M) +
+                 static_cast<std::size_t>(l)];
+    }
+};
+
+// Wave: the per-item site_map indexes the ONCE-resident donor-major panel directly. site_map
+// rows are strided by Mstride (= the batch-wide Mmax); Mp is the panel column stride.
+struct PanelRefhaps {
+    const std::uint8_t* panel;
+    const int* donor_map;
+    const int* site_map_all;
+    long Mp;
+    long Mstride;
+    __device__ std::uint8_t operator()(int blk, int k, long l) const {
+        const int* sm =
+            site_map_all + static_cast<std::size_t>(blk) * static_cast<std::size_t>(Mstride);
+        return panel[static_cast<std::size_t>(donor_map[k]) * static_cast<std::size_t>(Mp) +
+                     static_cast<std::size_t>(sm[l])];
+    }
+};
 
 // Block-wide sum reduction over `val` (one partial per thread). Result broadcast to
 // every thread via sh[0]. Inactive threads (tid >= K) pass val == 0. The trailing
@@ -52,15 +97,16 @@ __device__ inline double block_reduce_sum(double val, double* __restrict__ sh) {
 // the backward recompute call the IDENTICAL instruction stream (bit-identical replay).
 // a0_prev is the previous column's state-0 value (broadcast, identical on every thread);
 // aroh_prev the previous ROH column; aroh_out receives the normalized ROH column. Returns
-// the normalized state-0 value (identical on every thread).
+// the normalized state-0 value (identical on every thread). Templated on the refhaps
+// accessor `Ref` (Compact / Panel) — the only per-path difference is where ref(blk,k,l)
+// reads the reference-haplotype byte; every arithmetic op is identical.
+template <class Ref>
 __device__ inline double roh_forward_step(double a0_prev, const double* __restrict__ aroh_prev,
-                                          double* __restrict__ aroh_out, long l, int K, long M,
-                                          const std::uint8_t* __restrict__ ob,
-                                          const std::uint8_t* __restrict__ refhaps,
+                                          double* __restrict__ aroh_out, long l, int K, int blk,
+                                          const std::uint8_t* __restrict__ ob, const Ref& ref,
                                           const double* __restrict__ p, const double* __restrict__ T,
                                           double e_rate, double* __restrict__ sh) {
     const int tid = threadIdx.x;
-    const std::size_t Ms = static_cast<std::size_t>(M);
     double loc = 0.0;
     for (int k = tid; k < K; k += blockDim.x) loc += aroh_prev[k];
     const double f = block_reduce_sum(loc, sh);  // pooled ROH mass at l-1
@@ -76,7 +122,7 @@ __device__ inline double roh_forward_step(double a0_prev, const double* __restri
 
     double locs = 0.0;
     for (int k = tid; k < K; k += blockDim.x) {
-        const std::uint8_t rk = refhaps[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+        const std::uint8_t rk = ref(blk, k, l);
         const double ek = steppe::core::roh_emission_copy(rk, obl, e_rate);
         const double v = ek * (x1 + x2 + aroh_prev[k] * stay);
         aroh_out[k] = v;
@@ -91,31 +137,45 @@ __device__ inline double roh_forward_step(double a0_prev, const double* __restri
     return na0 * inv;  // identical on every thread
 }
 
-// The (K+1)-state forward-backward kernel — one block per target (blockIdx.x = tid).
-__global__ void roh_fb_kernel(const std::uint8_t* __restrict__ ob_all,
-                              const std::uint8_t* __restrict__ refhaps, const double* __restrict__ p,
-                              const double* __restrict__ T, int K, long M, int C, int nck,
-                              double e_rate, double in_val, double* __restrict__ proh_all,
-                              double* __restrict__ check_roh_all, double* __restrict__ check0_all,
-                              double* __restrict__ alphaA_all, double* __restrict__ alphaB_all,
-                              double* __restrict__ alpha_blk_all, double* __restrict__ a0_blk_all,
-                              double* __restrict__ betaA_all, double* __restrict__ betaB_all) {
-    const int tgt = blockIdx.x;
+// The unified (K+1)-state forward-backward kernel — one block per item (blockIdx.x = blk).
+// Per-block M/C/nck come from the *_all arrays when non-null (wave), else the uniform
+// scalars Muni/Cuni/nckuni (non-batch). Buffer bases are per-block via the strides:
+// ob/proh by Mstride, p/T by pTstride (0 => shared across blocks, the non-batch case),
+// check_roh/check0 by nckstride, the C-tile (alpha_blk/a0_blk) by Cstride, the ping-pong
+// K-columns by K. The FB math below is byte-identical to the historical roh_fb_kernel.
+template <class Ref>
+__global__ void roh_fb_kernel_t(
+    const std::uint8_t* __restrict__ ob_all, Ref ref, const double* __restrict__ p_all,
+    const double* __restrict__ T_all, const int* __restrict__ M_all, const int* __restrict__ C_all,
+    const int* __restrict__ nck_all, int Muni, int Cuni, int nckuni, long Mstride, long Cstride,
+    long nckstride, long pTstride, int K, double e_rate, double in_val,
+    double* __restrict__ proh_all, double* __restrict__ check_roh_all,
+    double* __restrict__ check0_all, double* __restrict__ alphaA_all,
+    double* __restrict__ alphaB_all, double* __restrict__ alpha_blk_all,
+    double* __restrict__ a0_blk_all, double* __restrict__ betaA_all,
+    double* __restrict__ betaB_all) {
+    const int blk = blockIdx.x;
     const int tid = threadIdx.x;
+    const int M = M_all ? M_all[blk] : Muni;
+    if (M <= 0) return;  // empty item — nothing to do (skipped by the consumer)
+    const int C = C_all ? C_all[blk] : Cuni;
+    const int nck = nck_all ? nck_all[blk] : nckuni;
     const std::size_t Ks = static_cast<std::size_t>(K);
-    const std::size_t Ms = static_cast<std::size_t>(M);
+    const std::size_t blkz = static_cast<std::size_t>(blk);
 
-    // Per-target views into the backend-owned buffers.
-    const std::uint8_t* ob = ob_all + static_cast<std::size_t>(tgt) * Ms;
-    double* proh = proh_all + static_cast<std::size_t>(tgt) * Ms;
-    double* check_roh = check_roh_all + static_cast<std::size_t>(tgt) * static_cast<std::size_t>(nck) * Ks;
-    double* check0 = check0_all + static_cast<std::size_t>(tgt) * static_cast<std::size_t>(nck);
-    double* alphaA = alphaA_all + static_cast<std::size_t>(tgt) * Ks;
-    double* alphaB = alphaB_all + static_cast<std::size_t>(tgt) * Ks;
-    double* alpha_blk = alpha_blk_all + static_cast<std::size_t>(tgt) * static_cast<std::size_t>(C) * Ks;
-    double* a0_blk = a0_blk_all + static_cast<std::size_t>(tgt) * static_cast<std::size_t>(C);
-    double* betaA = betaA_all + static_cast<std::size_t>(tgt) * Ks;
-    double* betaB = betaB_all + static_cast<std::size_t>(tgt) * Ks;
+    // Per-block views into the backend-owned buffers.
+    const std::uint8_t* ob = ob_all + blkz * static_cast<std::size_t>(Mstride);
+    const double* p = p_all + blkz * static_cast<std::size_t>(pTstride);
+    const double* T = T_all + blkz * static_cast<std::size_t>(pTstride) * 9;
+    double* proh = proh_all + blkz * static_cast<std::size_t>(Mstride);
+    double* check_roh = check_roh_all + blkz * static_cast<std::size_t>(nckstride) * Ks;
+    double* check0 = check0_all + blkz * static_cast<std::size_t>(nckstride);
+    double* alphaA = alphaA_all + blkz * Ks;
+    double* alphaB = alphaB_all + blkz * Ks;
+    double* alpha_blk = alpha_blk_all + blkz * static_cast<std::size_t>(Cstride) * Ks;
+    double* a0_blk = a0_blk_all + blkz * static_cast<std::size_t>(Cstride);
+    double* betaA = betaA_all + blkz * Ks;
+    double* betaB = betaB_all + blkz * Ks;
 
     __shared__ double sh[kBlock];
 
@@ -131,8 +191,7 @@ __global__ void roh_fb_kernel(const std::uint8_t* __restrict__ ob_all,
     __syncthreads();
 
     for (long l = 1; l < M; ++l) {
-        const double a0_new =
-            roh_forward_step(a0, cur, nxt, l, K, M, ob, refhaps, p, T, e_rate, sh);
+        const double a0_new = roh_forward_step(a0, cur, nxt, l, K, blk, ob, ref, p, T, e_rate, sh);
         double* tmp = cur;
         cur = nxt;
         nxt = tmp;  // now cur = alpha_l, nxt = alpha_{l-1}
@@ -169,8 +228,8 @@ __global__ void roh_fb_kernel(const std::uint8_t* __restrict__ ob_all,
         for (int j = 1; j < len; ++j) {
             const long l = b0 + j;
             a0_col = roh_forward_step(a0_col, alpha_blk + static_cast<std::size_t>(j - 1) * Ks,
-                                      alpha_blk + static_cast<std::size_t>(j) * Ks, l, K, M, ob,
-                                      refhaps, p, T, e_rate, sh);
+                                      alpha_blk + static_cast<std::size_t>(j) * Ks, l, K, blk, ob,
+                                      ref, p, T, e_rate, sh);
             if (tid == 0) a0_blk[j] = a0_col;
             __syncthreads();
         }
@@ -200,7 +259,7 @@ __global__ void roh_fb_kernel(const std::uint8_t* __restrict__ ob_all,
             const double stay = t11 - t12;
             double locf = 0.0;
             for (int k = tid; k < K; k += blockDim.x) {
-                const std::uint8_t rk = refhaps[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+                const std::uint8_t rk = ref(blk, k, l);
                 locf += beta_cur[k] * steppe::core::roh_emission_copy(rk, obl, e_rate);
             }
             const double fl = block_reduce_sum(locf, sh);
@@ -208,7 +267,7 @@ __global__ void roh_fb_kernel(const std::uint8_t* __restrict__ ob_all,
             const double x1 = e0 * beta0 * t10;
             double locs = 0.0;
             for (int k = tid; k < K; k += blockDim.x) {
-                const std::uint8_t rk = refhaps[static_cast<std::size_t>(k) * Ms + static_cast<std::size_t>(l)];
+                const std::uint8_t rk = ref(blk, k, l);
                 const double ek = steppe::core::roh_emission_copy(rk, obl, e_rate);
                 const double v = x1 + fl * t12 + ek * beta_cur[k] * stay;
                 beta_nxt[k] = v;
@@ -235,9 +294,32 @@ void launch_roh_fb(const std::uint8_t* d_ob, const std::uint8_t* d_refhaps, cons
                    double* d_alphaA, double* d_alphaB, double* d_alpha_blk, double* d_a0_blk,
                    double* d_betaA, double* d_betaB, cudaStream_t stream) {
     if (K <= 0 || M <= 0 || n_target <= 0) return;
-    roh_fb_kernel<<<n_target, kBlock, 0, stream>>>(
-        d_ob, d_refhaps, d_p, d_T, K, M, C, nck, e_rate, in_val, d_proh, d_check_roh, d_check0,
-        d_alphaA, d_alphaB, d_alpha_blk, d_a0_blk, d_betaA, d_betaB);
+    // Non-batch: n_target blocks, a shared compacted refhaps / p / T (pTstride = 0), uniform
+    // M/C/nck; per-target ob/proh/checkpoints/tiles via Mstride = M, Cstride = C, nckstride = nck.
+    roh_fb_kernel_t<CompactRefhaps><<<static_cast<unsigned>(n_target), kBlock, 0, stream>>>(
+        d_ob, CompactRefhaps{d_refhaps, M}, d_p, d_T, /*M_all*/nullptr, /*C_all*/nullptr,
+        /*nck_all*/nullptr, /*Muni*/static_cast<int>(M), /*Cuni*/C, /*nckuni*/nck, /*Mstride*/M,
+        /*Cstride*/C, /*nckstride*/nck, /*pTstride*/0, K, e_rate, in_val, d_proh, d_check_roh,
+        d_check0, d_alphaA, d_alphaB, d_alpha_blk, d_a0_blk, d_betaA, d_betaB);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_roh_fb_wave(const std::uint8_t* d_ob, const std::uint8_t* d_panel,
+                        const int* d_donor_map, const int* d_site_map, const double* d_p,
+                        const double* d_T, const int* d_M, const int* d_C, const int* d_nck,
+                        int K, long Mp, long Mstride, long Cstride, int W, double e_rate,
+                        double in_val, double* d_proh, double* d_check_roh, double* d_check0,
+                        double* d_alphaA, double* d_alphaB, double* d_alpha_blk, double* d_a0_blk,
+                        double* d_betaA, double* d_betaB, cudaStream_t stream) {
+    if (K <= 0 || W <= 0) return;
+    // Wave: W item-blocks in ONE grid, each indexing the resident panel via the site_map;
+    // per-item M/C/nck from the arrays; every buffer strided by the batch-wide Mstride/Cstride
+    // (nck bound = Cmax, so nckstride == Cstride), p/T per-item (pTstride = Mstride).
+    roh_fb_kernel_t<PanelRefhaps><<<static_cast<unsigned>(W), kBlock, 0, stream>>>(
+        d_ob, PanelRefhaps{d_panel, d_donor_map, d_site_map, Mp, Mstride}, d_p, d_T, d_M, d_C,
+        d_nck, /*Muni*/0, /*Cuni*/0, /*nckuni*/0, Mstride, Cstride, /*nckstride*/Cstride,
+        /*pTstride*/Mstride, K, e_rate, in_val, d_proh, d_check_roh, d_check0, d_alphaA, d_alphaB,
+        d_alpha_blk, d_a0_blk, d_betaA, d_betaB);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
@@ -246,6 +328,7 @@ namespace {
 // Compacted device gather: refhaps[k*M + l] = panel[donor_map[k]*Mp + site_map[l]], flat
 // grid-strided over the K*M output — the batch-overlap replacement for the per-item host
 // K*M panel gather + PCIe re-upload. Pure indirection over bytes; touches no FB math.
+// (Retained for launch_roh_gather; the wave path now folds this indexing into PanelRefhaps.)
 __global__ void roh_gather_kernel(const std::uint8_t* __restrict__ panel,
                                   const int* __restrict__ donor_map,
                                   const int* __restrict__ site_map, int K, long M, long Mp,
