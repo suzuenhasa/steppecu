@@ -14,12 +14,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -57,21 +61,95 @@ namespace {
     return sel;
 }
 
+// Default upper bound on host-prep worker threads. The 256-core box's raw
+// hardware_concurrency() would over-shard the (few-hundred-KB per block) prep loops; a modest
+// cap keeps per-block work meaningful without hurting the O(N)/O(Mp*K) parallel speedup. Only
+// an upper bound — the axis size and hardware_concurrency() clamp it further.
+constexpr std::size_t kRohDefaultThreadCap = 64;
+
+// Worker-thread cap for the host-prep parallel loops. Read once from STEPPE_ROH_THREADS (a
+// hidden knob, no CLI surface): a positive integer pins the cap (STEPPE_ROH_THREADS=1 forces
+// the fully-serial path; a large value forces max fan-out) — used by the parity harness to
+// prove the output is invariant to the thread count. Unset/invalid -> kRohDefaultThreadCap.
+[[nodiscard]] std::size_t roh_thread_cap() {
+    const char* e = std::getenv("STEPPE_ROH_THREADS");
+    if (e != nullptr && *e != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 1) return static_cast<std::size_t>(v);
+    }
+    return kRohDefaultThreadCap;
+}
+
+// Final clamped block/thread count for an axis of size n:
+// T = max(1, min(hardware_concurrency(), STEPPE_ROH_THREADS cap, n)). Capping by n means a
+// small axis never spawns more threads than there are blocks; hardware_concurrency()==0 (the
+// "unknowable" answer) falls back to serial. Deterministic in n, so every caller that pre-sizes
+// thread-local state with this count agrees with parallel_blocks' partition.
+[[nodiscard]] std::size_t roh_parallel_T(std::size_t n) {
+    if (n == 0) return 0;
+    const unsigned hw = std::thread::hardware_concurrency();
+    const std::size_t base = (hw == 0) ? std::size_t{1} : static_cast<std::size_t>(hw);
+    std::size_t T = std::min<std::size_t>({base, roh_thread_cap(), n});
+    return std::max<std::size_t>(std::size_t{1}, T);
+}
+
+// Partition [0, n) into T contiguous ascending blocks (T = roh_parallel_T(n)) and run
+// fn(begin, end, block_index) on one std::thread per non-empty block, then join. T==1 (or a
+// tiny axis) runs fn inline with no thread spawn. Blocks are contiguous and ascending, so a
+// consumer that fills a disjoint output slice per block — or a thread-local buffer merged in
+// ascending block order — reproduces the serial result BYTE-for-BYTE, independent of T.
+//
+// Every worker's body is wrapped so a throw (e.g. a thread-local allocation's bad_alloc) is
+// captured as an exception_ptr and rethrown after join — an uncaught throw crossing a
+// std::thread boundary would call std::terminate. Mirrors the multi-device dispatch below.
+template <typename Fn>
+void parallel_blocks(std::size_t n, Fn&& fn) {
+    const std::size_t T = roh_parallel_T(n);
+    if (T <= 1) {
+        if (n > 0) fn(std::size_t{0}, n, std::size_t{0});
+        return;
+    }
+    const std::size_t block = (n + T - 1) / T;  // ceil, so T blocks cover [0, n)
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    std::vector<std::exception_ptr> errs(T);
+    for (std::size_t b = 0; b < T; ++b) {
+        const std::size_t begin = b * block;
+        if (begin >= n) break;  // ceil rounding can leave trailing blocks empty
+        const std::size_t end = std::min(n, begin + block);
+        threads.emplace_back([&fn, &errs, begin, end, b]() {
+            try {
+                fn(begin, end, b);
+            } catch (...) {
+                errs[b] = std::current_exception();
+            }
+        });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& e : errs)
+        if (e) std::rethrow_exception(e);
+}
+
 // Decode a canonical individual-major tile to a flat haplotype-major allele-byte buffer
 // allele[g*M + l] in {0,1,kLsMissingAllele} (exactly cmd_paint::decode_haplotypes). Each
-// individual (haploid column) is one target/donor haplotype.
+// individual (haploid column) is one target/donor haplotype. Parallelized over the individual
+// (haplotype) axis: each block writes a disjoint set of rows [g0, g1), integer-only, so the
+// output bytes are identical to the serial decode regardless of the block count.
 [[nodiscard]] std::vector<std::uint8_t> decode_haplotypes(const io::GenotypeTile& tile, long M) {
     const std::size_t Ms = static_cast<std::size_t>(M);
     std::vector<std::uint8_t> out(tile.n_individuals * Ms, core::kLsMissingAllele);
-    for (std::size_t g = 0; g < tile.n_individuals; ++g) {
-        const std::uint8_t* rec = tile.packed.data() + g * tile.bytes_per_record;
-        for (long l = 0; l < M; ++l) {
-            const std::size_t byte = static_cast<std::size_t>(l) / core::kCodesPerByte;
-            const int pos = static_cast<int>(static_cast<std::size_t>(l) % core::kCodesPerByte);
-            out[g * Ms + static_cast<std::size_t>(l)] =
-                core::haploid_allele_from_code(core::genotype_code(rec[byte], pos));
+    parallel_blocks(tile.n_individuals, [&](std::size_t g0, std::size_t g1, std::size_t) {
+        for (std::size_t g = g0; g < g1; ++g) {
+            const std::uint8_t* rec = tile.packed.data() + g * tile.bytes_per_record;
+            for (long l = 0; l < M; ++l) {
+                const std::size_t byte = static_cast<std::size_t>(l) / core::kCodesPerByte;
+                const int pos = static_cast<int>(static_cast<std::size_t>(l) % core::kCodesPerByte);
+                out[g * Ms + static_cast<std::size_t>(l)] =
+                    core::haploid_allele_from_code(core::genotype_code(rec[byte], pos));
+            }
         }
-    }
+    });
     return out;
 }
 
@@ -195,8 +273,20 @@ int run_roh(const RohArgs& args) {
         return cfg::kExitInvalidConfig;
     }
 
+    // --- optional per-stage host-prep wall-clock timers (STEPPE_ROH_TIMING set) --------
+    // Proves the O(N) / O(Mp*K) decomposition on the box (read+transpose / panel decode /
+    // target decode / intersect+p_freq) so the de-bottleneck scope is measured, not assumed.
+    const bool roh_timing = std::getenv("STEPPE_ROH_TIMING") != nullptr;
+    using RohClock = std::chrono::steady_clock;
+    auto roh_tick = [&](const char* stage, RohClock::time_point from) {
+        if (roh_timing)
+            std::fprintf(stderr, "steppe roh [timing] %-18s %8.1f ms\n", stage,
+                         std::chrono::duration<double, std::milli>(RohClock::now() - from).count());
+    };
+
     // --- read target + panel front-ends (host CpuBackend as io/transpose oracle) ---
     core::GenotypeFrontEnd fe_t, fe_p;
+    const RohClock::time_point t_read0 = RohClock::now();
     try {
         const io::GenotypeTriple tt = io::resolve_genotype_triple(args.prefix);
         const io::GenotypeTriple pp = io::resolve_genotype_triple(args.ref_panel);
@@ -207,6 +297,7 @@ int run_roh(const RohArgs& args) {
         std::fprintf(stderr, "steppe roh: input error: %s\n", e.what());
         return cfg::kExitIoError;
     }
+    roh_tick("read+transpose", t_read0);
 
     const long Mt = static_cast<long>(fe_t.tile.n_snp);
     const long Mp = static_cast<long>(fe_p.tile.n_snp);
@@ -280,8 +371,12 @@ int run_roh(const RohArgs& args) {
     const int Ntgt = static_cast<int>(tgt_cols.size());
 
     // --- decode both panels to haploid allele bytes --------------------------------
+    const RohClock::time_point t_pdec0 = RohClock::now();
     const std::vector<std::uint8_t> panel_hap = decode_haplotypes(fe_p.tile, Mp);
+    roh_tick("panel decode", t_pdec0);
+    const RohClock::time_point t_tdec0 = RohClock::now();
     const std::vector<std::uint8_t> tgt_hap = decode_haplotypes(fe_t.tile, Mt);
+    roh_tick("target decode", t_tdec0);
 
     // --- intersect target ∩ panel by (chrom, physpos); enforce the polarity contract,
     //     grouped by chromosome ------------------------------------------------------
@@ -316,16 +411,19 @@ int run_roh(const RohArgs& args) {
     const std::size_t Mps = static_cast<std::size_t>(Mp);
     const std::size_t Mts = static_cast<std::size_t>(Mt);
 
-    for (long lt = 0; lt < Mt; ++lt) {
+    // Pure per-site classifier: reads only const state (both snptabs, panel_by_key, panel_hap,
+    // panel_cols, K) and either produces a KeptSite (with the SAME serial kk-loop p_freq, no
+    // reassociation) or reports why the target site is dropped. No shared mutable state, so it
+    // is safe to call from any worker; called in ascending lt so a contiguous lt block yields
+    // KeptSites in ascending-lt order.
+    enum class SiteOutcome { Keep, DropNoMatch, DropPolarity };
+    auto classify_site = [&](long lt, KeptSite& out) -> SiteOutcome {
         const std::size_t lts = static_cast<std::size_t>(lt);
         const int ch = (lts < fe_t.snptab.chrom.size()) ? fe_t.snptab.chrom[lts] : 0;
         const long long pos = static_cast<long long>(
             (lts < fe_t.snptab.physpos.size()) ? fe_t.snptab.physpos[lts] : 0.0);
         const auto it = panel_by_key.find(site_key(ch, pos));
-        if (it == panel_by_key.end()) {
-            ++n_drop_nomatch;
-            continue;
-        }
+        if (it == panel_by_key.end()) return SiteOutcome::DropNoMatch;
         const std::size_t lp = it->second;
         // Polarity: REF/ALT must match or be a consistent flip; else drop.
         bool flip = false;
@@ -339,8 +437,7 @@ int run_roh(const RohArgs& args) {
             } else if (tR == pA && tA == pR) {
                 flip = true;
             } else {
-                ++n_drop_polarity;
-                continue;
+                return SiteOutcome::DropPolarity;
             }
         }
         // Panel allele frequency over the SELECTED K haplotype columns (non-missing).
@@ -357,8 +454,58 @@ int run_roh(const RohArgs& args) {
         const double morgan = (lp < fe_p.snptab.genpos_morgans.size())
                                   ? fe_p.snptab.genpos_morgans[lp]
                                   : 0.0;
-        by_chrom[ch].push_back(KeptSite{ch, morgan, pos, p_freq, lp, lts, flip});
+        out = KeptSite{ch, morgan, pos, p_freq, lp, lts, flip};
+        return SiteOutcome::Keep;
+    };
+
+    // Parallel intersect + p_freq over the target sites, in T contiguous ascending lt blocks.
+    // Each block writes its own thread-local per-chrom KeptSite vectors + drop counters — no
+    // shared writes — then a SERIAL ascending-block merge appends each chrom's block-local
+    // vector onto by_chrom. Because block b covers a contiguous ascending lt range iterated
+    // ascending, and blocks merge in ascending b order, by_chrom[ch] receives KeptSites in
+    // EXACTLY the serial ascending-lt push_back order — the subsequent morgan-sort input, and
+    // thus every FB per-item input, is byte-identical and independent of the thread count.
+    const RohClock::time_point t_isect0 = RohClock::now();
+    {
+        const std::size_t T = roh_parallel_T(Mts);
+        const std::size_t slots = std::max<std::size_t>(T, std::size_t{1});
+        std::vector<std::unordered_map<int, std::vector<KeptSite>>> local_by_chrom(slots);
+        std::vector<long long> local_nomatch(slots, 0);
+        std::vector<long long> local_polarity(slots, 0);
+        parallel_blocks(Mts, [&](std::size_t lt0, std::size_t lt1, std::size_t b) {
+            std::unordered_map<int, std::vector<KeptSite>>& lbc = local_by_chrom[b];
+            long long nm = 0, npol = 0;
+            KeptSite ks;
+            for (std::size_t lt = lt0; lt < lt1; ++lt) {
+                switch (classify_site(static_cast<long>(lt), ks)) {
+                    case SiteOutcome::Keep:
+                        lbc[ks.ch].push_back(ks);
+                        break;
+                    case SiteOutcome::DropNoMatch:
+                        ++nm;
+                        break;
+                    case SiteOutcome::DropPolarity:
+                        ++npol;
+                        break;
+                }
+            }
+            local_nomatch[b] = nm;
+            local_polarity[b] = npol;
+        });
+        // Ordered merge (serial, ascending block index). Iterating a block's map over its chrom
+        // keys in arbitrary order is safe: each chrom's vector is appended to its OWN by_chrom
+        // slot, so no single chrom's ordering depends on the inter-chrom iteration order.
+        for (std::size_t b = 0; b < slots; ++b) {
+            for (auto& kv : local_by_chrom[b]) {
+                std::vector<KeptSite>& dst = by_chrom[kv.first];
+                dst.insert(dst.end(), std::make_move_iterator(kv.second.begin()),
+                           std::make_move_iterator(kv.second.end()));
+            }
+            n_drop_nomatch += local_nomatch[b];
+            n_drop_polarity += local_polarity[b];
+        }
     }
+    roh_tick("intersect+p_freq", t_isect0);
 
     long long n_kept = 0;
     for (auto& kv : by_chrom) n_kept += static_cast<long long>(kv.second.size());
