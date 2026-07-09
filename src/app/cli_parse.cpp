@@ -37,6 +37,7 @@
 #include "app/cmd_f4.hpp"
 #include "app/cmd_f4ratio.hpp"
 #include "app/cmd_fst.hpp"
+#include "app/cmd_kinship.hpp"
 #include "app/cmd_sfs.hpp"
 #include "app/cmd_pca.hpp"
 #include "app/cmd_fstat_sweep.hpp"
@@ -274,6 +275,7 @@ int run_cli(int argc, char** argv) {
     CliArgs readv2_args;
     CliArgs paint_args;
     CliArgs fst_args;
+    CliArgs kinship_args;
     CliArgs sfs_args;
     CliArgs pca_args;
 
@@ -387,6 +389,36 @@ int run_cli(int argc, char** argv) {
         },
         run_fst_command, code);
 
+    register_cmd(app, "kinship",
+        "KING-robust between-family kinship (Manichaikul et al. 2010): --prefix DIPLOID "
+        "genotypes -> per-pair phi + degree (dup/1st/2nd/3rd/unrelated). The diploid "
+        "counterpart of readv2 (which is pseudo-haploid). --all-pairs sweeps C(N,2); "
+        "--pairs FILE runs an explicit id1<ws>id2 list (the biobank-scale path). Gated "
+        "vs plink2 --make-king-table",
+        kinship_args, Command::Kinship,
+        [](CLI::App* s, CliArgs& a) {
+            s->add_option("--prefix", a.qpdstat_prefix,
+                          "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...; "
+                          "DIPLOID)");
+            s->add_option("--samples", a.samples,
+                          "OPTIONAL file of Genetic IDs (one per line) to restrict to; default = all "
+                          "individuals");
+            s->add_flag("--all-pairs", a.kinship_all_pairs,
+                        "Enumerate all C(N,2) pairs (the maxcomb-capped sweep; --sure lifts the cap). "
+                        "Mutually exclusive with --pairs");
+            s->add_option("--pairs", a.pairs,
+                          "OPTIONAL explicit pair FILE (id1<ws>id2 per line); the targeted / biobank-"
+                          "scale path. Mutually exclusive with --all-pairs");
+            s->add_option("--min-kinship", a.min_kinship,
+                          "Emit only pairs with phi >= this (default -inf = all); the biobank-scale "
+                          "related-only filter");
+            s->add_flag("--sure", a.sweep_sure,
+                        "(--all-pairs) lift the C(N,2) pair-count cap for very large sample sets");
+            add_output_flags(s, a);
+            add_common_flags(s, a);
+        },
+        run_kinship_command, code);
+
     register_cmd(app, "sfs",
         "2D joint site-frequency spectrum between TWO populations: --prefix genotypes + "
         "--pops A,B -> the (2nA+1)x(2nB+1) integer joint SFS matrix (--fold for the per-pop "
@@ -418,6 +450,15 @@ int run_cli(int argc, char** argv) {
                           "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
             add_str_list_flag(s, "--pops", a.pops,
                               "Populations to include (color groups); omit = ALL populations");
+            add_str_list_flag(s, "--project-pops", a.project_pops,
+                              "Populations placed by lsqproject ONLY (excluded from the PCA "
+                              "covariance AND the per-SNP allele frequencies)");
+            s->add_option("--project-samples", a.project_samples,
+                          "File of Genetic IDs (one IID/line), each projected-only (unions with "
+                          "--project-pops)");
+            s->add_option("--project-mode", a.project_mode,
+                          "Projection placement: lsq (default, full K x K least-squares == "
+                          "smartpca lsqproject:YES) | scaled (diagonal ratio)");
             s->add_option("-k,--k", a.pca_k, "Number of principal components (default 10)");
             s->add_flag("--eigenvalues", a.pca_eigenvalues,
                         "Emit the scree table (pc_index/eigenvalue/var_explained) instead of the "

@@ -48,6 +48,7 @@
 #include "device/device_f2_blocks.hpp"
 #include "steppe/config.hpp"
 #include "steppe/error.hpp"
+#include "steppe/pca.hpp"
 #include "steppe/qpadm.hpp"
 
 namespace steppe::device {
@@ -562,6 +563,280 @@ public:
                     static_cast<double>(at(V, i, static_cast<long>(col)) * scale);
         }
         out.N = Nn;
+        out.K = K;
+        out.n_snp_used = n_used;
+        out.n_snp_monomorphic = M - n_used;
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // pca_project_lsq: the lsqproject PCA parity oracle (test-only; not user-facing). Builds
+    // the eigenbasis over the REFERENCE rows only (folding per-SNP center/inv_scale over those
+    // rows alone), then places each TARGET row by the exact K x K least-squares fit over its
+    // non-missing, ref-polymorphic sites — the SAME math the CUDA two-pass path streams. Native
+    // long double throughout (the correctness oracle). The precision argument is ignored.
+    [[nodiscard]] PcaProject pca_project_lsq(const DecodeTileView& tile, int k,
+                                             std::span<const int> ref_rows,
+                                             std::span<const int> tgt_rows, int project_mode,
+                                             const Precision& precision) override {
+        (void)precision;
+        PcaProject out;
+        out.precision_tag = Precision::Kind::Fp64;
+
+        const long M = static_cast<long>(tile.n_snp);
+        const long N_ref = static_cast<long>(ref_rows.size());
+        const long N_tgt = static_cast<long>(tgt_rows.size());
+        if (M <= 0 || N_ref <= 0 || N_tgt <= 0 || k <= 0) {
+            out.status = Status::InvalidConfig;
+            return out;
+        }
+        const int Nr = static_cast<int>(N_ref);
+        const int Nt = static_cast<int>(N_tgt);
+        const int K = static_cast<int>(std::min<long>(k, N_ref));
+        const std::size_t NrZ = static_cast<std::size_t>(N_ref);
+
+        auto code_at = [&](long row, long s) -> std::uint8_t {
+            const std::size_t byte =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos = static_cast<int>(s % core::kCodesPerByte);
+            return core::genotype_code(
+                tile.packed[static_cast<std::size_t>(row) * tile.bytes_per_record + byte], pos);
+        };
+
+        // Per-SNP Patterson center/inv_scale over the REFERENCE rows only.
+        std::vector<double> center(static_cast<std::size_t>(M), 0.0);
+        std::vector<double> inv_scale(static_cast<std::size_t>(M), 0.0);
+        long n_used = 0;
+        for (long s = 0; s < M; ++s) {
+            long ac = 0, nn = 0;
+            for (long r = 0; r < N_ref; ++r) {
+                const std::uint8_t code = code_at(ref_rows[static_cast<std::size_t>(r)], s);
+                if (core::genotype_valid(code)) { ac += static_cast<long>(code); ++nn; }
+            }
+            const core::PcaSnpScale sc = core::pca_snp_scale(ac, nn);
+            center[static_cast<std::size_t>(s)] = sc.center;
+            inv_scale[static_cast<std::size_t>(s)] = sc.used ? (1.0 / std::sqrt(sc.pq)) : 0.0;
+            if (sc.used) ++n_used;
+        }
+
+        // Reference covariance C = Z_ref Z_ref^T (N_ref x N_ref, long double).
+        std::vector<long double> C(NrZ * NrZ, 0.0L);
+        std::vector<long double> z(NrZ, 0.0L);
+        for (long s = 0; s < M; ++s) {
+            const double ctr = center[static_cast<std::size_t>(s)];
+            const double inv = inv_scale[static_cast<std::size_t>(s)];
+            for (long r = 0; r < N_ref; ++r)
+                z[static_cast<std::size_t>(r)] = static_cast<long double>(core::pca_standardize_one(
+                    code_at(ref_rows[static_cast<std::size_t>(r)], s), ctr, inv));
+            for (long i = 0; i < N_ref; ++i) {
+                const long double zi = z[static_cast<std::size_t>(i)];
+                if (zi == 0.0L) continue;
+                for (long j = 0; j < N_ref; ++j)
+                    C[static_cast<std::size_t>(i) * NrZ + static_cast<std::size_t>(j)] +=
+                        zi * z[static_cast<std::size_t>(j)];
+            }
+        }
+
+        // Cyclic-Jacobi symmetric eigensolve (V columns = eigenvectors).
+        std::vector<long double> V(NrZ * NrZ, 0.0L);
+        for (long i = 0; i < N_ref; ++i)
+            V[static_cast<std::size_t>(i) * NrZ + static_cast<std::size_t>(i)] = 1.0L;
+        constexpr int kMaxSweeps = 100;
+        auto at = [NrZ](std::vector<long double>& A, long r, long c) -> long double& {
+            return A[static_cast<std::size_t>(r) * NrZ + static_cast<std::size_t>(c)];
+        };
+        for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+            long double off = 0.0L;
+            for (long p = 0; p < N_ref; ++p)
+                for (long q = p + 1; q < N_ref; ++q) off += at(C, p, q) * at(C, p, q);
+            if (off <= 1e-30L) break;
+            for (long p = 0; p < N_ref; ++p) {
+                for (long q = p + 1; q < N_ref; ++q) {
+                    const long double apq = at(C, p, q);
+                    if (apq == 0.0L) continue;
+                    const long double phi = 0.5L * (at(C, q, q) - at(C, p, p)) / apq;
+                    const long double t = (phi >= 0.0L ? 1.0L : -1.0L) /
+                                          (std::fabs(phi) + std::sqrt(phi * phi + 1.0L));
+                    const long double cs = 1.0L / std::sqrt(t * t + 1.0L);
+                    const long double sn = t * cs;
+                    for (long i = 0; i < N_ref; ++i) {
+                        const long double aip = at(C, i, p), aiq = at(C, i, q);
+                        at(C, i, p) = cs * aip - sn * aiq;
+                        at(C, i, q) = sn * aip + cs * aiq;
+                    }
+                    for (long i = 0; i < N_ref; ++i) {
+                        const long double api = at(C, p, i), aqi = at(C, q, i);
+                        at(C, p, i) = cs * api - sn * aqi;
+                        at(C, q, i) = sn * api + cs * aqi;
+                    }
+                    for (long i = 0; i < N_ref; ++i) {
+                        const long double vip = at(V, i, p), viq = at(V, i, q);
+                        at(V, i, p) = cs * vip - sn * viq;
+                        at(V, i, q) = sn * vip + cs * viq;
+                    }
+                }
+            }
+        }
+
+        std::vector<long double> evals(NrZ, 0.0L);
+        for (long i = 0; i < N_ref; ++i) evals[static_cast<std::size_t>(i)] = at(C, i, i);
+        std::vector<int> order(NrZ);
+        for (int i = 0; i < Nr; ++i) order[static_cast<std::size_t>(i)] = i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return evals[static_cast<std::size_t>(a)] > evals[static_cast<std::size_t>(b)];
+        });
+        long double total = 0.0L;
+        for (long i = 0; i < N_ref; ++i) total += evals[static_cast<std::size_t>(i)];
+
+        // Reference coords U*S + the S_k / 1/S_k the loadings need.
+        out.coords_ref.assign(NrZ * static_cast<std::size_t>(K), 0.0);
+        out.eigenvalues.assign(static_cast<std::size_t>(K), 0.0);
+        out.var_explained.assign(static_cast<std::size_t>(K), 0.0);
+        std::vector<long double> inv_S(static_cast<std::size_t>(K), 0.0L);
+        std::vector<int> col_of(static_cast<std::size_t>(K), 0);
+        for (int kk = 0; kk < K; ++kk) {
+            const int col = order[static_cast<std::size_t>(kk)];
+            col_of[static_cast<std::size_t>(kk)] = col;
+            const long double lambda = evals[static_cast<std::size_t>(col)];
+            const long double s_k = lambda > 0.0L ? std::sqrt(lambda) : 0.0L;
+            inv_S[static_cast<std::size_t>(kk)] = s_k > 0.0L ? (1.0L / s_k) : 0.0L;
+            out.eigenvalues[static_cast<std::size_t>(kk)] = static_cast<double>(lambda);
+            out.var_explained[static_cast<std::size_t>(kk)] =
+                (total != 0.0L) ? static_cast<double>(lambda / total) : 0.0;
+            for (long i = 0; i < N_ref; ++i)
+                out.coords_ref[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                               static_cast<std::size_t>(kk)] =
+                    static_cast<double>(at(V, i, static_cast<long>(col)) * s_k);
+        }
+
+        // Targets: accumulate b_j = W_O^T z_O and A_j = W_O^T W_O over the SNP loadings
+        // W_{s,k} = (1/S_k) Σ_i Z_ref[i,s] U[i,k].
+        out.coords_tgt.assign(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K), 0.0);
+        out.m_obs.assign(static_cast<std::size_t>(N_tgt), 0);
+        out.status_per_target.assign(static_cast<std::size_t>(N_tgt), 0);
+        std::vector<long double> b(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K),
+                                   0.0L);
+        std::vector<long double> A(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K) *
+                                       static_cast<std::size_t>(K),
+                                   0.0L);
+        std::vector<long double> w(static_cast<std::size_t>(K), 0.0L);
+        for (long s = 0; s < M; ++s) {
+            const double ctr = center[static_cast<std::size_t>(s)];
+            const double inv = inv_scale[static_cast<std::size_t>(s)];
+            if (inv == 0.0) continue;  // monomorphic ref site contributes no loading
+            // Loading row w_s (K) = (1/S_k) Σ_i Z_ref[i,s] U[i,k].
+            for (long r = 0; r < N_ref; ++r)
+                z[static_cast<std::size_t>(r)] = static_cast<long double>(core::pca_standardize_one(
+                    code_at(ref_rows[static_cast<std::size_t>(r)], s), ctr, inv));
+            for (int kk = 0; kk < K; ++kk) {
+                const int col = col_of[static_cast<std::size_t>(kk)];
+                long double dot = 0.0L;
+                for (long i = 0; i < N_ref; ++i)
+                    dot += z[static_cast<std::size_t>(i)] * at(V, i, static_cast<long>(col));
+                w[static_cast<std::size_t>(kk)] = dot * inv_S[static_cast<std::size_t>(kk)];
+            }
+            for (long jt = 0; jt < N_tgt; ++jt) {
+                const std::uint8_t code = code_at(tgt_rows[static_cast<std::size_t>(jt)], s);
+                const bool obs = core::genotype_valid(code);
+                const long double zt =
+                    static_cast<long double>(core::pca_standardize_one(code, ctr, inv));
+                const std::size_t bj = static_cast<std::size_t>(jt) * static_cast<std::size_t>(K);
+                for (int kk = 0; kk < K; ++kk)
+                    b[bj + static_cast<std::size_t>(kk)] += w[static_cast<std::size_t>(kk)] * zt;
+                if (obs) {
+                    out.m_obs[static_cast<std::size_t>(jt)] += 1;
+                    const std::size_t Aj = static_cast<std::size_t>(jt) *
+                                           static_cast<std::size_t>(K) * static_cast<std::size_t>(K);
+                    for (int a = 0; a < K; ++a)
+                        for (int c = 0; c < K; ++c)
+                            A[Aj + static_cast<std::size_t>(a) + static_cast<std::size_t>(c) *
+                                                                     static_cast<std::size_t>(K)] +=
+                                w[static_cast<std::size_t>(a)] * w[static_cast<std::size_t>(c)];
+                }
+            }
+        }
+
+        // Per-target K x K solve (long double Cholesky) or the diagonal ratio fallback.
+        for (long jt = 0; jt < N_tgt; ++jt) {
+            const long m_obs = out.m_obs[static_cast<std::size_t>(jt)];
+            const std::size_t bj = static_cast<std::size_t>(jt) * static_cast<std::size_t>(K);
+            const std::size_t Aj =
+                static_cast<std::size_t>(jt) * static_cast<std::size_t>(K) *
+                static_cast<std::size_t>(K);
+            double* xj = out.coords_tgt.data() + bj;
+            if (m_obs <= 0) { out.status_per_target[static_cast<std::size_t>(jt)] = 2; continue; }
+            bool solved = false;
+            if (project_mode == static_cast<int>(PcaProjectMode::Lsq) &&
+                m_obs >= static_cast<long>(K)) {
+                std::vector<long double> Lc(A.begin() + static_cast<std::ptrdiff_t>(Aj),
+                                            A.begin() + static_cast<std::ptrdiff_t>(Aj) +
+                                                static_cast<std::ptrdiff_t>(K) *
+                                                    static_cast<std::ptrdiff_t>(K));
+                solved = true;
+                for (int col = 0; col < K && solved; ++col) {
+                    long double d = Lc[static_cast<std::size_t>(col) +
+                                       static_cast<std::size_t>(col) * static_cast<std::size_t>(K)];
+                    for (int p = 0; p < col; ++p) {
+                        const long double v = Lc[static_cast<std::size_t>(col) +
+                                                 static_cast<std::size_t>(p) *
+                                                     static_cast<std::size_t>(K)];
+                        d -= v * v;
+                    }
+                    if (!(d > 0.0L)) { solved = false; break; }
+                    const long double ljj = std::sqrt(d);
+                    Lc[static_cast<std::size_t>(col) +
+                       static_cast<std::size_t>(col) * static_cast<std::size_t>(K)] = ljj;
+                    for (int i = col + 1; i < K; ++i) {
+                        long double ss = Lc[static_cast<std::size_t>(i) +
+                                            static_cast<std::size_t>(col) *
+                                                static_cast<std::size_t>(K)];
+                        for (int p = 0; p < col; ++p)
+                            ss -= Lc[static_cast<std::size_t>(i) +
+                                     static_cast<std::size_t>(p) * static_cast<std::size_t>(K)] *
+                                  Lc[static_cast<std::size_t>(col) +
+                                     static_cast<std::size_t>(p) * static_cast<std::size_t>(K)];
+                        Lc[static_cast<std::size_t>(i) +
+                           static_cast<std::size_t>(col) * static_cast<std::size_t>(K)] = ss / ljj;
+                    }
+                }
+                if (solved) {
+                    std::vector<long double> y(static_cast<std::size_t>(K), 0.0L);
+                    for (int i = 0; i < K; ++i) {
+                        long double ss = b[bj + static_cast<std::size_t>(i)];
+                        for (int p = 0; p < i; ++p)
+                            ss -= Lc[static_cast<std::size_t>(i) +
+                                     static_cast<std::size_t>(p) * static_cast<std::size_t>(K)] *
+                                  y[static_cast<std::size_t>(p)];
+                        y[static_cast<std::size_t>(i)] =
+                            ss / Lc[static_cast<std::size_t>(i) +
+                                    static_cast<std::size_t>(i) * static_cast<std::size_t>(K)];
+                    }
+                    for (int i = K - 1; i >= 0; --i) {
+                        long double ss = y[static_cast<std::size_t>(i)];
+                        for (int p = i + 1; p < K; ++p)
+                            ss -= Lc[static_cast<std::size_t>(p) +
+                                     static_cast<std::size_t>(i) * static_cast<std::size_t>(K)] *
+                                  static_cast<long double>(xj[p]);
+                        xj[i] = static_cast<double>(
+                            ss / Lc[static_cast<std::size_t>(i) +
+                                    static_cast<std::size_t>(i) * static_cast<std::size_t>(K)]);
+                    }
+                }
+            }
+            if (solved) {
+                out.status_per_target[static_cast<std::size_t>(jt)] = 0;
+            } else {
+                const long double ratio = m_obs > 0 ? static_cast<long double>(n_used) /
+                                                          static_cast<long double>(m_obs)
+                                                    : 0.0L;
+                for (int kk = 0; kk < K; ++kk)
+                    xj[kk] = static_cast<double>(ratio * b[bj + static_cast<std::size_t>(kk)]);
+                out.status_per_target[static_cast<std::size_t>(jt)] = 1;
+            }
+        }
+
+        out.N_ref = Nr;
+        out.N_tgt = Nt;
         out.K = K;
         out.n_snp_used = n_used;
         out.n_snp_monomorphic = M - n_used;

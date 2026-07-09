@@ -40,6 +40,7 @@ enum class Command {
     Fst,
     Sfs,
     Pca,
+    Kinship,
 };
 
 // PloidyMode — extract-f2 ploidy policy — reference §4
@@ -100,6 +101,11 @@ struct CliArgs {
     std::optional<bool>        fst_per_snp;   // emit the per-SNP FST table (else the summary row)
     std::optional<bool>        fst_all_pairs; // compute the all-pairs (P x P) WC FST matrix
 
+    // `kinship` (KING-robust between-family kinship) controls
+    std::optional<bool>        kinship_all_pairs;  // enumerate all C(N,2) pairs (else --pairs)
+    std::optional<std::string> pairs;              // FILE of explicit id1<ws>id2 pairs
+    std::optional<double>      min_kinship;        // emit only pairs with phi >= this
+
     // `sfs` (2D joint site-frequency spectrum) controls
     std::optional<bool>        sfs_fold;      // folded (per-pop minor) SFS; default unfolded (A1 copies)
 
@@ -107,6 +113,9 @@ struct CliArgs {
     std::optional<int>         pca_k;         // number of principal components (default 10)
     std::optional<bool>        pca_eigenvalues;  // emit the scree table instead of the coord table
     std::optional<std::string> pca_emit_html;    // also write a self-contained interactive scatter HTML here
+    std::vector<std::string>   project_pops;     // populations placed by lsqproject only (union with project_samples)
+    std::optional<std::string> project_samples;  // FILE of Genetic IDs, each projected-only
+    std::optional<std::string> project_mode;     // lsq (default) | scaled
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

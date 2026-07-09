@@ -150,6 +150,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     if (!args.right.empty()) merged_.right = args.right;
     if (!args.pool.empty())  merged_.pool  = args.pool;
     if (!args.pops.empty())  merged_.pops  = args.pops;
+    if (!args.project_pops.empty()) merged_.project_pops = args.project_pops;
     if (!args.pop1.empty())  merged_.pop1  = args.pop1;
     if (!args.pop2.empty())  merged_.pop2  = args.pop2;
     if (!args.pop3.empty())  merged_.pop3  = args.pop3;
@@ -213,10 +214,15 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.fst_method, args.fst_method);
     take_b(merged_.fst_per_snp, args.fst_per_snp);
     take_b(merged_.fst_all_pairs, args.fst_all_pairs);
+    take_b(merged_.kinship_all_pairs, args.kinship_all_pairs);
+    take(merged_.pairs, args.pairs);
+    take_d(merged_.min_kinship, args.min_kinship);
     take_b(merged_.sfs_fold, args.sfs_fold);
     take_i(merged_.pca_k, args.pca_k);
     take_b(merged_.pca_eigenvalues, args.pca_eigenvalues);
     take(merged_.pca_emit_html, args.pca_emit_html);
+    take(merged_.project_samples, args.project_samples);
+    take(merged_.project_mode, args.project_mode);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -566,6 +572,13 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.fst_per_snp) cfg.fst_per_snp_ = *merged_.fst_per_snp;
     if (merged_.fst_all_pairs) cfg.fst_all_pairs_ = *merged_.fst_all_pairs;
+    if (merged_.kinship_all_pairs) cfg.kinship_all_pairs_ = *merged_.kinship_all_pairs;
+    if (merged_.pairs) cfg.pairs_file_ = *merged_.pairs;
+    if (merged_.min_kinship) cfg.min_kinship_ = *merged_.min_kinship;
+    if (merged_.command == Command::Kinship && !cfg.pairs_file_.empty() &&
+        cfg.kinship_all_pairs_) {
+        return fail("steppe kinship: --pairs and --all-pairs are mutually exclusive");
+    }
     if (merged_.sfs_fold) cfg.sfs_fold_ = *merged_.sfs_fold;
     if (merged_.pca_k.has_value()) {
         if (*merged_.pca_k < 1) return fail("--k must be >= 1 (number of principal components)");
@@ -573,6 +586,14 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.pca_eigenvalues) cfg.pca_eigenvalues_ = *merged_.pca_eigenvalues;
     if (merged_.pca_emit_html) cfg.pca_emit_html_ = *merged_.pca_emit_html;
+    if (!merged_.project_pops.empty()) cfg.project_pops_ = merged_.project_pops;
+    if (merged_.project_samples) cfg.project_samples_file_ = *merged_.project_samples;
+    if (merged_.project_mode) {
+        const std::string m = to_lower(trim(*merged_.project_mode));
+        if (m != "lsq" && m != "scaled")
+            return fail("--project-mode '" + *merged_.project_mode + "' is unknown (lsq | scaled)");
+        cfg.project_mode_ = m;
+    }
     if (merged_.recip_batch.has_value()) {
         if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
         cfg.ls_recip_batch_ = *merged_.recip_batch;

@@ -83,6 +83,11 @@ public:
     [[nodiscard]] bool fst_per_snp()             const noexcept { return fst_per_snp_; }
     [[nodiscard]] bool fst_all_pairs()           const noexcept { return fst_all_pairs_; }
 
+    // `kinship` (KING-robust between-family kinship) controls
+    [[nodiscard]] bool kinship_all_pairs()       const noexcept { return kinship_all_pairs_; }
+    [[nodiscard]] const std::string& pairs_file() const noexcept { return pairs_file_; }
+    [[nodiscard]] double min_kinship()           const noexcept { return min_kinship_; }
+
     // `sfs` (2D joint site-frequency spectrum) controls
     [[nodiscard]] bool sfs_fold()                const noexcept { return sfs_fold_; }
 
@@ -90,6 +95,9 @@ public:
     [[nodiscard]] int pca_k()                    const noexcept { return pca_k_; }
     [[nodiscard]] bool pca_eigenvalues()         const noexcept { return pca_eigenvalues_; }
     [[nodiscard]] const std::string& pca_emit_html() const noexcept { return pca_emit_html_; }
+    [[nodiscard]] const std::vector<std::string>& project_pops() const noexcept { return project_pops_; }
+    [[nodiscard]] const std::string& project_samples_file() const noexcept { return project_samples_file_; }
+    [[nodiscard]] const std::string& project_mode() const noexcept { return project_mode_; }
 
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
@@ -166,10 +174,16 @@ private:
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
     bool fst_all_pairs_ = false;
+    bool kinship_all_pairs_ = false;
+    std::string pairs_file_;
+    double min_kinship_ = -std::numeric_limits<double>::infinity();
     bool sfs_fold_ = false;
     int pca_k_ = 10;
     bool pca_eigenvalues_ = false;
     std::string pca_emit_html_;
+    std::vector<std::string> project_pops_;
+    std::string project_samples_file_;
+    std::string project_mode_ = "lsq";
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

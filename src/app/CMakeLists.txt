@@ -34,6 +34,7 @@ add_executable(steppe_app
     cmd_fstat_sweep.cpp
     cmd_qpdstat.cpp
     cmd_fst.cpp
+    cmd_kinship.cpp
     cmd_sfs.cpp
     cmd_pca.cpp
     pca_html_writer.cpp

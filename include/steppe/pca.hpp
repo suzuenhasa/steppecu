@@ -34,6 +34,11 @@ namespace device {
 struct Resources;
 }  // namespace device
 
+// Projection mode for `steppe pca --project-*` (smartpca lsqproject semantics). Lsq is the
+// full K x K least-squares placement (== lsqproject:YES); Scaled is the diagonal-only ratio
+// a = (M_used/m_obs)*W^T z (the fast / extreme-low-coverage robustness path).
+enum class PcaProjectMode : int { Lsq = 0, Scaled = 1 };
+
 // PcaResult — the per-sample PC coordinates plus the eigen spectrum and provenance counts.
 struct PcaResult {
     // Row-major N x K sample PC coordinates: coord(sample i, PC k) = coords[i*K + k].
@@ -41,6 +46,11 @@ struct PcaResult {
     std::vector<double> coords;
     int N = 0;                         // samples
     int K = 0;                         // principal components reported
+    int n_ref = 0;                     // reference samples (== N when no projection)
+
+    // Per-sample projection flag in tile (row) order: 1 == placed by lsqproject (target),
+    // 0 == a reference sample that BUILT the eigenbasis. All 0 when no --project-* set.
+    std::vector<char> is_projected;
 
     std::vector<double> eigenvalues;   // length K, descending (== allel singular-value^2)
     std::vector<double> var_explained; // length K, eigenvalue_k / Σ_all eigenvalues
@@ -62,13 +72,24 @@ struct PcaResult {
 // (color groups); an empty span keeps ALL populations. `k` is the number of principal
 // components. `precision` governs the covariance SYRK (emulated-FP64 default); the eigen
 // solve is always native FP64.
+//
+// PROJECTION (smartpca lsqproject:YES). `project_pops` (whole populations) and
+// `project_samples` (individual Genetic IDs) are placed by least-squares PROJECTION only:
+// they are excluded from the eigenbasis AND from the per-SNP allele frequencies, then each
+// is coordinated by a per-target K x K least-squares fit over its non-missing sites so low
+// coverage does NOT shrink it toward the origin. The two sets combine (union). When BOTH are
+// empty the output is identical to the plain (no-projection) path (is_projected all 0, n_ref
+// == N). `project_mode` selects the full lsq solve (default) or the diagonal ratio path.
 [[nodiscard]] PcaResult run_pca(const std::string& geno,
                                 const std::string& snp,
                                 const std::string& ind,
                                 std::span<const std::string> pops,
                                 int k,
                                 const Precision& precision,
-                                device::Resources& resources);
+                                device::Resources& resources,
+                                std::span<const std::string> project_pops = {},
+                                std::span<const std::string> project_samples = {},
+                                PcaProjectMode project_mode = PcaProjectMode::Lsq);
 
 }  // namespace steppe
 

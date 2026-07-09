@@ -37,6 +37,7 @@ add_library(steppe_core STATIC
     qpadm/model_search_core.cpp
     stats/dstat.cpp
     stats/fst.cpp
+    stats/kinship.cpp
     stats/sfs.cpp
     stats/pca.cpp
     stats/pcangsd.cpp

@@ -290,6 +290,29 @@ steppe readv2-concord --a relatedness.csv --b reference.readv2.csv \
   --degree-agreement-min 0.95 --p0-within-tol-min 0.90 --coverage-min 1.0
 ```
 
+### KING-robust kinship — the diploid counterpart (`steppe kinship`)
+
+`steppe readv2` is pseudo-haploid only. For **diploid** data (consumer / biobank / modern
+panels) use `steppe kinship`, the GPU KING-robust between-family estimator (Manichaikul et al.
+2010). It reuses the same decode-once + all-pairs GPU sweep, but the unit is a per-individual
+Genetic ID and it consumes the het signal: per pair it counts hetHet, opposite-homozygotes
+(IBS0), and each side's hets over the shared non-missing autosomal sites, then reports
+`phi = (hetHet − 2·IBS0) / (het_i + het_j)` and a degree band (`dup / 1st / 2nd / 3rd /
+unrelated`). Duplicate/MZ → φ ≈ 0.5, unrelated → φ ≈ 0. Gated vs `plink2 --make-king-table`.
+
+```bash
+# all-pairs KING over a diploid panel
+steppe kinship --prefix diploid_panel --all-pairs --out kinship.tsv
+
+# biobank scale: only emit related pairs, or run a targeted pair list
+steppe kinship --prefix diploid_panel --all-pairs --min-kinship 0.0442 --out related.tsv
+steppe kinship --prefix diploid_panel --pairs pairs.txt --out kinship.tsv
+```
+
+The output is a plink2 `.kin0`-shaped per-pair table: `id1 id2 nsnp hethet ibs0 phi degree`
+(one row per pair; `id1 ≤ id2`). `--all-pairs` is the C(N,2) sweep (`--sure` lifts the maxcomb
+cap); `--pairs FILE` (an `id1<ws>id2` list) is the targeted / large-N path.
+
 ---
 
 ## Chromosome painting — Li-Stephens haplotype copying (needs your own data)

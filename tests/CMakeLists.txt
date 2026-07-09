@@ -366,6 +366,17 @@ target_link_libraries(test_fst_wc
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME fst_wc_unit COMMAND test_fst_wc LABELS "unit")
 
+# --- Host-only unit test of the KING-robust kinship primitive ------------------
+# Pure C++ TU (no CUDA, no data): the classification fold + phi + degree bands that
+# the GPU pair kernel, the host finalize, and this oracle all share via
+# core/internal/king_kinship.hpp — duplicate->0.5, opposite-hom penalty, REF<->ALT
+# relabel invariance, NaN/undefined guard, and the band cut points.
+add_executable(test_king_classify unit/test_king_classify.cpp)
+target_include_directories(test_king_classify PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_king_classify
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME king_classify_unit COMMAND test_king_classify LABELS "unit")
+
 # --- Host-only unit test of the `steppe fst --all-pairs` reformulation ---------
 # Pure C++ TU (no CUDA, no data): reproduces the decode-once + sweep_unrank(k=2) +
 # wc_finalize matrix combine over a tiny 3-pop x 2-SNP tile using the SAME shared

@@ -129,6 +129,7 @@ dropped, and the PC1 / PC2 variance-explained percentages.
 
 ```
 steppe pca --prefix PREFIX [--pops A B C ...] [-k K]
+           [--project-pops X Y ...] [--project-samples FILE] [--project-mode lsq|scaled]
            [--eigenvalues] [--emit-html PATH]
            [--out FILE] [--format csv|tsv|json]
            [--precision ...] [--device N]
@@ -139,12 +140,55 @@ steppe pca --prefix PREFIX [--pops A B C ...] [-k K]
 | `--prefix PREFIX` | genotype triple `PREFIX.{geno,snp,ind}` (required) |
 | `--pops A B C ...` | populations to include / color; omit = all |
 | `-k`, `--k K` | number of principal components (default 10; must be ≥ 1) |
+| `--project-pops X Y ...` | populations placed by **projection only** (see §5a) |
+| `--project-samples FILE` | file of Genetic IDs (one per line), each projected-only |
+| `--project-mode` | `lsq` (default, full least-squares) or `scaled` (diagonal ratio) |
 | `--eigenvalues` | emit the scree table instead of the coordinate table |
 | `--emit-html PATH` | also write the self-contained interactive scatter here |
 | `--out FILE` | write the table to a file (stdout if omitted) |
 | `--format` | `csv` (default), `tsv`, or `json` |
 | `--precision` | precision for the covariance SYRK (emulated-FP64 default) |
 | `--device N` | CUDA device ordinal |
+
+### 5a. Projecting samples onto a reference (smartpca `lsqproject`)
+
+`--project-pops` and `--project-samples` mark samples to be **placed by projection
+only**. They are excluded from the PCA covariance **and** from the per-SNP allele
+frequencies — the eigenbasis is built on the reference (everything not projected),
+exactly as smartpca does with `lsqproject: YES`. Each projected sample is then
+coordinated by a per-sample **least-squares fit over its non-missing sites**, so a
+low-coverage sample is placed at its true position instead of being shrunk toward
+the origin. The two flags combine (union); a projected population that is not in
+`--pops` is auto-added to the decode set. The reference must be non-empty, `K` must
+be `≤` the reference sample count, and a label cannot be both selected (`--pops`)
+and projected.
+
+`--project-mode`:
+- **`lsq`** (default) solves the full `K × K` least-squares system per sample
+  (`a = (WₒᵀWₒ)⁻¹ Wₒᵀ zₒ`), correcting both the shrink-to-origin **and** the
+  coverage-induced correlation between PCs — identical to `lsqproject: YES`.
+- **`scaled`** uses the diagonal ratio only (`a = (M_used / m_obs) · Wₒᵀ zₒ`), a
+  faster / more robust path for extreme low coverage. A sample whose normal matrix
+  is rank-deficient (fewer usable sites than `K`) automatically falls back to this
+  ratio.
+
+The **reference** samples keep their ordinary `U·S` coordinates (identical numbers
+to a plain run), the **eigenvalues / var_explained are the reference spectrum**
+(projected samples never perturb it), and every output row gains a projection flag:
+
+- **CSV / TSV**: a trailing `is_projected` column (`0`/`1`) after `pop`.
+- **JSON**: a `"projected": true|false` field per sample.
+- **HTML**: projected points render as **hollow diamonds** to set them apart.
+
+The flag/column appears **only** when a projection flag is given — with no
+`--project-*` the output is byte-identical to a plain run. Example (build the
+eigenbasis on five present-day panels, project a sixth):
+
+```
+steppe pca --prefix PREFIX_v66_1240K \
+           --pops TSI,CHB,JPT,GWD,CHS --project-pops ITU -k 4
+# stderr: 527 reference + 103 projected (lsqproject lsq) samples
+```
 
 The exact invocation used for the timing below (top-12 PCs, TSV out):
 
@@ -211,10 +255,10 @@ change (see caveats).
   is deliberately **not** built — steppe takes no RAPIDS / cuML dependency for it.
   The coord output and HTML schema are shaped so it can be added later without a
   break, but today `steppe pca` is linear PCA only.
-- **No EMU imputation and no projection of new samples.** Missing calls are
-  Patterson mean-imputed to 0, not model-imputed (no EMU), and there is no
-  shrinkage projection of unseen samples onto an existing PCA. Both are documented
-  follow-ups.
+- **No EMU imputation.** Missing calls are Patterson mean-imputed to 0, not
+  model-imputed (no EMU) — a documented follow-up. Least-squares **projection** of
+  samples onto a reference eigenbasis (smartpca `lsqproject`) **is** now supported —
+  see §5a.
 - **Monomorphic SNPs are dropped, not an error.** A SNP with no variation is
   excluded and counted in the `dropped monomorphic` line — expected behavior, not a
   warning you need to act on.

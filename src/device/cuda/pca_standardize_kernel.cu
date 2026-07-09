@@ -152,6 +152,156 @@ __global__ void pca_trace_kernel(const double* __restrict__ C, int N,
     if (threadIdx.x == 0) atomicAdd(out, sdata[0]);
 }
 
+// -------- lsqproject kernels --------
+
+// Fold only the reference rows (rows[r]) of one SNP tile -> Patterson center/inv_scale.
+__global__ void pca_snp_scale_gather_kernel(const std::uint8_t* __restrict__ packed,
+                                            std::size_t bytes_per_record,
+                                            const int* __restrict__ rows, long n_rows, long s_lo,
+                                            long tileM, double* __restrict__ center,
+                                            double* __restrict__ inv_scale,
+                                            unsigned long long* __restrict__ used_count) {
+    const long sl = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (sl >= tileM) return;
+    const long s = s_lo + sl;
+    const std::size_t byte_in_record =
+        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+    const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+
+    long ac = 0, nn = 0;
+    for (long r = 0; r < n_rows; ++r) {
+        const std::size_t g = static_cast<std::size_t>(rows[r]);
+        const std::uint8_t code =
+            genotype_code(packed[g * bytes_per_record + byte_in_record], pos_in_byte);
+        if (core::genotype_valid(code)) { ac += static_cast<long>(code); ++nn; }
+    }
+    const PcaSnpScale sc = core::pca_snp_scale(ac, nn);
+    center[sl] = sc.center;
+    inv_scale[sl] = sc.used ? (1.0 / sqrt(sc.pq)) : 0.0;
+    if (sc.used) atomicAdd(used_count, 1ULL);
+}
+
+// Standardize a gathered row block into the column-major Z operand (n_rows x tileM).
+__global__ void pca_standardize_gather_kernel(const std::uint8_t* __restrict__ packed,
+                                              std::size_t bytes_per_record,
+                                              const int* __restrict__ rows, long n_rows, long s_lo,
+                                              long tileM, const double* __restrict__ center,
+                                              const double* __restrict__ inv_scale,
+                                              double* __restrict__ Z) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = n_rows * tileM;
+    if (t >= total) return;
+    const long r = t % n_rows;    // gathered sample (fast axis => column-major leading dim)
+    const long sl = t / n_rows;   // local SNP (column)
+    const long s = s_lo + sl;
+    const std::size_t g = static_cast<std::size_t>(rows[r]);
+    const std::size_t byte_in_record =
+        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+    const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+    const std::uint8_t code =
+        genotype_code(packed[g * bytes_per_record + byte_in_record], pos_in_byte);
+    Z[t] = core::pca_standardize_one(code, center[sl], inv_scale[sl]);
+}
+
+// Standardize the target block + emit the observed (ref-polymorphic, non-missing) mask.
+__global__ void pca_standardize_target_kernel(const std::uint8_t* __restrict__ packed,
+                                              std::size_t bytes_per_record,
+                                              const int* __restrict__ rows, long n_rows, long s_lo,
+                                              long tileM, const double* __restrict__ center,
+                                              const double* __restrict__ inv_scale,
+                                              double* __restrict__ Ztgt,
+                                              std::uint8_t* __restrict__ mask) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = n_rows * tileM;
+    if (t >= total) return;
+    const long r = t % n_rows;
+    const long sl = t / n_rows;
+    const long s = s_lo + sl;
+    const std::size_t g = static_cast<std::size_t>(rows[r]);
+    const std::size_t byte_in_record =
+        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+    const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+    const std::uint8_t code =
+        genotype_code(packed[g * bytes_per_record + byte_in_record], pos_in_byte);
+    const bool obs = core::genotype_valid(code) && (inv_scale[sl] != 0.0);
+    Ztgt[t] = core::pca_standardize_one(code, center[sl], inv_scale[sl]);
+    mask[t] = obs ? std::uint8_t{1} : std::uint8_t{0};
+}
+
+// Pack U (N_ref x K) from the ascending Ritz block (largest at the tail column L-1-k).
+__global__ void pca_pack_basis_U_kernel(const double* __restrict__ evecL, int N_ref, int L, int K,
+                                        double* __restrict__ U) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = static_cast<long>(N_ref) * static_cast<long>(K);
+    if (t >= total) return;
+    const int i = static_cast<int>(t % static_cast<long>(N_ref));
+    const int k = static_cast<int>(t / static_cast<long>(N_ref));
+    const int col = L - 1 - k;
+    U[static_cast<std::size_t>(i) + static_cast<std::size_t>(k) * static_cast<std::size_t>(N_ref)] =
+        evecL[static_cast<std::size_t>(i) +
+              static_cast<std::size_t>(col) * static_cast<std::size_t>(N_ref)];
+}
+
+// inv_S[k] = 1/sqrt(max(eval[L-1-k], tiny)) — the loadings normalizer 1/S_k.
+__global__ void pca_pack_basis_invS_kernel(const double* __restrict__ evalL, int L, int K,
+                                           double* __restrict__ inv_S) {
+    const int k = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    const double lambda = evalL[L - 1 - k];
+    inv_S[k] = lambda > 0.0 ? (1.0 / sqrt(lambda)) : 0.0;
+}
+
+// W[s + k*tileM] *= inv_S[k].
+__global__ void pca_scale_loadings_kernel(double* __restrict__ W, long tileM, int K,
+                                          const double* __restrict__ inv_S) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = tileM * static_cast<long>(K);
+    if (t >= total) return;
+    const long s = t % tileM;
+    const int k = static_cast<int>(t / tileM);
+    W[static_cast<std::size_t>(s) + static_cast<std::size_t>(k) * static_cast<std::size_t>(tileM)] *=
+        inv_S[k];
+}
+
+// A[j*K*K + k + kp*K] += Σ_s mask[j + s*N_tgt] W[s+k*tileM] W[s+kp*tileM].
+__global__ void pca_accumulate_A_kernel(const double* __restrict__ W,
+                                        const std::uint8_t* __restrict__ mask, long tileM,
+                                        int N_tgt, int K, double* __restrict__ A) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = static_cast<long>(N_tgt) * static_cast<long>(K) * static_cast<long>(K);
+    if (t >= total) return;
+    const int kp = static_cast<int>(t % static_cast<long>(K));
+    const long rem = t / static_cast<long>(K);
+    const int k = static_cast<int>(rem % static_cast<long>(K));
+    const int j = static_cast<int>(rem / static_cast<long>(K));
+    double acc = 0.0;
+    for (long s = 0; s < tileM; ++s) {
+        if (mask[static_cast<std::size_t>(j) + static_cast<std::size_t>(s) *
+                                                   static_cast<std::size_t>(N_tgt)] == 0)
+            continue;
+        const double wk = W[static_cast<std::size_t>(s) +
+                            static_cast<std::size_t>(k) * static_cast<std::size_t>(tileM)];
+        const double wkp = W[static_cast<std::size_t>(s) +
+                             static_cast<std::size_t>(kp) * static_cast<std::size_t>(tileM)];
+        acc += wk * wkp;
+    }
+    A[static_cast<std::size_t>(j) * static_cast<std::size_t>(K) * static_cast<std::size_t>(K) +
+      static_cast<std::size_t>(k) + static_cast<std::size_t>(kp) * static_cast<std::size_t>(K)] +=
+        acc;
+}
+
+// m_obs[j] += Σ_s mask[j + s*N_tgt].
+__global__ void pca_accumulate_mobs_kernel(const std::uint8_t* __restrict__ mask, long tileM,
+                                           int N_tgt, unsigned long long* __restrict__ m_obs) {
+    const int j = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (j >= N_tgt) return;
+    unsigned long long c = 0;
+    for (long s = 0; s < tileM; ++s)
+        c += mask[static_cast<std::size_t>(j) +
+                  static_cast<std::size_t>(s) * static_cast<std::size_t>(N_tgt)];
+    m_obs[j] += c;
+}
+
 }  // namespace
 
 void launch_pca_snp_scale(const std::uint8_t* d_packed, std::size_t bytes_per_record,
@@ -207,6 +357,95 @@ void launch_pca_trace(const double* d_C, int N, double* d_out, cudaStream_t stre
     if (grid < 1) grid = 1;
     if (grid > 1024) grid = 1024;
     pca_trace_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(d_C, N, d_out);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_snp_scale_gather(const std::uint8_t* d_packed, std::size_t bytes_per_record,
+                                 const int* d_rows, long n_rows, long s_lo, long tileM,
+                                 double* d_center, double* d_inv_scale,
+                                 unsigned long long* d_used_count, cudaStream_t stream) {
+    if (tileM <= 0 || n_rows <= 0) return;
+    const int grid = core::grid_for_x(
+        tileM, kPcaBlock, "pca scale(gather) gridDim.x (SNP tile axis) exceeds kMaxGridX");
+    pca_snp_scale_gather_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_packed, bytes_per_record, d_rows, n_rows, s_lo, tileM, d_center, d_inv_scale,
+        d_used_count);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_standardize_gather(const std::uint8_t* d_packed, std::size_t bytes_per_record,
+                                   const int* d_rows, long n_rows, long s_lo, long tileM,
+                                   const double* d_center, const double* d_inv_scale, double* d_Z,
+                                   cudaStream_t stream) {
+    if (tileM <= 0 || n_rows <= 0) return;
+    const long total = n_rows * tileM;
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca standardize(gather) gridDim.x (n_rows*tileM axis) exceeds kMaxGridX");
+    pca_standardize_gather_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_packed, bytes_per_record, d_rows, n_rows, s_lo, tileM, d_center, d_inv_scale, d_Z);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_standardize_target(const std::uint8_t* d_packed, std::size_t bytes_per_record,
+                                   const int* d_rows, long n_rows, long s_lo, long tileM,
+                                   const double* d_center, const double* d_inv_scale,
+                                   double* d_Ztgt, std::uint8_t* d_mask, cudaStream_t stream) {
+    if (tileM <= 0 || n_rows <= 0) return;
+    const long total = n_rows * tileM;
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca standardize(target) gridDim.x (n_rows*tileM axis) exceeds kMaxGridX");
+    pca_standardize_target_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_packed, bytes_per_record, d_rows, n_rows, s_lo, tileM, d_center, d_inv_scale, d_Ztgt,
+        d_mask);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_pack_basis(const double* d_evecL, const double* d_evalL, int N_ref, int L, int K,
+                           double* d_U, double* d_inv_S, cudaStream_t stream) {
+    if (N_ref <= 0 || K <= 0 || L <= 0) return;
+    const long total = static_cast<long>(N_ref) * static_cast<long>(K);
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca pack_basis gridDim.x (N_ref*K axis) exceeds kMaxGridX");
+    pca_pack_basis_U_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_evecL, N_ref, L, K, d_U);
+    STEPPE_CUDA_CHECK_KERNEL();
+    const int gridK = core::grid_for_x(
+        static_cast<long>(K), kPcaBlock, "pca pack_basis invS gridDim.x (K axis) exceeds kMaxGridX");
+    pca_pack_basis_invS_kernel<<<static_cast<unsigned>(gridK), kPcaBlock, 0, stream>>>(
+        d_evalL, L, K, d_inv_S);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_scale_loadings(double* d_W, long tileM, int K, const double* d_inv_S,
+                               cudaStream_t stream) {
+    if (tileM <= 0 || K <= 0) return;
+    const long total = tileM * static_cast<long>(K);
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca scale_loadings gridDim.x (tileM*K axis) exceeds kMaxGridX");
+    pca_scale_loadings_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_W, tileM, K, d_inv_S);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_accumulate_A(const double* d_W, const std::uint8_t* d_mask, long tileM, int N_tgt,
+                             int K, double* d_A, cudaStream_t stream) {
+    if (tileM <= 0 || N_tgt <= 0 || K <= 0) return;
+    const long total = static_cast<long>(N_tgt) * static_cast<long>(K) * static_cast<long>(K);
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca accumulate_A gridDim.x (N_tgt*K*K axis) exceeds kMaxGridX");
+    pca_accumulate_A_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_W, d_mask, tileM, N_tgt, K, d_A);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_accumulate_mobs(const std::uint8_t* d_mask, long tileM, int N_tgt,
+                                unsigned long long* d_m_obs, cudaStream_t stream) {
+    if (tileM <= 0 || N_tgt <= 0) return;
+    const int grid = core::grid_for_x(
+        static_cast<long>(N_tgt), kPcaBlock,
+        "pca accumulate_mobs gridDim.x (N_tgt axis) exceeds kMaxGridX");
+    pca_accumulate_mobs_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_mask, tileM, N_tgt, d_m_obs);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

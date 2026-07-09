@@ -435,6 +435,28 @@ struct FstMatrix {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// KingMatrix — the device result of the KING-robust kinship pair sweep (`steppe kinship`).
+// The five per-pair integer counts (Manichaikul et al. 2010) over the swept pairs: nsnp
+// (considered sites), hethet, ibs0, het_i, het_j. For the all-pairs mode the pairs are the
+// C(N,2) upper-triangular set indexed by the flat rank r that readv2_unrank_pair(r, N)
+// inverts to (i, j), i < j; for the explicit-pair mode they are indexed 0..K-1 in the given
+// list order. The host derives phi = (hethet - 2*ibs0)/(het_i + het_j) and the degree band.
+// Integer counting on-device -> bit-exact, order-independent (native FP64 for the tag only).
+// Only the five small per-pair vectors cross PCIe; the N x tile decode + the pair combine
+// stay device-resident. Only the CUDA backend implements it (GPU-only, like fst_wc_all_pairs).
+struct KingMatrix {
+    std::vector<long> nsnp;    // per pair, considered (both non-missing) autosomal sites
+    std::vector<long> hethet;  // per pair, #{ci==1 & cj==1}
+    std::vector<long> ibs0;    // per pair, #{opposite homozygotes}
+    std::vector<long> het_i;   // per pair, #{ci==1} over the considered set
+    std::vector<long> het_j;   // per pair, #{cj==1} over the considered set
+    int N = 0;
+    std::size_t enumerated = 0;  // pairs swept (C(N,2) all-pairs, or the explicit-list length)
+    bool capped = false;         // C(N,2) > the maxcomb cap and sure==false (all-pairs only)
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 // SfsJoint — the 2D joint site-frequency spectrum over a population pair (`steppe sfs`).
 // grid is the row-major (extA x extB) integer joint histogram: cell (i, j) at
 // grid[i*extB + j] counts sites with pop-A category i and pop-B category j. A pure
@@ -467,6 +489,33 @@ struct PcaEig {
     std::vector<double> eigenvalues;    // K, descending
     std::vector<double> var_explained;  // K, ratio
     int N = 0;
+    int K = 0;
+    long n_snp_used = 0;
+    long n_snp_monomorphic = 0;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
+// PcaProject — the device result of the lsqproject PCA (`steppe pca --project-*`). The
+// eigenbasis is built on the REFERENCE rows only (targets excluded from the covariance AND
+// the per-SNP allele frequencies); `coords_ref` (N_ref x K, row-major, == U*S) keeps the
+// plain-PCA numbers for the references, and `coords_tgt` (N_tgt x K, row-major, SAME U*S
+// units) holds each target's least-squares coordinate a_j = (W_O^T W_O)^{-1} W_O^T z_O (mode
+// Lsq) or the diagonal ratio (M_used/m_obs)*W_O^T z_O (mode Scaled / rank-deficient fallback).
+// `m_obs[j]` is target j's usable observed-site count; `status_per_target[j]` is 0 (full lsq
+// solve), 1 (fell back to the diagonal ratio — A_j rank-deficient / non-SPD), or 2 (target has
+// no usable sites, coords zeroed). Eigenvalues/var_explained are the REFERENCE spectrum. Only
+// the small coords + spectrum + per-target counters cross PCIe. precision_tag reflects the
+// W/b matmuls (emulated-FP64 default); the K x K assembly/solve is native FP64.
+struct PcaProject {
+    std::vector<double> coords_ref;      // N_ref*K row-major (== U*S)
+    std::vector<double> coords_tgt;      // N_tgt*K row-major (lsq / scaled placement)
+    std::vector<double> eigenvalues;     // K, descending (reference spectrum)
+    std::vector<double> var_explained;   // K, ratio (reference spectrum)
+    std::vector<long>   m_obs;           // N_tgt usable observed-site counts
+    std::vector<char>   status_per_target;  // N_tgt: 0 lsq, 1 fallback-ratio, 2 no-data
+    int N_ref = 0;
+    int N_tgt = 0;
     int K = 0;
     long n_snp_used = 0;
     long n_snp_monomorphic = 0;
@@ -707,6 +756,24 @@ public:
             "(the GPU-only all-pairs sufficient-stat combine requires a CUDA backend)");
     }
 
+    // king_robust_all_pairs: the KING-robust kinship pair sweep (`steppe kinship`). Decodes
+    // the per-individual diploid dosage ONCE per SNP-tile (an N x tileM byte tensor) and folds
+    // every pair's five KING counts on-device via the SHARED king_classify. When `pairs_i` /
+    // `pairs_j` are BOTH empty it sweeps the full C(N,2) upper-triangular set (indexed by the
+    // readv2_unrank_pair rank); otherwise it walks exactly those explicit (i, j) index pairs
+    // (indexed 0..K-1). `summary_include[s] == 1` marks an autosomal SNP eligible for the count
+    // (indexed by the GLOBAL SNP position). `sure` lifts the C(N,2) maxcomb cap (all-pairs only;
+    // the explicit-pair list is never capped). Native FP64 tag (integer counts). Default: throw
+    // (CUDA only; the product is GPU-only for the pair sweep, like fst_wc_all_pairs).
+    [[nodiscard]] virtual KingMatrix king_robust_all_pairs(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
+        std::span<const int> pairs_i, std::span<const int> pairs_j, bool sure) {
+        (void)tile; (void)summary_include; (void)pairs_i; (void)pairs_j; (void)sure;
+        throw std::runtime_error(
+            "ComputeBackend::king_robust_all_pairs: not implemented by this backend "
+            "(the GPU-only KING pair sweep requires a CUDA backend)");
+    }
+
     // joint_sfs_2pop: the 2D joint site-frequency spectrum over the population pair (tile
     // pop indices popA, popB) accumulated by a GPU joint-histogram over the device-resident
     // genotype tile — the SAME per-pop A1-copy fold the FST path uses, fed into a joint
@@ -732,6 +799,26 @@ public:
         (void)tile; (void)k; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::pca_covariance_eig: not implemented by this backend");
+    }
+
+    // pca_project_lsq: the smartpca lsqproject PCA (`steppe pca --project-*`). Builds the
+    // eigenbasis over the REFERENCE rows only (`ref_rows`, N_ref indices into the tile),
+    // folding the per-SNP freq / center / inv_scale over those rows ALONE, then places each
+    // TARGET row (`tgt_rows`, N_tgt indices) by a least-squares fit over its non-missing,
+    // ref-polymorphic sites. Pass 1 = the ref-only standardize -> SYRK covariance -> truncated
+    // top-K eigen (identical numbers to pca_covariance_eig restricted to the references). Pass
+    // 2 re-standardizes each SNP tile to form the SNP loadings W = Z_ref^T U diag(1/S_k) and
+    // accumulates b = W_O^T z_O + the per-target normal matrix A = W_O^T W_O, then solves the
+    // batched K x K SPD system per target. `project_mode` 0 = full lsq (default), 1 = diagonal
+    // ratio. Default: throw (CUDA / CPU-oracle only).
+    [[nodiscard]] virtual PcaProject pca_project_lsq(const DecodeTileView& tile, int k,
+                                                     std::span<const int> ref_rows,
+                                                     std::span<const int> tgt_rows,
+                                                     int project_mode,
+                                                     const Precision& precision) {
+        (void)tile; (void)k; (void)ref_rows; (void)tgt_rows; (void)project_mode; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::pca_project_lsq: not implemented by this backend");
     }
 
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }

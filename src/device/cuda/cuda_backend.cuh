@@ -131,6 +131,15 @@ public:
         const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
         bool sure) override;
 
+    // KING-robust kinship pair sweep (`steppe kinship`) — uploads the packed diploid tile,
+    // streams the SNP axis by tile decoding the per-individual dosage code ONCE, and folds
+    // every pair's five KING counts into the persistent per-pair accumulators (all-pairs
+    // C(N,2) via readv2_unrank_pair, or an explicit pair-index list). Only the five small
+    // per-pair count vectors cross PCIe. Integer counting (native FP64 tag).
+    [[nodiscard]] KingMatrix king_robust_all_pairs(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
+        std::span<const int> pairs_i, std::span<const int> pairs_j, bool sure) override;
+
     // 2D joint site-frequency spectrum over a population pair (`steppe sfs`) — uploads the
     // packed tile, launches the joint-histogram kernel over the device tile, and D2H's only
     // the finished integer grid + the complete-site counter. Integer-count standalone stat.
@@ -143,6 +152,14 @@ public:
     // Dsyevd (native-FP64 carve-out), and D2H's only the top-K coords + eigen spectrum.
     [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
                                             const Precision& precision) override;
+
+    // Standalone lsqproject PCA (`steppe pca --project-*`) — ref-only eigenbasis + per-target
+    // least-squares placement over non-missing sites (two SNP-tile streaming passes; the
+    // K x K assembly stays native FP64, the W/b matmuls emulated-FP64). See backend.hpp.
+    [[nodiscard]] PcaProject pca_project_lsq(const DecodeTileView& tile, int k,
+                                             std::span<const int> ref_rows,
+                                             std::span<const int> tgt_rows, int project_mode,
+                                             const Precision& precision) override;
 
     // D-statistic block reduction — reference §6
     void dstat_block_reduce_device(const double* dQ, const double* dV, int P, long M,

@@ -14,10 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
 #include <vector>
 
 #include <cublas_v2.h>
 #include <cusolverDn.h>
+
+#include "steppe/pca.hpp"  // PcaProjectMode
 
 #include "device/cuda/cuda_backend.cuh"
 #include "device/cuda/check.cuh"
@@ -202,6 +205,280 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k,
     out.K = K;
     out.n_snp_used = static_cast<long>(used_h);
     out.n_snp_monomorphic = M - out.n_snp_used;
+    out.status = Status::Ok;
+    return out;
+}
+
+namespace {
+// Native-FP64 Cholesky solve of the SPD K x K system A x = b (A column-major, K tiny — the
+// default K=10 per-target normal matrix). Returns false if A is not positive definite (a
+// rank-deficient / singular target -> the caller falls back to the diagonal ratio estimate).
+bool pca_chol_solve(const double* A, int K, const double* b, double* x) {
+    std::vector<double> L(A, A + static_cast<std::size_t>(K) * static_cast<std::size_t>(K));
+    for (int j = 0; j < K; ++j) {
+        double d = L[static_cast<std::size_t>(j) + static_cast<std::size_t>(j) * K];
+        for (int p = 0; p < j; ++p) {
+            const double ljp = L[static_cast<std::size_t>(j) + static_cast<std::size_t>(p) * K];
+            d -= ljp * ljp;
+        }
+        if (!(d > 0.0)) return false;
+        const double ljj = std::sqrt(d);
+        L[static_cast<std::size_t>(j) + static_cast<std::size_t>(j) * K] = ljj;
+        for (int i = j + 1; i < K; ++i) {
+            double s = L[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * K];
+            for (int p = 0; p < j; ++p)
+                s -= L[static_cast<std::size_t>(i) + static_cast<std::size_t>(p) * K] *
+                     L[static_cast<std::size_t>(j) + static_cast<std::size_t>(p) * K];
+            L[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * K] = s / ljj;
+        }
+    }
+    std::vector<double> y(static_cast<std::size_t>(K), 0.0);
+    for (int i = 0; i < K; ++i) {
+        double s = b[i];
+        for (int p = 0; p < i; ++p)
+            s -= L[static_cast<std::size_t>(i) + static_cast<std::size_t>(p) * K] * y[static_cast<std::size_t>(p)];
+        y[static_cast<std::size_t>(i)] = s / L[static_cast<std::size_t>(i) + static_cast<std::size_t>(i) * K];
+    }
+    for (int i = K - 1; i >= 0; --i) {
+        double s = y[static_cast<std::size_t>(i)];
+        for (int p = i + 1; p < K; ++p)
+            s -= L[static_cast<std::size_t>(p) + static_cast<std::size_t>(i) * K] * x[p];
+        x[i] = s / L[static_cast<std::size_t>(i) + static_cast<std::size_t>(i) * K];
+    }
+    return true;
+}
+}  // namespace
+
+PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
+                                        std::span<const int> ref_rows,
+                                        std::span<const int> tgt_rows, int project_mode,
+                                        const Precision& precision) {
+    guard_device();
+    PcaProject out;
+    out.precision_tag =
+        (precision.kind == Precision::Kind::EmulatedFp64 &&
+         capabilities().emulated_fp64_honorable)
+            ? Precision::Kind::EmulatedFp64
+            : Precision::Kind::Fp64;
+
+    const long M = static_cast<long>(tile.n_snp);
+    const long N_ref = static_cast<long>(ref_rows.size());
+    const long N_tgt = static_cast<long>(tgt_rows.size());
+    if (M <= 0 || N_ref <= 0 || N_tgt <= 0 || k <= 0) {
+        out.status = Status::InvalidConfig;
+        return out;
+    }
+    const int Nr = static_cast<int>(N_ref);
+    const int Nt = static_cast<int>(N_tgt);
+    const int K = static_cast<int>(std::min<long>(k, N_ref));
+
+    // Row-index lists (indices into the tile individual axis).
+    DeviceBuffer<int> dRef(static_cast<std::size_t>(N_ref));
+    DeviceBuffer<int> dTgt(static_cast<std::size_t>(N_tgt));
+    h2d_async(dRef, ref_rows.data(), static_cast<std::size_t>(N_ref), stream_.get());
+    h2d_async(dTgt, tgt_rows.data(), static_cast<std::size_t>(N_tgt), stream_.get());
+
+    // Reference sample x sample covariance accumulator (column-major N_ref x N_ref).
+    const std::size_t NN = static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(N_ref);
+    DeviceBuffer<double> dC(NN);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dC.data(), 0, NN * sizeof(double), stream_.get()));
+    DeviceBuffer<unsigned long long> dUsed(1);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dUsed.data(), 0, sizeof(unsigned long long), stream_.get()));
+
+    // Cache the full-range Patterson center[M] / inv_scale[M] (folded over ref rows only) so
+    // pass 2 re-standardizes with NO re-fold (~19 MB at 1.2M SNPs).
+    DeviceBuffer<double> dCenterAll(static_cast<std::size_t>(M));
+    DeviceBuffer<double> dInvAll(static_cast<std::size_t>(M));
+
+    // SNP tile bounding the Z_ref operand to ~free/kPcaZBudgetDivisor (over the ref rows).
+    std::size_t free_b = capabilities().free_vram_bytes;
+    if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+    std::size_t budget = free_b / kPcaZBudgetDivisor;
+    const std::size_t z_row_bytes = static_cast<std::size_t>(N_ref) * sizeof(double);
+    if (budget < z_row_bytes) budget = z_row_bytes;
+    long tileM = static_cast<long>(budget / z_row_bytes);
+    if (tileM < 1) tileM = 1;
+    if (tileM > M) tileM = M;
+
+    // The packed genotype tile stays resident across BOTH passes (pass 2 re-standardizes the
+    // same rows for the loadings — the design's "reuse the resident packed tile, no re-read").
+    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
+    if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+
+    // ---- Pass 1: ref-only fold + SYRK covariance ----
+    {
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(tileM));
+        const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+        engage_f2_precision(blas_.get(), precision);
+        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+            const long tm = std::min<long>(tileM, M - s_lo);
+            launch_pca_snp_scale_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+                                        s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
+                                        dUsed.data(), stream_.get());
+            launch_pca_standardize_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+                                          s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
+                                          dZ.data(), stream_.get());
+            const double alpha = 1.0;
+            const double beta = (s_lo == 0) ? 0.0 : 1.0;
+            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, Nr,
+                                     static_cast<int>(tm), &alpha, dZ.data(), Nr, &beta, dC.data(),
+                                     Nr));
+        }
+    }
+    launch_symmetrize_lower_to_full(dC.data(), Nr, stream_.get());
+
+    // var_explained denominator = trace(dC) (native-FP64 diagonal reduction).
+    DeviceBuffer<double> dTrace(1);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dTrace.data(), 0, sizeof(double), stream_.get()));
+    launch_pca_trace(dC.data(), Nr, dTrace.data(), stream_.get());
+
+    // Truncated top-K eigensolve of the reference covariance.
+    solver_.set_stream(stream_.get());
+    const int oversample = pca_oversample();
+    const int subspace_iters = pca_subspace_iters();
+    const int L = static_cast<int>(std::min<long>(static_cast<long>(K) + oversample, N_ref));
+    DeviceBuffer<double> dEvecL(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(L));
+    DeviceBuffer<double> dEvalL(static_cast<std::size_t>(L));
+    int L_used = 0;
+    const PcaTruncatedEig te = pca_truncated_topk(
+        blas_.get(), solver_.get(), stream_.get(), dC.data(), Nr, K, oversample, subspace_iters,
+        precision, dEvecL.data(), dEvalL.data(), &L_used);
+    if (te.status != Status::Ok) {
+        out.status = te.status;
+        return out;
+    }
+
+    // Reference coords U*S, plus the loadings basis U (N_ref x K) and inv_S (1/S_k).
+    DeviceBuffer<double> dCoordsRef(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(K));
+    launch_pca_coords(dEvecL.data(), dEvalL.data(), Nr, te.L, K, dCoordsRef.data(), stream_.get());
+    DeviceBuffer<double> dU(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(K));
+    DeviceBuffer<double> dInvS(static_cast<std::size_t>(K));
+    launch_pca_pack_basis(dEvecL.data(), dEvalL.data(), Nr, te.L, K, dU.data(), dInvS.data(),
+                          stream_.get());
+
+    // ---- Pass 2: loadings W = Z_ref^T U / S, then b = W_O^T z_O and A = W_O^T W_O ----
+    DeviceBuffer<double> dB(static_cast<std::size_t>(K) * static_cast<std::size_t>(N_tgt));
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dB.data(), 0,
+                                      static_cast<std::size_t>(K) * static_cast<std::size_t>(N_tgt) *
+                                          sizeof(double),
+                                      stream_.get()));
+    DeviceBuffer<double> dA(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K) *
+                            static_cast<std::size_t>(K));
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dA.data(), 0,
+                                      static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K) *
+                                          static_cast<std::size_t>(K) * sizeof(double),
+                                      stream_.get()));
+    DeviceBuffer<unsigned long long> dMobs(static_cast<std::size_t>(N_tgt));
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dMobs.data(), 0,
+                                      static_cast<std::size_t>(N_tgt) * sizeof(unsigned long long),
+                                      stream_.get()));
+    {
+        DeviceBuffer<double> dZref(static_cast<std::size_t>(N_ref) *
+                                   static_cast<std::size_t>(tileM));
+        DeviceBuffer<double> dW(static_cast<std::size_t>(tileM) * static_cast<std::size_t>(K));
+        DeviceBuffer<double> dZtgt(static_cast<std::size_t>(N_tgt) *
+                                   static_cast<std::size_t>(tileM));
+        DeviceBuffer<std::uint8_t> dMask(static_cast<std::size_t>(N_tgt) *
+                                         static_cast<std::size_t>(tileM));
+        const MathModeScope gemm_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+        engage_f2_precision(blas_.get(), precision);
+        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+            const long tm = std::min<long>(tileM, M - s_lo);
+            // Re-standardize Z_ref (cached center/inv, no re-fold).
+            launch_pca_standardize_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+                                          s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
+                                          dZref.data(), stream_.get());
+            // W_tile (tm x K) = Z_ref^T U.
+            const double one = 1.0, zero = 0.0;
+            CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(tm), K,
+                                     Nr, &one, dZref.data(), Nr, dU.data(), Nr, &zero, dW.data(),
+                                     static_cast<int>(tm)));
+            launch_pca_scale_loadings(dW.data(), tm, K, dInvS.data(), stream_.get());
+            // Target standardize + observed mask.
+            launch_pca_standardize_target(dPacked.data(), tile.bytes_per_record, dTgt.data(), N_tgt,
+                                          s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
+                                          dZtgt.data(), dMask.data(), stream_.get());
+            // b (K x N_tgt) += W^T Z_tgt^T.
+            CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_T, CUBLAS_OP_T, K, Nt,
+                                     static_cast<int>(tm), &one, dW.data(), static_cast<int>(tm),
+                                     dZtgt.data(), Nt, &one, dB.data(), K));
+            // A += masked W W^T, and m_obs += Σ mask (native FP64 assembly).
+            launch_pca_accumulate_A(dW.data(), dMask.data(), tm, Nt, K, dA.data(), stream_.get());
+            launch_pca_accumulate_mobs(dMask.data(), tm, Nt, dMobs.data(), stream_.get());
+        }
+    }
+
+    // D2H the small results: ref coords, spectrum, trace, used cnt, per-target A/b/m_obs.
+    out.coords_ref.assign(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(K), 0.0);
+    std::vector<double> eval_L(static_cast<std::size_t>(te.L), 0.0);
+    std::vector<double> A_h(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K) *
+                                static_cast<std::size_t>(K),
+                            0.0);
+    std::vector<double> b_h(static_cast<std::size_t>(K) * static_cast<std::size_t>(N_tgt), 0.0);
+    std::vector<unsigned long long> mobs_h(static_cast<std::size_t>(N_tgt), 0);
+    double trace_h = 0.0;
+    unsigned long long used_h = 0;
+    d2h_async(out.coords_ref.data(), dCoordsRef,
+              static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(K), stream_.get());
+    d2h_async(eval_L.data(), dEvalL, static_cast<std::size_t>(te.L), stream_.get());
+    d2h_async(A_h.data(), dA, A_h.size(), stream_.get());
+    d2h_async(b_h.data(), dB, b_h.size(), stream_.get());
+    d2h_async(mobs_h.data(), dMobs, mobs_h.size(), stream_.get());
+    d2h_async(&trace_h, dTrace, 1, stream_.get());
+    d2h_async(&used_h, dUsed, 1, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    // Reference spectrum.
+    const long double total = static_cast<long double>(trace_h);
+    out.eigenvalues.assign(static_cast<std::size_t>(K), 0.0);
+    out.var_explained.assign(static_cast<std::size_t>(K), 0.0);
+    for (int kk = 0; kk < K; ++kk) {
+        const double lambda = eval_L[static_cast<std::size_t>(te.L - 1 - kk)];
+        out.eigenvalues[static_cast<std::size_t>(kk)] = lambda;
+        out.var_explained[static_cast<std::size_t>(kk)] =
+            (total != 0.0L) ? static_cast<double>(static_cast<long double>(lambda) / total) : 0.0;
+    }
+
+    // Per-target K x K solve (native FP64): full lsq, or the diagonal ratio (scaled mode /
+    // rank-deficient / no-data fallback). M_used = the reference-polymorphic site count.
+    const long M_used = static_cast<long>(used_h);
+    out.coords_tgt.assign(static_cast<std::size_t>(N_tgt) * static_cast<std::size_t>(K), 0.0);
+    out.m_obs.assign(static_cast<std::size_t>(N_tgt), 0);
+    out.status_per_target.assign(static_cast<std::size_t>(N_tgt), 0);
+    for (int j = 0; j < Nt; ++j) {
+        const long m_obs = static_cast<long>(mobs_h[static_cast<std::size_t>(j)]);
+        out.m_obs[static_cast<std::size_t>(j)] = m_obs;
+        const double* bj = b_h.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(K);
+        double* xj =
+            out.coords_tgt.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(K);
+        if (m_obs <= 0) {
+            out.status_per_target[static_cast<std::size_t>(j)] = 2;  // no usable data -> zeros
+            continue;
+        }
+        bool solved = false;
+        if (project_mode == static_cast<int>(PcaProjectMode::Lsq) && m_obs >= K) {
+            const double* Aj =
+                A_h.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(K) *
+                                 static_cast<std::size_t>(K);
+            solved = pca_chol_solve(Aj, K, bj, xj);
+        }
+        if (solved) {
+            out.status_per_target[static_cast<std::size_t>(j)] = 0;  // full lsq
+        } else {
+            // Diagonal ratio a = (M_used/m_obs)*b (== the W_O^T W_O ≈ (m_obs/M)*I limit).
+            const double ratio =
+                m_obs > 0 ? static_cast<double>(M_used) / static_cast<double>(m_obs) : 0.0;
+            for (int kk = 0; kk < K; ++kk) xj[kk] = ratio * bj[kk];
+            out.status_per_target[static_cast<std::size_t>(j)] = 1;  // ratio path
+        }
+    }
+
+    out.N_ref = Nr;
+    out.N_tgt = Nt;
+    out.K = K;
+    out.n_snp_used = M_used;
+    out.n_snp_monomorphic = M - M_used;
     out.status = Status::Ok;
     return out;
 }

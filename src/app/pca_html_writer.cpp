@@ -63,7 +63,9 @@ void write_data_literal(std::ostream& os, const PcaResult& r) {
         pop_index[r.pop_labels[p]] = static_cast<int>(p);
 
     const int K = r.K;
+    const bool has_proj = r.n_ref > 0 && r.n_ref < r.N;
     os << "const DATA = {\n";
+    os << "  \"hasProjected\": " << (has_proj ? "true" : "false") << ",\n";
     os << "  \"axisNames\": [";
     for (int k = 0; k < K; ++k) os << (k ? "," : "") << "\"PC" << (k + 1) << "\"";
     os << "],\n";
@@ -90,7 +92,12 @@ void write_data_literal(std::ostream& os, const PcaResult& r) {
                                      ? r.sample_pop[static_cast<std::size_t>(i)] : std::string();
         const auto it = pop_index.find(pop);
         const int pidx = (it != pop_index.end()) ? it->second : 0;
-        os << "    {\"id\":\"" << json_escape(id) << "\",\"pop\":" << pidx << ",\"c\":[";
+        const int pj = (static_cast<std::size_t>(i) < r.is_projected.size() &&
+                        r.is_projected[static_cast<std::size_t>(i)])
+                           ? 1
+                           : 0;
+        os << "    {\"id\":\"" << json_escape(id) << "\",\"pop\":" << pidx << ",\"pj\":" << pj
+           << ",\"c\":[";
         for (int k = 0; k < K; ++k) {
             const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
                                     static_cast<std::size_t>(k);
@@ -251,8 +258,17 @@ const char* kHtmlScript = R"HTML(
     let shown=0;
     for(const s of DATA.samples){if(!popVisible[s.pop])continue;shown++;
       const p=w2s(s.c[ax],s.c[ay]);
-      ctx.beginPath();ctx.arc(p[0],p[1],3.3,0,6.2832);
-      ctx.globalAlpha=0.82;ctx.fillStyle=color(s.pop);ctx.fill();ctx.globalAlpha=1;
+      if(s.pj){
+        // Projected (lsqproject) sample: a hollow diamond so it reads apart from the reference.
+        const rr=4.2;ctx.beginPath();
+        ctx.moveTo(p[0],p[1]-rr);ctx.lineTo(p[0]+rr,p[1]);
+        ctx.lineTo(p[0],p[1]+rr);ctx.lineTo(p[0]-rr,p[1]);ctx.closePath();
+        ctx.globalAlpha=0.95;ctx.lineWidth=1.6;ctx.strokeStyle=color(s.pop);ctx.stroke();
+        ctx.globalAlpha=1;ctx.lineWidth=1;
+      }else{
+        ctx.beginPath();ctx.arc(p[0],p[1],3.3,0,6.2832);
+        ctx.globalAlpha=0.82;ctx.fillStyle=color(s.pop);ctx.fill();ctx.globalAlpha=1;
+      }
     }
     ctx.fillStyle=cssvar('--fg');ctx.font='13px system-ui,sans-serif';
     ctx.fillText(DATA.axisNames[ax],r.width-72,o[1]-8);

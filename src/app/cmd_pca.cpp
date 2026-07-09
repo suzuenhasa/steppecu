@@ -14,7 +14,9 @@
 
 #include <cstdio>
 #include <exception>
+#include <fstream>
 #include <ostream>
+#include <sstream>
 #include <span>
 #include <string>
 #include <vector>
@@ -36,6 +38,21 @@ namespace {
 
 namespace cfg = steppe::config;
 
+// Read a --project-samples file of Genetic IDs (one per line; blanks/whitespace ignored).
+[[nodiscard]] bool read_id_list_file(const std::string& path, std::vector<std::string>& out,
+                                     std::string& err) {
+    std::ifstream in(path);
+    if (!in) { err = "cannot open --project-samples file: " + path; return false; }
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string tok;
+        if (ls >> tok) out.push_back(tok);
+    }
+    if (out.empty()) { err = "--project-samples file is empty: " + path; return false; }
+    return true;
+}
+
 const char* status_text(steppe::Status s) {
     switch (s) {
         case steppe::Status::Ok: return "ok";
@@ -52,6 +69,15 @@ const char* status_text(steppe::Status s) {
 // tile order), or a JSON object with the coords + the eigen spectrum.
 void emit_coords(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r) {
     const int K = r.K;
+    // Back-compat guard: the is_projected column/field appears ONLY when projection was
+    // requested (some sample is a target). With no --project-* set the output is byte-identical
+    // to the pre-projection schema.
+    const bool has_proj = r.n_ref > 0 && r.n_ref < r.N;
+    const auto projected = [&](int i) -> int {
+        return (static_cast<std::size_t>(i) < r.is_projected.size())
+                   ? (r.is_projected[static_cast<std::size_t>(i)] ? 1 : 0)
+                   : 0;
+    };
     if (fmt == OutputFormat::Json) {
         os << "{\n  \"eigenvalues\": [";
         for (int k = 0; k < K; ++k)
@@ -62,8 +88,9 @@ void emit_coords(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r)
         os << "],\n  \"samples\": [\n";
         for (int i = 0; i < r.N; ++i) {
             os << "    {\"sample\": " << json_quote(r.sample_id[static_cast<std::size_t>(i)])
-               << ", \"pop\": " << json_quote(r.sample_pop[static_cast<std::size_t>(i)])
-               << ", \"coords\": [";
+               << ", \"pop\": " << json_quote(r.sample_pop[static_cast<std::size_t>(i)]);
+            if (has_proj) os << ", \"projected\": " << (projected(i) ? "true" : "false");
+            os << ", \"coords\": [";
             for (int k = 0; k < K; ++k) {
                 const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
                                         static_cast<std::size_t>(k);
@@ -76,11 +103,13 @@ void emit_coords(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r)
     }
     const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
     os << "sample" << sep << "pop";
+    if (has_proj) os << sep << "is_projected";
     for (int k = 0; k < K; ++k) os << sep << "PC" << (k + 1);
     os << "\n";
     for (int i = 0; i < r.N; ++i) {
         os << csv_field(r.sample_id[static_cast<std::size_t>(i)], sep) << sep
            << csv_field(r.sample_pop[static_cast<std::size_t>(i)], sep);
+        if (has_proj) os << sep << projected(i);
         for (int k = 0; k < K; ++k) {
             const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
                                     static_cast<std::size_t>(k);
@@ -128,6 +157,20 @@ int run_pca_command(const cfg::RunConfig& config) {
     const std::string& prefix = config.qpdstat_prefix();
     const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
     const std::vector<std::string>& pops = config.pops();
+    const std::vector<std::string>& project_pops = config.project_pops();
+
+    // --project-samples FILE -> the list of projected-only Genetic IDs.
+    std::vector<std::string> project_samples;
+    if (!config.project_samples_file().empty()) {
+        std::string serr;
+        if (!read_id_list_file(config.project_samples_file(), project_samples, serr)) {
+            std::fprintf(stderr, "steppe pca: %s\n", serr.c_str());
+            return cfg::kExitInvalidConfig;
+        }
+    }
+    const steppe::PcaProjectMode project_mode = (config.project_mode() == "scaled")
+                                                    ? steppe::PcaProjectMode::Scaled
+                                                    : steppe::PcaProjectMode::Lsq;
 
     steppe::PcaResult result;
     try {
@@ -135,7 +178,8 @@ int run_pca_command(const cfg::RunConfig& config) {
         if (!require_first_gpu(resources, "pca")) return cfg::kExitRuntimeError;
         result = run_pca(triple.geno, triple.snp, triple.ind,
                          std::span<const std::string>(pops), k, config.device().precision,
-                         resources);
+                         resources, std::span<const std::string>(project_pops),
+                         std::span<const std::string>(project_samples), project_mode);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe pca: input/device error: %s\n", e.what());
         return exit_code_for_caught(e);
@@ -156,6 +200,12 @@ int run_pca_command(const cfg::RunConfig& config) {
                  "steppe pca: %d samples x %ld SNPs used (%ld dropped monomorphic), top-%d PCs; "
                  "PC1 var=%.2f%%, PC2 var=%.2f%%\n",
                  result.N, result.n_snp_used, result.n_snp_monomorphic, result.K, v1, v2);
+    if (result.n_ref > 0 && result.n_ref < result.N) {
+        std::fprintf(stderr,
+                     "steppe pca: %d reference + %d projected (lsqproject %s) samples\n",
+                     result.n_ref, result.N - result.n_ref,
+                     project_mode == steppe::PcaProjectMode::Scaled ? "scaled" : "lsq");
+    }
 
     // The self-contained interactive HTML artifact (separate write path; combinable with --out).
     if (!config.pca_emit_html().empty()) {
