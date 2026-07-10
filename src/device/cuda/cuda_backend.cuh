@@ -258,6 +258,15 @@ public:
                                          double maf, int maf_iter, double maf_tol, bool want_pi,
                                          const Precision& precision) override;
 
+    // ADMIXTURE Q/F ML fit (the `steppe admixture` core). Decodes the per-individual dosage
+    // matrix device-resident and runs the block-EM (GEMM -> native-FP64 responsibility ->
+    // GEMM), SNP-tiled. See ComputeBackend::admixture_fit.
+    [[nodiscard]] AdmixtureFit admixture_fit(const DecodeTileView& tile, int K,
+                                             const double* fixed_F, long fixed_F_M,
+                                             unsigned long long seed, int seeds, int max_iter,
+                                             double tol, int init_mode,
+                                             const Precision& precision) override;
+
     // qpfstats smoothing — reference §9
     [[nodiscard]] QpfstatsSmooth qpfstats_smooth(std::span<const double> x,
                                                  std::span<const double> ymat,

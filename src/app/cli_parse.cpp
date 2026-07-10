@@ -30,6 +30,7 @@
 #include "app/cmd_ibd.hpp"
 #include "app/cmd_roh.hpp"
 #include "app/cmd_pcangsd.hpp"
+#include "app/cmd_admixture.hpp"
 #include "app/cmd_ingest.hpp"
 #include "app/cmd_ingest_concord.hpp"
 #include "app/cmd_readv2_concord.hpp"
@@ -295,6 +296,7 @@ int run_cli(int argc, char** argv) {
     IbdArgs ibd_args;
     RohArgs roh_args;
     PcangsdArgs pcangsd_args;
+    AdmixtureArgs admixture_args;
     IngestConcordArgs ingest_concord_args;
 
     int code = cfg::kExitOk;
@@ -938,6 +940,43 @@ int run_cli(int argc, char** argv) {
         ->required();
     pca_gl->add_option("--format", pcangsd_args.format, "Matrix field separator: tsv | csv (default tsv)");
     pca_gl->callback([&]() { code = run_pcangsd_cmd(pcangsd_args); });
+
+    // The `admixture` subcommand (model-based ancestry Q/F; the ADMIXTURE model): self-contained
+    // args, like `pcangsd`. Runs the GPU block-EM over the per-individual dosage matrix; three
+    // modes (unsupervised / supervised / projection). Writes out-dir/{Q.tsv,F.tsv,loglik,meta}.
+    CLI::App* adm = app.add_subcommand(
+        "admixture",
+        "Model-based ancestry Q/F (ADMIXTURE model, Alexander & Lange 2009): individual ancestry "
+        "proportions Q [N x K] + per-cluster allele frequencies F [M x K] by maximum likelihood, "
+        "via the GPU block-EM. Modes: unsupervised (-K), supervised (--supervised), projection "
+        "(--project-onto). Writes out-dir/{Q.tsv, F.tsv, loglik.txt, meta.json}");
+    adm->add_option("--prefix", admixture_args.prefix, "PREFIX.{geno,snp,ind}")->required();
+    adm->add_option("--pops", admixture_args.pops,
+                    "Population-selection file (one label per line; empty = all pops)");
+    adm->add_option("-K,-k", admixture_args.K,
+                    "Number of ancestral components (required for unsupervised; K>=1, K<N)");
+    adm->add_option("--seed", admixture_args.seed, "RNG seed (recorded in meta; default 42)");
+    adm->add_option("--seeds", admixture_args.seeds,
+                    "Random-restart count, best-loglik wins (unsupervised; default 1)");
+    adm->add_option("--init", admixture_args.init, "Init: random (v1 default) | svd (Phase 2)");
+    adm->add_option("--max-iter", admixture_args.max_iter, "EM iteration cap (default 200)");
+    adm->add_option("--tol", admixture_args.tol,
+                    "Convergence tol on the relative log-lik delta (default 1e-6)");
+    adm->add_option("--supervised", admixture_args.supervised,
+                    "Supervised mode: file of labeled reference pop labels defining the K clusters "
+                    "(F fixed from their per-SNP allele freqs; solve Q). XOR --project-onto");
+    adm->add_option("--project-onto", admixture_args.project_onto,
+                    "Projection mode: fixed reference F.tsv (M x K); solve only Q. K = F columns. "
+                    "XOR --supervised");
+    adm->add_option("--project-samples", admixture_args.project_samples,
+                    "Projection: optional file of sample ids to project (default: all selected)");
+    adm->add_flag("--emit-F", admixture_args.emit_F, "Also write F.tsv (M x K; large)");
+    adm->add_option("--precision", admixture_args.precision,
+                    "GEMM precision: emu | fp64 (default emu; responsibility + loglik native FP64)");
+    adm->add_option("--device", admixture_args.device, "CUDA device ordinal (default auto)");
+    adm->add_option("--out-dir", admixture_args.out_dir, "Output directory")->required();
+    adm->add_option("--format", admixture_args.format, "Field separator: tsv | csv (default tsv)");
+    adm->callback([&]() { code = run_admixture_cmd(admixture_args); });
 
     // The host-only VCF-ingest concordance validator (the Stage-1 block-correctness
     // gate): diffs steppe's report (--a) vs the Stage-0 oracle dosage TSV (--b).

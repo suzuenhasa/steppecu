@@ -551,6 +551,31 @@ struct PcangsdFit {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// AdmixtureFit — the device result of the ADMIXTURE Q/F ML fit (`steppe admixture`). The
+// frappe/ADMIXTURE block-EM (GEMM A=QF^T -> native-FP64 binomial responsibility g/A,(2-g)/
+// (1-A) -> GEMM) runs SNP-tiled over the device-resident per-individual dosage matrix G,
+// alternating the multiplicative F-update (given Q) and Q-update+row-renormalize (given F).
+// Q is row-major N x K (rows on the simplex); F is row-major M x K (allele-2 freq in [0,1]).
+// When `fixed_F` is supplied (supervised/projection) the F-update is skipped and only Q is
+// solved (deterministic, single seed). Otherwise the seed axis is a multi-restart loop, the
+// best final log-likelihood winning. The GEMMs run emulated-FP64 (matmul-heavy default); the
+// responsibility elementwise + the log-likelihood reduction run native FP64 (the near-0/1
+// cancellation carve-out). Gated vs ADMIXTURE (NOT AT2), concordance up to label-switching.
+struct AdmixtureFit {
+    std::vector<double> Q;             // N*K row-major, rows sum to 1
+    std::vector<double> F;             // M*K row-major, in [0,1]
+    std::vector<double> seed_loglik;   // per-restart final log-likelihood
+    std::vector<int>    seed_iters;    // per-restart iterations run
+    std::vector<char>   seed_converged;
+    double best_loglik = 0.0;
+    int    best_seed = 0;
+    int    N = 0, M = 0, K = 0;
+    int    iters_run = 0;
+    bool   converged = false;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 class ComputeBackend;
 
 // Host helper functions — reference §15
@@ -819,6 +844,26 @@ public:
         (void)tile; (void)k; (void)ref_rows; (void)tgt_rows; (void)project_mode; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::pca_project_lsq: not implemented by this backend");
+    }
+
+    // admixture_fit: the ADMIXTURE Q/F ML fit over the device-resident per-individual dosage
+    // matrix (`steppe admixture`). Decodes G [N x M] + validity mask V from the packed tile,
+    // seeds Q/F deterministically (admix_init), and runs the block-EM SNP-tiled: A=Q F^T (GEMM,
+    // emulated-FP64), binomial responsibilities (native FP64), the multiplicative F-update /
+    // Q-update+renormalize (GEMMs), to |dL| < tol*max(1,|L|) or max_iter. When `fixed_F` != null
+    // (supervised/projection) the F-update is skipped, F is held at the passed M x K row-major
+    // table, and only Q is solved (single deterministic seed); K then comes from fixed_F's
+    // columns. Otherwise it runs `seeds` random restarts and keeps the best log-likelihood.
+    // Default: throw (CUDA / CPU-oracle only).
+    [[nodiscard]] virtual AdmixtureFit admixture_fit(const DecodeTileView& tile, int K,
+                                                     const double* fixed_F, long fixed_F_M,
+                                                     unsigned long long seed, int seeds,
+                                                     int max_iter, double tol, int init_mode,
+                                                     const Precision& precision) {
+        (void)tile; (void)K; (void)fixed_F; (void)fixed_F_M; (void)seed; (void)seeds;
+        (void)max_iter; (void)tol; (void)init_mode; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::admixture_fit: not implemented by this backend");
     }
 
     virtual void set_solve_precision(const Precision& precision) { (void)precision; }

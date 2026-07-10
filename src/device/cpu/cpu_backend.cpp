@@ -30,6 +30,7 @@
 #include "core/stats/roh_fb.hpp"
 #include "core/stats/ancibd_model.hpp"
 #include "core/stats/pcangsd_em.hpp"
+#include "core/internal/admix_init.hpp"
 #include "core/internal/decode_af.hpp"
 #include "core/internal/sfs_hist.hpp"
 #include "core/internal/f2_estimator.hpp"
@@ -871,6 +872,247 @@ public:
         out.M_total = r.M_total;
         out.iters_run = r.iters_run;
         out.final_rmse = r.final_rmse;
+        out.status = Status::Ok;
+        return out;
+    }
+
+    // admixture_fit: the ADMIXTURE Q/F ML REFERENCE oracle (test-only; not user-facing).
+    // The SAME frappe/ADMIXTURE block-EM the CUDA path runs, in scalar native double: decode
+    // the per-individual dosage G/V, seed Q/F from the shared admix_init, then alternate the
+    // multiplicative F-update (given Q) and Q-update+row-renormalize (given F), with the
+    // binomial log-likelihood as the convergence oracle. Row-major Q [N x K] / F [M x K]. The
+    // reconstruction A=Q F^T + responsibilities are formed one SNP at a time (no full N x M).
+    [[nodiscard]] AdmixtureFit admixture_fit(const DecodeTileView& tile, int K,
+                                             const double* fixed_F, long fixed_F_M,
+                                             unsigned long long seed, int seeds, int max_iter,
+                                             double tol, int init_mode,
+                                             const Precision& precision) override {
+        (void)init_mode; (void)precision;
+        AdmixtureFit out;
+        out.precision_tag = Precision::Kind::Fp64;
+        const long N = static_cast<long>(tile.n_individuals);
+        const long M = static_cast<long>(tile.n_snp);
+        const bool supervised = (fixed_F != nullptr);
+        if (N <= 0 || M <= 0 || K <= 0 || K > N || (supervised && fixed_F_M != M)) {
+            out.status = Status::InvalidConfig;
+            return out;
+        }
+        constexpr double eps = 1e-5;
+        out.N = static_cast<int>(N);
+        out.M = static_cast<int>(M);
+        out.K = K;
+        const int nseed = supervised ? 1 : std::max(1, seeds);
+        if (max_iter < 1) max_iter = 1;
+
+        // Decode G/V (row-major here: g[i*M+s]) + per-SNP mean allele freq phat.
+        std::vector<double> G(static_cast<std::size_t>(N) * static_cast<std::size_t>(M), 0.0);
+        std::vector<double> V(static_cast<std::size_t>(N) * static_cast<std::size_t>(M), 0.0);
+        std::vector<double> phat(static_cast<std::size_t>(M), 0.5);
+        for (long s = 0; s < M; ++s) {
+            const std::size_t byte_in_rec =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos = static_cast<int>(s % core::kCodesPerByte);
+            double sg = 0.0, sv = 0.0;
+            for (long i = 0; i < N; ++i) {
+                const std::uint8_t byte =
+                    tile.packed[static_cast<std::size_t>(i) * tile.bytes_per_record + byte_in_rec];
+                const std::uint8_t code = core::genotype_code(byte, pos);
+                const bool valid = core::genotype_valid(code);
+                const double g = valid ? static_cast<double>(code) : 0.0;
+                G[static_cast<std::size_t>(i) * static_cast<std::size_t>(M) +
+                  static_cast<std::size_t>(s)] = g;
+                V[static_cast<std::size_t>(i) * static_cast<std::size_t>(M) +
+                  static_cast<std::size_t>(s)] = valid ? 1.0 : 0.0;
+                if (valid) { sg += g; sv += 1.0; }
+            }
+            phat[static_cast<std::size_t>(s)] = (sv > 0.0) ? (sg / (2.0 * sv)) : 0.5;
+        }
+
+        // Fixed F (supervised/projection), clamped, row-major [M x K].
+        std::vector<double> fixedF;
+        if (supervised) {
+            fixedF.assign(static_cast<std::size_t>(M) * static_cast<std::size_t>(K), 0.0);
+            for (std::size_t i = 0; i < fixedF.size(); ++i) {
+                double f = fixed_F[i];
+                if (f < eps) f = eps;
+                if (f > 1.0 - eps) f = 1.0 - eps;
+                fixedF[i] = f;
+            }
+        }
+
+        out.seed_loglik.assign(static_cast<std::size_t>(nseed), 0.0);
+        out.seed_iters.assign(static_cast<std::size_t>(nseed), 0);
+        out.seed_converged.assign(static_cast<std::size_t>(nseed), 0);
+        std::vector<double> bestQ, bestF;
+        double best_ll = -std::numeric_limits<double>::infinity();
+
+        // Init helper produces column-major; convert to the row-major we use here.
+        std::vector<double> qcm(static_cast<std::size_t>(N) * static_cast<std::size_t>(K), 0.0);
+        std::vector<double> fcm(static_cast<std::size_t>(M) * static_cast<std::size_t>(K), 0.0);
+        std::vector<double> Q(static_cast<std::size_t>(N) * static_cast<std::size_t>(K), 0.0);
+        std::vector<double> F(static_cast<std::size_t>(M) * static_cast<std::size_t>(K), 0.0);
+
+        for (int si = 0; si < nseed; ++si) {
+            const std::uint64_t sd = seed + static_cast<std::uint64_t>(si) * 0x9E3779B1ull;
+            core::admix_init_q(sd, N, K, qcm.data());
+            for (long i = 0; i < N; ++i)
+                for (int k = 0; k < K; ++k)
+                    Q[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                      static_cast<std::size_t>(k)] =
+                        qcm[static_cast<std::size_t>(i) +
+                            static_cast<std::size_t>(N) * static_cast<std::size_t>(k)];
+            if (supervised) {
+                F = fixedF;
+            } else {
+                core::admix_init_f(sd, M, K, phat.data(), eps, fcm.data());
+                for (long s = 0; s < M; ++s)
+                    for (int k = 0; k < K; ++k)
+                        F[static_cast<std::size_t>(s) * static_cast<std::size_t>(K) +
+                          static_cast<std::size_t>(k)] =
+                            fcm[static_cast<std::size_t>(s) +
+                                static_cast<std::size_t>(M) * static_cast<std::size_t>(k)];
+            }
+
+            double L_prev = -std::numeric_limits<double>::infinity();
+            int iters = 0;
+            bool converged = false;
+            std::vector<double> S2(static_cast<std::size_t>(M) * static_cast<std::size_t>(K));
+            std::vector<double> S1(static_cast<std::size_t>(M) * static_cast<std::size_t>(K));
+            std::vector<double> T2(static_cast<std::size_t>(N) * static_cast<std::size_t>(K));
+            std::vector<double> T1(static_cast<std::size_t>(N) * static_cast<std::size_t>(K));
+
+            auto a_of = [&](long i, long s) -> double {
+                double a = 0.0;
+                for (int k = 0; k < K; ++k)
+                    a += Q[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                           static_cast<std::size_t>(k)] *
+                         F[static_cast<std::size_t>(s) * static_cast<std::size_t>(K) +
+                           static_cast<std::size_t>(k)];
+                if (a < eps) a = eps;
+                if (a > 1.0 - eps) a = 1.0 - eps;
+                return a;
+            };
+
+            for (int it = 0; it < max_iter; ++it) {
+                // F-update (given Q).
+                if (!supervised) {
+                    std::fill(S2.begin(), S2.end(), 0.0);
+                    std::fill(S1.begin(), S1.end(), 0.0);
+                    for (long s = 0; s < M; ++s)
+                        for (long i = 0; i < N; ++i) {
+                            const double v = V[static_cast<std::size_t>(i) *
+                                                   static_cast<std::size_t>(M) +
+                                               static_cast<std::size_t>(s)];
+                            if (v == 0.0) continue;
+                            const double g = G[static_cast<std::size_t>(i) *
+                                                   static_cast<std::size_t>(M) +
+                                               static_cast<std::size_t>(s)];
+                            const double a = a_of(i, s);
+                            const double r2 = g / a;
+                            const double r1 = (2.0 - g) / (1.0 - a);
+                            for (int k = 0; k < K; ++k) {
+                                const double q = Q[static_cast<std::size_t>(i) *
+                                                       static_cast<std::size_t>(K) +
+                                                   static_cast<std::size_t>(k)];
+                                S2[static_cast<std::size_t>(s) * static_cast<std::size_t>(K) +
+                                   static_cast<std::size_t>(k)] += q * r2;
+                                S1[static_cast<std::size_t>(s) * static_cast<std::size_t>(K) +
+                                   static_cast<std::size_t>(k)] += q * r1;
+                            }
+                        }
+                    for (long s = 0; s < M; ++s)
+                        for (int k = 0; k < K; ++k) {
+                            const std::size_t o = static_cast<std::size_t>(s) *
+                                                      static_cast<std::size_t>(K) +
+                                                  static_cast<std::size_t>(k);
+                            const double f = F[o];
+                            const double num = f * S2[o];
+                            const double den = f * S2[o] + (1.0 - f) * S1[o];
+                            double fn = (den > 0.0) ? (num / den) : f;
+                            if (fn < eps) fn = eps;
+                            if (fn > 1.0 - eps) fn = 1.0 - eps;
+                            F[o] = fn;
+                        }
+                }
+                // Q-update (given F).
+                std::fill(T2.begin(), T2.end(), 0.0);
+                std::fill(T1.begin(), T1.end(), 0.0);
+                for (long s = 0; s < M; ++s)
+                    for (long i = 0; i < N; ++i) {
+                        const double v = V[static_cast<std::size_t>(i) *
+                                               static_cast<std::size_t>(M) +
+                                           static_cast<std::size_t>(s)];
+                        if (v == 0.0) continue;
+                        const double g = G[static_cast<std::size_t>(i) *
+                                               static_cast<std::size_t>(M) +
+                                           static_cast<std::size_t>(s)];
+                        const double a = a_of(i, s);
+                        const double r2 = g / a;
+                        const double r1 = (2.0 - g) / (1.0 - a);
+                        for (int k = 0; k < K; ++k) {
+                            const double f = F[static_cast<std::size_t>(s) *
+                                                   static_cast<std::size_t>(K) +
+                                               static_cast<std::size_t>(k)];
+                            T2[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                               static_cast<std::size_t>(k)] += r2 * f;
+                            T1[static_cast<std::size_t>(i) * static_cast<std::size_t>(K) +
+                               static_cast<std::size_t>(k)] += r1 * (1.0 - f);
+                        }
+                    }
+                for (long i = 0; i < N; ++i) {
+                    double rowsum = 0.0;
+                    for (int k = 0; k < K; ++k) {
+                        const std::size_t o = static_cast<std::size_t>(i) *
+                                                  static_cast<std::size_t>(K) +
+                                              static_cast<std::size_t>(k);
+                        Q[o] = Q[o] * (T2[o] + T1[o]);
+                        rowsum += Q[o];
+                    }
+                    for (int k = 0; k < K; ++k) {
+                        const std::size_t o = static_cast<std::size_t>(i) *
+                                                  static_cast<std::size_t>(K) +
+                                              static_cast<std::size_t>(k);
+                        Q[o] = (rowsum > 0.0) ? (Q[o] / rowsum) : (1.0 / static_cast<double>(K));
+                    }
+                }
+                // Log-likelihood.
+                double L = 0.0;
+                for (long s = 0; s < M; ++s)
+                    for (long i = 0; i < N; ++i) {
+                        const double v = V[static_cast<std::size_t>(i) *
+                                               static_cast<std::size_t>(M) +
+                                           static_cast<std::size_t>(s)];
+                        if (v == 0.0) continue;
+                        const double g = G[static_cast<std::size_t>(i) *
+                                               static_cast<std::size_t>(M) +
+                                           static_cast<std::size_t>(s)];
+                        const double a = a_of(i, s);
+                        L += g * std::log(a) + (2.0 - g) * std::log(1.0 - a);
+                    }
+                iters = it + 1;
+                if (std::isfinite(L) && std::isfinite(L_prev) &&
+                    std::fabs(L - L_prev) < tol * std::max(1.0, std::fabs(L))) {
+                    converged = true;
+                    L_prev = L;
+                    break;
+                }
+                L_prev = L;
+            }
+            out.seed_loglik[static_cast<std::size_t>(si)] = L_prev;
+            out.seed_iters[static_cast<std::size_t>(si)] = iters;
+            out.seed_converged[static_cast<std::size_t>(si)] = converged ? 1 : 0;
+            if (si == 0 || L_prev > best_ll) {
+                best_ll = L_prev;
+                out.best_seed = si;
+                out.iters_run = iters;
+                out.converged = converged;
+                bestQ = Q;
+                bestF = F;
+            }
+        }
+        out.best_loglik = best_ll;
+        out.Q = bestQ;
+        out.F = bestF;
         out.status = Status::Ok;
         return out;
     }

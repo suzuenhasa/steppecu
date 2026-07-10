@@ -29,6 +29,8 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_pca.cu
     cuda/pcangsd_kernels.cu
     cuda/cuda_backend_pcangsd.cu
+    cuda/admixture_kernels.cu
+    cuda/cuda_backend_admixture.cu
     cuda/readv2_pack_kernel.cu
     cuda/readv2_mismatch_kernel.cu
     cuda/readv2_bitmatrix.cu
