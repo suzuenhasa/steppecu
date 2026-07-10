@@ -21,6 +21,15 @@ namespace steppe::device {
 void launch_admix_decode(const std::uint8_t* d_packed, std::size_t bytes_per_record, long N,
                          long M, double* d_G, double* d_V, cudaStream_t stream);
 
+// Decode one SNP TILE [N x t] at global SNP offset s0 from the resident 2-bit packed tile into
+// a tile-local column-major G/V pair (element (i,j) at i + N*j, global SNP s0 + j). Produces
+// values BYTE-IDENTICAL to launch_admix_decode for the same (i, s0+j) — it is the Tier-1 wall
+// fix: the fit keeps only dPacked resident (~32x smaller than the two full N x M FP64 buffers)
+// and decodes a [N x tileM] slice per SNP-tile inside the existing s0 loops, mirroring how PCA
+// re-standardizes from d_packed per SNP-block. d_Gt/d_Vt are the tile-local buffers (offset 0).
+void launch_admix_decode_tile(const std::uint8_t* d_packed, std::size_t bytes_per_record, long N,
+                              long s0, long t, double* d_Gt, double* d_Vt, cudaStream_t stream);
+
 // Per-SNP mean allele-2 frequency phat[s] = (sum_i V*G) / (2 * sum_i V) over valid samples
 // (0.5 when a SNP has no valid sample). d_phat is length M.
 void launch_admix_snp_mean(const double* d_G, const double* d_V, long N, long M, double* d_phat,

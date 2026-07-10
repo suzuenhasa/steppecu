@@ -1,9 +1,12 @@
 // src/device/cuda/cuda_backend_admixture.cu
 //
 // CudaBackend override for the ADMIXTURE Q/F ML fit (`steppe admixture`). It uploads the
-// packed individual-major genotype tile, decodes the per-individual dosage matrix G [N x M]
-// + validity mask V device-resident, seeds Q/F deterministically (the shared admix_init),
-// and runs the frappe/ADMIXTURE block-EM SNP-tiled and device-resident:
+// packed individual-major genotype tile and keeps ONLY the 2-bit packed genotypes resident
+// (Tier-1): the per-individual dosage G [N x M] + validity mask V are NOT materialized
+// (that was a 32 GB / 16-B-per-genotype wall at ~8.5k samples). Instead each consumer decodes
+// the [N x tileM] slice it needs per SNP-tile straight from dPacked (launch_admix_decode_tile),
+// exactly as PCA re-standardizes from d_packed per SNP-block. It seeds Q/F deterministically
+// (the shared admix_init) and runs the frappe/ADMIXTURE block-EM SNP-tiled and device-resident:
 //
 //   F-update pass (given Q):  A = Q F^T (GEMM)  ->  R2=g/A, R1=(2-g)/(1-A) (native FP64)
 //                             ->  S2 = Q^T R2, S1 = Q^T R1 (GEMMs)  ->  multiplicative F-update
@@ -54,6 +57,16 @@ constexpr double kSqDelta = 1e-9;
 constexpr double kSqVvTiny = 1e-30;
 constexpr double kSqTermBand = 1e-4;  // |alpha+1| < band -> snap to the plain-EM floor
 constexpr int kSqMaxBacktrack = 30;
+
+// cudaMalloc reserves device memory in fixed-size pages, so a request of B bytes reduces
+// cudaMemGetInfo's reported free by round_up(B, page). On the CUDA 13 / Blackwell (sm_120)
+// target this page is 2 MiB (empirically verified on the gate box: an 836,203,888 B request
+// dropped free by 836,763,648 B = 399 x 2 MiB). Used ONLY to reproduce the pre-fix free-VRAM
+// reading for tileM parity (see reproduced_free_b) — it is not a correctness-critical value.
+constexpr std::size_t kCudaMallocPageBytes = std::size_t{2} << 20;  // 2 MiB
+[[nodiscard]] inline std::size_t admix_reserved_bytes(std::size_t logical) noexcept {
+    return ((logical + kCudaMallocPageBytes - 1) / kCudaMallocPageBytes) * kCudaMallocPageBytes;
+}
 }  // namespace
 
 AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const double* fixed_F,
@@ -85,19 +98,37 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
     const int nseed = supervised ? 1 : std::max(1, seeds);
     if (max_iter < 1) max_iter = 1;
 
-    // --- upload packed tile + decode G/V device-resident (shared across seeds) --------------
+    // --- upload packed tile; keep ONLY the 2-bit packed genotypes resident (Tier-1) ---------
     const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
     DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
     if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
 
     const std::size_t NM = static_cast<std::size_t>(N) * static_cast<std::size_t>(M);
-    DeviceBuffer<double> dG(NM), dV(NM);
-    launch_admix_decode(dPacked.data(), tile.bytes_per_record, N, M, dG.data(), dV.data(),
-                        stream_.get());
 
-    // Per-SNP mean allele-2 frequency (for the random F init).
+    // Per-SNP mean allele-2 frequency (for the random F init), computed BY SNP-TILE from
+    // dPacked so no full N x M buffer is held. phat[s] is a per-SNP reduction over all N and is
+    // independent of the tile boundary, so this stays byte-identical to the old full decode.
     DeviceBuffer<double> dPhat(static_cast<std::size_t>(M));
-    launch_admix_snp_mean(dG.data(), dV.data(), N, M, dPhat.data(), stream_.get());
+    {
+        // Modest, parity-irrelevant width (phat is per-SNP): bound the transient G/V decode
+        // scratch to ~256 MiB. Freed at block exit BEFORE the tileM budget query below, so the
+        // free-VRAM reading there differs from the pre-fix reading by exactly dG+dV (which the
+        // pre-fix path held live at that point) — see reproduced_free_b.
+        constexpr std::size_t kPhatScratchCap = std::size_t{256} << 20;
+        long tileP = static_cast<long>(kPhatScratchCap /
+                                       (2u * static_cast<std::size_t>(N) * sizeof(double)));
+        if (tileP < 1) tileP = 1;
+        if (tileP > M) tileP = M;
+        DeviceBuffer<double> dGp(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileP));
+        DeviceBuffer<double> dVp(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileP));
+        for (long s0 = 0; s0 < M; s0 += tileP) {
+            const long t = std::min<long>(tileP, M - s0);
+            launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t, dGp.data(),
+                                     dVp.data(), stream_.get());
+            launch_admix_snp_mean(dGp.data(), dVp.data(), N, t, dPhat.data() + s0, stream_.get());
+        }
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));  // finish before dGp/dVp free
+    }
     std::vector<double> phat(static_cast<std::size_t>(M), 0.5);
     d2h_async(phat.data(), dPhat, static_cast<std::size_t>(M), stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
@@ -128,13 +159,32 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
     out.seed_iters.assign(static_cast<std::size_t>(nseed), 0);
     out.seed_converged.assign(static_cast<std::size_t>(nseed), 0);
 
+    // Reproduce the pre-fix free-VRAM reading so the SNP-tile width tileM — hence the cross-tile
+    // T2/T1 Q-update FP summation order — stays byte-identical to the pre-fix binary. The pre-fix
+    // path allocated dG+dV (two full N x M FP64 buffers) BEFORE the budget query; this fix does
+    // not, so their footprint no longer shrinks the measured free VRAM. Whenever the pre-fix path
+    // would itself have fit (2*reserved(N*M*8) <= free) we subtract that footprint to reproduce
+    // its reading exactly (a valid byte-exact baseline exists there); once it would have OOM'd —
+    // the wall this fix removes — we keep the true, larger free VRAM (no baseline to match, and
+    // it is what lets the run proceed with sensible tiles). dPacked/dPhat are resident in BOTH
+    // paths at the query point, so they cancel and the reproduction is exact on the gate box.
+    const std::size_t admix_phantom_free = 2u * admix_reserved_bytes(NM * sizeof(double));
+    auto reproduced_free_b = [&]() -> std::size_t {
+        std::size_t free_b = capabilities().free_vram_bytes;
+        if (free_b == 0) free_b = kAdmixFreeFallback;
+        if (admix_phantom_free < free_b) free_b -= admix_phantom_free;
+        return free_b;
+    };
+
     // ==========================================================================================
     // accel_mode == 1 : PLAIN EM (bit-identical to the shipped loop; base map untouched).
     // ==========================================================================================
     if (accel_mode == 1) {
-        std::size_t free_b = capabilities().free_vram_bytes;
-        if (free_b == 0) free_b = kAdmixFreeFallback;
+        std::size_t free_b = reproduced_free_b();
         std::size_t budget = free_b / kAdmixTileDivisor;
+        // col_bytes counts ONLY dA/dR2/dR1 (3 cols) — NOT the added dGt/dVt decode scratch — so
+        // tileM is byte-identical to the pre-fix value (parity); the 2 extra tile columns are
+        // absorbed by the divisor headroom (and the freed dG+dV dwarfs them).
         const std::size_t col_bytes = 3u * static_cast<std::size_t>(N) * sizeof(double);
         if (budget < col_bytes) budget = col_bytes;
         long tileM = static_cast<long>(budget / col_bytes);
@@ -145,6 +195,9 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
         DeviceBuffer<double> dA(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
         DeviceBuffer<double> dR2(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
         DeviceBuffer<double> dR1(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
+        // Per-SNP-tile decode scratch (dosage + validity), decoded fresh from dPacked each pass.
+        DeviceBuffer<double> dGt(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
+        DeviceBuffer<double> dVt(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
         DeviceBuffer<double> dS2(KM), dS1(KM);
         DeviceBuffer<double> dT2(NK), dT1(NK);
         DeviceBuffer<double> dLL(1);
@@ -177,10 +230,11 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                         CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K,
                                                  &one, dQ.data(), Ni, dF.data() + s0,
                                                  static_cast<int>(M), &zero, dA.data(), Ni));
-                        launch_admix_responsibility(dG.data() + static_cast<std::size_t>(N) * s0,
-                                                    dV.data() + static_cast<std::size_t>(N) * s0,
-                                                    dA.data(), N, t, kAdmixEps, dR2.data(),
-                                                    dR1.data(), stream_.get());
+                        launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                                                 dGt.data(), dVt.data(), stream_.get());
+                        launch_admix_responsibility(dGt.data(), dVt.data(), dA.data(), N, t,
+                                                    kAdmixEps, dR2.data(), dR1.data(),
+                                                    stream_.get());
                         CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_T, CUBLAS_OP_N, K, tt, Ni,
                                                  &one, dQ.data(), Ni, dR2.data(), Ni, &zero,
                                                  dS2.data() + static_cast<std::size_t>(K) * s0, K));
@@ -200,10 +254,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, &one,
                                              dQ.data(), Ni, dF.data() + s0, static_cast<int>(M),
                                              &zero, dA.data(), Ni));
-                    launch_admix_responsibility(dG.data() + static_cast<std::size_t>(N) * s0,
-                                                dV.data() + static_cast<std::size_t>(N) * s0,
-                                                dA.data(), N, t, kAdmixEps, dR2.data(), dR1.data(),
-                                                stream_.get());
+                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                                             dGt.data(), dVt.data(), stream_.get());
+                    launch_admix_responsibility(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
+                                                dR2.data(), dR1.data(), stream_.get());
                     const double beta = first ? 0.0 : 1.0;
                     CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_N, Ni, K, tt, &one,
                                              dR2.data(), Ni, dF.data() + s0, static_cast<int>(M),
@@ -222,9 +276,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, &one,
                                              dQ.data(), Ni, dF.data() + s0, static_cast<int>(M),
                                              &zero, dA.data(), Ni));
-                    launch_admix_loglik(dG.data() + static_cast<std::size_t>(N) * s0,
-                                        dV.data() + static_cast<std::size_t>(N) * s0, dA.data(), N,
-                                        t, kAdmixEps, dLL.data(), stream_.get());
+                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                                             dGt.data(), dVt.data(), stream_.get());
+                    launch_admix_loglik(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
+                                        dLL.data(), stream_.get());
                 }
                 double L = 0.0;
                 d2h_async(&L, dLL, 1, stream_.get());
@@ -266,9 +321,11 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
         // MUST_FIX 1: the S x SNP-tile scratch (dA/dR2/dR1) is the dominant buffer, so fold S
         // into the tile budget divisor: budget = free / (divisor * S). Keeps the S-batched tile
         // region within ~free/divisor (was silently violated by S x with the per-seed sizing).
-        std::size_t free_b = capabilities().free_vram_bytes;
-        if (free_b == 0) free_b = kAdmixFreeFallback;
+        std::size_t free_b = reproduced_free_b();
         std::size_t budget = free_b / (kAdmixTileDivisor * Sz);
+        // col_bytes counts ONLY the S-batched dA/dR2/dR1 (3 cols) — NOT the added seed-shared
+        // dGt/dVt decode scratch (2 non-batched cols, tiny vs S*3) — so tileM is byte-identical
+        // to the pre-fix value (the parity-load-bearing invariant).
         const std::size_t col_bytes = 3u * static_cast<std::size_t>(N) * sizeof(double);
         if (budget < col_bytes) budget = col_bytes;
         long tileM = static_cast<long>(budget / col_bytes);
@@ -285,6 +342,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
         DeviceBuffer<double> dA(Sz * static_cast<std::size_t>(strideTile));
         DeviceBuffer<double> dR2(Sz * static_cast<std::size_t>(strideTile));
         DeviceBuffer<double> dR1(Sz * static_cast<std::size_t>(strideTile));
+        // Per-SNP-tile decode scratch — SEED-INDEPENDENT (G/V are shared across restarts), so a
+        // single [N x tileM] copy (not S-batched), decoded fresh from dPacked in each sweep.
+        DeviceBuffer<double> dGt(static_cast<std::size_t>(strideTile));
+        DeviceBuffer<double> dVt(static_cast<std::size_t>(strideTile));
         DeviceBuffer<double> dS2(Sz * KM), dS1(Sz * KM);
         DeviceBuffer<double> dT2(Sz * NK), dT1(Sz * NK);
         DeviceBuffer<double> dLL(Sz), dLL2(Sz), drr(Sz), dvv(Sz), dAlpha(Sz), dActive(Sz);
@@ -321,10 +382,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK),
                             F + s0, static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni,
                             strideTile);
-                    launch_admix_responsibility_b(dG.data() + static_cast<std::size_t>(N) * s0,
-                                                  dV.data() + static_cast<std::size_t>(N) * s0,
-                                                  dA.data(), N, t, kAdmixEps, dR2.data(),
-                                                  dR1.data(), S, strideTile, stream);
+                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                                             dGt.data(), dVt.data(), stream);
+                    launch_admix_responsibility_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
+                                                  dR2.data(), dR1.data(), S, strideTile, stream);
                     gemm_sb(CUBLAS_OP_T, CUBLAS_OP_N, K, tt, Ni, Q, Ni, static_cast<long>(NK),
                             dR2.data(), Ni, strideTile, 0.0,
                             dS2.data() + static_cast<std::size_t>(K) * s0, K, static_cast<long>(KM));
@@ -344,10 +405,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                 const int tt = static_cast<int>(t);
                 gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK), F + s0,
                         static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni, strideTile);
-                launch_admix_responsibility_b(dG.data() + static_cast<std::size_t>(N) * s0,
-                                              dV.data() + static_cast<std::size_t>(N) * s0,
-                                              dA.data(), N, t, kAdmixEps, dR2.data(), dR1.data(), S,
-                                              strideTile, stream);
+                launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                                         dGt.data(), dVt.data(), stream);
+                launch_admix_responsibility_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
+                                              dR2.data(), dR1.data(), S, strideTile, stream);
                 const double beta = first ? 0.0 : 1.0;
                 gemm_sb(CUBLAS_OP_N, CUBLAS_OP_N, Ni, K, tt, dR2.data(), Ni, strideTile, F + s0,
                         static_cast<int>(M), static_cast<long>(MK), beta, dT2.data(), Ni,
@@ -370,9 +431,10 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                 const int tt = static_cast<int>(t);
                 gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK), F + s0,
                         static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni, strideTile);
-                launch_admix_loglik_b(dG.data() + static_cast<std::size_t>(N) * s0,
-                                      dV.data() + static_cast<std::size_t>(N) * s0, dA.data(), N, t,
-                                      kAdmixEps, dll, S, strideTile, stream);
+                launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t, dGt.data(),
+                                         dVt.data(), stream);
+                launch_admix_loglik_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps, dll, S,
+                                      strideTile, stream);
             }
         };
 

@@ -21,6 +21,25 @@ namespace {
 
 constexpr int kBlk = 256;
 
+// Decode ONE packed genotype (individual i, GLOBAL SNP s) into dosage g + validity v. The
+// single home for the bit-unpack -> (g, v) map, shared by the full-matrix decode and the
+// per-SNP-tile decode so the two CANNOT drift: the SNP-tiled Tier-1 path (decode from the
+// resident 2-bit dPacked per tile instead of materializing the full N x M FP64 G/V) is only
+// parity-safe because it produces byte-identical (g, v) for the same (i, s) as the full decode.
+__device__ __forceinline__ void admix_decode_one(const std::uint8_t* __restrict__ packed,
+                                                 std::size_t bytes_per_record, long i, long s,
+                                                 double& g, double& v) {
+    const std::size_t byte_in_rec =
+        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+    const int pos = static_cast<int>(s % core::kCodesPerByte);
+    const std::uint8_t byte =
+        packed[static_cast<std::size_t>(i) * bytes_per_record + byte_in_rec];
+    const std::uint8_t code = core::genotype_code(byte, pos);
+    const bool valid = core::genotype_valid(code);
+    g = valid ? static_cast<double>(code) : 0.0;  // diploid: code == dosage 0/1/2
+    v = valid ? 1.0 : 0.0;
+}
+
 __global__ void admix_decode_kernel(const std::uint8_t* __restrict__ packed,
                                     std::size_t bytes_per_record, long N, long M,
                                     double* __restrict__ G, double* __restrict__ V) {
@@ -29,15 +48,23 @@ __global__ void admix_decode_kernel(const std::uint8_t* __restrict__ packed,
     if (idx >= total) return;
     const long i = idx % N;   // individual (column-major: i fastest)
     const long s = idx / N;   // SNP
-    const std::size_t byte_in_rec =
-        static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
-    const int pos = static_cast<int>(s % core::kCodesPerByte);
-    const std::uint8_t byte =
-        packed[static_cast<std::size_t>(i) * bytes_per_record + byte_in_rec];
-    const std::uint8_t code = core::genotype_code(byte, pos);
-    const bool valid = core::genotype_valid(code);
-    G[idx] = valid ? static_cast<double>(code) : 0.0;  // diploid: code == dosage 0/1/2
-    V[idx] = valid ? 1.0 : 0.0;
+    admix_decode_one(packed, bytes_per_record, i, s, G[idx], V[idx]);
+}
+
+// Decode one SNP TILE [N x t] at global SNP offset s0 into a tile-local column-major buffer
+// (element (i, j) at i + N*j, global SNP s0 + j). Byte-identical to the full decode for the
+// same (i, s0 + j) — it routes through the SAME admix_decode_one. This is the Tier-1 wall
+// fix: the caller keeps dPacked resident and decodes a [N x tileM] slice per SNP-tile inside
+// the existing s0 loops instead of holding two full N x M FP64 buffers (16 B/genotype).
+__global__ void admix_decode_tile_kernel(const std::uint8_t* __restrict__ packed,
+                                         std::size_t bytes_per_record, long N, long s0, long t,
+                                         double* __restrict__ G, double* __restrict__ V) {
+    const long idx = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = N * t;
+    if (idx >= total) return;
+    const long i = idx % N;        // individual (column-major within the tile: i fastest)
+    const long j = idx / N;        // local SNP within the tile
+    admix_decode_one(packed, bytes_per_record, i, s0 + j, G[idx], V[idx]);
 }
 
 // One block per SNP, block-reduce over individuals -> phat[s].
@@ -384,6 +411,16 @@ void launch_admix_decode(const std::uint8_t* d_packed, std::size_t bytes_per_rec
     if (total <= 0) return;
     const int grid = static_cast<int>((total + kBlk - 1) / kBlk);
     admix_decode_kernel<<<grid, kBlk, 0, stream>>>(d_packed, bytes_per_record, N, M, d_G, d_V);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_admix_decode_tile(const std::uint8_t* d_packed, std::size_t bytes_per_record, long N,
+                              long s0, long t, double* d_Gt, double* d_Vt, cudaStream_t stream) {
+    const long total = N * t;
+    if (total <= 0) return;
+    const int grid = static_cast<int>((total + kBlk - 1) / kBlk);
+    admix_decode_tile_kernel<<<grid, kBlk, 0, stream>>>(d_packed, bytes_per_record, N, s0, t, d_Gt,
+                                                        d_Vt);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
