@@ -254,10 +254,11 @@ namespace {
 // {0,2,3} matrix for the bit-exact gate, and reports the pass counters + the
 // unphased-drop guard on stderr.
 [[nodiscard]] int run_phased_vcf_panel(const IngestArgs& args) {
-    if (args.emit_hap_codes.empty()) {
+    if (args.emit_hap_codes.empty() && args.emit_tile.empty()) {
         std::fprintf(stderr,
                      "steppe ingest: --phased-vcf needs an output — pass --emit-hap-codes FILE "
-                     "(the host-only sites x haps {0,2,3} panel matrix)\n");
+                     "(the host-only sites x haps {0,2,3} text matrix) and/or --emit-tile FILE "
+                     "(the packed SNP-major binary panel, the decode->pack product)\n");
         return cfg::kExitInvalidConfig;
     }
     io::VcfPanelOptions opts;
@@ -279,7 +280,7 @@ namespace {
         return cfg::kExitIoError;
     }
 
-    {
+    if (!args.emit_hap_codes.empty()) {
         std::ofstream o(args.emit_hap_codes, std::ios::trunc);
         if (!o) {
             std::fprintf(stderr, "steppe ingest: cannot open --emit-hap-codes file: %s\n",
@@ -289,6 +290,29 @@ namespace {
         io::dump_hap_codes(panel.tile, panel.snptab, o);
         if (!o) {
             std::fprintf(stderr, "steppe ingest: failed writing --emit-hap-codes file\n");
+            return cfg::kExitIoError;
+        }
+    }
+
+    // OPTIONAL binary panel: the packed SNP-major 2-bit tile — the reader's real
+    // decode->pack product, with NO text formatting. Header = 3 uint64 LE
+    // (n_snp, n_individuals, src_bytes_per_record), then the raw snp_major bytes.
+    if (!args.emit_tile.empty()) {
+        std::ofstream tf(args.emit_tile, std::ios::binary | std::ios::trunc);
+        if (!tf) {
+            std::fprintf(stderr, "steppe ingest: cannot open --emit-tile file: %s\n",
+                         args.emit_tile.c_str());
+            return cfg::kExitIoError;
+        }
+        const std::uint64_t hdr[3] = {
+            static_cast<std::uint64_t>(panel.tile.n_snp),
+            static_cast<std::uint64_t>(panel.tile.n_individuals),
+            static_cast<std::uint64_t>(panel.tile.src_bytes_per_record)};
+        tf.write(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+        tf.write(reinterpret_cast<const char*>(panel.tile.snp_major.data()),
+                 static_cast<std::streamsize>(panel.tile.snp_major.size()));
+        if (!tf) {
+            std::fprintf(stderr, "steppe ingest: failed writing --emit-tile file\n");
             return cfg::kExitIoError;
         }
     }
