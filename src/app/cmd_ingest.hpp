@@ -55,6 +55,8 @@ struct IngestArgs {
     std::string emit_snp;        // OPTIONAL: EIGENSTRAT .snp dump (id chrom genpos_M physpos ref alt)
                                  // — the genpos spot-check artifact + the .snp for a matching panel
     double unphased_max = 1.0;   // fail if the unphased-het fraction exceeds this (default: report-only)
+    bool gpu = false;            // Phased-panel mode: use the GPU-native ingest path (nvcomp GPU
+                                 // DEFLATE + GPU GT-parse + device-resident pack). Also STEPPE_VCF_GPU=1.
 };
 
 [[nodiscard]] int run_ingest(const IngestArgs& args);

@@ -56,6 +56,7 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_fstats_assemble.cu
     cuda/cuda_backend_f2_blocks.cu
     cuda/cuda_backend_qpadm_fit.cu
+    cuda/vcf_gpu_ingest.cu
     cuda/device_partial.cu
     cuda/device_f2_blocks.cu
     cuda/device_decode_result.cu
@@ -82,6 +83,23 @@ target_compile_features(steppe_device PUBLIC cxx_std_20)
 # STEPPE_HAVE_EMU_TUNING — the fixed-slice Ozaki engagement gate
 if(STEPPE_HAVE_EMU_TUNING)
   target_compile_definitions(steppe_device PRIVATE STEPPE_HAVE_EMU_TUNING=1)
+endif()
+
+# nvcomp — GPU batched DEFLATE for the GPU-native phased-VCF ingest path
+# (cuda/vcf_gpu_ingest.cu). OPTIONAL: auto-detected via the pip wheel's CMake
+# config package (point nvcomp_DIR / CMAKE_PREFIX_PATH at
+# .../nvidia/libnvcomp/lib64/cmake/nvcomp). Kept PRIVATE so the CUDA-free
+# device/backend.hpp + device/vcf_gpu_ingest.hpp seam is unaffected. When nvcomp
+# is NOT found the TU still compiles (its body is #ifdef'd out to a clear-throw
+# stub), so a missing nvcomp can never break the build — vcf_gpu_available()
+# simply returns false.
+find_package(nvcomp CONFIG QUIET)
+if(nvcomp_FOUND)
+  target_link_libraries(steppe_device PRIVATE nvcomp::nvcomp)
+  target_compile_definitions(steppe_device PRIVATE STEPPE_HAVE_NVCOMP=1)
+  message(STATUS "steppe: nvcomp found (${nvcomp_VERSION}) — GPU phased-VCF ingest ENABLED")
+else()
+  message(STATUS "steppe: nvcomp NOT found — GPU phased-VCF ingest disabled (CPU reader unaffected)")
 endif()
 
 # STEPPE_NVTX — the profiler phase-range gate

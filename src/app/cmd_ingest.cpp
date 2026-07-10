@@ -30,6 +30,7 @@
 #include "core/config/exit_code.hpp"
 #include "core/stats/read_canonical_tile.hpp"
 #include "device/resources.hpp"
+#include "device/vcf_gpu_ingest.hpp"
 #include "io/consumer_raw_reader.hpp"
 #include "io/eigenstrat_format.hpp"
 #include "io/faidx_reader.hpp"
@@ -272,9 +273,36 @@ namespace {
         }
     }
 
+    // GPU-native ingest path selector: --gpu OR STEPPE_VCF_GPU=1 routes decode
+    // through the nvcomp GPU-DEFLATE + GPU GT-parse + device-resident pack, which
+    // returns a BYTE-IDENTICAL VcfPanelResult (the invariance gate). The CPU reader
+    // stays the default and the bit-exact reference.
+    bool want_gpu = args.gpu;
+    if (!want_gpu) {
+        const char* e = std::getenv("STEPPE_VCF_GPU");
+        if (e != nullptr && e[0] != '\0' && e[0] != '0') want_gpu = true;
+    }
+
     io::VcfPanelResult panel;
     try {
-        panel = io::read_vcf_panel(args.phased_vcf, opts);
+        if (want_gpu) {
+            if (!device::vcf_gpu_available()) {
+                std::fprintf(stderr,
+                             "steppe ingest: --gpu / STEPPE_VCF_GPU requested but steppe was built "
+                             "without nvcomp (GPU phased-VCF path unavailable)\n");
+                return cfg::kExitInvalidConfig;
+            }
+            steppe::DeviceConfig dc;
+            std::string derr;
+            if (!parse_device(args.device, dc, derr)) {
+                std::fprintf(stderr, "steppe ingest: %s\n", derr.c_str());
+                return cfg::kExitInvalidConfig;
+            }
+            const int device_id = dc.devices.empty() ? 0 : dc.devices.front();
+            panel = device::read_vcf_panel_gpu(args.phased_vcf, opts, device_id);
+        } else {
+            panel = io::read_vcf_panel(args.phased_vcf, opts);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe ingest: %s\n", e.what());
         return cfg::kExitIoError;

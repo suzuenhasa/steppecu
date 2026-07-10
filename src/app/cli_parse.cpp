@@ -867,6 +867,10 @@ int run_cli(int argc, char** argv) {
     ing->add_option("--unphased-max", ingest_args.unphased_max,
                     "Phased-panel mode: fail if the unphased-het fraction of diploid GT calls exceeds "
                     "this (default 1.0 = report-only; set low to guard against phase loss)");
+    ing->add_flag("--gpu", ingest_args.gpu,
+                  "Phased-panel mode: use the GPU-native ingest path (nvcomp GPU DEFLATE + GPU "
+                  "GT-parse + device-resident 2-bit pack); bit-identical to the CPU reader. Also "
+                  "selectable via STEPPE_VCF_GPU=1");
     ing->add_option("--device", ingest_args.device,
                     "CUDA device ordinal(s) for --emit-tile transpose (default auto)");
     ing->callback([&]() { code = run_ingest(ingest_args); });

@@ -34,8 +34,10 @@
 
 #include <zlib.h>
 
+#include "io/bgzf_index.hpp"
 #include "io/eigenstrat_format.hpp"
 #include "io/gzip_line_reader.hpp"
+#include "io/vcf_panel_decode.hpp"
 #include "io/vcf_record.hpp"
 
 namespace steppe::io {
@@ -44,121 +46,10 @@ namespace vd = vcfdetail;
 
 namespace {
 
-// Strip a leading 'chr'/'CHR' from a CHROM token (phase-3 uses bare "22", but be
-// permissive). Returns a view over the original buffer.
-[[nodiscard]] std::string_view strip_chr(std::string_view s) {
-    if (s.size() > 3 && (s[0] == 'c' || s[0] == 'C') && (s[1] == 'h' || s[1] == 'H') &&
-        (s[2] == 'r' || s[2] == 'R')) {
-        s.remove_prefix(3);
-    }
-    return s;
-}
-
-// Map a 'chr'-stripped CHROM token to the .snp integer convention (numeric, or
-// X/Y/MT -> 23/24/90, else -1). Only used for SnpTable.chrom; region filtering
-// compares the string form.
-[[nodiscard]] int chrom_to_int(std::string_view stripped) {
-    if (stripped == "X" || stripped == "x") return kChromCodeX;
-    if (stripped == "Y" || stripped == "y") return kChromCodeY;
-    if (stripped == "MT" || stripped == "mt" || stripped == "M" || stripped == "m")
-        return kChromCodeMt;
-    const auto v = vd::parse_int(stripped);
-    return v ? static_cast<int>(*v) : kFirstOtherChromCode;
-}
-
-// A single-base SNP allele: exactly one A/C/G/T/N nucleotide (rejects indels,
-// '*' spanning deletions, '<SYMBOLIC>', and '.'). Mirrors bcftools `-v snps`.
-[[nodiscard]] bool is_snp_allele(std::string_view a) {
-    if (a.size() != 1) return false;
-    switch (a[0]) {
-        case 'A': case 'C': case 'G': case 'T': case 'N':
-        case 'a': case 'c': case 'g': case 't': case 'n':
-            return true;
-        default:
-            return false;
-    }
-}
-
-// The per-haplotype allele-token -> 2-bit code map (the load-bearing {0,2,3}
-// contract): '0'->0, '1'->2, everything else (".", multi-digit, empty) -> 3
-// (missing). NEVER emits code 1.
-[[nodiscard]] std::uint8_t hap_code(std::string_view allele) {
-    if (allele.size() == 1) {
-        if (allele[0] == '0') return 0u;
-        if (allele[0] == '1') return 2u;
-    }
-    return kMissingCode;  // 3
-}
-
-// A per-chromosome genetic map: (bp, cM) sorted ascending by bp, for linear
-// interpolation to Morgans.
-struct ChromMap {
-    std::vector<long long> bp;
-    std::vector<double> cm;
-};
-
-// Parse a plink-format .map (whitespace: chrom id cM bp) into per-chrom (bp,cM)
-// tables. Non-conforming / header lines (a bp or cM token that will not parse)
-// are skipped. Kept sorted by bp per chromosome.
-[[nodiscard]] std::unordered_map<int, ChromMap> read_genetic_map(const std::string& path) {
-    std::ifstream in(path);
-    if (!in) {
-        throw std::runtime_error("io::read_vcf_panel: cannot open --map genetic map: " + path);
-    }
-    std::unordered_map<int, ChromMap> maps;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream ls(line);
-        std::string chrom_tok, id_tok, cm_tok, bp_tok;
-        if (!(ls >> chrom_tok >> id_tok >> cm_tok >> bp_tok)) continue;  // need 4 columns
-        char* endp = nullptr;
-        const double cm = std::strtod(cm_tok.c_str(), &endp);
-        if (endp != cm_tok.c_str() + cm_tok.size()) continue;  // header / non-numeric cM
-        const auto bp = vd::parse_int(bp_tok);
-        if (!bp) continue;
-        const int chrom = chrom_to_int(strip_chr(chrom_tok));
-        ChromMap& m = maps[chrom];
-        m.bp.push_back(*bp);
-        m.cm.push_back(cm);
-    }
-    for (auto& [chrom, m] : maps) {
-        (void)chrom;
-        std::vector<std::size_t> order(m.bp.size());
-        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-        std::sort(order.begin(), order.end(),
-                  [&](std::size_t a, std::size_t b) { return m.bp[a] < m.bp[b]; });
-        ChromMap sorted;
-        sorted.bp.reserve(m.bp.size());
-        sorted.cm.reserve(m.cm.size());
-        for (std::size_t i : order) {
-            sorted.bp.push_back(m.bp[i]);
-            sorted.cm.push_back(m.cm[i]);
-        }
-        m = std::move(sorted);
-    }
-    return maps;
-}
-
-// Linear-interpolate cM at bp within a per-chrom map, clamping to the endpoints
-// (keeps genpos monotonic non-decreasing, which paint requires). Returns Morgans.
-[[nodiscard]] double interp_morgans(const ChromMap& m, long long bp) {
-    if (m.bp.empty()) return 0.0;
-    if (bp <= m.bp.front()) return m.cm.front() / 100.0;
-    if (bp >= m.bp.back()) return m.cm.back() / 100.0;
-    // upper_bound: first entry with bp_i > bp
-    const auto it = std::upper_bound(m.bp.begin(), m.bp.end(), bp);
-    const std::size_t hi = static_cast<std::size_t>(it - m.bp.begin());
-    const std::size_t lo = hi - 1;
-    const long long b0 = m.bp[lo];
-    const long long b1 = m.bp[hi];
-    const double c0 = m.cm[lo];
-    const double c1 = m.cm[hi];
-    const double frac = (b1 == b0) ? 0.0
-                                   : static_cast<double>(bp - b0) / static_cast<double>(b1 - b0);
-    return (c0 + (c1 - c0) * frac) / 100.0;
-}
+// The pure decode rules (strip_chr, chrom_to_int, is_snp_allele, hap_code,
+// ChromMap, read_genetic_map, interp_morgans) now live in the shared io header
+// io/vcf_panel_decode.hpp so the GPU reader reproduces them byte-for-byte from one
+// source of truth. They are steppe::io names, visible unqualified here.
 
 // ============================================================================
 // Phase-2: block-parallel BGZF decompression + parallel GT parse.
@@ -194,55 +85,9 @@ struct ChromMap {
     return (hw == 0) ? std::size_t{1} : static_cast<std::size_t>(hw);
 }
 
-// One BGZF block: its byte offset in the compressed file and its compressed length.
-struct BgzfBlock {
-    std::size_t coff = 0;
-    std::size_t clen = 0;
-};
-
-// Header-only BGZF walk (ZERO decompression). Reads each block's 12-byte gzip
-// header + XLEN + extra field, locates the BC subfield (SI1='B',SI2='C',SLEN=2),
-// reads BSIZE (uint16 LE), records (coff, BSIZE+1), and advances. Returns false
-// (caller falls back to serial) on ANY structural anomaly: not gzip, not deflate,
-// no FEXTRA, no BC subfield (plain gzip), a truncated/over-running block, or
-// trailing garbage. On success `out` holds every block including the 28-byte EOF
-// marker, contiguously covering [0, size).
-[[nodiscard]] bool scan_bgzf(const std::uint8_t* d, std::size_t size,
-                             std::vector<BgzfBlock>& out) {
-    out.clear();
-    std::size_t off = 0;
-    while (off + 18 <= size) {
-        if (d[off] != 0x1f || d[off + 1] != 0x8b) return false;   // gzip magic
-        if (d[off + 2] != 8) return false;                        // CM = deflate
-        if ((d[off + 3] & 0x04) == 0) return false;               // FLG.FEXTRA
-        const std::size_t xlen =
-            static_cast<std::size_t>(d[off + 10]) | (static_cast<std::size_t>(d[off + 11]) << 8);
-        const std::size_t ex = off + 12;
-        const std::size_t ex_end = ex + xlen;
-        if (ex_end > size) return false;
-        long bsize = -1;
-        std::size_t p = ex;
-        while (p + 4 <= ex_end) {
-            const std::uint8_t si1 = d[p];
-            const std::uint8_t si2 = d[p + 1];
-            const std::size_t slen =
-                static_cast<std::size_t>(d[p + 2]) | (static_cast<std::size_t>(d[p + 3]) << 8);
-            if (si1 == 'B' && si2 == 'C' && slen == 2) {
-                if (p + 6 > ex_end) return false;
-                bsize = static_cast<long>(d[p + 4]) | (static_cast<long>(d[p + 5]) << 8);
-                break;
-            }
-            p += 4 + slen;
-        }
-        if (bsize < 0) return false;                              // no BC -> plain gzip
-        const std::size_t clen = static_cast<std::size_t>(bsize) + 1;
-        if (off + clen > size) return false;                      // over-run
-        out.push_back(BgzfBlock{off, clen});
-        off += clen;
-    }
-    if (off != size) return false;                               // trailing garbage
-    return !out.empty();
-}
+// BgzfBlock + scan_bgzf (the zero-decompression block-index walk) now live in the
+// shared io header io/bgzf_index.hpp, extended with xlen for the GPU reader's raw
+// deflate-payload slice. Same struct + walk; the CPU path just ignores xlen.
 
 // Inflate a byte range [begin,end) of the in-memory compressed buffer that spans
 // whole BGZF blocks, into `out`. Uses the same concatenated-member loop the serial
