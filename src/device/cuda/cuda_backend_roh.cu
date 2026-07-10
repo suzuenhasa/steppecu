@@ -25,6 +25,9 @@
 #include "device/cuda/pinned_buffer.cuh"
 #include "device/cuda/roh_fb_kernel.cuh"
 #include "device/cuda/stream.hpp"
+#include "device/cuda/wave_batch.cuh"
+#include "device/tier_select.hpp"  // free_host_ram_bytes (the host budget for the wave sizer)
+#include "device/wave_budget.hpp"
 
 namespace steppe::device {
 
@@ -207,14 +210,18 @@ void CudaBackend::roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, d
         return;
     }
 
-    // WAVE BATCHING: replace the 3-slot look-ahead pipeline (which kept only ~2-3 blocks
-    // resident on a 170-SM GPU) with a single grid of W item-blocks per wave. One block per
-    // item (blockIdx.x = item within the wave), each block indexing the ONCE-resident panel
-    // DIRECTLY via its site_map (PanelRefhaps) — no per-item compacted refhaps gather, so the
-    // per-item VRAM footprint drops from ~K*Mmax bytes (~145 MB) to ~16 MB and hundreds of
-    // items run concurrently. Bit-identical to the old per-item path: same FB math, same
-    // per-item site axis / neighbor distances (per-item ob/site_map/p/T/M/C/nck from build),
-    // build() ascending + consume() ascending -> byte-stable seg + summary.
+    // WAVE BATCHING (via the shared map-only wave core, device/cuda/wave_batch.cuh): replace
+    // the 3-slot look-ahead pipeline (which kept only ~2-3 blocks resident on a 170-SM GPU)
+    // with a single grid of W item-blocks per wave. One block per item (blockIdx.x = item
+    // within the wave), each block indexing the ONCE-resident panel DIRECTLY via its site_map
+    // (PanelRefhaps) — no per-item compacted refhaps gather, so the per-item VRAM footprint
+    // drops from ~K*Mmax bytes (~145 MB) to ~16 MB and hundreds of items run concurrently.
+    // Bit-identical to the old per-item path: same FB math, same per-item site axis / neighbor
+    // distances (per-item ob/site_map/p/T/M/C/nck from build), build() ascending +
+    // consume() strictly ascending -> byte-stable seg + summary. The wave width W is an
+    // execution detail only: every item is independent and its posterior is a disjoint output
+    // slice, so the emitted table is byte-identical for ANY W (this is what lets the shared
+    // sizer's dual budget re-clamp W without a parity change).
     //
     // Scratch is sized to the WAVE width W (not N). Checkpoint stride bound: C(M)=ceil(sqrt(M))
     // <= ceil(sqrt(Mmax))=Cmax and nck(M)=ceil(M/C(M)) <= Cmax for all M<=Mmax, so both the
@@ -225,94 +232,111 @@ void CudaBackend::roh_fb_batch(const RohPanelHandle& panel, long N, long Mmax, d
     if (Cmax < 1) Cmax = 1;
     const std::size_t Cs = static_cast<std::size_t>(Cmax);
 
-    // Wave width W from the FREE VRAM (the panel is already resident). Per-item device bytes:
-    //   ob(Mm) + site_map(4*Mm) + p(8*Mm) + T(72*Mm) + proh(8*Mm)
-    //   + check_roh(8*Cs*Ks) + check0(8*Cs) + alpha_blk(8*Cs*Ks) + a0_blk(8*Cs)
-    //   + alphaA/B + betaA/B (4 * 8*Ks). Reserve 1 GB headroom, then take 90%.
-    const std::size_t per_item = Mm * 1 + Mm * 4 + Mm * 8 + Mm * 9 * 8 + Mm * 8 + Cs * Ks * 8 +
-                                 Cs * 8 + Cs * Ks * 8 + Cs * 8 + Ks * 8 * 4 + 64;
+    // Per-item footprint, declared (not hand-summed). Staging pairs (built on host, uploaded,
+    // or downloaded) count on BOTH the device and the pinned-host axes; the device-only FB
+    // scratch (check/alpha/beta) counts on the device axis alone. wave_width caps W by
+    // min(VRAM-derived, pinned-host-derived) — the pinned-host arm is the latent budget bug
+    // this shared sizer fixes: since the host per-item footprint (no scratch) is smaller than
+    // the device one, the host arm binds only when free host RAM is far below free VRAM.
+    PerItemBytes pib;
+    pib.pair_add<std::uint8_t>(Mm)   // ob
+        .pair_add<int>(Mm)           // site_map
+        .pair_add<double>(Mm)        // p
+        .pair_add<double>(Mm * 9)    // T
+        .pair_add<double>(Mm)        // proh (posterior output)
+        .pair_add<int>(1)            // M
+        .pair_add<int>(1)            // C
+        .pair_add<int>(1);           // nck
+    pib.dev_add<double>(Cs * Ks)     // check_roh
+        .dev_add<double>(Cs)         // check0
+        .dev_add<double>(Cs * Ks)    // alpha_blk
+        .dev_add<double>(Cs)         // a0_blk
+        .dev_add<double>(Ks * 4);    // alphaA + alphaB + betaA + betaB
+
     std::size_t freeB = 0, totalB = 0;
-    STEPPE_CUDA_CHECK(cudaMemGetInfo(&freeB, &totalB));
-    const std::size_t reserve = static_cast<std::size_t>(1) << 30;  // 1 GB headroom
-    std::size_t budget = (freeB > reserve) ? (freeB - reserve) : (freeB / 2);
-    budget = static_cast<std::size_t>(static_cast<double>(budget) * 0.9);
-    long W = (per_item > 0) ? static_cast<long>(budget / per_item) : N;
-    if (W < 1) W = 1;
-    if (W > N) W = N;
+    STEPPE_CUDA_CHECK(cudaMemGetInfo(&freeB, &totalB));  // panel already resident (decode_budget seam)
+    const std::size_t host_free = free_host_ram_bytes();
+    const long W = wave_width(freeB, pib.dev, host_free, pib.host, N);
     const std::size_t Wz = static_cast<std::size_t>(W);
 
-    // ONE set of wave-strided pinned + device buffers, sized to W (not N), reused every wave.
-    PinnedBuffer<std::uint8_t> h_ob(Wz * Mm);
-    PinnedBuffer<int> h_map(Wz * Mm);
-    PinnedBuffer<double> h_p(Wz * Mm), h_T(Wz * Mm * 9), h_post(Wz * Mm);
-    PinnedBuffer<int> h_M(Wz), h_C(Wz), h_nck(Wz);
-    DeviceBuffer<std::uint8_t> dOb(Wz * Mm);
-    DeviceBuffer<int> dMap(Wz * Mm);
-    DeviceBuffer<double> dP(Wz * Mm), dT(Wz * Mm * 9), dProh(Wz * Mm);
-    DeviceBuffer<int> dM(Wz), dC(Wz), dNck(Wz);
+    // ONE set of W-wide staging pairs (pinned<->device), sized once, reused every wave. The
+    // dOb/dMap/... pairs of the old hand-rolled loop become WaveStage<T>; the FB scratch stays
+    // device-only DeviceBuffer<T>. WaveStage owns both halves; wave_map drives them.
+    WaveStage<std::uint8_t> ob(W, Mm, stream_.get());
+    WaveStage<int> map(W, Mm, stream_.get());
+    WaveStage<double> p(W, Mm, stream_.get());
+    WaveStage<double> Tt(W, Mm * 9, stream_.get());
+    WaveStage<double> post(W, Mm, stream_.get());  // posterior output (d2h only)
+    WaveStage<int> mM(W, 1, stream_.get());
+    WaveStage<int> mC(W, 1, stream_.get());
+    WaveStage<int> mNck(W, 1, stream_.get());
     DeviceBuffer<double> dCheckRoh(Wz * Cs * Ks), dCheck0(Wz * Cs);
     DeviceBuffer<double> dAlphaA(Wz * Ks), dAlphaB(Wz * Ks);
     DeviceBuffer<double> dAlphaBlk(Wz * Cs * Ks), dA0Blk(Wz * Cs);
     DeviceBuffer<double> dBetaA(Wz * Ks), dBetaB(Wz * Ks);
 
-    for (long w0 = 0; w0 < N; w0 += W) {
-        const long Wc = std::min<long>(W, N - w0);  // items in this wave
-        // Phase P: build each item into its wave-strided pinned slot; record M/C/nck. F2:
-        // PARALLELIZED across the wave items. Each item j writes ONLY its own disjoint pinned
-        // slice (ob/map/p/T at stride j*Mm) + its own h_M/h_C/h_nck[j] scalar, and build() reads
-        // only const shared prep (make_cov over const by_chrom/tgt_hap + the pure
-        // roh_build_transition) — so concurrent per-item builds are order-independent and
-        // byte-identical to the old serial fill. The JOIN happens before the H2D of [0,Wc), so
-        // the uploaded bytes are exactly the serial-fill bytes. STEPPE_ROH_THREADS=1 forces this
-        // fully serial (parity harness invariance proof). Consume (Phase C) stays strictly serial.
+    WaveMapOps ops;
+    // Phase P (build): fill each item into its wave-strided pinned slot; record M/C/nck; then
+    // H2D the live [0,Wc) prefix of every input stage. PARALLELIZED across the wave items via
+    // parallel_blocks_roh, which stays INSIDE the build callback (consumer policy). Each item j
+    // writes ONLY its own disjoint pinned slice (ob/map/p/T at stride j*Mm) + its own
+    // mM/mC/mNck[j] scalar, and build() reads only const shared prep, so concurrent per-item
+    // builds are order-independent and byte-identical to the serial fill. The parallel join
+    // happens before the H2D, so the uploaded bytes are exactly the serial-fill bytes.
+    // STEPPE_ROH_THREADS=1 forces this fully serial (parity harness invariance proof).
+    ops.build = [&](long w0, long Wc) {
         parallel_blocks_roh(static_cast<std::size_t>(Wc),
                             [&](std::size_t j0, std::size_t j1, std::size_t) {
             for (std::size_t j = j0; j < j1; ++j) {
-                std::uint8_t* ob_j = h_ob.data() + j * Mm;
-                int* map_j = h_map.data() + j * Mm;
-                double* p_j = h_p.data() + j * Mm;
-                double* T_j = h_T.data() + j * Mm * 9;
+                std::uint8_t* ob_j = ob.host() + j * Mm;
+                int* map_j = map.host() + j * Mm;
+                double* p_j = p.host() + j * Mm;
+                double* T_j = Tt.host() + j * Mm * 9;
                 const long M = build(w0 + static_cast<long>(j), ob_j, map_j, p_j, T_j);
-                h_M.data()[j] = static_cast<int>(M);
+                mM.host()[j] = static_cast<int>(M);
                 if (M > 0) {
                     int C = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(M))));
                     if (C < 1) C = 1;
                     const int nck = static_cast<int>((M + C - 1) / C);
-                    h_C.data()[j] = C;
-                    h_nck.data()[j] = nck;
+                    mC.host()[j] = C;
+                    mNck.host()[j] = nck;
                 } else {
-                    h_C.data()[j] = 1;
-                    h_nck.data()[j] = 0;
+                    mC.host()[j] = 1;
+                    mNck.host()[j] = 0;
                 }
             }
         });
-        // H2D the used [0,Wc) region (gaps M_j<Mmax within an item are never read by a block).
-        const std::size_t Wcz = static_cast<std::size_t>(Wc);
-        h2d_async(dOb, h_ob.data(), Wcz * Mm, stream_.get());
-        h2d_async(dMap, h_map.data(), Wcz * Mm, stream_.get());
-        h2d_async(dP, h_p.data(), Wcz * Mm, stream_.get());
-        h2d_async(dT, h_T.data(), Wcz * Mm * 9, stream_.get());
-        h2d_async(dM, h_M.data(), Wcz, stream_.get());
-        h2d_async(dC, h_C.data(), Wcz, stream_.get());
-        h2d_async(dNck, h_nck.data(), Wcz, stream_.get());
-
-        // ONE grid launch: Wc item-blocks, each indexing the resident panel directly.
-        launch_roh_fb_wave(dOb.data(), res->panel.data(), res->donor_map.data(), dMap.data(),
-                           dP.data(), dT.data(), dM.data(), dC.data(), dNck.data(), K, res->Mp,
-                           /*Mstride*/static_cast<long>(Mmax), /*Cstride*/static_cast<long>(Cmax),
-                           static_cast<int>(Wc), e_rate, in_val, dProh.data(), dCheckRoh.data(),
-                           dCheck0.data(), dAlphaA.data(), dAlphaB.data(), dAlphaBlk.data(),
-                           dA0Blk.data(), dBetaA.data(), dBetaB.data(), stream_.get());
-
-        d2h_async(h_post.data(), dProh, Wcz * Mm, stream_.get());
-        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
-
-        // Phase C: consume in STRICT item order (each item reads only its own [0,M)).
+        // Upload the used [0,Wc) prefix (gaps M_j<Mmax within an item are never read by a block).
+        ob.h2d(Wc, stream_.get());
+        map.h2d(Wc, stream_.get());
+        p.h2d(Wc, stream_.get());
+        Tt.h2d(Wc, stream_.get());
+        mM.h2d(Wc, stream_.get());
+        mC.h2d(Wc, stream_.get());
+        mNck.h2d(Wc, stream_.get());
+    };
+    // ONE grid launch: Wc item-blocks, each indexing the resident panel directly; then D2H the
+    // posterior prefix.
+    ops.launch = [&](long /*w0*/, long Wc) {
+        launch_roh_fb_wave(ob.device(), res->panel.data(), res->donor_map.data(), map.device(),
+                           p.device(), Tt.device(), mM.device(), mC.device(), mNck.device(), K,
+                           res->Mp, /*Mstride*/ static_cast<long>(Mmax),
+                           /*Cstride*/ static_cast<long>(Cmax), static_cast<int>(Wc), e_rate,
+                           in_val, post.device(), dCheckRoh.data(), dCheck0.data(), dAlphaA.data(),
+                           dAlphaB.data(), dAlphaBlk.data(), dA0Blk.data(), dBetaA.data(),
+                           dBetaB.data(), stream_.get());
+        post.d2h(Wc, stream_.get());
+    };
+    // Phase C (consume): STRICT item order (wave_map guarantees ascending w0), each item reads
+    // only its own [0,M) posterior slice.
+    ops.consume = [&](long w0, long Wc) {
         for (long j = 0; j < Wc; ++j) {
-            const long M = h_M.data()[j];
-            if (M > 0) consume(w0 + j, h_post.data() + static_cast<std::size_t>(j) * Mm, M);
+            const long M = mM.host()[j];
+            if (M > 0) consume(w0 + j, post.host() + static_cast<std::size_t>(j) * Mm, M);
         }
-    }
+    };
+
+    wave_map(N, W, ops, stream_.get());
 }
 
 }  // namespace steppe::device
