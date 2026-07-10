@@ -14,21 +14,30 @@
 //   2. GPU   nvcompBatchedDeflateDecompressAsync inflates the batch's blocks into
 //            per-chunk (4-byte-aligned) device slots; a compaction kernel gathers
 //            them into ONE contiguous device text buffer (carry-prefixed so a VCF
-//            line straddling the previous batch is whole here).
-//   3. HOST  parse the batch text (D2H) line-by-line, mirroring the CPU serial
-//            decision loop EXACTLY (bounded metadata tokenize; region/dup/biallelic
-//            filters; SnpTable + map-join) -> the emitted records' (line offset,
-//            GT FORMAT index). The trailing partial line carries to the next batch.
-//   4. GPU   kernel A builds each emitted record's column-start index from the
+//            line straddling the previous batch is whole here). The decompressed
+//            text STAYS DEVICE-RESIDENT — it is never copied to the host in bulk.
+//   3. GPU   cub finds every record newline device-side; a metadata kernel scans
+//            each record for its column layout and gathers ONLY the 9-column
+//            metadata prefix (CHROM..FORMAT, never the 2504 sample columns) into a
+//            compact device buffer, and a small D2H brings JUST that prefix + the
+//            per-record field count + record offsets to the host. The full
+//            decompressed-text D2H (and the whole-line host tokenize it forced) is
+//            GONE — the host-serial tail that used to dominate the wall.
+//   4. HOST  replays the CPU serial decision loop EXACTLY over the compact prefixes
+//            (each split into its 9 fields only): region/dup/biallelic filters,
+//            SnpTable + map-join -> the emitted records' (line offset, GT FORMAT
+//            index). The trailing partial line carries to the next batch.
+//   5. GPU   kernel A builds each emitted record's column-start index from the
 //            device text; kernel B (one thread per (record, tile byte)) decodes the
 //            phased GT of its 2 samples and packs a full 2-bit byte device-resident.
-//   5. D2H   append the batch's packed tile rows to the panel's snp_major bytes.
+//   6. D2H   append the batch's packed tile rows to the panel's snp_major bytes.
 //
 // The GT decode (dev_hap_code + the phased/unphased split) re-implements
 // io::hap_code and the CPU per-sample rule BYTE-FOR-BYTE. A CUDA TU private to
 // steppe_device; the CUDA-free entry is device/vcf_gpu_ingest.hpp.
 #include "device/vcf_gpu_ingest.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -37,6 +46,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace steppe::device {
@@ -64,6 +74,12 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string&, const io::VcfPanelOpti
 }  // namespace steppe::device
 
 #else  // STEPPE_HAVE_NVCOMP ===================================================
+
+#include <cub/device/device_reduce.cuh>
+#include <cub/device/device_scan.cuh>
+#include <cub/device/device_select.cuh>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #include <cuda_runtime.h>
 #include <nvcomp/deflate.h>
@@ -188,6 +204,79 @@ __global__ void compact_kernel(const std::uint8_t* __restrict__ out,
     for (std::size_t j = threadIdx.x; j < n; j += blockDim.x) dst[j] = src[j];
 }
 
+// cub select-op: flag the byte at absolute index `i` when it is a record newline.
+// Feeding a CountingInputIterator through DeviceSelect::If yields the ordered list
+// of newline offsets WITHOUT materialising an N-byte flag array (the batch text is
+// up to 256 MB — a per-byte flag/scan buffer would blow the VRAM budget).
+struct IsNewlineAt {
+    const char* text;
+    __host__ __device__ __forceinline__ bool operator()(std::int64_t i) const {
+        return text[i] == '\n';
+    }
+};
+
+// The 0/1 transform used to COUNT newlines via cub::DeviceReduce::Sum (a plain
+// int accumulator; the bool predicate above is only for the ordered select).
+struct NewlineCount01 {
+    const char* text;
+    __host__ __device__ __forceinline__ int operator()(std::int64_t i) const {
+        return text[i] == '\n' ? 1 : 0;
+    }
+};
+
+// Per record, scan its line [start,end) ONCE: count total tab fields (== the CPU
+// vd::split(line).size(), so the truncated-record test `size <= max_col` is
+// reproduced exactly) and capture the byte length of the 9-column metadata prefix
+// (CHROM POS ID REF ALT QUAL FILTER INFO FORMAT — everything up to, but excluding,
+// the 9th tab). `start_m = (m==0)? scan_start : nl[m-1]+1`, `end_m = nl[m]`.
+__global__ void meta_scan_kernel(const char* __restrict__ text,
+                                 const std::int64_t* __restrict__ nl, long n_rec,
+                                 std::uint64_t scan_start,
+                                 std::uint32_t* __restrict__ prefix_len,
+                                 std::uint32_t* __restrict__ field_count) {
+    const long m = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (m >= n_rec) return;
+    const std::size_t start =
+        (m == 0) ? static_cast<std::size_t>(scan_start)
+                 : static_cast<std::size_t>(nl[m - 1]) + 1u;
+    const std::size_t end = static_cast<std::size_t>(nl[m]);  // the '\n' (exclusive)
+
+    std::uint32_t tabs = 0;
+    std::uint32_t plen = static_cast<std::uint32_t>(end - start);  // whole line if <9 tabs
+    bool have9 = false;
+    for (std::size_t j = start; j < end; ++j) {
+        if (text[j] == '\t') {
+            if (tabs == 8 && !have9) {  // the tab that ENDS column 8 (FORMAT)
+                plen = static_cast<std::uint32_t>(j - start);
+                have9 = true;
+            }
+            ++tabs;
+        }
+    }
+    field_count[m] = tabs + 1u;   // fields == tab count + 1 (matches vd::split)
+    prefix_len[m] = plen;         // bytes of columns [0..8], no trailing tab
+}
+
+// Gather each record's 9-column metadata prefix into the compact host-bound buffer
+// (one block per record). `prefix_off` is the exclusive prefix sum of `prefix_len`.
+__global__ void meta_gather_kernel(const char* __restrict__ text,
+                                   const std::int64_t* __restrict__ nl, long n_rec,
+                                   std::uint64_t scan_start,
+                                   const std::uint32_t* __restrict__ prefix_off,
+                                   const std::uint32_t* __restrict__ prefix_len,
+                                   char* __restrict__ compact) {
+    const long m = blockIdx.x;
+    if (m >= n_rec) return;
+    const std::size_t start =
+        (m == 0) ? static_cast<std::size_t>(scan_start)
+                 : static_cast<std::size_t>(nl[m - 1]) + 1u;
+    const std::uint32_t len = prefix_len[m];
+    const std::uint32_t off = prefix_off[m];
+    for (std::uint32_t j = threadIdx.x; j < len; j += blockDim.x) {
+        compact[off + j] = text[start + j];
+    }
+}
+
 // For each emitted record, index the start offset (line-local) of every column
 // into colstart[i*(n_col+1) + j]; colstart[n_col] is the separator that ends the
 // last needed column (a tab if more columns follow, else the newline / buffer end),
@@ -290,17 +379,18 @@ __global__ void gtpack_kernel(const char* __restrict__ text,
 }
 
 // One decompressed block-batch resident on the device as one contiguous text
-// buffer (carry-prefixed). Carries the raw device text + its host mirror.
+// buffer (carry-prefixed). Device-only: the text is NEVER copied to the host in
+// bulk — record boundaries and the metadata prefix are extracted device-side and
+// only a small compact prefix + the trailing carry come back.
 struct BatchText {
     DeviceBuffer<std::uint8_t> d_text;   // carry ++ decompressed blocks, contiguous
-    std::string host;                    // D2H mirror (record offsets index into this)
     std::size_t size = 0;
 };
 
 // Decompress blocks [b0,b1) of `filebuf` (BGZF payload slices from `blocks`) with
-// nvcomp, prefixing `carry` bytes, into ONE contiguous device text buffer + host
-// mirror. Alignment: input/output chunks are padded to kAlign (>= nvcomp's 4-byte
-// requirement).
+// nvcomp, prefixing `carry` bytes, into ONE contiguous device text buffer.
+// Alignment: input/output chunks are padded to kAlign (>= nvcomp's 4-byte
+// requirement). The buffer stays device-resident on return (stream synchronised).
 [[nodiscard]] BatchText decompress_batch(const std::vector<std::uint8_t>& filebuf,
                                          const std::vector<io::BgzfBlock>& blocks,
                                          std::size_t b0, std::size_t b1,
@@ -342,7 +432,6 @@ struct BatchText {
     BatchText bt;
     bt.size = text_cursor;                                      // carry + sum(isize)
     if (n_chunks == 0) {                                        // nothing decompressible
-        bt.host = carry;
         bt.d_text = DeviceBuffer<std::uint8_t>(bt.size == 0 ? 1 : bt.size);
         if (carry_len) h2d_async(bt.d_text, carry.data(), carry_len, stream);
         STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -412,11 +501,115 @@ struct BatchText {
         d_out.data(), d_out_off.data(), d_text_off.data(), d_isize.data(),
         static_cast<long>(n_chunks), bt.d_text.data());
     STEPPE_CUDA_CHECK_KERNEL();
-
-    bt.host.resize(bt.size);
-    if (bt.size) d2h_async(bt.host.data(), bt.d_text, bt.size, stream);
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
     return bt;
+}
+
+// The per-record metadata a batch's device pass hands back to the host decision
+// loop: the compact 9-column prefixes + their offsets/lengths + field counts, plus
+// the newline positions the host turns into record line offsets and the carry.
+struct BatchMeta {
+    long n_rec = 0;                        // complete records (newlines) in [scan_start, N)
+    std::vector<std::int64_t> nl;          // absolute newline offsets, ordered
+    std::vector<std::uint32_t> prefix_off; // offset of record m's prefix in `compact`
+    std::vector<std::uint32_t> prefix_len; // byte length of record m's 9-column prefix
+    std::vector<std::uint32_t> field_count;// vd::split(line).size() for record m
+    std::string compact;                   // packed 9-column prefixes (host)
+};
+
+// Device-side record scan: find every newline in [scan_start, N), then extract each
+// record's compact 9-column metadata prefix + field count. No bulk text D2H — only
+// the (small) compact prefix buffer and the per-record scalar arrays come back.
+[[nodiscard]] BatchMeta extract_batch_meta(const DeviceBuffer<std::uint8_t>& d_text,
+                                           std::size_t scan_start, std::size_t N,
+                                           cudaStream_t stream) {
+    BatchMeta meta;
+    const char* text = reinterpret_cast<const char*>(d_text.data());
+    const std::int64_t span = static_cast<std::int64_t>(N - scan_start);
+
+    // --- count newlines first (bounded VRAM: no per-byte flag/scan array; the
+    //     ordered DeviceSelect below needs its output sized to the exact count) --
+    auto counts = thrust::make_counting_iterator<std::int64_t>(static_cast<std::int64_t>(scan_start));
+    DeviceBuffer<int> d_k(1);
+    {
+        auto flags = thrust::make_transform_iterator(counts, NewlineCount01{text});
+        std::size_t tb = 0;
+        STEPPE_CUDA_CHECK(cub::DeviceReduce::Sum(nullptr, tb, flags, d_k.data(), span, stream));
+        DeviceBuffer<std::uint8_t> d_tmp(tb == 0 ? 1 : tb);
+        std::size_t tb2 = tb;
+        STEPPE_CUDA_CHECK(cub::DeviceReduce::Sum(d_tmp.data(), tb2, flags, d_k.data(), span, stream));
+    }
+    int k_host = 0;
+    d2h_async(&k_host, d_k, 1, stream);
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+    meta.n_rec = static_cast<long>(k_host);
+    if (meta.n_rec == 0) return meta;
+
+    const long K = meta.n_rec;
+    DeviceBuffer<std::int64_t> d_nl(static_cast<std::size_t>(K));
+    DeviceBuffer<int> d_numsel(1);
+    {
+        std::size_t tb = 0;
+        STEPPE_CUDA_CHECK(cub::DeviceSelect::If(nullptr, tb, counts, d_nl.data(),
+                          d_numsel.data(), span, IsNewlineAt{text}, stream));
+        DeviceBuffer<std::uint8_t> d_tmp(tb == 0 ? 1 : tb);
+        std::size_t tb2 = tb;
+        STEPPE_CUDA_CHECK(cub::DeviceSelect::If(d_tmp.data(), tb2, counts, d_nl.data(),
+                          d_numsel.data(), span, IsNewlineAt{text}, stream));
+    }
+
+    // --- per-record scan: field count + 9-column prefix length ----------------
+    DeviceBuffer<std::uint32_t> d_prefix_len(static_cast<std::size_t>(K));
+    DeviceBuffer<std::uint32_t> d_field_count(static_cast<std::size_t>(K));
+    {
+        const unsigned grid = static_cast<unsigned>((K + 255) / 256);
+        meta_scan_kernel<<<grid, 256, 0, stream>>>(text, d_nl.data(), K,
+            static_cast<std::uint64_t>(scan_start), d_prefix_len.data(), d_field_count.data());
+        STEPPE_CUDA_CHECK_KERNEL();
+    }
+
+    // --- exclusive prefix sum of the prefix lengths -> compact offsets ---------
+    DeviceBuffer<std::uint32_t> d_prefix_off(static_cast<std::size_t>(K));
+    {
+        std::size_t tb = 0;
+        STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(nullptr, tb, d_prefix_len.data(),
+                          d_prefix_off.data(), static_cast<std::int64_t>(K), stream));
+        DeviceBuffer<std::uint8_t> d_tmp(tb == 0 ? 1 : tb);
+        std::size_t tb2 = tb;
+        STEPPE_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(d_tmp.data(), tb2, d_prefix_len.data(),
+                          d_prefix_off.data(), static_cast<std::int64_t>(K), stream));
+    }
+
+    // total compact bytes = prefix_off[K-1] + prefix_len[K-1]  (last element each)
+    std::uint32_t last_off = 0, last_len = 0;
+    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&last_off, d_prefix_off.data() + (K - 1),
+                                      sizeof(std::uint32_t), cudaMemcpyDeviceToHost, stream));
+    STEPPE_CUDA_CHECK(cudaMemcpyAsync(&last_len, d_prefix_len.data() + (K - 1),
+                                      sizeof(std::uint32_t), cudaMemcpyDeviceToHost, stream));
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+    const std::size_t total = static_cast<std::size_t>(last_off) + last_len;
+
+    // --- gather the compact prefixes + bring the small metadata home ----------
+    DeviceBuffer<char> d_compact(total == 0 ? 1 : total);
+    {
+        meta_gather_kernel<<<static_cast<unsigned>(K), 128, 0, stream>>>(
+            text, d_nl.data(), K, static_cast<std::uint64_t>(scan_start),
+            d_prefix_off.data(), d_prefix_len.data(), d_compact.data());
+        STEPPE_CUDA_CHECK_KERNEL();
+    }
+
+    meta.nl.resize(static_cast<std::size_t>(K));
+    meta.prefix_off.resize(static_cast<std::size_t>(K));
+    meta.prefix_len.resize(static_cast<std::size_t>(K));
+    meta.field_count.resize(static_cast<std::size_t>(K));
+    meta.compact.resize(total);
+    d2h_async(meta.nl.data(), d_nl, static_cast<std::size_t>(K), stream);
+    d2h_async(meta.prefix_off.data(), d_prefix_off, static_cast<std::size_t>(K), stream);
+    d2h_async(meta.prefix_len.data(), d_prefix_len, static_cast<std::size_t>(K), stream);
+    d2h_async(meta.field_count.data(), d_field_count, static_cast<std::size_t>(K), stream);
+    if (total) d2h_async(meta.compact.data(), d_compact, total, stream);
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+    return meta;
 }
 
 }  // namespace
@@ -481,67 +674,159 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
             const bool last_batch = (bi >= n_blocks);
 
             BatchText bt = decompress_batch(filebuf, blocks, b0, bi, carry, stream);
-            const std::string& text = bt.host;
-            const std::size_t tsz = text.size();
+            const std::size_t tsz = bt.size;
 
-            // Parse only up to the last complete line; the tail becomes the carry.
-            std::size_t last_nl = text.rfind('\n');
-            std::size_t parse_end;
-            if (last_nl == std::string::npos) {
-                // No newline in the whole batch: either the header/line spans it
-                // (carry the lot) or, on the final batch, the file lacks a trailing
-                // newline (treat the buffer end as the line end).
-                if (last_batch && tsz > 0) {
-                    parse_end = tsz;
+            // --- resolve the #CHROM header once (batch 0 only) ------------------
+            // Only the header line needs the full-width tokenize (2504 sample IDs),
+            // and it happens exactly once. D2H a bounded window and parse ## + #CHROM
+            // exactly as the CPU reader does; `scan_start` = the first data byte.
+            std::size_t scan_start = 0;
+            if (!header_done) {
+                std::size_t win = std::min(tsz, static_cast<std::size_t>(8ull << 20));
+                std::string hbuf;
+                for (;;) {
+                    hbuf.resize(win);
+                    if (win) d2h_async(hbuf.data(), bt.d_text, win, stream);
+                    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    std::size_t p = 0;
+                    while (p < win) {
+                        const std::size_t nl = hbuf.find('\n', p);
+                        if (nl == std::string::npos) break;  // partial at window end -> grow
+                        std::string_view line(hbuf.data() + p, nl - p);
+                        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+                        if (line.rfind("##", 0) == 0) { p = nl + 1; continue; }
+                        if (!line.empty() && line[0] == '#') {
+                            const std::vector<std::string_view> h = vd::split(line, '\t');
+                            if (h.size() < 10) {
+                                throw std::runtime_error(
+                                    "read_vcf_panel_gpu: #CHROM header has no sample column in " +
+                                    vcf_path);
+                            }
+                            n_sample = h.size() - 9;
+                            n_hap = n_sample * 2;
+                            src_bpr = io::packed_bytes(n_hap);
+                            n_col = 9 + static_cast<int>(n_sample);
+                            max_col = static_cast<int>(h.size()) - 1;  // last sample column index
+                            out.sample_ids.clear();
+                            out.sample_ids.reserve(n_sample);
+                            for (std::size_t c = 9; c < h.size(); ++c) out.sample_ids.emplace_back(h[c]);
+                            header_done = true;
+                            scan_start = nl + 1;  // first DATA byte
+                            break;
+                        }
+                        // data before #CHROM (matches the CPU `if(!header_done) continue`)
+                        p = nl + 1;
+                    }
+                    if (header_done) break;
+                    if (win >= tsz) break;               // whole batch scanned, no #CHROM
+                    win = std::min(tsz, win * 4);        // header line spilled the window
+                }
+                if (!header_done) {
+                    throw std::runtime_error("read_vcf_panel_gpu: no #CHROM header found in " +
+                                             vcf_path);
+                }
+            }
+
+            // No data bytes past the header in this batch: carry nothing forward.
+            if (scan_start >= tsz) { carry.clear(); continue; }
+
+            // --- device: newline positions + compact 9-column metadata prefixes -
+            BatchMeta meta = extract_batch_meta(bt.d_text, scan_start, tsz, stream);
+            const long K = meta.n_rec;
+
+            // Set the carry (trailing partial after the last complete line) exactly
+            // like the CPU driver: dropped on the last batch, else carried forward.
+            std::size_t records = static_cast<std::size_t>(K);
+            bool final_no_nl = false;  // K==0 last batch: whole span is one unterminated line
+            if (K == 0) {
+                if (last_batch && tsz > scan_start) {
+                    final_no_nl = true;   // process [scan_start,tsz) as one final line
                     carry.clear();
                 } else {
-                    carry = text;
+                    // No complete line this batch: the whole span carries forward.
+                    std::string tail(tsz - scan_start, '\0');
+                    if (!tail.empty()) {
+                        STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                            tail.data(), bt.d_text.data() + scan_start, tail.size(),
+                            cudaMemcpyDeviceToHost, stream));
+                        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    }
+                    carry = std::move(tail);
                     continue;
                 }
             } else {
-                parse_end = last_nl + 1;              // include the last '\n'
-                carry = text.substr(last_nl + 1);     // trailing partial -> next batch
+                const std::size_t carry_start = static_cast<std::size_t>(meta.nl[K - 1]) + 1u;
+                if (last_batch) {
+                    carry.clear();
+                } else {
+                    std::string tail(tsz - carry_start, '\0');
+                    if (!tail.empty()) {
+                        STEPPE_CUDA_CHECK(cudaMemcpyAsync(
+                            tail.data(), bt.d_text.data() + carry_start, tail.size(),
+                            cudaMemcpyDeviceToHost, stream));
+                        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    }
+                    carry = std::move(tail);
+                }
             }
-            if (last_batch) carry.clear();
 
-            // --- per-batch host decision pass + emit list -----------------------
-            std::vector<std::uint64_t> emit_off;  // record line offset in bt.d_text
+            // --- per-record host decision pass + emit list ----------------------
+            // Replays the CPU serial loop body BYTE-FOR-BYTE, but each record is
+            // tokenized from its compact 9-column prefix (never the sample columns)
+            // and its field count comes from the device scan.
+            std::vector<std::uint64_t> emit_off;   // record line offset in bt.d_text
             std::vector<int> emit_gt_fi;
 
-            std::size_t p = 0;
-            while (p < parse_end) {
-                std::size_t nl = text.find('\n', p);
-                std::size_t end = (nl == std::string::npos) ? parse_end : nl;
-                const std::size_t line_off = p;
-                std::string_view line(text.data() + p, end - p);
-                p = (nl == std::string::npos) ? parse_end : nl + 1;
-                if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-
-                if (line.rfind("##", 0) == 0) continue;
-                if (!line.empty() && line[0] == '#') {
-                    // #CHROM header: resolve the sample columns (once).
-                    const std::vector<std::string_view> h = vd::split(line, '\t');
-                    if (h.size() < 10) {
-                        throw std::runtime_error(
-                            "read_vcf_panel_gpu: #CHROM header has no sample column in " + vcf_path);
+            // Handle the (essentially unreachable) final unterminated line by
+            // pulling just that one line's prefix through the same code path.
+            std::string final_prefix;
+            std::uint32_t final_fields = 0;
+            std::uint64_t final_start = 0;
+            if (final_no_nl) {
+                // One line [scan_start, tsz): D2H it and count its fields/prefix on
+                // the host (a single line — cost is irrelevant).
+                std::string line(tsz - scan_start, '\0');
+                STEPPE_CUDA_CHECK(cudaMemcpyAsync(line.data(), bt.d_text.data() + scan_start,
+                                                  line.size(), cudaMemcpyDeviceToHost, stream));
+                STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                std::string_view lv(line);
+                std::uint32_t tabs = 0, plen = static_cast<std::uint32_t>(lv.size());
+                bool have9 = false;
+                for (std::size_t j = 0; j < lv.size(); ++j) {
+                    if (lv[j] == '\t') {
+                        if (tabs == 8 && !have9) { plen = static_cast<std::uint32_t>(j); have9 = true; }
+                        ++tabs;
                     }
-                    n_sample = h.size() - 9;
-                    n_hap = n_sample * 2;
-                    src_bpr = io::packed_bytes(n_hap);
-                    n_col = 9 + static_cast<int>(n_sample);
-                    max_col = static_cast<int>(h.size()) - 1;  // last sample column index
-                    out.sample_ids.clear();
-                    out.sample_ids.reserve(n_sample);
-                    for (std::size_t c = 9; c < h.size(); ++c) out.sample_ids.emplace_back(h[c]);
-                    header_done = true;
-                    continue;
                 }
-                if (!header_done) continue;               // data before #CHROM (skip)
-                if (line.empty()) continue;
+                final_fields = tabs + 1u;
+                final_prefix.assign(lv.substr(0, plen));
+                final_start = scan_start;
+                records = 1;
+            }
 
-                const std::vector<std::string_view> f = vd::split(line, '\t');
-                if (static_cast<int>(f.size()) <= max_col) continue;  // truncated record
+            for (std::size_t m = 0; m < records; ++m) {
+                if (region_done) break;
+                std::size_t start;
+                std::string_view prefix;
+                int nfields;
+                if (final_no_nl) {
+                    start = static_cast<std::size_t>(final_start);
+                    prefix = std::string_view(final_prefix);
+                    nfields = static_cast<int>(final_fields);
+                } else {
+                    start = (m == 0) ? scan_start
+                                     : static_cast<std::size_t>(meta.nl[m - 1]) + 1u;
+                    prefix = std::string_view(meta.compact.data() + meta.prefix_off[m],
+                                              meta.prefix_len[m]);
+                    nfields = static_cast<int>(meta.field_count[m]);
+                }
+
+                if (nfields <= max_col) continue;  // truncated / empty (matches CPU)
                 ++counts.records_seen;
+
+                // Tokenize ONLY the 9-column prefix (CHROM..FORMAT) — never the 2504
+                // sample columns. f[0..8] are byte-identical to the CPU full-split.
+                const std::vector<std::string_view> f = vd::split(prefix, '\t');
 
                 const std::string_view chrom_sv = io::strip_chr(f[0]);
                 const auto pos_opt = vd::parse_int(f[1]);
@@ -586,7 +871,7 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
                 snptab.physpos.push_back(static_cast<double>(pos));
                 snptab.ref.push_back(ref[0]);
                 snptab.alt.push_back(alt[0]);
-                emit_off.push_back(static_cast<std::uint64_t>(line_off));
+                emit_off.push_back(static_cast<std::uint64_t>(start));
                 emit_gt_fi.push_back(gt_fi);
                 ++counts.emitted_sites;
                 last_pos = pos;
