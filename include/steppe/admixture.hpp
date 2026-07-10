@@ -39,6 +39,12 @@ enum class AdmixtureMode : int { Unsupervised = 0, Supervised = 1, Projection = 
 // per-SNP-mean F); Svd (the randomized-subspace warm start) is a Phase-2 follow-up.
 enum class AdmixtureInit : int { Random = 0, Svd = 1 };
 
+// EM acceleration. Squarem (default) wraps the untouched base EM map M in the SqS3 quasi-
+// Newton control layer (~8x fewer OUTER steps) and runs all restarts concurrently as one
+// batched-GEMM stack; Em forces the plain fixed-point loop (bit-identical to the base map,
+// one seed at a time). The accelerator is a SWAPPABLE layer over M, never baked into it.
+enum class AdmixtureAccel : int { Squarem = 0, Em = 1 };
+
 // AdmixtureParams — the run knobs (mode, K, RNG, loop caps, precision). Mode-specific inputs
 // (supervised labels, projection F + SNP ids) travel in AdmixtureInputs below.
 struct AdmixtureParams {
@@ -47,6 +53,7 @@ struct AdmixtureParams {
     unsigned long long seed = 42;               // RNG seed (recorded in meta)
     int seeds = 1;                              // random-restart count, best-loglik wins (unsupervised)
     AdmixtureInit init = AdmixtureInit::Random;
+    AdmixtureAccel accel = AdmixtureAccel::Squarem;  // SQUAREM (default) | plain EM
     int max_iter = 200;
     double tol = 1e-6;                          // stop on |dL| < tol*max(1,|L|)
     Precision precision = Precision::emulated_fp64();
@@ -68,7 +75,8 @@ struct AdmixtureResult {
     std::vector<char>   seed_converged;          // per-restart converged flag
     double best_loglik = 0.0;
     int    best_seed = 0;
-    int    iters_run = 0;
+    int    iters_run = 0;                         // accel steps (squarem) or EM iters (em)
+    int    base_map_evals = 0;                    // total base-EM-map evaluations (winner)
     bool   converged = false;
 
     long n_snp_total = 0;

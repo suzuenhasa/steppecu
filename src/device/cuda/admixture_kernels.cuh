@@ -53,6 +53,60 @@ void launch_admix_update_q(double* d_Q, const double* d_T2, const double* d_T1, 
 void launch_admix_loglik(const double* d_Gtile, const double* d_Vtile, const double* d_A, long N,
                          long t, double eps, double* d_ll, cudaStream_t stream);
 
+// ---------------------------------------------------------------------------------------------
+// SQUAREM + batched-restart layer (`--accel squarem`). S seeds run CONCURRENTLY as one resident
+// stack: every kernel below gains a leading batch dimension (blockIdx.z = seed) and a per-seed
+// stride, sharing the single seed-independent G/V decode. The SQUAREM control layer is a
+// SWAPPABLE wrapper over the SAME base map M — these primitives are the map's elementwise pieces
+// re-expressed batched, plus the three accelerator-only kernels (norms/combine/project). An
+// optional `d_active` mask (length S; nullptr = all active) freezes converged/settled seeds to
+// no-ops so the batch stays uniform for the strided-batched GEMMs. All buffers are column-major.
+
+// Batched binomial responsibilities. G/V are seed-independent (shared, indexed by the tile idx);
+// A/R2/R1 are the per-seed tile at stride `stride_tile` (= N*tileM). One block-z per seed.
+void launch_admix_responsibility_b(const double* d_Gtile, const double* d_Vtile, const double* d_A,
+                                   long N, long t, double eps, double* d_R2, double* d_R1, int S,
+                                   long stride_tile, cudaStream_t stream);
+
+// Batched multiplicative F-update. F stride = M*K; S2/S1 stride = K*M. Seeds with
+// d_active[s]==0 are skipped (frozen).
+void launch_admix_update_f_b(double* d_F, const double* d_S2, const double* d_S1, long M, int K,
+                             double eps, int S, long stride_F, long stride_S,
+                             const double* d_active, cudaStream_t stream);
+
+// Batched complement Fc = 1 - F over [M x K] per seed (stride = M*K). Frozen seeds skipped.
+void launch_admix_complement_b(const double* d_F, double* d_Fc, long MK, int S, long stride,
+                               const double* d_active, cudaStream_t stream);
+
+// Batched multiplicative Q-update + row-simplex renormalize. Q stride = N*K. Frozen seeds skipped.
+void launch_admix_update_q_b(double* d_Q, const double* d_T2, const double* d_T1, long N, int K,
+                             int S, long stride_Q, const double* d_active, cudaStream_t stream);
+
+// Batched log-likelihood: accumulates each seed's L into d_ll[s] (length S). A stride = N*tileM.
+void launch_admix_loglik_b(const double* d_Gtile, const double* d_Vtile, const double* d_A, long N,
+                           long t, double eps, double* d_ll, int S, long stride_tile,
+                           cudaStream_t stream);
+
+// SQUAREM fused norms: reads theta0/theta1/theta2 directly (no r,v materialize) and accumulates
+//   rr[s] += sum(theta1-theta0)^2,  vv[s] += sum(theta2-2*theta1+theta0)^2   (native FP64,
+// segmented by seed). Call once per state part (Q then F) into the SAME rr/vv (memset first).
+void launch_admix_squarem_norms(const double* d_t0, const double* d_t1, const double* d_t2,
+                                long len, long stride, double* d_rr, double* d_vv, int S,
+                                cudaStream_t stream);
+
+// SQUAREM extrapolation combine: out = c0*t0 + c1*t1 + c2*t2 with per-seed alpha (d_alpha[s]):
+//   c0=(1+a)^2, c1=-2a(1+a), c2=a^2  (alpha=-1 => (0,0,1) => out=t2 exactly). Frozen seeds skipped.
+void launch_admix_squarem_combine(const double* d_t0, const double* d_t1, const double* d_t2,
+                                  double* d_out, long len, long stride, const double* d_alpha,
+                                  const double* d_active, int S, cudaStream_t stream);
+
+// Feasibility projection of theta' before the stabilizing map. project_f: clamp F to [eps,1-eps]
+// + refresh Fc. project_q: per-row clamp-to-nonneg + row-renormalize (uniform 1/K on a dead row).
+void launch_admix_project_f(double* d_F, double* d_Fc, long MK, int S, long stride, double eps,
+                            const double* d_active, cudaStream_t stream);
+void launch_admix_project_q(double* d_Q, long N, int K, int S, long stride_Q,
+                            const double* d_active, cudaStream_t stream);
+
 }  // namespace steppe::device
 
 #endif  // STEPPE_DEVICE_CUDA_ADMIXTURE_KERNELS_CUH

@@ -140,7 +140,8 @@ AdmixtureResult run_admixture(const std::string& geno, const std::string& snp,
 
     const AdmixtureFit fit = be.admixture_fit(
         view, K, fixedF_ptr, fixedF_ptr ? M : 0, params.seed, params.seeds, params.max_iter,
-        params.tol, static_cast<int>(params.init), params.precision);
+        params.tol, static_cast<int>(params.init), static_cast<int>(params.accel),
+        params.precision);
     if (fit.status != Status::Ok) {
         res.status = fit.status;
         return res;
@@ -157,6 +158,7 @@ AdmixtureResult run_admixture(const std::string& geno, const std::string& snp,
     res.best_loglik = fit.best_loglik;
     res.best_seed = fit.best_seed;
     res.iters_run = fit.iters_run;
+    res.base_map_evals = fit.base_map_evals;
     res.converged = fit.converged;
     res.precision_tag = fit.precision_tag;
     res.status = Status::Ok;

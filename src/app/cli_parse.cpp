@@ -959,6 +959,8 @@ int run_cli(int argc, char** argv) {
     adm->add_option("--seeds", admixture_args.seeds,
                     "Random-restart count, best-loglik wins (unsupervised; default 1)");
     adm->add_option("--init", admixture_args.init, "Init: random (v1 default) | svd (Phase 2)");
+    adm->add_option("--accel", admixture_args.accel,
+                    "EM acceleration: squarem (default) | em (plain fixed-point)");
     adm->add_option("--max-iter", admixture_args.max_iter, "EM iteration cap (default 200)");
     adm->add_option("--tol", admixture_args.tol,
                     "Convergence tol on the relative log-lik delta (default 1e-6)");

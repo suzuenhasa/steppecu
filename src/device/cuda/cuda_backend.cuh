@@ -264,7 +264,7 @@ public:
     [[nodiscard]] AdmixtureFit admixture_fit(const DecodeTileView& tile, int K,
                                              const double* fixed_F, long fixed_F_M,
                                              unsigned long long seed, int seeds, int max_iter,
-                                             double tol, int init_mode,
+                                             double tol, int init_mode, int accel_mode,
                                              const Precision& precision) override;
 
     // qpfstats smoothing — reference §9

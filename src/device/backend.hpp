@@ -570,7 +570,8 @@ struct AdmixtureFit {
     double best_loglik = 0.0;
     int    best_seed = 0;
     int    N = 0, M = 0, K = 0;
-    int    iters_run = 0;
+    int    iters_run = 0;             // accel steps (squarem) or EM iters (em) for the winner
+    int    base_map_evals = 0;        // total base-EM-map evaluations for the winner
     bool   converged = false;
     Status status = Status::Ok;
     Precision::Kind precision_tag = Precision::Kind::Fp64;
@@ -859,9 +860,9 @@ public:
                                                      const double* fixed_F, long fixed_F_M,
                                                      unsigned long long seed, int seeds,
                                                      int max_iter, double tol, int init_mode,
-                                                     const Precision& precision) {
+                                                     int accel_mode, const Precision& precision) {
         (void)tile; (void)K; (void)fixed_F; (void)fixed_F_M; (void)seed; (void)seeds;
-        (void)max_iter; (void)tol; (void)init_mode; (void)precision;
+        (void)max_iter; (void)tol; (void)init_mode; (void)accel_mode; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::admixture_fit: not implemented by this backend");
     }

@@ -25,6 +25,7 @@ struct AdmixtureArgs {
     unsigned long long seed = 42;   // RNG seed (recorded in meta)
     int seeds = 1;                  // random-restart count, best-loglik wins (unsupervised)
     std::string init = "random";    // init: random (v1 default) | svd (Phase 2)
+    std::string accel = "squarem";  // EM acceleration: squarem (default) | em (plain fixed-point)
     int max_iter = 200;
     double tol = 1e-6;
     std::string supervised;         // --supervised FILE: labeled reference pop labels (one/line)

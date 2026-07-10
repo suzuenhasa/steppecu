@@ -885,9 +885,9 @@ public:
     [[nodiscard]] AdmixtureFit admixture_fit(const DecodeTileView& tile, int K,
                                              const double* fixed_F, long fixed_F_M,
                                              unsigned long long seed, int seeds, int max_iter,
-                                             double tol, int init_mode,
+                                             double tol, int init_mode, int accel_mode,
                                              const Precision& precision) override {
-        (void)init_mode; (void)precision;
+        (void)init_mode; (void)accel_mode; (void)precision;  // CPU oracle: plain EM only
         AdmixtureFit out;
         out.precision_tag = Precision::Kind::Fp64;
         const long N = static_cast<long>(tile.n_individuals);

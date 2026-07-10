@@ -176,6 +176,11 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
                      args.precision.c_str());
         return cfg::kExitInvalidConfig;
     }
+    if (args.accel != "squarem" && args.accel != "em") {
+        std::fprintf(stderr, "steppe admixture: --accel must be squarem | em (got '%s')\n",
+                     args.accel.c_str());
+        return cfg::kExitInvalidConfig;
+    }
     const bool supervised = !args.supervised.empty();
     const bool projection = !args.project_onto.empty();
     if (supervised && projection) {
@@ -191,6 +196,8 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
     params.max_iter = args.max_iter;
     params.tol = args.tol;
     params.init = (args.init == "svd") ? steppe::AdmixtureInit::Svd : steppe::AdmixtureInit::Random;
+    params.accel =
+        (args.accel == "em") ? steppe::AdmixtureAccel::Em : steppe::AdmixtureAccel::Squarem;
     params.precision =
         (args.precision == "fp64") ? steppe::Precision::fp64() : steppe::Precision::emulated_fp64();
 
@@ -305,6 +312,7 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
         os << "  \"seed\": " << args.seed << ",\n";
         os << "  \"seeds\": " << params.seeds << ",\n";
         os << "  \"init\": \"" << args.init << "\",\n";
+        os << "  \"accel\": \"" << args.accel << "\",\n";
         os << "  \"max_iter\": " << args.max_iter << ",\n";
         os << "  \"tol\": " << fmt_double(args.tol) << ",\n";
         os << "  \"precision\": \"" << args.precision << "\",\n";
@@ -313,6 +321,7 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
         os << "  \"best_seed\": " << r.best_seed << ",\n";
         os << "  \"best_loglik\": " << fmt_double(r.best_loglik) << ",\n";
         os << "  \"iters_run\": " << r.iters_run << ",\n";
+        os << "  \"base_map_evals\": " << r.base_map_evals << ",\n";
         os << "  \"converged\": " << (r.converged ? "true" : "false") << "\n";
         os << "}\n";
         if (!os.good()) {
@@ -322,10 +331,11 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
     }
 
     std::fprintf(stderr,
-                 "steppe admixture: %s mode, %d samples x %ld SNPs, K=%d; %s after %d iters "
-                 "(loglik=%s, best seed %d/%d) -> %sQ.tsv%s\n",
-                 mode_name(r.mode), r.N, r.n_snp_total, r.K,
+                 "steppe admixture: %s mode (accel=%s), %d samples x %ld SNPs, K=%d; %s after %d %s "
+                 "(%d base-EM-map evals; loglik=%s, best seed %d/%d) -> %sQ.tsv%s\n",
+                 mode_name(r.mode), args.accel.c_str(), r.N, r.n_snp_total, r.K,
                  r.converged ? "converged" : "stopped at --max-iter", r.iters_run,
+                 (args.accel == "em") ? "EM iters" : "accel steps", r.base_map_evals,
                  fmt_double(r.best_loglik).c_str(), r.best_seed, params.seeds, base.c_str(),
                  args.emit_F ? " F.tsv" : "");
     return cfg::kExitOk;
