@@ -146,6 +146,21 @@ struct FilterConfig {
     // intersection, the consumer-DNA f4-bias failure), the front-end refuses. Setting this
     // true acknowledges the mix and proceeds anyway. Reference §6.
     bool allow_mixed_ascertainment = false;
+
+    // Windowed-r2 LD pruning (--ld-prune WIN:STEP:R2). A variant-count sliding window (WIN
+    // variants wide, sliding STEP variants each shift) that greedily removes the higher-major-
+    // allele-frequency (== lower-MAF) variant of every within-window same-chromosome pair whose
+    // genotypic r^2 exceeds ld_prune_r2 — plink2 --indep-pairwise, default --indep-order 2 (the
+    // backward within-window scan). Runs AFTER the QC keep mask (on the survivors), on the GPU
+    // (device-resident pairwise r^2 + a host greedy selection). Inactive when any of the three is
+    // non-positive. Reference §6.
+    int ld_prune_window = 0;
+    int ld_prune_step = 0;
+    double ld_prune_r2 = 0.0;
+
+    [[nodiscard]] bool ld_prune_active() const noexcept {
+        return ld_prune_window > 0 && ld_prune_step > 0 && ld_prune_r2 > 0.0;
+    }
 };
 
 }  // namespace steppe

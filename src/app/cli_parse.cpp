@@ -130,6 +130,10 @@ void add_filter_flags(CLI::App* sub, CliArgs& a) {
                   "a different panel than the target)");
     sub->add_option("--emit-kept-snps", a.emit_kept_snps,
                     "Write the retained SNP ids (one per line) to this FILE after filtering");
+    sub->add_option("--ld-prune", a.ld_prune,
+                    "Windowed-r2 LD prune WIN:STEP:R2 (variant-count window, matches plink2 "
+                    "--indep-pairwise; e.g. 200:50:0.5). Runs after the QC filter; combine with "
+                    "--emit-kept-snps to dump the pruned set");
 }
 
 void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
@@ -1055,6 +1059,9 @@ int run_cli(int argc, char** argv) {
                   "Override the same-ascertainment guard (keep list from a different panel)");
     adm->add_option("--emit-kept-snps", admixture_args.emit_kept_snps,
                     "Write the retained SNP ids (one per line) to this FILE after filtering");
+    adm->add_option("--ld-prune", admixture_args.ld_prune,
+                    "Windowed-r2 LD prune WIN:STEP:R2 (variant-count window, matches plink2 "
+                    "--indep-pairwise; e.g. 200:50:0.5). Runs after the QC filter");
     adm->add_option("--precision", admixture_args.precision,
                     "GEMM precision: emu | fp64 (default emu; responsibility + loglik native FP64)");
     adm->add_option("--device", admixture_args.device, "CUDA device ordinal (default auto)");

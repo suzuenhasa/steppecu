@@ -140,6 +140,15 @@ public:
         const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
         std::span<const int> pairs_i, std::span<const int> pairs_j, bool sure) override;
 
+    // Windowed-r2 LD pruner (`--ld-prune WIN:STEP:R2`) — uploads the packed diploid tile, streams
+    // the SNP axis by tile decoding a SNP-major dosage pane, computes per-variant stats + every
+    // within-window same-chromosome pair's plink2 r^2 decision on-GPU, then runs the greedy
+    // backward-scan selection on the host. Returns one keep byte per SNP (1 = retained). See
+    // cuda_backend_ld_prune.cu and backend.hpp.
+    [[nodiscard]] std::vector<std::uint8_t> ld_prune_windowed(
+        const DecodeTileView& tile, std::span<const int> chrom, int window, int step,
+        double r2_thresh) override;
+
     // 2D joint site-frequency spectrum over a population pair (`steppe sfs`) — uploads the
     // packed tile, launches the joint-histogram kernel over the device tile, and D2H's only
     // the finished integer grid + the complete-site counter. Integer-count standalone stat.

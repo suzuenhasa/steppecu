@@ -47,6 +47,7 @@ struct AdmixtureArgs {
     std::string exclude_snps;       // --exclude-snps FILE
     bool allow_mixed_ascertainment = false;  // --allow-mixed-ascertainment
     std::string emit_kept_snps;     // --emit-kept-snps FILE
+    std::string ld_prune;           // --ld-prune WIN:STEP:R2 (windowed-r2 LD prune)
 };
 
 [[nodiscard]] int run_admixture_cmd(const AdmixtureArgs& args);

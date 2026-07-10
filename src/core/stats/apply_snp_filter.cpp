@@ -144,6 +144,42 @@ void subset_snptab(io::SnpTable& snptab, const std::vector<long>& kept_cols) {
 
 }  // namespace
 
+// Subset `tile` + `snptab` in lockstep to the kept SNP columns. A no-op (returns false) when the
+// mask keeps every column; otherwise repacks the 2-bit tile + subsets the table and returns true.
+bool subset_to_mask(io::GenotypeTile& tile, io::SnpTable& snptab,
+                    const std::vector<std::uint8_t>& keep, const char* what) {
+    const long M = static_cast<long>(tile.n_snp);
+    std::vector<long> kept_cols;
+    kept_cols.reserve(static_cast<std::size_t>(M));
+    for (long s = 0; s < M; ++s) {
+        if (keep[static_cast<std::size_t>(s)]) kept_cols.push_back(s);
+    }
+    if (kept_cols.empty()) {
+        throw std::invalid_argument(std::string(what) + " kept 0 of " + std::to_string(M) +
+                                    " SNPs — relax --maf / --geno-max-miss / --ld-prune / the keep list");
+    }
+    if (static_cast<long>(kept_cols.size()) == M) return false;  // kept everything: untouched
+    repack_tile_columns(tile, kept_cols);
+    subset_snptab(snptab, kept_cols);
+    return true;
+}
+
+// Windowed-r2 LD prune (--ld-prune) over the CURRENT (post-QC) tile: decode + pairwise r^2 on the
+// backend, greedy plink2 selection, returned as a per-SNP keep mask. See ld_prune_windowed.
+std::vector<std::uint8_t> ld_prune_mask(io::GenotypeTile& tile, io::SnpTable& snptab,
+                                        const FilterConfig& cfg, ComputeBackend& backend) {
+    const long M = static_cast<long>(tile.n_snp);
+    std::vector<int> chrom(static_cast<std::size_t>(M), 0);
+    for (long s = 0; s < M; ++s) {
+        const std::size_t si = static_cast<std::size_t>(s);
+        chrom[si] = si < snptab.chrom.size() ? snptab.chrom[si] : 0;
+    }
+    std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
+    const DecodeTileView view = make_decode_tile_view(tile, sample_ploidy, static_cast<int>(tile.n_pop()));
+    return backend.ld_prune_windowed(view, chrom, cfg.ld_prune_window, cfg.ld_prune_step,
+                                     cfg.ld_prune_r2);
+}
+
 SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, io::SnpTable& snptab,
                                   const FilterConfig& cfg, ComputeBackend& backend) {
     SnpFilterOutcome out;
@@ -165,34 +201,25 @@ SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, io::SnpTable& snptab,
         if (v.mixed) throw std::invalid_argument("same-ascertainment guard: " + v.reason);
     }
 
-    const std::vector<bool> keep = build_keep_mask(tile, snptab, cfg, backend, P, M);
-
-    std::vector<long> kept_cols;
-    kept_cols.reserve(static_cast<std::size_t>(M));
+    // Phase 1 — per-SNP QC keep mask (MAF / missing / monomorphic / class / membership). Applied
+    // FIRST so the LD pruner (Phase 2) runs on the QC survivors, matching the usual QC-then-prune
+    // order and keeping each stage's math a pure SNP-subset of the tool's kernels.
+    const std::vector<bool> keep_bool = build_keep_mask(tile, snptab, cfg, backend, P, M);
+    std::vector<std::uint8_t> keep(static_cast<std::size_t>(M));
     for (long s = 0; s < M; ++s) {
-        if (keep[static_cast<std::size_t>(s)]) kept_cols.push_back(s);
+        keep[static_cast<std::size_t>(s)] = keep_bool[static_cast<std::size_t>(s)] ? 1u : 0u;
     }
-    const long n_kept = static_cast<long>(kept_cols.size());
-    out.n_kept = n_kept;
+    if (subset_to_mask(tile, snptab, keep, "per-SNP QC filter")) out.applied = true;
 
-    if (n_kept <= 0) {
-        throw std::invalid_argument(
-            "per-SNP QC filter kept 0 of " + std::to_string(M) +
-            " SNPs — relax --maf / --geno-max-miss / the keep list");
-    }
-
-    // Always report the retained ids (for --emit-kept-snps), whether or not a repack was needed.
-    out.kept_ids.reserve(static_cast<std::size_t>(n_kept));
-    for (const long s : kept_cols) {
-        const std::size_t si = static_cast<std::size_t>(s);
-        out.kept_ids.push_back(si < snptab.id.size() ? snptab.id[si] : std::string());
+    // Phase 2 — windowed-r2 LD prune over the survivors (the one genuinely-new GPU kernel).
+    if (cfg.ld_prune_active()) {
+        const std::vector<std::uint8_t> ld_keep = ld_prune_mask(tile, snptab, cfg, backend);
+        if (subset_to_mask(tile, snptab, ld_keep, "--ld-prune")) out.applied = true;
     }
 
-    if (n_kept == M) return out;  // mask kept everything: leave the tile/SnpTable untouched
-
-    repack_tile_columns(tile, kept_cols);
-    subset_snptab(snptab, kept_cols);
-    out.applied = true;
+    // The surviving SnpTable ids ARE the final kept set (used for --emit-kept-snps).
+    out.n_kept = static_cast<long>(tile.n_snp);
+    out.kept_ids.assign(snptab.id.begin(), snptab.id.end());
     return out;
 }
 

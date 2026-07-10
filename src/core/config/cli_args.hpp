@@ -186,6 +186,7 @@ struct CliArgs {
     std::optional<std::string> exclude_snps; // FILE of SNP ids to drop
     std::optional<bool>   allow_mixed_ascertainment;  // override the same-ascertainment guard
     std::optional<std::string> emit_kept_snps;        // write the retained SNP ids here
+    std::optional<std::string> ld_prune;              // windowed-r2 LD prune "WIN:STEP:R2"
 
     // extract-f2 run controls — reference §14
     std::optional<std::string> tier;

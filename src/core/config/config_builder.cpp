@@ -199,6 +199,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.exclude_snps, args.exclude_snps);
     take_b(merged_.allow_mixed_ascertainment, args.allow_mixed_ascertainment);
     take(merged_.emit_kept_snps, args.emit_kept_snps);
+    take(merged_.ld_prune, args.ld_prune);
     take_b(merged_.dry_run, args.dry_run);
     take_b(merged_.hash_source, args.hash_source);
     take_i(merged_.numstart, args.numstart);
@@ -438,6 +439,11 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         flt.allow_mixed_ascertainment = *merged_.allow_mixed_ascertainment;
     }
     if (merged_.emit_kept_snps.has_value()) cfg.emit_kept_snps_ = *merged_.emit_kept_snps;
+    // Windowed-r2 LD prune "WIN:STEP:R2" (variant-count window; plink2 --indep-pairwise).
+    if (merged_.ld_prune.has_value() && !merged_.ld_prune->empty()) {
+        std::string lderr;
+        if (!io::filter::parse_ld_prune_spec(*merged_.ld_prune, flt, lderr)) return fail(lderr);
+    }
 
     {
         int modes_set = 0;

@@ -227,6 +227,13 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
             return cfg::kExitInvalidConfig;
         }
     }
+    if (!args.ld_prune.empty()) {
+        std::string lderr;
+        if (!steppe::io::filter::parse_ld_prune_spec(args.ld_prune, params.filter, lderr)) {
+            std::fprintf(stderr, "steppe admixture: %s\n", lderr.c_str());
+            return cfg::kExitInvalidConfig;
+        }
+    }
 
     if (projection) {
         params.mode = steppe::AdmixtureMode::Projection;

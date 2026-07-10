@@ -800,6 +800,27 @@ public:
             "(the GPU-only KING pair sweep requires a CUDA backend)");
     }
 
+    // ld_prune_windowed: windowed-r2 LD pruning (`--ld-prune WIN:STEP:R2`), the plink2
+    // --indep-pairwise analogue. Uploads the packed diploid tile device-resident and SNP-tiles a
+    // transposed (SNP-major) dosage decode; per variant it reduces the global {nm, Σg, Σg²} (=>
+    // major-allele frequency + a monomorphic flag) and, for every within-`window` same-chromosome
+    // pair (index distance 1..window-1), computes plink2's exact pairwise-complete integer r^2
+    // decision cov12² > r2*(1+eps)*var1*var2 (pairwise deletion, no mean-imputation). Only the
+    // per-SNP stats + the per-pair boolean flags cross PCIe. It then runs plink2's greedy backward
+    // within-window scan (default --indep-order 2): remove the higher-major-freq (lower-MAF)
+    // variant of each over-threshold pair, ties remove the later variant, monomorphic variants are
+    // pre-removed; the window slides by `step` and resets at each chromosome boundary. Returns one
+    // keep byte per SNP (1 = retained, in tile SNP order). `chrom` is the per-SNP chromosome code
+    // (the window-reset key). Default: throw (GPU-only, like the KING/FST pair sweeps).
+    [[nodiscard]] virtual std::vector<std::uint8_t> ld_prune_windowed(
+        const DecodeTileView& tile, std::span<const int> chrom, int window, int step,
+        double r2_thresh) {
+        (void)tile; (void)chrom; (void)window; (void)step; (void)r2_thresh;
+        throw std::runtime_error(
+            "ComputeBackend::ld_prune_windowed: not implemented by this backend "
+            "(the GPU-only windowed-r2 LD pruner requires a CUDA backend)");
+    }
+
     // joint_sfs_2pop: the 2D joint site-frequency spectrum over the population pair (tile
     // pop indices popA, popB) accumulated by a GPU joint-histogram over the device-resident
     // genotype tile — the SAME per-pop A1-copy fold the FST path uses, fed into a joint
