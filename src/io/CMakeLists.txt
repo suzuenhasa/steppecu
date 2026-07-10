@@ -29,7 +29,8 @@ add_library(steppe_io STATIC
     likelihood_tensor_writer.cpp
     filter/include_exclude.cpp
     filter/snp_filter.cpp
-    filter/mind_prepass.cpp)
+    filter/mind_prepass.cpp
+    filter/ascertainment.cpp)
 add_library(steppe::io ALIAS steppe_io)
 
 # Include root — reference §4

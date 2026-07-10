@@ -179,7 +179,8 @@ int run_pca_command(const cfg::RunConfig& config) {
         result = run_pca(triple.geno, triple.snp, triple.ind,
                          std::span<const std::string>(pops), k, config.device().precision,
                          resources, std::span<const std::string>(project_pops),
-                         std::span<const std::string>(project_samples), project_mode);
+                         std::span<const std::string>(project_samples), project_mode,
+                         config.filter());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe pca: input/device error: %s\n", e.what());
         return exit_code_for_caught(e);
@@ -205,6 +206,10 @@ int run_pca_command(const cfg::RunConfig& config) {
                      "steppe pca: %d reference + %d projected (lsqproject %s) samples\n",
                      result.n_ref, result.N - result.n_ref,
                      project_mode == steppe::PcaProjectMode::Scaled ? "scaled" : "lsq");
+    }
+
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "pca")) {
+        return cfg::kExitIoError;
     }
 
     // The self-contained interactive HTML artifact (separate write path; combinable with --out).

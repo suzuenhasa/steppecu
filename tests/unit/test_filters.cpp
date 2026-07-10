@@ -34,8 +34,9 @@
 #include <system_error>
 #include <vector>
 
+#include "io/filter/ascertainment.hpp"     // classify_snp_id / check_same_ascertainment
 #include "io/filter/filter_decision.hpp"   // the shared predicates (single source)
-#include "io/filter/snp_filter.hpp"        // derive_per_snp_summary / build_snp_keep_mask / snp_keep_decision
+#include "io/filter/snp_filter.hpp"        // derive_per_snp_summary / build_snp_keep_mask / snp_keep_decision / filter_is_active
 #include "io/filter/include_exclude.hpp"   // SnpMembership
 #include "io/filter/mind_prepass.hpp"      // run_mind_prepass
 #include "io/snp_reader.hpp"               // SnpTable
@@ -725,9 +726,83 @@ void write_text(const std::filesystem::path& path, const std::string& body) {
     return true;
 }
 
+// filter_is_active: strand-mode alone is NOT a trigger (so a default FilterConfig is inactive
+// and the front-end stays byte-identical); every genuine subset knob IS.
+bool test_filter_is_active() {
+    if (filter_is_active(FilterConfig{})) return false;               // all defaults -> inactive
+    { FilterConfig c; c.strand_mode = steppe::StrandMode::Drop; if (filter_is_active(c)) return false; }
+    { FilterConfig c; c.strand_mode = steppe::StrandMode::Keep; if (filter_is_active(c)) return false; }
+    { FilterConfig c; c.maf_min = 0.05; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.geno_max_missing = 0.9; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.autosomes_only = true; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.drop_monomorphic = true; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.transversions_only = true; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.include_snp_ids = {"rs1"}; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.exclude_snp_ids = {"rs1"}; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.prune_in_path = "x.in"; if (!filter_is_active(c)) return false; }
+    { FilterConfig c; c.maf_min = 0.0; c.geno_max_missing = 1.0; if (filter_is_active(c)) return false; }
+    return true;
+}
+
+// classify_snp_id: rsID / chr:pos / array-probe / other namespaces.
+bool test_classify_snp_id() {
+    if (classify_snp_id("rs3094315") != IdNamespace::RsId) return false;
+    if (classify_snp_id("RS12") != IdNamespace::RsId) return false;
+    if (classify_snp_id("1:752566") != IdNamespace::ChrPos) return false;
+    if (classify_snp_id("chr1:752566:G:A") != IdNamespace::ChrPos) return false;
+    if (classify_snp_id("i5000940") != IdNamespace::Probe) return false;      // 23andMe internal
+    if (classify_snp_id("GSA-rs123") != IdNamespace::Probe) return false;
+    if (classify_snp_id("AX-11086525") != IdNamespace::Probe) return false;
+    if (classify_snp_id("exm12345") != IdNamespace::Probe) return false;
+    if (classify_snp_id("affx-1234") != IdNamespace::Probe) return false;
+    if (classify_snp_id("rsBAD") != IdNamespace::Other) return false;          // rs + non-digits
+    if (classify_snp_id("SNP_A_1") != IdNamespace::Other) return false;
+    // Plurality on a set.
+    if (classify_ascertainment({"rs1", "rs2", "rs3", "1:5"}).dominant != IdNamespace::RsId)
+        return false;
+    return true;
+}
+
+// check_same_ascertainment: a subset list (⊆ target) is NOT a mix; a cross-panel list (mostly
+// absent from the target) IS, with a populated reason. Empty external list -> not mixed.
+bool test_same_ascertainment_guard() {
+    const std::vector<std::string> target = {"rs1", "rs2", "rs3", "rs4", "rs5",
+                                             "rs6", "rs7", "rs8", "rs9", "rs10"};
+    // A genuine restrict-to-subset list: fully contained -> not mixed.
+    {
+        const AscertainmentVerdict v =
+            check_same_ascertainment(target, {"rs2", "rs4", "rs6"});
+        if (v.mixed) return false;
+        if (!(v.present_frac > 0.999)) return false;
+    }
+    // A cross-panel list: mostly foreign to the target -> mixed, reason populated.
+    {
+        const AscertainmentVerdict v = check_same_ascertainment(
+            target, {"rsX1", "rsX2", "rsX3", "rsX4", "rs1"});  // 1 of 5 present = 0.2 < 0.5
+        if (!v.mixed) return false;
+        if (v.reason.empty()) return false;
+        if (v.external_present != 1 || v.external_total != 5) return false;
+    }
+    // No external list: never a mix.
+    {
+        const AscertainmentVerdict v = check_same_ascertainment(target, {});
+        if (v.mixed) return false;
+    }
+    // Exactly at the floor (0.5) is NOT mixed (< is strict).
+    {
+        const AscertainmentVerdict v =
+            check_same_ascertainment(target, {"rs1", "rs2", "zzz1", "zzz2"});  // 2/4 = 0.5
+        if (v.mixed) return false;
+    }
+    return true;
+}
+
 struct Case { const char* name; bool (*fn)(); };
 
 constexpr Case kCases[] = {
+    {"filter_is_active (strand alone is not a trigger; subset knobs are)", test_filter_is_active},
+    {"classify_snp_id (rsID / chr:pos / probe / other)", test_classify_snp_id},
+    {"same-ascertainment guard (subset ok; cross-panel refused)", test_same_ascertainment_guard},
     {"MAF boundary (>= inclusive; no-op at 0)", test_maf_boundary},
     {"geno boundary (<= inclusive; no-op at 1)", test_geno_boundary},
     {"mind boundary (<= inclusive; no-op at 1)", test_mind_boundary},

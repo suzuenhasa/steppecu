@@ -42,6 +42,10 @@ struct KinshipResult {
     std::size_t emitted = 0;           // rows returned (after the --min-kinship filter)
     long        autosomal_snps = 0;    // autosomal SNPs in the mask (informational)
     bool capped = false;               // refused: C(N,2) > the maxcomb cap and no --sure
+
+    // SNP ids retained by the QC filter (kept order); empty when no filter was active.
+    std::vector<std::string> kept_snp_ids;
+
     Status status = Status::Ok;
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
@@ -54,7 +58,7 @@ struct KinshipResult {
 [[nodiscard]] KinshipResult run_kinship_all_pairs(
     const std::string& geno, const std::string& snp, const std::string& ind,
     const std::optional<std::vector<std::string>>& samples, double min_kinship, bool sure,
-    device::Resources& resources);
+    device::Resources& resources, const FilterConfig& filter = FilterConfig{});
 
 // run_kinship_pairs — the targeted (biobank-scale) KING driver over an EXPLICIT pair list
 // (each pair a {id1, id2} of Genetic IDs). Same decode-once path; the pair sweep walks the
@@ -64,7 +68,7 @@ struct KinshipResult {
     const std::string& geno, const std::string& snp, const std::string& ind,
     const std::optional<std::vector<std::string>>& samples,
     const std::vector<std::pair<std::string, std::string>>& pairs, double min_kinship,
-    device::Resources& resources);
+    device::Resources& resources, const FilterConfig& filter = FilterConfig{});
 
 }  // namespace steppe
 

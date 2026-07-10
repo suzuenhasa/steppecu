@@ -46,17 +46,22 @@ struct FstResult {
     double fst_mean = 0.0;                   // unweighted mean of per-SNP fst (secondary)
     long n_valid = 0;
 
+    // SNP ids retained by the QC filter (kept order); empty when no filter was active.
+    std::vector<std::string> kept_snp_ids;
+
     Status status = Status::Ok;
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
-// run_fst — the pairwise per-SNP WC FST driver. popA/popB are .ind population labels.
+// run_fst — the pairwise per-SNP WC FST driver. popA/popB are .ind population labels. `filter`
+// subsets the SNP axis before the WC accumulation; an inactive (default) filter is a no-op.
 [[nodiscard]] FstResult run_fst(const std::string& geno,
                                 const std::string& snp,
                                 const std::string& ind,
                                 const std::string& popA,
                                 const std::string& popB,
-                                device::Resources& resources);
+                                device::Resources& resources,
+                                const FilterConfig& filter = FilterConfig{});
 
 // FstMatrixResult — the all-pairs (P x P) genome-wide WC FST matrix. Every cell (i,j) is
 // the ratio-of-averages fst_ratio = Σnum/Σden the single-pair path reports for that pair
@@ -74,6 +79,10 @@ struct FstMatrixResult {
 
     std::size_t enumerated = 0;       // C(P,2) pairs enumerated
     bool capped = false;              // refused: C(P,2) > the maxcomb cap and no --sure
+
+    // SNP ids retained by the QC filter (kept order); empty when no filter was active.
+    std::vector<std::string> kept_snp_ids;
+
     Status status = Status::Ok;
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
@@ -90,7 +99,8 @@ struct FstMatrixResult {
                                                 const std::vector<std::string>& pops,
                                                 int min_n,
                                                 bool sure,
-                                                device::Resources& resources);
+                                                device::Resources& resources,
+                                                const FilterConfig& filter = FilterConfig{});
 
 }  // namespace steppe
 

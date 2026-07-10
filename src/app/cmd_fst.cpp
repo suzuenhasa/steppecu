@@ -154,7 +154,7 @@ int run_fst_all_pairs_command(const cfg::RunConfig& config) {
         device::Resources resources = device::build_resources(config.device());
         if (!require_first_gpu(resources, "fst")) return cfg::kExitRuntimeError;
         result = run_fst_all_pairs(triple.geno, triple.snp, triple.ind, pops, min_n,
-                                   config.sweep_sure(), resources);
+                                   config.sweep_sure(), resources, config.filter());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe fst: input/device error: %s\n", e.what());
         return exit_code_for_caught(e);
@@ -181,6 +181,10 @@ int run_fst_all_pairs_command(const cfg::RunConfig& config) {
                  "steppe fst --all-pairs: %zu populations, %zu pairs -> %zux%zu WC FST matrix "
                  "(genome-wide ratio-of-averages over autosomes)\n",
                  result.pops.size(), result.enumerated, result.pops.size(), result.pops.size());
+
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "fst")) {
+        return cfg::kExitIoError;
+    }
 
     if (const auto rc = emit_to_destination(
             config, "fst", [&](std::ostream& os, OutputFormat fmt) {
@@ -230,7 +234,8 @@ int run_fst_command(const cfg::RunConfig& config) {
     try {
         device::Resources resources = device::build_resources(config.device());
         if (!require_first_gpu(resources, "fst")) return cfg::kExitRuntimeError;
-        result = run_fst(triple.geno, triple.snp, triple.ind, pops[0], pops[1], resources);
+        result = run_fst(triple.geno, triple.snp, triple.ind, pops[0], pops[1], resources,
+                         config.filter());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe fst: input/device error: %s\n", e.what());
         return exit_code_for_caught(e);
@@ -248,6 +253,10 @@ int run_fst_command(const cfg::RunConfig& config) {
                  "autosomal sites (mean per-SNP = %.6f)\n",
                  result.popA.c_str(), result.popB.c_str(), result.fst_ratio, result.n_valid,
                  result.fst_mean);
+
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "fst")) {
+        return cfg::kExitIoError;
+    }
 
     const bool per_snp = config.fst_per_snp();
     if (const auto rc = emit_to_destination(

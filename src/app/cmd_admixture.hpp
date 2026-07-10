@@ -36,6 +36,17 @@ struct AdmixtureArgs {
     std::string device;             // CUDA device ordinal (default auto)
     std::string out_dir;            // output directory [required]
     std::string format = "tsv";     // field separator: tsv | csv
+
+    // Per-SNP QC filter (the Phase-0 common-variant front-end). Strand-ambiguous SNPs are kept
+    // (single-file analysis) and there is no autosome-only default; MAF defaults common-variant.
+    double maf = 0.05;              // --maf minor-allele-frequency floor (--maf 0 disables)
+    double geno_max_miss = 1.0;     // --geno-max-miss per-SNP per-individual missing cap
+    bool drop_mono = false;         // --drop-mono
+    bool autosomes_only = false;    // --auto-only
+    std::string keep_snps;          // --keep-snps FILE (prune.in-style restrict list)
+    std::string exclude_snps;       // --exclude-snps FILE
+    bool allow_mixed_ascertainment = false;  // --allow-mixed-ascertainment
+    std::string emit_kept_snps;     // --emit-kept-snps FILE
 };
 
 [[nodiscard]] int run_admixture_cmd(const AdmixtureArgs& args);

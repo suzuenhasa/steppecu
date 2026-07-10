@@ -55,9 +55,13 @@ struct PcaResult {
     std::vector<double> eigenvalues;   // length K, descending (== allel singular-value^2)
     std::vector<double> var_explained; // length K, eigenvalue_k / Σ_all eigenvalues
 
-    long n_snp_total = 0;              // SNPs in the kept tile
+    long n_snp_total = 0;              // SNPs in the kept tile (AFTER the QC filter subset)
     long n_snp_used = 0;              // polymorphic, non-empty SNPs (standardized columns)
     long n_snp_monomorphic = 0;       // n_snp_total - n_snp_used (mono/all-missing, dropped)
+
+    // The SNP ids retained by the QC filter (in kept order); empty when no filter was active.
+    // Surfaced for --emit-kept-snps (the bring-your-own prune.in / gate hand-off).
+    std::vector<std::string> kept_snp_ids;
 
     // Per-sample identity in tile (row) order — the join key for the oracle gate.
     std::vector<std::string> sample_id;
@@ -89,7 +93,8 @@ struct PcaResult {
                                 device::Resources& resources,
                                 std::span<const std::string> project_pops = {},
                                 std::span<const std::string> project_samples = {},
-                                PcaProjectMode project_mode = PcaProjectMode::Lsq);
+                                PcaProjectMode project_mode = PcaProjectMode::Lsq,
+                                const FilterConfig& filter = FilterConfig{});
 
 }  // namespace steppe
 

@@ -9,6 +9,7 @@
 #include "core/config/config_builder.hpp"
 
 #include "core/internal/index_cast.hpp"
+#include "io/filter/include_exclude.hpp"
 #include "io/genotype_source.hpp"
 
 #include <algorithm>
@@ -194,6 +195,10 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.drop_monomorphic, args.drop_monomorphic);
     take_b(merged_.transversions_only, args.transversions_only);
     take(merged_.strand_mode, args.strand_mode);
+    take(merged_.keep_snps, args.keep_snps);
+    take(merged_.exclude_snps, args.exclude_snps);
+    take_b(merged_.allow_mixed_ascertainment, args.allow_mixed_ascertainment);
+    take(merged_.emit_kept_snps, args.emit_kept_snps);
     take_b(merged_.dry_run, args.dry_run);
     take_b(merged_.hash_source, args.hash_source);
     take_i(merged_.numstart, args.numstart);
@@ -368,6 +373,17 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.se_require_p.has_value()) opt.se_require_p = *merged_.se_require_p;
 
     FilterConfig& flt = cfg.filter_;
+    // Common-variant defaults for the standalone population-genetic tools (pca/fst/kinship;
+    // gated vs scikit-allel/plink2/PCAngsd, NOT AT2): a MAF floor collapses the rare/monomorphic
+    // tail that makes these noisy on modern dense data, and strand-ambiguous SNPs are KEPT
+    // (single-file analyses have no cross-panel merge to protect). The explicit --maf /
+    // --strand-mode below still win; autosome-only stays opt-in (--auto-only) since the tools
+    // already layer their own autosome summary masks.
+    if (merged_.command == Command::Pca || merged_.command == Command::Fst ||
+        merged_.command == Command::Kinship) {
+        flt.maf_min = 0.05;
+        flt.strand_mode = StrandMode::Keep;
+    }
     if (merged_.maf.has_value()) {
         if (*merged_.maf < 0.0 || *merged_.maf > 0.5) return fail("--maf must lie in [0, 0.5]");
         flt.maf_min = *merged_.maf;
@@ -406,6 +422,22 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         }
         flt.strand_mode = *mode;
     }
+    // Membership + same-ascertainment guard. --keep-snps reuses the lazy prune.in reader;
+    // --exclude-snps is read eagerly into the drop set here.
+    if (merged_.keep_snps.has_value() && !merged_.keep_snps->empty()) {
+        flt.prune_in_path = *merged_.keep_snps;
+    }
+    if (merged_.exclude_snps.has_value() && !merged_.exclude_snps->empty()) {
+        try {
+            io::filter::read_snp_id_list(*merged_.exclude_snps, flt.exclude_snp_ids);
+        } catch (const std::exception& e) {
+            return fail(std::string("--exclude-snps: ") + e.what());
+        }
+    }
+    if (merged_.allow_mixed_ascertainment.has_value()) {
+        flt.allow_mixed_ascertainment = *merged_.allow_mixed_ascertainment;
+    }
+    if (merged_.emit_kept_snps.has_value()) cfg.emit_kept_snps_ = *merged_.emit_kept_snps;
 
     {
         int modes_set = 0;

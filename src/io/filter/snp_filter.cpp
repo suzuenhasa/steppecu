@@ -102,4 +102,10 @@ std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
     return keep;
 }
 
+bool filter_is_active(const FilterConfig& cfg) noexcept {
+    return cfg.maf_min > 0.0 || cfg.geno_max_missing < 1.0 || cfg.autosomes_only ||
+           cfg.drop_monomorphic || cfg.transversions_only || !cfg.include_snp_ids.empty() ||
+           !cfg.exclude_snp_ids.empty() || !cfg.prune_in_path.empty();
+}
+
 }  // namespace steppe::io::filter

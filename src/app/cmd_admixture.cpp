@@ -22,6 +22,7 @@
 #include "core/config/exit_code.hpp"
 #include "device/backend.hpp"
 #include "device/backend_factory.hpp"
+#include "io/filter/include_exclude.hpp"
 #include "io/genotype_source.hpp"
 #include "steppe/admixture.hpp"
 #include "steppe/config.hpp"
@@ -201,6 +202,32 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
     params.precision =
         (args.precision == "fp64") ? steppe::Precision::fp64() : steppe::Precision::emulated_fp64();
 
+    // Per-SNP QC filter (Phase-0 common-variant front-end). Strand-ambiguous SNPs are kept.
+    if (args.maf < 0.0 || args.maf > 0.5) {
+        std::fprintf(stderr, "steppe admixture: --maf must lie in [0, 0.5] (got %g)\n", args.maf);
+        return cfg::kExitInvalidConfig;
+    }
+    if (args.geno_max_miss < 0.0 || args.geno_max_miss > 1.0) {
+        std::fprintf(stderr, "steppe admixture: --geno-max-miss must lie in [0, 1] (got %g)\n",
+                     args.geno_max_miss);
+        return cfg::kExitInvalidConfig;
+    }
+    params.filter.maf_min = args.maf;
+    params.filter.geno_max_missing = args.geno_max_miss;
+    params.filter.drop_monomorphic = args.drop_mono;
+    params.filter.autosomes_only = args.autosomes_only;
+    params.filter.strand_mode = steppe::StrandMode::Keep;
+    params.filter.allow_mixed_ascertainment = args.allow_mixed_ascertainment;
+    if (!args.keep_snps.empty()) params.filter.prune_in_path = args.keep_snps;
+    if (!args.exclude_snps.empty()) {
+        try {
+            steppe::io::filter::read_snp_id_list(args.exclude_snps, params.filter.exclude_snp_ids);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe admixture: --exclude-snps: %s\n", e.what());
+            return cfg::kExitInvalidConfig;
+        }
+    }
+
     if (projection) {
         params.mode = steppe::AdmixtureMode::Projection;
         std::string err;
@@ -282,6 +309,16 @@ int run_admixture_cmd(const AdmixtureArgs& args) {
     std::error_code ec;
     std::filesystem::create_directories(args.out_dir, ec);
     const std::string base = args.out_dir + "/";
+    if (!args.emit_kept_snps.empty()) {
+        std::ofstream ks(args.emit_kept_snps, std::ios::trunc);
+        for (const std::string& id : r.kept_snp_ids) ks << id << "\n";
+        ks.flush();
+        if (!ks.good()) {
+            std::fprintf(stderr, "steppe admixture: failed to write --emit-kept-snps file: %s\n",
+                         args.emit_kept_snps.c_str());
+            return cfg::kExitIoError;
+        }
+    }
     if (!write_q_table(base + "Q.tsv", r, sep)) {
         std::fprintf(stderr, "steppe admixture: failed to write Q.tsv\n");
         return cfg::kExitIoError;

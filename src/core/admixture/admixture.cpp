@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/internal/decode_af.hpp"
+#include "core/stats/apply_snp_filter.hpp"
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
@@ -45,7 +46,12 @@ AdmixtureResult run_admixture(const std::string& geno, const std::string& snp,
         sel.min_n = 1;
     }
 
-    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    // Per-SNP QC filter: subset the SNP axis (individuals untouched) BEFORE the fixed-F build
+    // and the block-EM, so a filtered run's Q is bit-exact vs an externally pre-subset triple
+    // under deterministic EM. Throws on a same-ascertainment refusal / an all-filtered set.
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, params.filter, be);
+    res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const int P = static_cast<int>(tile.n_pop());
     const long N = static_cast<long>(tile.n_individuals);

@@ -49,6 +49,7 @@ add_library(steppe_core STATIC
     stats/ancibd_segments.cpp
     stats/roh_segments.cpp
     stats/decode_keep_autosomes.cpp
+    stats/apply_snp_filter.cpp
     stats/read_canonical_tile.cpp
     stats/genotype_front_end.cpp
     stats/read_vcf_panel_front_end.cpp

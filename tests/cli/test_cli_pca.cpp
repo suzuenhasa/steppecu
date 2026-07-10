@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
     const std::filesystem::path co = tmp / "steppe_pca.tsv";
     const std::filesystem::path ho = tmp / "steppe_pca.html";
     std::vector<std::string> args = {"pca", "--prefix", bed_prefix, "-k", std::to_string(K),
-                                     "--format", "tsv", "--device", "0",
+                                     "--maf", "0", "--format", "tsv", "--device", "0",
                                      "--out", co.string(), "--emit-html", ho.string()};
     if (!pops_line.empty() && pops_line != "ALL") { args.push_back("--pops"); args.push_back(pops_line); }
     const RunResult rr = run_steppe(steppe_bin, args, tmp);

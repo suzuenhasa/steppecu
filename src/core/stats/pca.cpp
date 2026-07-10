@@ -25,6 +25,7 @@
 
 #include "core/internal/decode_af.hpp"
 #include "core/internal/primary_backend.hpp"
+#include "core/stats/apply_snp_filter.hpp"
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
@@ -39,7 +40,8 @@ namespace steppe {
 PcaResult run_pca(const std::string& geno, const std::string& snp, const std::string& ind,
                   std::span<const std::string> pops, int k, const Precision& precision,
                   device::Resources& resources, std::span<const std::string> project_pops,
-                  std::span<const std::string> project_samples, PcaProjectMode project_mode) {
+                  std::span<const std::string> project_samples, PcaProjectMode project_mode,
+                  const FilterConfig& filter) {
     PcaResult res;
     res.precision_tag = Precision::Kind::Fp64;
 
@@ -78,7 +80,12 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
         sel.min_n = 1;
     }
 
-    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    // Per-SNP QC filter: subset the SNP axis in place BEFORE the decode view, so the covariance
+    // (hence the eigenvectors, up to per-component sign) is bit-exact vs an externally pre-subset
+    // triple. Throws on a same-ascertainment refusal / an all-filtered set.
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
 
     const int P = static_cast<int>(tile.n_pop());

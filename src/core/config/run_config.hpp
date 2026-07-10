@@ -54,6 +54,8 @@ public:
     [[nodiscard]] const std::string& out_file() const noexcept { return out_file_; }
     [[nodiscard]] const std::string& format()   const noexcept { return format_; }
     [[nodiscard]] const std::string& qpdstat_prefix() const noexcept { return qpdstat_prefix_; }
+    // Where to write the retained SNP ids after the QC filter (empty = don't emit).
+    [[nodiscard]] const std::string& emit_kept_snps() const noexcept { return emit_kept_snps_; }
 
     // READv2 controls
     [[nodiscard]] const std::string& samples_file() const noexcept { return samples_file_; }
@@ -160,6 +162,7 @@ private:
     std::string out_file_;
     std::string format_ = "csv";
     std::string qpdstat_prefix_;
+    std::string emit_kept_snps_;
     std::string samples_file_;
     int window_snps_ = 1000;
     std::string norm_mode_ = "median";

@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
     const std::filesystem::path ps_out = tmp / "steppe_fst.tsv";
     const RunResult ps = run_steppe(steppe_bin,
         {"fst", "--prefix", bed_prefix, "--pops", pops, "--method", "wc", "--per-snp",
-         "--format", "tsv", "--device", "0", "--out", ps_out.string()}, tmp);
+         "--maf", "0", "--format", "tsv", "--device", "0", "--out", ps_out.string()}, tmp);
     if (looks_like_no_gpu(ps.text)) {
         std::filesystem::remove_all(tmp, ec);
         std::printf("\nRESULT: SKIP (no CUDA device visible)\n");
@@ -334,7 +334,7 @@ int main(int argc, char** argv) {
     const std::filesystem::path sm_out = tmp / "steppe_sum.tsv";
     const RunResult sm = run_steppe(steppe_bin,
         {"fst", "--prefix", bed_prefix, "--pops", pops, "--method", "wc",
-         "--format", "tsv", "--device", "0", "--out", sm_out.string()}, tmp);
+         "--maf", "0", "--format", "tsv", "--device", "0", "--out", sm_out.string()}, tmp);
     check_true("summary exit 0", sm.exit_code == 0);
     const double steppe_ratio = parse_steppe_summary_ratio(slurp(sm_out));
     check_true("steppe summary fst_ratio finite", !std::isnan(steppe_ratio));

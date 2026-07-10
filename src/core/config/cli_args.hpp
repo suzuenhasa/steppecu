@@ -181,6 +181,11 @@ struct CliArgs {
     std::optional<bool>   drop_monomorphic;
     std::optional<bool>   transversions_only;
     std::optional<std::string> strand_mode;
+    // Membership + ascertainment-guard filter surface (shared by pca/fst/kinship/admixture).
+    std::optional<std::string> keep_snps;    // FILE of SNP ids to restrict to (prune.in-style)
+    std::optional<std::string> exclude_snps; // FILE of SNP ids to drop
+    std::optional<bool>   allow_mixed_ascertainment;  // override the same-ascertainment guard
+    std::optional<std::string> emit_kept_snps;        // write the retained SNP ids here
 
     // extract-f2 run controls — reference §14
     std::optional<std::string> tier;

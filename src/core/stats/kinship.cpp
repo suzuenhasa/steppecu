@@ -25,6 +25,7 @@
 
 #include "core/internal/king_kinship.hpp"
 #include "core/internal/primary_backend.hpp"
+#include "core/stats/apply_snp_filter.hpp"
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/read_canonical_tile.hpp"
 #include "device/backend.hpp"
@@ -56,11 +57,13 @@ struct KinshipTile {
     std::vector<std::string> labels;  // Genetic ID per singleton index
     std::vector<std::uint8_t> summary_include;
     long autosomal = 0;
+    std::vector<std::string> kept_snp_ids;  // retained ids (--emit-kept-snps); empty if no filter
 };
 
 [[nodiscard]] KinshipTile read_kinship_tile(
     const std::string& geno, const std::string& snp, const std::string& ind,
-    const std::optional<std::vector<std::string>>& samples, ComputeBackend& be) {
+    const std::optional<std::vector<std::string>>& samples, ComputeBackend& be,
+    const FilterConfig& filter) {
     KinshipTile kt;
 
     io::GenoReader reader(geno);
@@ -71,7 +74,7 @@ struct KinshipTile {
     kt.labels.reserve(part.groups.size());
     for (const io::PopGroup& g : part.groups) kt.labels.push_back(g.label);
 
-    const io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
+    io::SnpTable snptab = io::read_snp_table(fmt, snp, SIZE_MAX);
     const long M0 = static_cast<long>(std::min(reader.header().n_snp, snptab.count));
     if (M0 <= 0) return kt;  // caller treats an empty tile as InvalidConfig
 
@@ -79,9 +82,17 @@ struct KinshipTile {
     // 0; the 1240K panel per individual is small and bounded).
     kt.tile = core::read_canonical_tile(reader, part, be, 0, static_cast<std::size_t>(M0));
 
+    // Per-SNP QC filter: subset the SNP axis (individuals untouched) in lockstep with the SnpTable
+    // BEFORE the autosome mask + KING sweep, so a filtered run's integer counts (nsnp/hethet/ibs0)
+    // and phi are bit-exact vs an externally pre-subset triple. Throws on a same-ascertainment
+    // refusal / an all-filtered set.
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(kt.tile, snptab, filter, be);
+    kt.kept_snp_ids = flt.kept_ids;
+
     // FST-style FULL interspersed autosome mask (indexed by global SNP), NOT readv2's
     // contiguous-prefix restriction — so chr23/24 exclusion is clean even when interspersed.
-    const std::size_t Mz = static_cast<std::size_t>(M0);
+    // Rebuilt from the SUBSET SnpTable so the mask layers cleanly UNDER the filter.
+    const std::size_t Mz = kt.tile.n_snp;
     kt.summary_include.assign(Mz, 0);
     long auto_n = 0;
     for (std::size_t s = 0; s < Mz && s < snptab.chrom.size(); ++s) {
@@ -135,15 +146,16 @@ void finalize(const KingMatrix& mat, const std::vector<std::string>& labels,
 KinshipResult run_kinship_all_pairs(
     const std::string& geno, const std::string& snp, const std::string& ind,
     const std::optional<std::vector<std::string>>& samples, double min_kinship, bool sure,
-    device::Resources& resources) {
+    device::Resources& resources, const FilterConfig& filter) {
     KinshipResult res;
     res.precision_tag = Precision::Kind::Fp64;
 
     ComputeBackend& be = device::primary_backend(resources);
-    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be);
+    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be, filter);
     const int N = static_cast<int>(kt.labels.size());
     res.N = N;
     res.autosomal_snps = kt.autosomal;
+    res.kept_snp_ids = kt.kept_snp_ids;
     if (N < 2 || kt.tile.n_snp == 0) {
         res.status = Status::InvalidConfig;
         return res;
@@ -174,15 +186,16 @@ KinshipResult run_kinship_pairs(
     const std::string& geno, const std::string& snp, const std::string& ind,
     const std::optional<std::vector<std::string>>& samples,
     const std::vector<std::pair<std::string, std::string>>& pairs, double min_kinship,
-    device::Resources& resources) {
+    device::Resources& resources, const FilterConfig& filter) {
     KinshipResult res;
     res.precision_tag = Precision::Kind::Fp64;
 
     ComputeBackend& be = device::primary_backend(resources);
-    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be);
+    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be, filter);
     const int N = static_cast<int>(kt.labels.size());
     res.N = N;
     res.autosomal_snps = kt.autosomal;
+    res.kept_snp_ids = kt.kept_snp_ids;
     if (N < 1 || kt.tile.n_snp == 0) {
         res.status = Status::InvalidConfig;
         return res;

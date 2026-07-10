@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
     const std::filesystem::path mat_out = tmp / "matrix.tsv";
     const RunResult mr = run_steppe(steppe_bin,
         {"fst", "--all-pairs", "--prefix", bed_prefix, "--pops", pops, "--method", "wc",
-         "--format", "tsv", "--device", "0", "--out", mat_out.string()});
+         "--maf", "0", "--format", "tsv", "--device", "0", "--out", mat_out.string()});
     if (looks_like_no_gpu(mr.text)) {
         std::filesystem::remove_all(tmp, ec);
         std::printf("\nRESULT: SKIP (no CUDA device visible)\n");
@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
                     tmp / (std::string("single_") + std::to_string(a) + "_" + std::to_string(b) + ".tsv");
                 const RunResult sp = run_steppe(steppe_bin,
                     {"fst", "--prefix", bed_prefix, "--pops", pr, "--method", "wc",
-                     "--format", "tsv", "--device", "0", "--out", sp_out.string()});
+                     "--maf", "0", "--format", "tsv", "--device", "0", "--out", sp_out.string()});
                 check_true("single-pair exit 0", sp.exit_code == 0);
                 const double single = parse_single_ratio(slurp(sp_out));
                 std::printf("  cell(%s,%s)=%.12f  single-pair=%.12f  |d|=%.3e\n",

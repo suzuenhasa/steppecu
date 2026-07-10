@@ -18,6 +18,7 @@
 
 #include "core/internal/decode_af.hpp"
 #include "core/internal/primary_backend.hpp"
+#include "core/stats/apply_snp_filter.hpp"
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
@@ -29,7 +30,7 @@ namespace steppe {
 
 FstResult run_fst(const std::string& geno, const std::string& snp, const std::string& ind,
                   const std::string& popA, const std::string& popB,
-                  device::Resources& resources) {
+                  device::Resources& resources, const FilterConfig& filter) {
     FstResult res;
     res.precision_tag = Precision::Kind::Fp64;
     res.popA = popA;
@@ -47,8 +48,12 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
     // Read the triple to the canonical tile, keeping ONLY the two requested populations
     // (population-contiguous, so each pop is one [begin, end) individual range).
     const std::vector<std::string> want{popA, popB};
-    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(
+    core::GenotypeFrontEnd fe = core::read_genotype_front_end(
         geno, snp, ind, std::span<const std::string>(want), be);
+    // Per-SNP QC filter: subset the SNP axis (only the SNP set changes; per-site WC math is
+    // untouched) so a filtered run is bit-exact vs an externally pre-subset triple.
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const io::SnpTable& snptab = fe.snptab;
 
@@ -126,7 +131,8 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
 
 FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& snp,
                                   const std::string& ind, const std::vector<std::string>& pops,
-                                  int min_n, bool sure, device::Resources& resources) {
+                                  int min_n, bool sure, device::Resources& resources,
+                                  const FilterConfig& filter) {
     FstMatrixResult res;
     res.precision_tag = Precision::Kind::Fp64;
 
@@ -143,7 +149,9 @@ FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& sn
         sel.min_n = (min_n >= 1) ? static_cast<std::size_t>(min_n) : std::size_t{1};
     }
 
-    const core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const io::SnpTable& snptab = fe.snptab;
 

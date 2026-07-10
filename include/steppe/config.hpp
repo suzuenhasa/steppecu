@@ -139,6 +139,13 @@ struct FilterConfig {
     std::vector<std::string> include_snp_ids;
     std::vector<std::string> exclude_snp_ids;
     std::string prune_in_path;
+
+    // Same-ascertainment guard override. When an external SNP-keyed input (a --keep-snps /
+    // prune.in list, or include ids) is combined with the target and the two carry a different
+    // ascertainment fingerprint (the list is largely absent from the target — a cross-panel
+    // intersection, the consumer-DNA f4-bias failure), the front-end refuses. Setting this
+    // true acknowledges the mix and proceeds anyway. Reference §6.
+    bool allow_mixed_ascertainment = false;
 };
 
 }  // namespace steppe

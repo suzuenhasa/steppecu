@@ -57,6 +57,8 @@ struct AdmixtureParams {
     int max_iter = 200;
     double tol = 1e-6;                          // stop on |dL| < tol*max(1,|L|)
     Precision precision = Precision::emulated_fp64();
+    // Per-SNP QC filter, applied to the SNP axis before the EM (inactive default = no-op).
+    FilterConfig filter = FilterConfig{};
 };
 
 // AdmixtureResult — the per-run output tables + provenance. Q is row-major N x K (row per
@@ -81,6 +83,9 @@ struct AdmixtureResult {
 
     long n_snp_total = 0;
     long n_indiv = 0;
+
+    // SNP ids retained by the QC filter (kept order); empty when no filter was active.
+    std::vector<std::string> kept_snp_ids;
 
     AdmixtureMode mode = AdmixtureMode::Unsupervised;
     Status status = Status::Ok;

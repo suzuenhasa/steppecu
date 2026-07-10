@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,25 @@
 #include "device/resources.hpp"
 
 namespace steppe::app {
+
+// write_kept_snps — dump the QC-filter's retained SNP ids (one per line) to `path`. Shared by
+// the pca/fst/kinship/admixture handlers behind --emit-kept-snps; a no-op when `path` is empty.
+// Returns false (and reports) only on a write error.
+[[nodiscard]] inline bool write_kept_snps(const std::string& path,
+                                          const std::vector<std::string>& ids, const char* prefix) {
+    if (path.empty()) return true;
+    std::ofstream os(path, std::ios::trunc);
+    for (const std::string& id : ids) os << id << "\n";
+    os.flush();
+    if (!os.good()) {
+        std::fprintf(stderr, "steppe %s: failed to write --emit-kept-snps file: %s\n", prefix,
+                     path.c_str());
+        return false;
+    }
+    std::fprintf(stderr, "steppe %s: wrote %zu retained SNP ids -> %s\n", prefix, ids.size(),
+                 path.c_str());
+    return true;
+}
 
 // require_first_gpu — the standard no-GPU guard shared by every CLI handler.
 // Returns true when a CUDA device is present; otherwise prints the canonical

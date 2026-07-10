@@ -68,6 +68,15 @@ struct PerSnpSummary {
     const FilterConfig& cfg,
     const SnpMembership& mem);
 
+// filter_is_active — true when the config requests ANY SNP subsetting: a MAF floor, a per-SNP
+// missing cap, autosomes-only, drop-monomorphic, transversions-only, or an include/exclude/
+// prune membership. Strand-mode is a sub-policy of the filter (it only takes effect once the
+// filter is otherwise engaged), NOT an independent trigger — so a default-constructed
+// FilterConfig (strand-mode Drop, everything else off) is INACTIVE and the front-end leaves
+// the tile byte-identical. Used by the shared apply_snp_filter seam to skip all work (and
+// stay bit-exact) when nothing is asked.
+[[nodiscard]] bool filter_is_active(const FilterConfig& cfg) noexcept;
+
 }  // namespace steppe::io::filter
 
 #endif  // STEPPE_IO_FILTER_SNP_FILTER_HPP

@@ -106,6 +106,32 @@ void add_output_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option("--format", a.format, "Output format: csv | tsv | json (default csv)");
 }
 
+// The shared per-SNP QC-filter surface for the standalone population-genetic tools
+// (pca/fst/kinship). Wired through RunConfig.filter() into the apply_snp_filter seam; the
+// default MAF (0.05 common-variant) and strand-keep are set per-command in ConfigBuilder.
+void add_filter_flags(CLI::App* sub, CliArgs& a) {
+    sub->add_option("--maf", a.maf,
+                    "Minor-allele-frequency floor (default 0.05 common-variant; --maf 0 disables)");
+    sub->add_option("--geno-max-miss", a.geno_max_missing,
+                    "Max per-SNP per-individual missing fraction (default 1 = off)");
+    sub->add_flag("--auto-only,!--no-auto-only", a.autosomes_only,
+                  "Restrict to autosomes chr 1-22 (default off; the tools already summarize autosomes)");
+    sub->add_flag("--drop-mono,!--no-drop-mono", a.drop_monomorphic,
+                  "Drop monomorphic SNPs (default off)");
+    sub->add_flag("--transversions", a.transversions_only, "Keep only transversion SNPs");
+    sub->add_option("--strand-mode", a.strand_mode,
+                    "Strand-ambiguous (A/T, C/G) policy: drop | keep (default for these tools) | flip");
+    sub->add_option("--keep-snps", a.keep_snps,
+                    "FILE of SNP ids to restrict to (prune.in-style; the LD-prune / bring-your-own "
+                    "subset hand-off)");
+    sub->add_option("--exclude-snps", a.exclude_snps, "FILE of SNP ids to drop");
+    sub->add_flag("--allow-mixed-ascertainment", a.allow_mixed_ascertainment,
+                  "Override the same-ascertainment guard (proceed when the keep list is drawn from "
+                  "a different panel than the target)");
+    sub->add_option("--emit-kept-snps", a.emit_kept_snps,
+                    "Write the retained SNP ids (one per line) to this FILE after filtering");
+}
+
 void add_qpadm_option_flags(CLI::App* sub, CliArgs& a) {
     sub->add_option("--fudge", a.fudge, "AT2 ridge constant (default 1e-4)");
     sub->add_option("--als-iters", a.als_iterations, "ALS iteration count (default 20)");
@@ -386,6 +412,7 @@ int run_cli(int argc, char** argv) {
             s->add_flag("--per-snp", a.fst_per_snp,
                         "Emit the per-SNP FST table (snp_id/chrom/pos/a1/a2/num/den/fst/valid); "
                         "default emits the genome-wide summary row");
+            add_filter_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -416,6 +443,7 @@ int run_cli(int argc, char** argv) {
                           "related-only filter");
             s->add_flag("--sure", a.sweep_sure,
                         "(--all-pairs) lift the C(N,2) pair-count cap for very large sample sets");
+            add_filter_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -468,6 +496,7 @@ int run_cli(int argc, char** argv) {
             s->add_option("--emit-html", a.pca_emit_html,
                           "Also write a self-contained interactive scatter HTML (pan/zoom/hover, "
                           "PC selector, population legend) to this path");
+            add_filter_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -1013,6 +1042,19 @@ int run_cli(int argc, char** argv) {
     adm->add_option("--project-samples", admixture_args.project_samples,
                     "Projection: optional file of sample ids to project (default: all selected)");
     adm->add_flag("--emit-F", admixture_args.emit_F, "Also write F.tsv (M x K; large)");
+    adm->add_option("--maf", admixture_args.maf,
+                    "Minor-allele-frequency floor (default 0.05 common-variant; --maf 0 disables)");
+    adm->add_option("--geno-max-miss", admixture_args.geno_max_miss,
+                    "Max per-SNP per-individual missing fraction (default 1 = off)");
+    adm->add_flag("--drop-mono", admixture_args.drop_mono, "Drop monomorphic SNPs");
+    adm->add_flag("--auto-only", admixture_args.autosomes_only, "Restrict to autosomes chr 1-22");
+    adm->add_option("--keep-snps", admixture_args.keep_snps,
+                    "FILE of SNP ids to restrict to (prune.in-style; the LD-prune subset hand-off)");
+    adm->add_option("--exclude-snps", admixture_args.exclude_snps, "FILE of SNP ids to drop");
+    adm->add_flag("--allow-mixed-ascertainment", admixture_args.allow_mixed_ascertainment,
+                  "Override the same-ascertainment guard (keep list from a different panel)");
+    adm->add_option("--emit-kept-snps", admixture_args.emit_kept_snps,
+                    "Write the retained SNP ids (one per line) to this FILE after filtering");
     adm->add_option("--precision", admixture_args.precision,
                     "GEMM precision: emu | fp64 (default emu; responsibility + loglik native FP64)");
     adm->add_option("--device", admixture_args.device, "CUDA device ordinal (default auto)");

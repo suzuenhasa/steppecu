@@ -133,10 +133,11 @@ int run_kinship_command(const cfg::RunConfig& config) {
         if (!require_first_gpu(resources, "kinship")) return cfg::kExitRuntimeError;
         if (pairs_mode) {
             result = run_kinship_pairs(triple.geno, triple.snp, triple.ind, samples, pairs,
-                                       config.min_kinship(), resources);
+                                       config.min_kinship(), resources, config.filter());
         } else {
             result = run_kinship_all_pairs(triple.geno, triple.snp, triple.ind, samples,
-                                           config.min_kinship(), config.sweep_sure(), resources);
+                                           config.min_kinship(), config.sweep_sure(), resources,
+                                           config.filter());
         }
     } catch (const std::invalid_argument& e) {
         // Fail-fast INPUT reject (unknown --pairs id, self-pair) -> invalid config.
@@ -164,6 +165,10 @@ int run_kinship_command(const cfg::RunConfig& config) {
     std::fprintf(stderr,
                  "steppe kinship: %d individuals, %zu pairs, %zu emitted, %ld autosomal SNPs used\n",
                  result.N, result.enumerated, result.emitted, result.autosomal_snps);
+
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "kinship")) {
+        return cfg::kExitIoError;
+    }
 
     if (const auto rc = emit_to_destination(
             config, "kinship", [&](std::ostream& os, OutputFormat fmt) {
