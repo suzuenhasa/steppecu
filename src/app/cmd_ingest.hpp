@@ -52,6 +52,8 @@ struct IngestArgs {
     std::string map;          // OPTIONAL: plink/HapMap genetic map (chrom id cM bp) -> genpos Morgans
     std::string region;       // OPTIONAL: bounded POS filter "CHROM:START-END" (inclusive)
     std::string emit_hap_codes;  // OPTIONAL: host-only sites x haps {0,2,3} matrix (bit-exact gate)
+    std::string emit_snp;        // OPTIONAL: EIGENSTRAT .snp dump (id chrom genpos_M physpos ref alt)
+                                 // — the genpos spot-check artifact + the .snp for a matching panel
     double unphased_max = 1.0;   // fail if the unphased-het fraction exceeds this (default: report-only)
 };
 

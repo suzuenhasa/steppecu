@@ -31,11 +31,13 @@
 #include "core/stats/genotype_front_end.hpp"
 #include "core/stats/li_stephens.hpp"
 #include "core/stats/li_stephens_validate.hpp"
+#include "core/stats/read_vcf_panel_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/backend_factory.hpp"
 #include "io/genotype_source.hpp"
 #include "io/ind_reader.hpp"
 #include "io/snp_reader.hpp"
+#include "io/vcf_panel_reader.hpp"
 #include "steppe/config.hpp"
 
 namespace steppe::app {
@@ -43,6 +45,43 @@ namespace steppe::app {
 namespace {
 
 namespace cfg = steppe::config;
+
+// Parse a "CHROM:START-END" region (inclusive) into a VcfPanelRegion; the chrom is
+// 'chr'-stripped to match the VCF reader's stripped CHROM comparison. Returns false
+// with `err` set on a malformed spec. (Local twin of cmd_ingest's parser so paint
+// stays self-contained; the VCF panels bound their SNP axis to this region.)
+[[nodiscard]] bool parse_region(const std::string& s, io::VcfPanelRegion& out, std::string& err) {
+    const std::size_t colon = s.find(':');
+    if (colon == std::string::npos) {
+        err = "--region must be CHROM:START-END (missing ':') — got '" + s + "'";
+        return false;
+    }
+    std::string chrom = s.substr(0, colon);
+    if (chrom.size() > 3 && (chrom[0] == 'c' || chrom[0] == 'C') &&
+        (chrom[1] == 'h' || chrom[1] == 'H') && (chrom[2] == 'r' || chrom[2] == 'R')) {
+        chrom = chrom.substr(3);
+    }
+    const std::string rng = s.substr(colon + 1);
+    const std::size_t dash = rng.find('-');
+    if (dash == std::string::npos) {
+        err = "--region must be CHROM:START-END (missing '-') — got '" + s + "'";
+        return false;
+    }
+    try {
+        out.start = std::stoll(rng.substr(0, dash));
+        out.end = std::stoll(rng.substr(dash + 1));
+    } catch (...) {
+        err = "--region START/END are not integers — got '" + s + "'";
+        return false;
+    }
+    if (out.end < out.start) {
+        err = "--region END < START — got '" + s + "'";
+        return false;
+    }
+    out.chrom = std::move(chrom);
+    out.active = true;
+    return true;
+}
 
 // A PopSelection that keeps every individual (each haploid column is a haplotype):
 // MinN with a floor of 1 retains all populations with at least one member.
@@ -103,24 +142,53 @@ namespace cfg = steppe::config;
 }  // namespace
 
 int run_paint_command(const cfg::RunConfig& config) {
+    // VCF-native mode: recipient/donor haplotype panels are read INLINE from phased
+    // .vcf.gz via the dedicated read_vcf_panel_front_end (no .geno/.snp/.ind, no
+    // bcftools prep). Engaged when either --recip-vcf/--donor-vcf is present.
+    const bool vcf_mode = !config.recip_vcf().empty() || !config.donor_vcf().empty();
+
     // --- Required inputs -----------------------------------------------------
-    if (config.qpdstat_prefix().empty()) {
-        std::fprintf(stderr,
-                     "steppe paint: --prefix PREFIX.{geno,snp,ind} (the phased RECIPIENT "
-                     "haplotypes) is required\n");
-        return cfg::kExitInvalidConfig;
-    }
-    if (config.donors_prefix().empty()) {
-        std::fprintf(stderr,
-                     "steppe paint: --donors PREFIX.{geno,snp,ind} (the phased DONOR panel) "
-                     "is required\n");
-        return cfg::kExitInvalidConfig;
+    if (vcf_mode) {
+        if (config.recip_vcf().empty() || config.donor_vcf().empty()) {
+            std::fprintf(stderr,
+                         "steppe paint: VCF mode needs BOTH --recip-vcf RECIP.vcf.gz and "
+                         "--donor-vcf DONOR.vcf.gz (same file = all-vs-all self painting)\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (config.vcf_map().empty()) {
+            std::fprintf(stderr,
+                         "steppe paint: VCF mode needs --map MAP (plink/HapMap cM map); paint "
+                         "requires a real genetic map for the recombination scale\n");
+            return cfg::kExitInvalidConfig;
+        }
+    } else {
+        if (config.qpdstat_prefix().empty()) {
+            std::fprintf(stderr,
+                         "steppe paint: --prefix PREFIX.{geno,snp,ind} (the phased RECIPIENT "
+                         "haplotypes) is required\n");
+            return cfg::kExitInvalidConfig;
+        }
+        if (config.donors_prefix().empty()) {
+            std::fprintf(stderr,
+                         "steppe paint: --donors PREFIX.{geno,snp,ind} (the phased DONOR panel) "
+                         "is required\n");
+            return cfg::kExitInvalidConfig;
+        }
     }
 
-    const std::string& recip_prefix = config.qpdstat_prefix();
-    const std::string& donor_prefix = config.donors_prefix();
-    const io::GenotypeTriple recip = io::resolve_genotype_triple(recip_prefix);
-    const io::GenotypeTriple donor = io::resolve_genotype_triple(donor_prefix);
+    // Build (and validate) the VCF panel options host-only before the read try-block.
+    io::VcfPanelOptions vcf_opts;
+    if (vcf_mode) {
+        vcf_opts.map_path = config.vcf_map();
+        vcf_opts.unphased_max = config.vcf_unphased_max();
+        if (!config.vcf_region().empty()) {
+            std::string rerr;
+            if (!parse_region(config.vcf_region(), vcf_opts.region, rerr)) {
+                std::fprintf(stderr, "steppe paint: %s\n", rerr.c_str());
+                return cfg::kExitInvalidConfig;
+            }
+        }
+    }
 
     io::SnpTable snptab;
     core::PaintRequest req;
@@ -131,10 +199,23 @@ int run_paint_command(const cfg::RunConfig& config) {
         // path below drives the GPU/CPU forward-backward through its own backend).
         std::unique_ptr<ComputeBackend> be = device::make_cpu_backend();
 
-        fe_r = core::read_genotype_front_end(recip.geno, recip.snp, recip.ind,
-                                             all_individuals(), *be);
-        fe_d = core::read_genotype_front_end(donor.geno, donor.snp, donor.ind,
-                                             all_individuals(), *be);
+        if (vcf_mode) {
+            // Forward-only streaming decode from the phased VCFs (throws on I/O failure /
+            // phase loss over --unphased-max); the same VcfPanelOptions (map + region)
+            // drives both panels, so their genpos come through the SAME reader+map and
+            // the exact-== marker check below is satisfied.
+            fe_r = core::read_vcf_panel_front_end(config.recip_vcf(), vcf_opts, *be);
+            fe_d = core::read_vcf_panel_front_end(config.donor_vcf(), vcf_opts, *be);
+        } else {
+            const io::GenotypeTriple recip =
+                io::resolve_genotype_triple(config.qpdstat_prefix());
+            const io::GenotypeTriple donor =
+                io::resolve_genotype_triple(config.donors_prefix());
+            fe_r = core::read_genotype_front_end(recip.geno, recip.snp, recip.ind,
+                                                 all_individuals(), *be);
+            fe_d = core::read_genotype_front_end(donor.geno, donor.snp, donor.ind,
+                                                 all_individuals(), *be);
+        }
 
         snptab = fe_r.snptab;
 
@@ -148,10 +229,12 @@ int run_paint_command(const cfg::RunConfig& config) {
         req.n_donors = static_cast<long>(fe_d.tile.n_individuals);
         req.n_diploid_samples =
             count_diploid(*be, fe_r.tile) + count_diploid(*be, fe_d.tile);
-        // The same triple for donors and recipients IS the panel-vs-self (all-vs-all)
+        // The same source for donors and recipients IS the panel-vs-self (all-vs-all)
         // painting case: the two reads use the identical selection so individual order
         // matches, and recipient r's self donor is donor r (leave-one-out via pi_r=0).
-        req.donors_superset_recipients = (recip_prefix == donor_prefix);
+        req.donors_superset_recipients =
+            vcf_mode ? (config.recip_vcf() == config.donor_vcf())
+                     : (config.qpdstat_prefix() == config.donors_prefix());
         req.sure = config.sweep_sure();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe paint: input error: %s\n", e.what());

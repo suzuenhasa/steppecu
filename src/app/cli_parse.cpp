@@ -531,6 +531,23 @@ int run_cli(int argc, char** argv) {
                         "aggregate (default off = per ancestry/pop label)");
             s->add_flag("--sure", a.sweep_sure,
                         "Lift the O(N*K*M) work cost guard (proceed with a long job)");
+            // Phased-VCF-native inputs (no bcftools prep): read the recipient/donor
+            // haplotype panels INLINE from phased .vcf.gz. When both are set, paint
+            // takes the VCF front-end path and --prefix/--donors are not required.
+            s->add_option("--recip-vcf", a.recip_vcf,
+                          "Phased RECIPIENT multi-sample .vcf.gz -> inline haplotype panel "
+                          "(2 haploid columns / sample; replaces --prefix)");
+            s->add_option("--donor-vcf", a.donor_vcf,
+                          "Phased DONOR multi-sample .vcf.gz -> inline haplotype panel "
+                          "(replaces --donors); same file as --recip-vcf = all-vs-all self painting");
+            s->add_option("--map", a.vcf_map,
+                          "plink/HapMap genetic map (chrom id cM bp) -> genpos Morgans for the "
+                          "VCF panels (required in VCF mode; paint needs a real cM map)");
+            s->add_option("--region", a.vcf_region,
+                          "OPTIONAL bounded POS filter CHROM:START-END (inclusive) for the VCF panels");
+            s->add_option("--unphased-max", a.vcf_unphased_max,
+                          "Fail if the unphased-het fraction of the VCF panels exceeds this "
+                          "(default 1.0 = report-only; paint's n_diploid gate does NOT catch phase loss)");
             add_output_flags(s, a);
             add_common_flags(s, a);
         },
@@ -844,6 +861,9 @@ int run_cli(int argc, char** argv) {
     ing->add_option("--emit-hap-codes", ingest_args.emit_hap_codes,
                     "Phased-panel mode: write the host-only sites x haps {0,2,3} matrix here "
                     "(CHROM POS + one code per haplotype column) — the bit-exact panel-gate artifact");
+    ing->add_option("--emit-snp", ingest_args.emit_snp,
+                    "Phased-panel mode: write an EIGENSTRAT .snp here (id chrom genpos_Morgans "
+                    "physpos ref alt; full round-trip precision) — the genpos artifact");
     ing->add_option("--unphased-max", ingest_args.unphased_max,
                     "Phased-panel mode: fail if the unphased-het fraction of diploid GT calls exceeds "
                     "this (default 1.0 = report-only; set low to guard against phase loss)");

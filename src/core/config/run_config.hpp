@@ -77,6 +77,12 @@ public:
     [[nodiscard]] bool ls_bp_fallback()          const noexcept { return ls_bp_fallback_; }
     // When true, emit the full per-DONOR coancestry matrix; default is per-label.
     [[nodiscard]] bool paint_full()              const noexcept { return paint_full_; }
+    // Phased-VCF-native paint inputs (empty => the .geno/.snp/.ind triple path).
+    [[nodiscard]] const std::string& recip_vcf() const noexcept { return recip_vcf_; }
+    [[nodiscard]] const std::string& donor_vcf() const noexcept { return donor_vcf_; }
+    [[nodiscard]] const std::string& vcf_map()   const noexcept { return vcf_map_; }
+    [[nodiscard]] const std::string& vcf_region() const noexcept { return vcf_region_; }
+    [[nodiscard]] double vcf_unphased_max()      const noexcept { return vcf_unphased_max_; }
 
     // `fst` (per-SNP Weir-Cockerham FST) controls
     [[nodiscard]] const std::string& fst_method() const noexcept { return fst_method_; }
@@ -171,6 +177,11 @@ private:
     int  ls_recip_batch_ = kLsDefaultRecipBatch;
     bool ls_bp_fallback_ = false;
     bool paint_full_ = false;
+    std::string recip_vcf_;
+    std::string donor_vcf_;
+    std::string vcf_map_;
+    std::string vcf_region_;
+    double vcf_unphased_max_ = 1.0;
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
     bool fst_all_pairs_ = false;

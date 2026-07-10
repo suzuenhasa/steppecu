@@ -51,6 +51,7 @@ add_library(steppe_core STATIC
     stats/decode_keep_autosomes.cpp
     stats/read_canonical_tile.cpp
     stats/genotype_front_end.cpp
+    stats/read_vcf_panel_front_end.cpp
     readv2/readv2.cpp
     readv2/readv2_classify.cpp
     config/config_builder.cpp)

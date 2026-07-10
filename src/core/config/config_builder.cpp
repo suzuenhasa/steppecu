@@ -211,6 +211,11 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_i(merged_.recip_batch, args.recip_batch);
     take_b(merged_.bp_fallback, args.bp_fallback);
     take_b(merged_.paint_full, args.paint_full);
+    take(merged_.recip_vcf, args.recip_vcf);
+    take(merged_.donor_vcf, args.donor_vcf);
+    take(merged_.vcf_map, args.vcf_map);
+    take(merged_.vcf_region, args.vcf_region);
+    take_d(merged_.vcf_unphased_max, args.vcf_unphased_max);
     take(merged_.fst_method, args.fst_method);
     take_b(merged_.fst_per_snp, args.fst_per_snp);
     take_b(merged_.fst_all_pairs, args.fst_all_pairs);
@@ -563,6 +568,16 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.self_copy) cfg.ls_self_copy_ = *merged_.self_copy;
     if (merged_.bp_fallback) cfg.ls_bp_fallback_ = *merged_.bp_fallback;
     if (merged_.paint_full) cfg.paint_full_ = *merged_.paint_full;
+    if (merged_.recip_vcf) cfg.recip_vcf_ = *merged_.recip_vcf;
+    if (merged_.donor_vcf) cfg.donor_vcf_ = *merged_.donor_vcf;
+    if (merged_.vcf_map) cfg.vcf_map_ = *merged_.vcf_map;
+    if (merged_.vcf_region) cfg.vcf_region_ = *merged_.vcf_region;
+    if (merged_.vcf_unphased_max.has_value()) {
+        if (!(*merged_.vcf_unphased_max >= 0.0) || !std::isfinite(*merged_.vcf_unphased_max)) {
+            return fail("--unphased-max must be a finite value >= 0");
+        }
+        cfg.vcf_unphased_max_ = *merged_.vcf_unphased_max;
+    }
     if (merged_.fst_method) {
         const std::string m = to_lower(trim(*merged_.fst_method));
         if (m != "wc" && m != "hudson") {

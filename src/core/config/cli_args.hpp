@@ -95,6 +95,14 @@ struct CliArgs {
     std::optional<int>         recip_batch;   // #recipients resident per wave (the batch/VRAM knob)
     std::optional<bool>        bp_fallback;   // opt into the bp cM-fallback when genpos is absent
     std::optional<bool>        paint_full;    // emit the per-DONOR coancestry matrix (default per-label)
+    // Phased-VCF-native paint inputs (no .geno/.snp/.ind sidecars): read the recipient
+    // and donor haplotype panels INLINE from phased .vcf.gz files via the dedicated
+    // read_vcf_panel_front_end. When both are set, paint takes the VCF path.
+    std::optional<std::string> recip_vcf;     // phased RECIPIENT .vcf.gz -> inline haplotype panel
+    std::optional<std::string> donor_vcf;     // phased DONOR .vcf.gz -> inline haplotype panel
+    std::optional<std::string> vcf_map;       // plink/HapMap genetic map (chrom id cM bp) -> genpos Morgans
+    std::optional<std::string> vcf_region;    // bounded POS filter "CHROM:START-END" (inclusive)
+    std::optional<double>      vcf_unphased_max;  // fail if the unphased-het fraction exceeds this
 
     // `fst` (per-SNP Weir-Cockerham FST) controls
     std::optional<std::string> fst_method;    // wc (Weir-Cockerham 1984; default). hudson is a follow-up.

@@ -18,6 +18,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -288,6 +289,30 @@ namespace {
         io::dump_hap_codes(panel.tile, panel.snptab, o);
         if (!o) {
             std::fprintf(stderr, "steppe ingest: failed writing --emit-hap-codes file\n");
+            return cfg::kExitIoError;
+        }
+    }
+
+    // OPTIONAL EIGENSTRAT .snp dump: id chrom genpos_Morgans physpos ref alt. genpos is
+    // written at full round-trip precision (17 sig digits) so a panel built from this
+    // .snp carries genpos BIT-IDENTICAL to the VCF reader's — paint's exact-== marker
+    // check then treats a VCF-read panel and a .snp-read panel as the same markers.
+    if (!args.emit_snp.empty()) {
+        std::ofstream so(args.emit_snp, std::ios::trunc);
+        if (!so) {
+            std::fprintf(stderr, "steppe ingest: cannot open --emit-snp file: %s\n",
+                         args.emit_snp.c_str());
+            return cfg::kExitIoError;
+        }
+        so << std::setprecision(17);
+        const io::SnpTable& st = panel.snptab;
+        for (std::size_t s = 0; s < st.count; ++s) {
+            so << st.id[s] << '\t' << st.chrom[s] << '\t' << st.genpos_morgans[s] << '\t'
+               << static_cast<long long>(st.physpos[s]) << '\t' << st.ref[s] << '\t'
+               << st.alt[s] << '\n';
+        }
+        if (!so) {
+            std::fprintf(stderr, "steppe ingest: failed writing --emit-snp file\n");
             return cfg::kExitIoError;
         }
     }
