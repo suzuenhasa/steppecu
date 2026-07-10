@@ -68,13 +68,13 @@ bool orthonormalize(cusolverDnHandle_t solver, double* A, int N, int L,
 
 }  // namespace
 
-PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solver,
-                                   cudaStream_t stream, const double* dC, int N, int K,
-                                   int oversample, int subspace_iters,
-                                   const Precision& precision, double* d_evecL,
-                                   double* d_evalL, int* out_L) {
+PcaTruncatedEig pca_truncated_topk_op(cublasHandle_t blas, cusolverDnHandle_t solver,
+                                      cudaStream_t stream, const PcaCovMatvec& matvec, int N,
+                                      int K, int oversample, int subspace_iters,
+                                      const Precision& precision, double* d_evecL,
+                                      double* d_evalL, int* out_L) {
     PcaTruncatedEig out;
-    if (N <= 0 || K <= 0 || K > N) {
+    if (N <= 0 || K <= 0 || K > N || !matvec) {
         out.status = Status::InvalidConfig;
         return out;
     }
@@ -97,7 +97,7 @@ PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solve
     launch_pca_fill_omega(dOmega.data(), NL, kPcaOmegaSeed, stream);
 
     // 2) Y = C * Omega  ->  3) Q = orth(Y).
-    sketch_CQ(blas, precision, dC, dOmega.data(), dQ.data(), N, L);
+    matvec(dOmega.data(), dQ.data(), L);
     if (!orthonormalize(solver, dQ.data(), N, L, dTau, dInfo, stream)) {
         out.status = Status::NonSpdCovariance;
         return out;
@@ -106,7 +106,7 @@ PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solve
     // 4) Subspace iteration: Q = orth(C * Q), re-orthonormalizing each pass (stable form —
     //    never forms C*C*Omega raw, which loses the trailing PCs to rounding).
     for (int it = 0; it < subspace_iters; ++it) {
-        sketch_CQ(blas, precision, dC, dQ.data(), dScratch.data(), N, L);
+        matvec(dQ.data(), dScratch.data(), L);
         if (!orthonormalize(solver, dScratch.data(), N, L, dTau, dInfo, stream)) {
             out.status = Status::NonSpdCovariance;
             return out;
@@ -114,9 +114,9 @@ PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solve
         std::swap(dQ, dScratch);  // dQ now holds the freshly orthonormalized basis
     }
 
-    // 5) Rayleigh-Ritz projection. dScratch = C*Q emulated; B = Q^T*(C*Q) NATIVE (the small
+    // 5) Rayleigh-Ritz projection. dScratch = C*Q (matvec); B = Q^T*(C*Q) NATIVE (the small
     //    O(N*L^2) inner-product reduction whose eigenvalues ARE the Ritz values — carve-out).
-    sketch_CQ(blas, precision, dC, dQ.data(), dScratch.data(), N, L);
+    matvec(dQ.data(), dScratch.data(), L);
     {
         const MathModeScope mode(blas, CUBLAS_PEDANTIC_MATH);  // native FP64 (no emulation)
         const double one = 1.0;
@@ -159,6 +159,21 @@ PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solve
 
     out.status = Status::Ok;
     return out;
+}
+
+PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solver,
+                                   cudaStream_t stream, const double* dC, int N, int K,
+                                   int oversample, int subspace_iters,
+                                   const Precision& precision, double* d_evecL,
+                                   double* d_evalL, int* out_L) {
+    // Dense operator: C*Q is a single cuBLAS GEMM against the resident N x N Gram — the exact
+    // pre-factoring path, byte-identical (same emulated-FP64 sketch_CQ, same call sequence),
+    // so the committed exact-path goldens stay bit-exact.
+    const PcaCovMatvec matvec = [&](const double* Q_in, double* CQ_out, int ncols) {
+        sketch_CQ(blas, precision, dC, Q_in, CQ_out, N, ncols);
+    };
+    return pca_truncated_topk_op(blas, solver, stream, matvec, N, K, oversample, subspace_iters,
+                                 precision, d_evecL, d_evalL, out_L);
 }
 
 }  // namespace steppe::device

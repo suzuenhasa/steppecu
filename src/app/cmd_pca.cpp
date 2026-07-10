@@ -171,6 +171,10 @@ int run_pca_command(const cfg::RunConfig& config) {
     const steppe::PcaProjectMode project_mode = (config.project_mode() == "scaled")
                                                     ? steppe::PcaProjectMode::Scaled
                                                     : steppe::PcaProjectMode::Lsq;
+    const steppe::PcaSolver pca_solver =
+        (config.pca_solver() == "exact")        ? steppe::PcaSolver::Exact
+        : (config.pca_solver() == "randomized") ? steppe::PcaSolver::Randomized
+                                                : steppe::PcaSolver::Auto;
 
     steppe::PcaResult result;
     try {
@@ -180,7 +184,7 @@ int run_pca_command(const cfg::RunConfig& config) {
                          std::span<const std::string>(pops), k, config.device().precision,
                          resources, std::span<const std::string>(project_pops),
                          std::span<const std::string>(project_samples), project_mode,
-                         config.filter());
+                         config.filter(), pca_solver);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe pca: input/device error: %s\n", e.what());
         return exit_code_for_caught(e);

@@ -836,14 +836,20 @@ public:
 
     // pca_covariance_eig: standalone genotype PCA (`steppe pca`) over the device-resident
     // tile. Patterson-2006 standardizes ALL individuals' diploid dosages on the GPU
-    // (per-SNP center 2p + scale 1/sqrt(p(1-p)), missing -> 0, monomorphic columns zeroed),
-    // forms the sample x sample covariance via cuBLAS SYRK (`precision` = emulated-FP64
-    // default, matmul-heavy), eigendecomposes it with cuSOLVER Dsyevd (native FP64
-    // carve-out), and projects to the top-K PCs (coord = eigenvector*sqrt(eigenvalue)).
-    // `k` is clamped to min(k, N). Default: throw (CUDA/CPU-oracle only).
+    // (per-SNP center 2p + scale 1/sqrt(p(1-p)), missing -> 0, monomorphic columns zeroed)
+    // and projects to the top-K PCs (coord = eigenvector*sqrt(eigenvalue)); `k` is clamped
+    // to min(k, N). `solver_mode` picks the covariance path: 0 = EXACT (form the dense
+    // N x N Gram via cuBLAS SYRK, then the randomized top-K on that resident Gram — the
+    // byte-unchanged reference path), 1 = RANDOMIZED (matrix-free: never form N x N; the
+    // top-K left singular vectors of the standardized Z via a streamed Z(Zᵀv) matvec range
+    // finder, so N scales to biobank size), 2 = AUTO (the backend resolves to randomized
+    // when the would-be dense Gram is large / near the VRAM wall, else exact). The
+    // covariance matmuls follow `precision` (emulated-FP64 default); the L x L B-eigen /
+    // QR are the native-FP64 carve-out. Default: throw (CUDA/CPU-oracle only).
     [[nodiscard]] virtual PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+                                                    int solver_mode,
                                                     const Precision& precision) {
-        (void)tile; (void)k; (void)precision;
+        (void)tile; (void)k; (void)solver_mode; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::pca_covariance_eig: not implemented by this backend");
     }

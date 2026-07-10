@@ -156,10 +156,12 @@ public:
                                           bool folded) override;
 
     // Standalone genotype PCA (`steppe pca`) — uploads the packed tile, SNP-tiles the
-    // Patterson-standardize kernel + cuBLAS SYRK to accumulate the sample x sample
-    // covariance device-resident (emulated-FP64 default), eigendecomposes with cuSOLVER
-    // Dsyevd (native-FP64 carve-out), and D2H's only the top-K coords + eigen spectrum.
-    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+    // Patterson-standardize kernel, and runs the randomized top-K eigensolver either on a
+    // resident dense N x N Gram (solver_mode 0 EXACT, cuBLAS SYRK) or MATRIX-FREE (solver_mode
+    // 1 RANDOMIZED — streamed Z(Zᵀv) matvecs, no N x N ever, biobank-scale), or auto-picks
+    // (solver_mode 2). Emulated-FP64 matmuls + native-FP64 B-eigen carve-out; D2H's only the
+    // top-K coords + eigen spectrum. See ComputeBackend::pca_covariance_eig.
+    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k, int solver_mode,
                                             const Precision& precision) override;
 
     // Standalone lsqproject PCA (`steppe pca --project-*`) — ref-only eigenbasis + per-target

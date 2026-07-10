@@ -113,14 +113,28 @@ int main() {
 
     auto cuda = steppe::device::make_cuda_backend(0);
     auto cpu = steppe::device::make_cpu_backend();
-    const PcaEig gpu = cuda->pca_covariance_eig(view, K, precision);
-    const PcaEig ref = cpu->pca_covariance_eig(view, K, precision);
+    // solver_mode 0 = the exact dense-Gram path (the reference the CPU oracle mirrors).
+    const PcaEig gpu = cuda->pca_covariance_eig(view, K, /*solver_mode=*/0, precision);
+    const PcaEig ref = cpu->pca_covariance_eig(view, K, /*solver_mode=*/0, precision);
 
     check_true("gpu status ok", gpu.status == steppe::Status::Ok);
     check_true("gpu N==4", gpu.N == N);
     check_true("gpu K==4", gpu.K == K);
     check_true("n_snp_used == 7 (SNP6 monomorphic dropped)", gpu.n_snp_used == 7);
     check_true("n_snp_monomorphic == 1", gpu.n_snp_monomorphic == 1);
+
+    // The matrix-free randomized path (solver_mode 1) must agree with the exact path on the
+    // same tile: here L = min(K+p, N) = N, so the streamed Z(Zᵀv) sweep spans the full space
+    // and recovers the same eigenvalues (the trace comes from the ||Z||_F^2 accumulator, not
+    // trace(dC)). This exercises the no-N x N path end to end on a known tile.
+    const PcaEig rnd = cuda->pca_covariance_eig(view, K, /*solver_mode=*/1, precision);
+    check_true("randomized status ok", rnd.status == steppe::Status::Ok);
+    check_true("randomized n_snp_used == 7", rnd.n_snp_used == 7);
+    for (int kk = 0; kk < K; ++kk) {
+        const double le = gpu.eigenvalues[static_cast<std::size_t>(kk)];
+        const double lr = rnd.eigenvalues[static_cast<std::size_t>(kk)];
+        check_close("randomized eigenvalue vs exact", lr, le, 1e-6 * (std::fabs(le) + 1.0));
+    }
 
     // (2) Trace invariance: Σ eigenvalues == Σ_{i,s} Z_is^2 (independent host standardization).
     double host_trace = 0.0;

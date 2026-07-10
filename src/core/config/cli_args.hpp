@@ -124,6 +124,7 @@ struct CliArgs {
     std::vector<std::string>   project_pops;     // populations placed by lsqproject only (union with project_samples)
     std::optional<std::string> project_samples;  // FILE of Genetic IDs, each projected-only
     std::optional<std::string> project_mode;     // lsq (default) | scaled
+    std::optional<std::string> pca_solver;       // exact | randomized | auto (default)
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

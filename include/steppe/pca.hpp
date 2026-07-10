@@ -39,6 +39,15 @@ struct Resources;
 // a = (M_used/m_obs)*W^T z (the fast / extreme-low-coverage robustness path).
 enum class PcaProjectMode : int { Lsq = 0, Scaled = 1 };
 
+// Covariance solver for `steppe pca` (--pca-solver). Exact forms the dense N x N sample Gram
+// (right for AADR-fixture N); Randomized is the MATRIX-FREE randomized SVD that never builds
+// N x N (top-K left singular vectors of the standardized Z via a streamed Z(Zᵀv) range finder),
+// so PCA scales to biobank N past the ~23k quadratic wall; Auto (default) resolves to
+// randomized once N is large / the dense Gram nears the VRAM wall, else exact. The two paths
+// agree to tight tolerance where both run (Auto keeps small N on the byte-identical exact path,
+// so the exact-path goldens are untouched). The int values are the backend `solver_mode` codes.
+enum class PcaSolver : int { Exact = 0, Randomized = 1, Auto = 2 };
+
 // PcaResult — the per-sample PC coordinates plus the eigen spectrum and provenance counts.
 struct PcaResult {
     // Row-major N x K sample PC coordinates: coord(sample i, PC k) = coords[i*K + k].
@@ -94,7 +103,8 @@ struct PcaResult {
                                 std::span<const std::string> project_pops = {},
                                 std::span<const std::string> project_samples = {},
                                 PcaProjectMode project_mode = PcaProjectMode::Lsq,
-                                const FilterConfig& filter = FilterConfig{});
+                                const FilterConfig& filter = FilterConfig{},
+                                PcaSolver pca_solver = PcaSolver::Auto);
 
 }  // namespace steppe
 

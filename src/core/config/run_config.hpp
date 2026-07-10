@@ -106,6 +106,7 @@ public:
     [[nodiscard]] const std::vector<std::string>& project_pops() const noexcept { return project_pops_; }
     [[nodiscard]] const std::string& project_samples_file() const noexcept { return project_samples_file_; }
     [[nodiscard]] const std::string& project_mode() const noexcept { return project_mode_; }
+    [[nodiscard]] const std::string& pca_solver() const noexcept { return pca_solver_; }
 
     // extract-f2 controls — reference §9
     [[nodiscard]] double blgsize_cm()           const noexcept { return blgsize_cm_; }
@@ -198,6 +199,7 @@ private:
     std::vector<std::string> project_pops_;
     std::string project_samples_file_;
     std::string project_mode_ = "lsq";
+    std::string pca_solver_ = "auto";
     double blgsize_cm_ = kDefaultBlockSizeCm;
     PloidyMode ploidy_ = PloidyMode::Auto;
     int min_sources_ = 1;

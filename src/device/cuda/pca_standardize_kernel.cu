@@ -152,6 +152,27 @@ __global__ void pca_trace_kernel(const double* __restrict__ C, int N,
     if (threadIdx.x == 0) atomicAdd(out, sdata[0]);
 }
 
+// Block reduction of Σ Z[e]^2 over the first n_elem elements into *out via one atomicAdd/block
+// (native FP64). Mirrors pca_trace_kernel but over the standardized Z tile instead of the dense
+// diagonal — the matrix-free trace(C) = ||Z||_F^2 accumulator.
+__global__ void pca_sumsq_kernel(const double* __restrict__ Z, long n_elem,
+                                 double* __restrict__ out) {
+    __shared__ double sdata[kPcaBlock];
+    double local = 0.0;
+    for (long e = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x; e < n_elem;
+         e += static_cast<long>(gridDim.x) * blockDim.x) {
+        const double z = Z[e];
+        local += z * z;
+    }
+    sdata[threadIdx.x] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) atomicAdd(out, sdata[0]);
+}
+
 // -------- lsqproject kernels --------
 
 // Fold only the reference rows (rows[r]) of one SNP tile -> Patterson center/inv_scale.
@@ -357,6 +378,16 @@ void launch_pca_trace(const double* d_C, int N, double* d_out, cudaStream_t stre
     if (grid < 1) grid = 1;
     if (grid > 1024) grid = 1024;
     pca_trace_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(d_C, N, d_out);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_accumulate_sumsq(const double* d_Z, long n_elem, double* d_out,
+                                 cudaStream_t stream) {
+    if (n_elem <= 0) return;
+    int grid = static_cast<int>((n_elem + kPcaBlock - 1) / kPcaBlock);
+    if (grid < 1) grid = 1;
+    if (grid > 1024) grid = 1024;
+    pca_sumsq_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(d_Z, n_elem, d_out);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

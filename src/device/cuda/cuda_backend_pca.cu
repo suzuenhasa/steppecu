@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -36,6 +37,14 @@ namespace {
 // packed tile, the N x N covariance, and the eigensolver workspace).
 constexpr std::size_t kPcaZBudgetDivisor = 4;
 constexpr std::size_t kPcaFreeVramFallbackBytes = std::size_t{1} << 30;  // 1 GiB
+
+// Matrix-free path: the Z-tile budget is a SMALLER fraction of the free VRAM that remains AFTER
+// the resident packed tile, because the emulated-FP64 (fixed-point Ozaki) GEMM allocates an
+// internal working set that scales with the Z_t operand — and the matrix-free sweep issues TWO
+// such GEMMs per tile against Z_t. Taking free/8 (measured post-packed) keeps dZ + that working
+// set + the O(N*L) sketches well inside VRAM at biobank N; a bigger tile buys nothing (the extra
+// SNP-tiles are cheap, memory-bound re-standardizes) and risks OOM in the emulated GEMM scratch.
+constexpr std::size_t kPcaRandZBudgetDivisor = 8;
 
 // Randomized truncated-eigensolver tuning. Oversample p and subspace-iteration count q
 // govern top-K convergence: the error on the K-th Ritz pair ~ (λ_{L+1}/λ_K)^(2q+1). The AADR
@@ -68,9 +77,28 @@ int pca_subspace_iters() {
     }
     return kPcaSubspaceItersDefault;
 }
+
+// AUTO solver resolution (solver_mode 2 -> exact/randomized). Use the matrix-free randomized
+// path once the sample count is clearly large OR the would-be dense N x N Gram (8*N^2 bytes)
+// would claim a big slice of free VRAM (the quadratic wall the exact path hits ~23k on 32 GB).
+// The sample floor sits ABOVE the committed 430-sample golden and the 2-8k gate subset so
+// `auto` stays on the byte-identical exact path there; the 22-27k present-day cohort trips it.
+constexpr long kPcaAutoRandomizedSampleFloor = 8000;
+constexpr std::size_t kPcaAutoDenseVramDivisor = 4;  // dense Gram > free/4 -> randomized
+
+bool pca_use_randomized(int solver_mode, long N, std::size_t free_vram_bytes) {
+    if (solver_mode == 1) return true;   // explicit --pca-solver randomized
+    if (solver_mode == 0) return false;  // explicit --pca-solver exact
+    std::size_t free_b = free_vram_bytes;
+    if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+    const std::size_t dense_gram_bytes =
+        static_cast<std::size_t>(N) * static_cast<std::size_t>(N) * sizeof(double);
+    return (N > kPcaAutoRandomizedSampleFloor) ||
+           (dense_gram_bytes > free_b / kPcaAutoDenseVramDivisor);
+}
 }  // namespace
 
-PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k,
+PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int solver_mode,
                                        const Precision& precision) {
     guard_device();
     PcaEig out;
@@ -89,103 +117,203 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k,
     const int Nn = static_cast<int>(N);
     const int K = static_cast<int>(std::min<long>(k, N));
 
-    // Sample x sample covariance accumulator (column-major N x N), zeroed for beta=0/1 SYRK.
-    const std::size_t NN = static_cast<std::size_t>(N) * static_cast<std::size_t>(N);
-    DeviceBuffer<double> dC(NN);
-    STEPPE_CUDA_CHECK(cudaMemsetAsync(dC.data(), 0, NN * sizeof(double), stream_.get()));
+    const bool use_randomized =
+        pca_use_randomized(solver_mode, N, capabilities().free_vram_bytes);
 
-    DeviceBuffer<unsigned long long> dUsed(1);
-    STEPPE_CUDA_CHECK(cudaMemsetAsync(dUsed.data(), 0, sizeof(unsigned long long), stream_.get()));
-
-    // Choose a SNP tile that bounds the Z operand footprint to ~free/kPcaZBudgetDivisor,
-    // keeping the standardize+SYRK memory O(N*tileM + N^2) (the extract_f2 tiling idiom).
-    std::size_t free_b = capabilities().free_vram_bytes;
-    if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
-    std::size_t budget = free_b / kPcaZBudgetDivisor;
-    const std::size_t z_row_bytes = static_cast<std::size_t>(N) * sizeof(double);
-    if (budget < z_row_bytes) budget = z_row_bytes;
-    long tileM = static_cast<long>(budget / z_row_bytes);
-    if (tileM < 1) tileM = 1;
-    if (tileM > M) tileM = M;
-
-    {
-        // The packed genotype tile, the standardize center/scale scratch, and the Z operand
-        // tile ALL live ONLY inside this block so RAII frees them (the ~7 GB packed tile + the
-        // ~free/kPcaZBudgetDivisor Z tile, together ~11 GB at 23k) BEFORE the eigensolver
-        // allocates its workspace — the marginal alloc that OOMs the full cohort. Nothing after
-        // the block references them (symmetrize + the truncated solve read only dC).
-        const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-        DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-        if (packed_bytes > 0) {
-            h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-        }
-
-        DeviceBuffer<double> dCenter(static_cast<std::size_t>(tileM));
-        DeviceBuffer<double> dInv(static_cast<std::size_t>(tileM));
-        DeviceBuffer<double> dZ(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
-
-        // Covariance SYRK: emulated-FP64 default (matmul-heavy), the fit-engine block.
-        const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
-        engage_f2_precision(blas_.get(), precision);
-        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
-            const long tm = std::min<long>(tileM, M - s_lo);
-            launch_pca_snp_scale(dPacked.data(), tile.bytes_per_record,
-                                 tile.n_individuals, s_lo, tm, dCenter.data(),
-                                 dInv.data(), dUsed.data(), stream_.get());
-            launch_pca_standardize(dPacked.data(), tile.bytes_per_record,
-                                   tile.n_individuals, s_lo, tm, dCenter.data(),
-                                   dInv.data(), dZ.data(), stream_.get());
-            const double alpha = 1.0;
-            const double beta = (s_lo == 0) ? 0.0 : 1.0;
-            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
-                                     Nn, static_cast<int>(tm), &alpha, dZ.data(), Nn,
-                                     &beta, dC.data(), Nn));
-        }
-    }
-    launch_symmetrize_lower_to_full(dC.data(), Nn, stream_.get());
-
-    // Truncated top-K eigensolve (randomized subspace iteration): only the K PCs are needed,
-    // so we skip the full N-spectrum Dsyevd (~2N^2*8B ≈ 8.5 GB workspace at 23k — the OOM
-    // wall) and Rayleigh-Ritz project onto an L = K+p subspace (default L=256; sketch/basis
-    // buffers ~190 MB at 23k, the tiny L x L Dsyevd ~1 MB). The matmul-heavy sketches run
-    // emulated-FP64; the QR + the tiny L x L B-eigen run
-    // native-FP64 (the eigen carve-out, now on B not the 23k GRM). dC is READ-ONLY here so
-    // trace(dC) below stays valid.
+    // Randomized subspace-iteration tuning + the L=K+p subspace, shared by both paths (the
+    // exact path runs the SAME truncated solver on the resident dense Gram; the randomized
+    // path runs it matrix-free). The lifted Ritz block dEvecL (N x L, ascending) and the L
+    // Ritz values dEvalL, plus the trace + used-SNP counters, are produced by whichever branch
+    // runs and consumed by the shared projection/D2H tail below.
     solver_.set_stream(stream_.get());
     const int oversample = pca_oversample();
     const int subspace_iters = pca_subspace_iters();
     const int L = static_cast<int>(std::min<long>(static_cast<long>(K) + oversample, N));
     DeviceBuffer<double> dEvecL(static_cast<std::size_t>(N) * static_cast<std::size_t>(L));
     DeviceBuffer<double> dEvalL(static_cast<std::size_t>(L));
-    int L_used = 0;
-    const PcaTruncatedEig te = pca_truncated_topk(
-        blas_.get(), solver_.get(), stream_.get(), dC.data(), Nn, K, oversample,
-        subspace_iters, precision, dEvecL.data(), dEvalL.data(), &L_used);
-    if (te.status != Status::Ok) {
-        out.status = te.status;
-        return out;
-    }
-
-    // var_explained denominator = trace(dC) = Σ_all λ (native-FP64 diagonal reduction) — the
-    // truncated solve no longer returns the full N-vector we used to sum, but the trace is
-    // exactly Σ of ALL eigenvalues, so the ratio is unchanged in value.
     DeviceBuffer<double> dTrace(1);
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dTrace.data(), 0, sizeof(double), stream_.get()));
-    launch_pca_trace(dC.data(), Nn, dTrace.data(), stream_.get());
+    DeviceBuffer<unsigned long long> dUsed(1);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dUsed.data(), 0, sizeof(unsigned long long), stream_.get()));
+    int L_used = 0;
 
-    // Project the top-K eigenvectors to sample PC coordinates (coord = evec*sqrt(eval)); the
-    // eigenvector block is N x L (ncol = te.L), ascending Ritz value (largest at the tail).
+    if (!use_randomized) {
+        // ---- EXACT path (byte-unchanged): form the dense N x N Gram then solve on it ----
+        // Sample x sample covariance accumulator (column-major N x N), zeroed for beta=0/1 SYRK.
+        const std::size_t NN = static_cast<std::size_t>(N) * static_cast<std::size_t>(N);
+        DeviceBuffer<double> dC(NN);
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(dC.data(), 0, NN * sizeof(double), stream_.get()));
+
+        // Choose a SNP tile that bounds the Z operand footprint to ~free/kPcaZBudgetDivisor,
+        // keeping the standardize+SYRK memory O(N*tileM + N^2) (the extract_f2 tiling idiom).
+        std::size_t free_b = capabilities().free_vram_bytes;
+        if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+        std::size_t budget = free_b / kPcaZBudgetDivisor;
+        const std::size_t z_row_bytes = static_cast<std::size_t>(N) * sizeof(double);
+        if (budget < z_row_bytes) budget = z_row_bytes;
+        long tileM = static_cast<long>(budget / z_row_bytes);
+        if (tileM < 1) tileM = 1;
+        if (tileM > M) tileM = M;
+
+        {
+            // The packed genotype tile, the standardize center/scale scratch, and the Z operand
+            // tile ALL live ONLY inside this block so RAII frees them (the ~7 GB packed tile +
+            // the ~free/kPcaZBudgetDivisor Z tile, together ~11 GB at 23k) BEFORE the
+            // eigensolver allocates its workspace — the marginal alloc that OOMs the full
+            // cohort. Nothing after the block references them (symmetrize + the truncated solve
+            // read only dC).
+            const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+            DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
+            if (packed_bytes > 0) {
+                h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+            }
+
+            DeviceBuffer<double> dCenter(static_cast<std::size_t>(tileM));
+            DeviceBuffer<double> dInv(static_cast<std::size_t>(tileM));
+            DeviceBuffer<double> dZ(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
+
+            // Covariance SYRK: emulated-FP64 default (matmul-heavy), the fit-engine block.
+            const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas_.get(), precision);
+            for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+                const long tm = std::min<long>(tileM, M - s_lo);
+                launch_pca_snp_scale(dPacked.data(), tile.bytes_per_record,
+                                     tile.n_individuals, s_lo, tm, dCenter.data(),
+                                     dInv.data(), dUsed.data(), stream_.get());
+                launch_pca_standardize(dPacked.data(), tile.bytes_per_record,
+                                       tile.n_individuals, s_lo, tm, dCenter.data(),
+                                       dInv.data(), dZ.data(), stream_.get());
+                const double alpha = 1.0;
+                const double beta = (s_lo == 0) ? 0.0 : 1.0;
+                CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
+                                         Nn, static_cast<int>(tm), &alpha, dZ.data(), Nn,
+                                         &beta, dC.data(), Nn));
+            }
+        }
+        launch_symmetrize_lower_to_full(dC.data(), Nn, stream_.get());
+
+        // Truncated top-K eigensolve on the resident dense Gram (the pre-factoring reference
+        // path, byte-identical). dC is READ-ONLY, so trace(dC) below stays valid.
+        const PcaTruncatedEig te = pca_truncated_topk(
+            blas_.get(), solver_.get(), stream_.get(), dC.data(), Nn, K, oversample,
+            subspace_iters, precision, dEvecL.data(), dEvalL.data(), &L_used);
+        if (te.status != Status::Ok) {
+            out.status = te.status;
+            return out;
+        }
+
+        // var_explained denominator = trace(dC) = Σ_all λ (native-FP64 diagonal reduction).
+        launch_pca_trace(dC.data(), Nn, dTrace.data(), stream_.get());
+    } else {
+        // ---- MATRIX-FREE randomized path (biobank-scale): NEVER form the N x N Gram ----
+        // Top-K eigenvectors of C = Z Zᵀ via a randomized range finder whose covariance action
+        // C·Q is a streamed two-GEMM sweep CQ = Σ_tiles Z_t (Z_tᵀ Q) over SNP tiles — the exact
+        // same operator the dense path applies, but no O(N^2) object is ever allocated (peak
+        // memory is O(N*(bytes_per_record + L)), linear in N). Trace(C) = ||Z||_F^2 is
+        // accumulated in the precompute sweep, replacing trace(dC).
+
+        // The packed genotype tile + the Z/T scratch stay resident ACROSS every sweep (the
+        // matvec re-standardizes them q+2 times) — so, unlike the exact path, they are NOT
+        // freed before the solve; there is no N x N object competing for the VRAM. Allocate the
+        // packed tile FIRST so the Z-tile budget below is taken from the free VRAM that REMAINS
+        // after it (mirrors the exact path measuring free after dC), not the full pool.
+        const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+        DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
+        if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+
+        // Cache the full-range Patterson center[M]/inv_scale[M] once (no re-fold per sweep).
+        DeviceBuffer<double> dCenterAll(static_cast<std::size_t>(M));
+        DeviceBuffer<double> dInvAll(static_cast<std::size_t>(M));
+
+        // SNP tile bounding BOTH the Z operand (N x tileM) and the T = Zᵀ Q scratch (tileM x L):
+        // each SNP column costs (N + L) doubles across the two. Sized to a conservative fraction
+        // of the free VRAM that remains after the packed tile, leaving headroom for the emulated
+        // GEMM's fixed-point working set (see kPcaRandZBudgetDivisor).
+        std::size_t free_b = capabilities().free_vram_bytes;
+        if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+        std::size_t budget = free_b / kPcaRandZBudgetDivisor;
+        const std::size_t col_bytes =
+            (static_cast<std::size_t>(N) + static_cast<std::size_t>(L)) * sizeof(double);
+        if (budget < col_bytes) budget = col_bytes;
+        long tileM = static_cast<long>(budget / col_bytes);
+        if (tileM < 1) tileM = 1;
+        if (tileM > M) tileM = M;
+
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
+        DeviceBuffer<double> dT(static_cast<std::size_t>(tileM) * static_cast<std::size_t>(L));
+
+        // Precompute sweep: cache center/inv, count used SNPs, accumulate trace = ||Z||_F^2.
+        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+            const long tm = std::min<long>(tileM, M - s_lo);
+            launch_pca_snp_scale(dPacked.data(), tile.bytes_per_record, tile.n_individuals, s_lo,
+                                 tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo, dUsed.data(),
+                                 stream_.get());
+            launch_pca_standardize(dPacked.data(), tile.bytes_per_record, tile.n_individuals, s_lo,
+                                   tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo, dZ.data(),
+                                   stream_.get());
+            launch_pca_accumulate_sumsq(dZ.data(), static_cast<long>(N) * tm, dTrace.data(),
+                                        stream_.get());
+        }
+
+        // Streamed covariance matvec CQ (N x ncols) = Σ_tiles Z_t (Z_tᵀ Q). Per tile: (a)
+        // re-standardize Z_t from the resident packed tile (cached center/inv, no re-fold); (b)
+        // T = Z_tᵀ Q (tm x ncols); (c) CQ += Z_t T (N x ncols). Both GEMMs emulated-FP64 (match
+        // the dense sketch + SYRK). Buffers captured by value (pointers/handles/POD).
+        cublasHandle_t blas = blas_.get();
+        cudaStream_t stream = stream_.get();
+        const std::uint8_t* packed_ptr = dPacked.data();
+        const std::size_t bpr = tile.bytes_per_record;
+        const std::size_t Nrec = tile.n_individuals;
+        double* dZp = dZ.data();
+        double* dTp = dT.data();
+        const double* dCenterP = dCenterAll.data();
+        const double* dInvP = dInvAll.data();
+        const long tileM_c = tileM;
+        const long M_c = M;
+        const PcaCovMatvec matvec = [=](const double* Q_in, double* CQ_out, int ncols) {
+            const MathModeScope mode(blas, CUBLAS_PEDANTIC_MATH);
+            engage_f2_precision(blas, precision);
+            const double one = 1.0;
+            for (long s_lo = 0; s_lo < M_c; s_lo += tileM_c) {
+                const long tm = std::min<long>(tileM_c, M_c - s_lo);
+                launch_pca_standardize(packed_ptr, bpr, Nrec, s_lo, tm, dCenterP + s_lo,
+                                       dInvP + s_lo, dZp, stream);
+                // T (tm x ncols) = Z_tᵀ Q : (OP_T, OP_N) m=tm, n=ncols, k=N, beta=0.
+                const double zero = 0.0;
+                CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(tm),
+                                         ncols, Nn, &one, dZp, Nn, Q_in, Nn, &zero, dTp,
+                                         static_cast<int>(tm)));
+                // CQ (N x ncols) += Z_t T : (OP_N, OP_N) m=N, n=ncols, k=tm, beta = first?0:1.
+                const double beta = (s_lo == 0) ? 0.0 : 1.0;
+                CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, Nn, ncols,
+                                         static_cast<int>(tm), &one, dZp, Nn, dTp,
+                                         static_cast<int>(tm), &beta, CQ_out, Nn));
+            }
+        };
+
+        const PcaTruncatedEig te = pca_truncated_topk_op(
+            blas, solver_.get(), stream, matvec, Nn, K, oversample, subspace_iters, precision,
+            dEvecL.data(), dEvalL.data(), &L_used);
+        if (te.status != Status::Ok) {
+            out.status = te.status;
+            return out;
+        }
+        // dTrace already holds ||Z||_F^2 from the precompute sweep.
+    }
+
+    // ---- Shared tail: project top-K coords, D2H the small results, assemble the spectrum ----
+    // The eigenvector block is N x L, ascending Ritz value (largest at the tail => PC k reads
+    // column L-1-k). coord = evec*sqrt(eval).
     DeviceBuffer<double> dCoords(static_cast<std::size_t>(N) * static_cast<std::size_t>(K));
-    launch_pca_coords(dEvecL.data(), dEvalL.data(), Nn, te.L, K, dCoords.data(), stream_.get());
+    launch_pca_coords(dEvecL.data(), dEvalL.data(), Nn, L, K, dCoords.data(), stream_.get());
 
-    // D2H only the small results: coords (N*K), the L Ritz values, the trace scalar, used cnt.
     out.coords.assign(static_cast<std::size_t>(N) * static_cast<std::size_t>(K), 0.0);
-    std::vector<double> eval_L(static_cast<std::size_t>(te.L), 0.0);
+    std::vector<double> eval_L(static_cast<std::size_t>(L), 0.0);
     double trace_h = 0.0;
     unsigned long long used_h = 0;
     d2h_async(out.coords.data(), dCoords,
               static_cast<std::size_t>(N) * static_cast<std::size_t>(K), stream_.get());
-    d2h_async(eval_L.data(), dEvalL, static_cast<std::size_t>(te.L), stream_.get());
+    d2h_async(eval_L.data(), dEvalL, static_cast<std::size_t>(L), stream_.get());
     d2h_async(&trace_h, dTrace, 1, stream_.get());
     d2h_async(&used_h, dUsed, 1, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
@@ -195,7 +323,7 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k,
     out.var_explained.assign(static_cast<std::size_t>(K), 0.0);
     for (int kk = 0; kk < K; ++kk) {
         // Ritz values ascending -> descending PCs read from the tail.
-        const double lambda = eval_L[static_cast<std::size_t>(te.L - 1 - kk)];
+        const double lambda = eval_L[static_cast<std::size_t>(L - 1 - kk)];
         out.eigenvalues[static_cast<std::size_t>(kk)] = lambda;
         out.var_explained[static_cast<std::size_t>(kk)] =
             (total != 0.0L) ? static_cast<double>(static_cast<long double>(lambda) / total) : 0.0;

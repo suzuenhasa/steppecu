@@ -449,9 +449,12 @@ public:
     // the GPU kernel calls), a dense Z*Z^T sample covariance, and a cyclic-Jacobi symmetric
     // eigensolve — coords = eigenvector*sqrt(eigenvalue), top-K descending. Native long double
     // (never emulated: this is the correctness oracle). The precision argument is ignored.
-    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k,
+    [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k, int solver_mode,
                                             const Precision& precision) override {
         (void)precision;
+        // The oracle is the exact dense reference regardless of solver_mode — it is the
+        // ground truth the device randomized path is gated against, not a solver selector.
+        (void)solver_mode;
         PcaEig out;
         out.precision_tag = Precision::Kind::Fp64;
 

@@ -52,6 +52,14 @@ void launch_pca_fill_omega(double* d_omega, std::size_t n_elem, unsigned long lo
 // the var_explained denominator / cancellation carve-out class). Caller zeros *d_out first.
 void launch_pca_trace(const double* d_C, int N, double* d_out, cudaStream_t stream);
 
+// Accumulate Σ_e d_Z[e]^2 over the first n_elem elements of a standardized Z tile into *d_out
+// (native FP64, block reduction + one atomicAdd/block). The matrix-free PCA path uses this to
+// build trace(C) = trace(Z Z^T) = ||Z||_F^2 by summing squares over each SNP tile as it is
+// standardized — the exact same quantity the dense path reads as Σ diag(dC), but WITHOUT ever
+// forming the N x N Gram. Caller zeros *d_out before the first tile.
+void launch_pca_accumulate_sumsq(const double* d_Z, long n_elem, double* d_out,
+                                 cudaStream_t stream);
+
 // -------- lsqproject (`steppe pca --project-*`) launchers --------
 
 // Per-SNP Patterson scale over ONE SNP tile, folding ONLY the `n_rows` reference rows named by

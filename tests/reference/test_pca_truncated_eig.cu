@@ -209,6 +209,75 @@ int main() {
         }
     }
 
+    // --- (C) OPERATOR path: matrix-free streamed matvec CQ = Σ_tiles Z_t (Z_tᵀ Q) ----------
+    // Factor the well-separated planted C as C = Z Zᵀ with Z = W diag(sqrt(lambda)) (N x N),
+    // then drive pca_truncated_topk_op with a TWO-TILE streamed two-GEMM matvec — the exact
+    // pattern the biobank PCA path uses (never forms N x N; exercises the beta=0 -> beta=1 tile
+    // accumulation). It must recover the same top-4 eigenpairs as the dense solver.
+    {
+        std::vector<double> lambda(N);
+        const double sep[4] = {100.0, 50.0, 25.0, 10.0};
+        for (int k = 0; k < 4; ++k) lambda[static_cast<std::size_t>(k)] = sep[k];
+        for (int k = 4; k < N; ++k)
+            lambda[static_cast<std::size_t>(k)] = 5.0 * std::pow(0.85, k - 4);
+        std::vector<double> Z(static_cast<std::size_t>(N) * N, 0.0);
+        for (int k = 0; k < N; ++k) {
+            const double s = std::sqrt(lambda[static_cast<std::size_t>(k)]);
+            for (int i = 0; i < N; ++i)
+                Z[static_cast<std::size_t>(k) * N + i] = W[static_cast<std::size_t>(k) * N + i] * s;
+        }
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N) * N);
+        steppe::device::h2d_async(dZ, Z.data(), Z.size(), stream);
+
+        const int K = 4, oversample = 16, iters = 2;
+        const int L = std::min(K + oversample, N);
+        DeviceBuffer<double> dEvec(static_cast<std::size_t>(N) * L);
+        DeviceBuffer<double> dEval(static_cast<std::size_t>(L));
+        DeviceBuffer<double> dT(static_cast<std::size_t>(N) * L);  // tileM<=N bounds tm x L
+        cublasHandle_t b = blas.get();
+        double* dZp = dZ.data();
+        double* dTp = dT.data();
+        const int Msyn = N;
+        const int tileM = (N + 1) / 2;  // two tiles -> exercises beta=0 then beta=1
+        const steppe::device::PcaCovMatvec matvec =
+            [=](const double* Q_in, double* CQ_out, int ncols) {
+                const double one = 1.0;
+                for (int s0 = 0; s0 < Msyn; s0 += tileM) {
+                    const int tm = std::min(tileM, Msyn - s0);
+                    const double zero = 0.0;
+                    // T (tm x ncols) = Z_tᵀ Q; Z_t = columns [s0,s0+tm) of Z (ld N).
+                    CUBLAS_CHECK(cublasDgemm(b, CUBLAS_OP_T, CUBLAS_OP_N, tm, ncols, N, &one,
+                                             dZp + static_cast<std::size_t>(s0) * N, N, Q_in, N,
+                                             &zero, dTp, tm));
+                    const double beta = (s0 == 0) ? 0.0 : 1.0;
+                    // CQ (N x ncols) += Z_t T.
+                    CUBLAS_CHECK(cublasDgemm(b, CUBLAS_OP_N, CUBLAS_OP_N, N, ncols, tm, &one,
+                                             dZp + static_cast<std::size_t>(s0) * N, N, dTp, tm,
+                                             &beta, CQ_out, N));
+                }
+            };
+        int L_used = 0;
+        const PcaTruncatedEig te = steppe::device::pca_truncated_topk_op(
+            b, solver.get(), stream, matvec, N, K, oversample, iters, Precision::emulated_fp64(),
+            dEvec.data(), dEval.data(), &L_used);
+        std::vector<double> evec(static_cast<std::size_t>(N) * te.L, 0.0);
+        std::vector<double> eval(static_cast<std::size_t>(te.L), 0.0);
+        steppe::device::d2h_async(evec.data(), dEvec, static_cast<std::size_t>(N) * te.L, stream);
+        steppe::device::d2h_async(eval.data(), dEval, static_cast<std::size_t>(te.L), stream);
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream));
+        check_true("C: op status ok", te.status == Status::Ok);
+        check_true("C: L == 20", te.L == 20);
+        for (int k = 0; k < K; ++k) {
+            char lbl[80];
+            std::snprintf(lbl, sizeof(lbl), "C: PC%d Ritz value ~ planted (streamed matvec)",
+                          k + 1);
+            check_rel(lbl, eval[static_cast<std::size_t>(te.L - 1 - k)], sep[k], 1e-6);
+            std::snprintf(lbl, sizeof(lbl), "C: PC%d |r| vs planted ~ 1 (streamed matvec)", k + 1);
+            check_true(lbl, abs_pearson(&evec[static_cast<std::size_t>(te.L - 1 - k) * N],
+                                        &W[static_cast<std::size_t>(k) * N]) > 0.999);
+        }
+    }
+
     cudaStreamDestroy(stream);
 
     if (g_failures == 0) {

@@ -22,6 +22,8 @@
 // Factored out of cuda_backend_pca.cu so the truncation math is unit-testable on a planted
 // spectrum. Private to steppe_device; a CUDA header (pulls in cuBLAS/cuSOLVER).
 
+#include <functional>
+
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <cuda_runtime.h>
@@ -35,6 +37,17 @@ struct PcaTruncatedEig {
     int L = 0;                    // actual subspace width used (= min(K+oversample, N))
     Status status = Status::Ok;
 };
+
+// PcaCovMatvec — the covariance operator the randomized solver applies. It computes
+// CQ_out (column-major N x ncols, leading dim N) = C * Q_in (column-major N x ncols, ld N),
+// where C is the sample x sample covariance. The IMPLEMENTATION is free to form the product
+// any way it likes and NEVER has to materialize C: the dense path multiplies a resident N x N
+// Gram (byte-identical to the pre-factoring code), while the matrix-free/biobank path streams
+// CQ = Σ_tiles Z_t (Z_t^T Q) over SNP tiles, so no N x N object is ever allocated. `ncols` is
+// the subspace width L on every call. The callee is issued on the solver's stream (the caller
+// binds `blas`/`solver` to `stream`); it must leave `blas`'s math mode as it found it or set
+// it per call (the dense/streamed impls both scope their own MathModeScope).
+using PcaCovMatvec = std::function<void(const double* Q_in, double* CQ_out, int ncols)>;
 
 // Truncated top-K eigensolve of the column-major N x N SPD matrix dC (READ-ONLY — not
 // overwritten, so trace(dC) stays valid for the caller's var_explained denominator).
@@ -55,5 +68,18 @@ PcaTruncatedEig pca_truncated_topk(cublasHandle_t blas, cusolverDnHandle_t solve
                                    int oversample, int subspace_iters,
                                    const Precision& precision, double* d_evecL,
                                    double* d_evalL, int* out_L);
+
+// Operator-driven form of the same Halko pipeline: identical to pca_truncated_topk except the
+// covariance action is supplied by `matvec` (see PcaCovMatvec) instead of a resident N x N
+// Gram, so the biobank-scale (matrix-free) PCA path can plug a streamed Z(Z^T Q) sweep here
+// and NEVER form C. `matvec` is invoked q+2 times (the range-finder sketch, `subspace_iters`
+// power passes, and the Rayleigh-Ritz projection). All other arguments/outputs match
+// pca_truncated_topk; `precision` governs only the final emulated-FP64 lift GEMM (the QR, the
+// L x L B formation, and the L x L Dsyevd stay native — the eigen carve-out on L, not N).
+PcaTruncatedEig pca_truncated_topk_op(cublasHandle_t blas, cusolverDnHandle_t solver,
+                                      cudaStream_t stream, const PcaCovMatvec& matvec, int N,
+                                      int K, int oversample, int subspace_iters,
+                                      const Precision& precision, double* d_evecL,
+                                      double* d_evalL, int* out_L);
 
 }  // namespace steppe::device

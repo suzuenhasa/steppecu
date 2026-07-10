@@ -41,7 +41,7 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
                   std::span<const std::string> pops, int k, const Precision& precision,
                   device::Resources& resources, std::span<const std::string> project_pops,
                   std::span<const std::string> project_samples, PcaProjectMode project_mode,
-                  const FilterConfig& filter) {
+                  const FilterConfig& filter, PcaSolver pca_solver) {
     PcaResult res;
     res.precision_tag = Precision::Kind::Fp64;
 
@@ -153,8 +153,11 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
     const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
 
     if (!projecting) {
-        // No targets marked: the plain (byte-identical to today) covariance-eig path.
-        const PcaEig eig = be.pca_covariance_eig(view, k, precision);
+        // No targets marked: the plain covariance-eig path. The solver selector chooses the
+        // exact dense N x N Gram or the matrix-free randomized path (Auto resolves in the
+        // backend from N + free VRAM); projection always uses the exact reference basis.
+        const PcaEig eig =
+            be.pca_covariance_eig(view, k, static_cast<int>(pca_solver), precision);
         if (eig.status != Status::Ok) {
             res.status = eig.status;
             return res;

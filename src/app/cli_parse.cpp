@@ -493,6 +493,10 @@ int run_cli(int argc, char** argv) {
             s->add_option("--project-mode", a.project_mode,
                           "Projection placement: lsq (default, full K x K least-squares == "
                           "smartpca lsqproject:YES) | scaled (diagonal ratio)");
+            s->add_option("--pca-solver", a.pca_solver,
+                          "Covariance solver: auto (default) | exact (dense N x N Gram) | "
+                          "randomized (matrix-free randomized SVD, no N x N — biobank-scale N). "
+                          "Auto picks randomized once N is large / near the VRAM wall");
             s->add_option("-k,--k", a.pca_k, "Number of principal components (default 10)");
             s->add_flag("--eigenvalues", a.pca_eigenvalues,
                         "Emit the scree table (pc_index/eigenvalue/var_explained) instead of the "

@@ -234,6 +234,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.pca_emit_html, args.pca_emit_html);
     take(merged_.project_samples, args.project_samples);
     take(merged_.project_mode, args.project_mode);
+    take(merged_.pca_solver, args.pca_solver);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
     if (args.config_path.has_value() && !args.config_path->empty()) {
@@ -646,6 +647,13 @@ BuildResult<RunConfig> ConfigBuilder::build() {
         if (m != "lsq" && m != "scaled")
             return fail("--project-mode '" + *merged_.project_mode + "' is unknown (lsq | scaled)");
         cfg.project_mode_ = m;
+    }
+    if (merged_.pca_solver) {
+        const std::string s = to_lower(trim(*merged_.pca_solver));
+        if (s != "exact" && s != "randomized" && s != "auto")
+            return fail("--pca-solver '" + *merged_.pca_solver +
+                        "' is unknown (exact | randomized | auto)");
+        cfg.pca_solver_ = s;
     }
     if (merged_.recip_batch.has_value()) {
         if (*merged_.recip_batch < 1) return fail("--recip-batch must be >= 1");
