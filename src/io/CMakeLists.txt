@@ -22,6 +22,7 @@ add_library(steppe_io STATIC
     faidx_reader.cpp
     target_build.cpp
     vcf_reader.cpp
+    vcf_panel_reader.cpp
     consumer_raw_reader.cpp
     beagle_reader.cpp
     panel_merge_writer.cpp

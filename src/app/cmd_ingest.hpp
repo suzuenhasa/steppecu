@@ -46,6 +46,13 @@ struct IngestArgs {
     std::string gl_field = "PL";      // which FORMAT field: PL | GL | GP
     std::string emit_likelihoods;     // OPTIONAL: the on-disk STPGL1 tensor artifact (needs a device)
     std::string emit_pl_raw;          // OPTIONAL: DEBUG raw triplet TSV (VCF-native order; host-only)
+    //   Phased-VCF -> canonical haplotype-panel path (the dedicated streaming reader,
+    //   independent of the target-site genotyper above; no --targets/--panel needed).
+    std::string phased_vcf;   // OPTIONAL: multi-sample PHASED .vcf.gz -> haplotype panel
+    std::string map;          // OPTIONAL: plink/HapMap genetic map (chrom id cM bp) -> genpos Morgans
+    std::string region;       // OPTIONAL: bounded POS filter "CHROM:START-END" (inclusive)
+    std::string emit_hap_codes;  // OPTIONAL: host-only sites x haps {0,2,3} matrix (bit-exact gate)
+    double unphased_max = 1.0;   // fail if the unphased-het fraction exceeds this (default: report-only)
 };
 
 [[nodiscard]] int run_ingest(const IngestArgs& args);

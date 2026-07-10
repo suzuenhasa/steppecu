@@ -831,6 +831,22 @@ int run_cli(int argc, char** argv) {
     ing->add_option("--emit-pl-raw", ingest_args.emit_pl_raw,
                     "GL mode: DEBUG dump of the raw parsed triplets in VCF-native order, self-keyed "
                     "(rsID/chrom/pos38/sample) for the bit-exact bcftools gate (host-only, no device)");
+    ing->add_option("--phased-vcf", ingest_args.phased_vcf,
+                    "Phased-panel mode: a multi-sample PHASED .vcf.gz (1000G phase-3 shape) -> "
+                    "canonical haplotype panel (2 haploid columns/sample, codes {0,2,3}). Reads SNPs "
+                    "and individuals INLINE (no --targets/--panel/.snp/.ind). Streaming, per-chromosome");
+    ing->add_option("--map", ingest_args.map,
+                    "Phased-panel mode: plink/HapMap genetic map (chrom id cM bp) -> SnpTable genpos "
+                    "in Morgans (optional; the GT-code panel gate is map-independent)");
+    ing->add_option("--region", ingest_args.region,
+                    "Phased-panel mode: bounded in-stream POS filter CHROM:START-END (inclusive; no "
+                    "tabix — streams and stops past the range end)");
+    ing->add_option("--emit-hap-codes", ingest_args.emit_hap_codes,
+                    "Phased-panel mode: write the host-only sites x haps {0,2,3} matrix here "
+                    "(CHROM POS + one code per haplotype column) — the bit-exact panel-gate artifact");
+    ing->add_option("--unphased-max", ingest_args.unphased_max,
+                    "Phased-panel mode: fail if the unphased-het fraction of diploid GT calls exceeds "
+                    "this (default 1.0 = report-only; set low to guard against phase loss)");
     ing->add_option("--device", ingest_args.device,
                     "CUDA device ordinal(s) for --emit-tile transpose (default auto)");
     ing->callback([&]() { code = run_ingest(ingest_args); });

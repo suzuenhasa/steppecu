@@ -38,6 +38,7 @@
 #include "io/panel_merge_writer.hpp"
 #include "io/target_build.hpp"
 #include "io/target_sites.hpp"
+#include "io/vcf_panel_reader.hpp"
 #include "io/vcf_reader.hpp"
 #include "steppe/config.hpp"
 
@@ -211,6 +212,103 @@ namespace {
     return "PL";
 }
 
+// Parse a "CHROM:START-END" region (inclusive) into a VcfPanelRegion. The chrom is
+// 'chr'-stripped to match the reader's stripped CHROM comparison. Returns false on a
+// malformed spec.
+[[nodiscard]] bool parse_region(const std::string& s, io::VcfPanelRegion& out, std::string& err) {
+    const std::size_t colon = s.find(':');
+    if (colon == std::string::npos) {
+        err = "--region must be CHROM:START-END (missing ':') — got '" + s + "'";
+        return false;
+    }
+    std::string chrom = s.substr(0, colon);
+    if (chrom.size() > 3 && (chrom[0] == 'c' || chrom[0] == 'C') &&
+        (chrom[1] == 'h' || chrom[1] == 'H') && (chrom[2] == 'r' || chrom[2] == 'R')) {
+        chrom = chrom.substr(3);
+    }
+    const std::string rng = s.substr(colon + 1);
+    const std::size_t dash = rng.find('-');
+    if (dash == std::string::npos) {
+        err = "--region must be CHROM:START-END (missing '-') — got '" + s + "'";
+        return false;
+    }
+    try {
+        out.start = std::stoll(rng.substr(0, dash));
+        out.end = std::stoll(rng.substr(dash + 1));
+    } catch (...) {
+        err = "--region START/END are not integers — got '" + s + "'";
+        return false;
+    }
+    if (out.end < out.start) {
+        err = "--region END < START — got '" + s + "'";
+        return false;
+    }
+    out.chrom = std::move(chrom);
+    out.active = true;
+    return true;
+}
+
+// The dedicated phased-VCF -> canonical haplotype-panel path (independent of the
+// target-site genotyper). Streams the VCF once, emits the host-only sites x haps
+// {0,2,3} matrix for the bit-exact gate, and reports the pass counters + the
+// unphased-drop guard on stderr.
+[[nodiscard]] int run_phased_vcf_panel(const IngestArgs& args) {
+    if (args.emit_hap_codes.empty()) {
+        std::fprintf(stderr,
+                     "steppe ingest: --phased-vcf needs an output — pass --emit-hap-codes FILE "
+                     "(the host-only sites x haps {0,2,3} panel matrix)\n");
+        return cfg::kExitInvalidConfig;
+    }
+    io::VcfPanelOptions opts;
+    opts.map_path = args.map;
+    opts.unphased_max = args.unphased_max;
+    if (!args.region.empty()) {
+        std::string err;
+        if (!parse_region(args.region, opts.region, err)) {
+            std::fprintf(stderr, "steppe ingest: %s\n", err.c_str());
+            return cfg::kExitInvalidConfig;
+        }
+    }
+
+    io::VcfPanelResult panel;
+    try {
+        panel = io::read_vcf_panel(args.phased_vcf, opts);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe ingest: %s\n", e.what());
+        return cfg::kExitIoError;
+    }
+
+    {
+        std::ofstream o(args.emit_hap_codes, std::ios::trunc);
+        if (!o) {
+            std::fprintf(stderr, "steppe ingest: cannot open --emit-hap-codes file: %s\n",
+                         args.emit_hap_codes.c_str());
+            return cfg::kExitIoError;
+        }
+        io::dump_hap_codes(panel.tile, panel.snptab, o);
+        if (!o) {
+            std::fprintf(stderr, "steppe ingest: failed writing --emit-hap-codes file\n");
+            return cfg::kExitIoError;
+        }
+    }
+
+    const io::VcfPanelCounts& c = panel.counts;
+    const double frac = c.diploid_calls > 0
+                            ? static_cast<double>(c.unphased_het_dropped) /
+                                  static_cast<double>(c.diploid_calls)
+                            : 0.0;
+    std::fprintf(stderr,
+                 "steppe ingest: phased-VCF panel | samples=%zu haps=%zu sites=%lld | "
+                 "skipped multiallelic=%lld non_snp=%lld dup_pos=%lld out_of_region=%lld | "
+                 "unphased_het_dropped=%lld/%lld (frac=%.6g) half_missing_haps=%lld "
+                 "missing_haps=%lld\n",
+                 panel.n_sample, panel.tile.n_individuals, c.emitted_sites,
+                 c.skipped_multiallelic, c.skipped_non_snp, c.skipped_dup_pos,
+                 c.skipped_out_of_region, c.unphased_het_dropped, c.diploid_calls, frac,
+                 c.half_missing_haps, c.missing_haps);
+    return cfg::kExitOk;
+}
+
 // Write the DEBUG raw-triplet dump (VCF-native order, self-keyed) for the bit-exact
 // bcftools gate. TSV: rsID chrom pos38 sample v0 v1 v2.
 [[nodiscard]] bool write_raw_gl(const std::string& path, const std::vector<io::RawGlRow>& rows,
@@ -228,6 +326,14 @@ namespace {
 }  // namespace
 
 int run_ingest(const IngestArgs& args) {
+    // --- dedicated phased-VCF -> haplotype-panel path -------------------------
+    // A self-contained forward-only streaming reader (no target-site table, no
+    // --panel/--fasta/--lift): reads SNPs + individuals INLINE from the phased VCF.
+    // Handled first and returned, so none of the target-site validation applies.
+    if (!args.phased_vcf.empty()) {
+        return run_phased_vcf_panel(args);
+    }
+
     // --- target-site source selection (mutually exclusive) --------------------
     // Native mode is anchored on --panel (the AADR .snp). --fasta/--lift/--assembly/
     // --emit-targets are native-only knobs; --fasta is required (or auto-resolved for
