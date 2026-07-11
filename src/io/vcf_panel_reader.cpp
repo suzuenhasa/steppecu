@@ -177,6 +177,7 @@ struct DecodeCtx {
     std::size_t n_sample = 0;
     std::size_t src_bpr = 0;
     int max_col = 8;
+    bool hardcall = false;               // ONE dosage column/sample vs two haploid columns
     bool region_active = false;
     std::string region_chrom;            // compared as-is (matches serial)
     long long region_start = 0;
@@ -237,11 +238,21 @@ void decode_record(std::string_view line, const DecodeCtx& ctx, WorkerAccum& acc
             const std::string_view sample = f[static_cast<std::size_t>((*ctx.sample_cols)[k])];
             const std::string_view gtv =
                 (gt_fi >= 0) ? vd::subfield(sample, gt_fi) : std::string_view{};
-            std::uint8_t h0 = kMissingCode;
-            std::uint8_t h1 = kMissingCode;
             const bool phased = gtv.find('|') != std::string_view::npos;
             const char sep = phased ? '|' : '/';
             const std::vector<std::string_view> ga = vd::split(gtv, sep);
+
+            if (ctx.hardcall) {
+                std::uint8_t code = kMissingCode;
+                if (ga.size() == 2) code = diploid_dosage_code(ga[0], ga[1]);
+                if (code == kMissingCode) ++missing;
+                rec[k / static_cast<std::size_t>(kCodesPerByte)] = pack_code_into_byte(
+                    rec[k / static_cast<std::size_t>(kCodesPerByte)], static_cast<int>(k), code);
+                continue;
+            }
+
+            std::uint8_t h0 = kMissingCode;
+            std::uint8_t h1 = kMissingCode;
             if (ga.size() == 2) {
                 const bool unphased_het = !phased && ga[0] != ga[1];
                 if (unphased_het) {
@@ -400,7 +411,11 @@ static VcfPanelResult read_vcf_panel_serial(const std::string& vcf_path,
     out.n_sample = out.sample_ids.size();
     const std::size_t n_sample = out.n_sample;
     const std::size_t n_hap = n_sample * 2;                     // two haploid columns / sample
-    const std::size_t src_bpr = packed_bytes(n_hap);            // SNP-major record width
+    // Output columns: hardcall packs ONE dosage column/sample; phased packs two
+    // haploid columns/sample. Everything downstream (pack width, tile shape) keys
+    // off n_cols; only the per-sample decode below differs between the two modes.
+    const std::size_t n_cols = opts.hardcall ? n_sample : n_hap;
+    const std::size_t src_bpr = packed_bytes(n_cols);           // SNP-major record width
     const int max_col = sample_cols.empty() ? 8 : sample_cols.back();
 
     VcfPanelCounts counts;
@@ -459,14 +474,28 @@ static VcfPanelResult read_vcf_panel_serial(const std::string& vcf_path,
             const std::string_view sample = f[static_cast<std::size_t>(sample_cols[k])];
             const std::string_view gtv = (gt_fi >= 0) ? vd::subfield(sample, gt_fi)
                                                       : std::string_view{};
-
-            std::uint8_t h0 = kMissingCode;  // 3
-            std::uint8_t h1 = kMissingCode;
-            // Phased bit-split (reuse vcf_reader.cpp:836-852 SHAPE): split on '|'
-            // (phased) or '/' (unphased), hap1 = allele before, hap2 = after.
+            // The ONE decode point that differs between the two modes. The GT split
+            // is shared (split on '|' if phased else '/'); only the post-split
+            // mapping and the number of output columns/counters differ.
             const bool phased = gtv.find('|') != std::string_view::npos;
             const char sep = phased ? '|' : '/';
             const std::vector<std::string_view> ga = vd::split(gtv, sep);
+
+            if (opts.hardcall) {
+                // HARDCALL: ONE phase-agnostic dosage code per sample at column k.
+                // An unphased het is a valid dosage-1 call — nothing is dropped.
+                std::uint8_t code = kMissingCode;  // 3
+                if (ga.size() == 2) code = diploid_dosage_code(ga[0], ga[1]);
+                if (code == kMissingCode) ++counts.missing_haps;  // per-sample missing count
+                rec[k / static_cast<std::size_t>(kCodesPerByte)] = pack_code_into_byte(
+                    rec[k / static_cast<std::size_t>(kCodesPerByte)], static_cast<int>(k), code);
+                continue;
+            }
+
+            std::uint8_t h0 = kMissingCode;  // 3
+            std::uint8_t h1 = kMissingCode;
+            // Phased bit-split (reuse vcf_reader.cpp:836-852 SHAPE): hap1 = allele
+            // before the separator, hap2 = after.
             if (ga.size() == 2) {
                 const bool unphased_het = !phased && ga[0] != ga[1];
                 if (unphased_het) {
@@ -522,14 +551,15 @@ static VcfPanelResult read_vcf_panel_serial(const std::string& vcf_path,
 
     out.tile.src_bytes_per_record = src_bpr;
     out.tile.n_snp = static_cast<std::size_t>(counts.emitted_sites);
-    out.tile.n_individuals = n_hap;
-    out.tile.sel_rows.resize(n_hap);
-    for (std::size_t i = 0; i < n_hap; ++i) out.tile.sel_rows[i] = i;   // identity: all haps
-    out.tile.pop_offsets = {0, n_hap};                                  // one "PANEL" pop
+    out.tile.n_individuals = n_cols;
+    out.tile.sel_rows.resize(n_cols);
+    for (std::size_t i = 0; i < n_cols; ++i) out.tile.sel_rows[i] = i;  // identity: all columns
+    out.tile.pop_offsets = {0, n_cols};                                 // one "PANEL" pop
     out.tile.pop_labels = {std::string("PANEL")};
 
-    // --- unphased-drop guard: fail loud above the threshold ------------------
-    if (counts.diploid_calls > 0) {
+    // --- unphased-drop guard: fail loud above the threshold (phased only; an
+    //     unphased het is a legitimate dosage-1 call in hardcall mode) ---------
+    if (!opts.hardcall && counts.diploid_calls > 0) {
         const double frac =
             static_cast<double>(counts.unphased_het_dropped) /
             static_cast<double>(counts.diploid_calls);
@@ -597,13 +627,15 @@ VcfPanelResult read_vcf_panel(const std::string& vcf_path, const VcfPanelOptions
 
     const std::size_t n_sample = sample_ids.size();
     const std::size_t n_hap = n_sample * 2;
-    const std::size_t src_bpr = packed_bytes(n_hap);
+    const std::size_t n_cols = opts.hardcall ? n_sample : n_hap;
+    const std::size_t src_bpr = packed_bytes(n_cols);
 
     DecodeCtx ctx;
     ctx.sample_cols = &sample_cols;
     ctx.n_sample = n_sample;
     ctx.src_bpr = src_bpr;
     ctx.max_col = sample_cols.empty() ? 8 : sample_cols.back();
+    ctx.hardcall = opts.hardcall;
     ctx.region_active = opts.region.active;
     ctx.region_chrom = opts.region.chrom;
     ctx.region_start = opts.region.start;
@@ -734,13 +766,13 @@ VcfPanelResult read_vcf_panel(const std::string& vcf_path, const VcfPanelOptions
 
     out.tile.src_bytes_per_record = src_bpr;
     out.tile.n_snp = static_cast<std::size_t>(counts.emitted_sites);
-    out.tile.n_individuals = n_hap;
-    out.tile.sel_rows.resize(n_hap);
-    for (std::size_t i = 0; i < n_hap; ++i) out.tile.sel_rows[i] = i;
-    out.tile.pop_offsets = {0, n_hap};
+    out.tile.n_individuals = n_cols;
+    out.tile.sel_rows.resize(n_cols);
+    for (std::size_t i = 0; i < n_cols; ++i) out.tile.sel_rows[i] = i;
+    out.tile.pop_offsets = {0, n_cols};
     out.tile.pop_labels = {std::string("PANEL")};
 
-    if (counts.diploid_calls > 0) {
+    if (!opts.hardcall && counts.diploid_calls > 0) {
         const double frac = static_cast<double>(counts.unphased_het_dropped) /
                             static_cast<double>(counts.diploid_calls);
         if (frac > opts.unphased_max) {

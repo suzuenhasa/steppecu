@@ -6,11 +6,13 @@
 //   * strip_chr / chrom_to_int   — the CHROM token normalisation + .snp int code
 //   * is_snp_allele              — the biallelic-SNP allele filter (`-v snps`)
 //   * hap_code                   — the load-bearing {0,2,3} haplotype code map
+//   * diploid_dosage_code        — the phase-agnostic {0,1,2,3} hardcall dosage map
 //   * ChromMap / read_genetic_map / interp_morgans — the genetic-map join
 //
-// hap_code is ALSO re-implemented on-device (in the GPU GT-parse kernel) to match
-// these bytes; keeping the host definition here documents the exact rule the
-// kernel mirrors. Pure host C++20 io-leaf (standard library only, no CUDA).
+// hap_code and diploid_dosage_code are ALSO re-implemented on-device (in the GPU
+// GT-parse kernels) to match these bytes; keeping the host definitions here
+// documents the exact rules the kernels mirror. Pure host C++20 io-leaf (standard
+// library only, no CUDA).
 #ifndef STEPPE_IO_VCF_PANEL_DECODE_HPP
 #define STEPPE_IO_VCF_PANEL_DECODE_HPP
 
@@ -77,6 +79,28 @@ namespace vpd = vcfdetail;
         if (allele[0] == '1') return 2u;
     }
     return kMissingCode;  // 3
+}
+
+// The phase-agnostic diploid-dosage code for a biallelic GT's two allele tokens
+// (the HARDCALL path's per-sample rule): both '0' -> 0; exactly one '1' (het, either
+// order, phased OR unphased '0|1'=='0/1'=='1|0') -> 1; both '1' -> 2; any missing '.'
+// / multi-digit / malformed allele -> 3. Mirrors the bcftools oracle GT ->
+// {0/0:0, het:1, 1/1:2, else:3}. Used by BOTH the CPU and GPU hardcall readers (the
+// GPU kernel re-implements it byte-exact). Unlike hap_code, an unphased het is a
+// LEGITIMATE dosage-1 call here — nothing is dropped for lacking a phase.
+[[nodiscard]] inline std::uint8_t diploid_dosage_code(std::string_view a0,
+                                                      std::string_view a1) {
+    const auto bit = [](std::string_view a) -> int {
+        if (a.size() == 1) {
+            if (a[0] == '0') return 0;
+            if (a[0] == '1') return 1;
+        }
+        return -1;  // '.', a multiallelic index, or malformed
+    };
+    const int b0 = bit(a0);
+    const int b1 = bit(a1);
+    if (b0 < 0 || b1 < 0) return kMissingCode;  // 3
+    return static_cast<std::uint8_t>(b0 + b1);  // 0 / 1 / 2  (het = 0 + 1 = 1)
 }
 
 // A per-chromosome genetic map: (bp, cM) sorted ascending by bp, for linear

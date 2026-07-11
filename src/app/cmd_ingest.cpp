@@ -250,21 +250,29 @@ namespace {
     return true;
 }
 
-// The dedicated phased-VCF -> canonical haplotype-panel path (independent of the
-// target-site genotyper). Streams the VCF once, emits the host-only sites x haps
-// {0,2,3} matrix for the bit-exact gate, and reports the pass counters + the
-// unphased-drop guard on stderr.
-[[nodiscard]] int run_phased_vcf_panel(const IngestArgs& args) {
+// The dedicated multi-sample-VCF -> canonical panel path (independent of the
+// target-site genotyper), shared by both --phased-vcf (two haploid columns/sample,
+// codes {0,2,3}) and --hardcall-vcf (one diploid-dosage column/sample, codes
+// {0,1,2,3}; phase-agnostic). Streams the VCF once, emits the host-only sites x
+// columns matrix for the bit-exact gate, and reports the pass counters on stderr.
+// The ONLY behavioural difference is opts.hardcall (threaded into the CPU + GPU
+// readers at the single per-sample decode point); the CPU/GPU selector, region,
+// map join, and every emitter are identical.
+[[nodiscard]] int run_vcf_panel_mode(const IngestArgs& args, const std::string& vcf_path,
+                                     bool hardcall) {
+    const char* mode = hardcall ? "--hardcall-vcf" : "--phased-vcf";
     if (args.emit_hap_codes.empty() && args.emit_tile.empty()) {
         std::fprintf(stderr,
-                     "steppe ingest: --phased-vcf needs an output — pass --emit-hap-codes FILE "
-                     "(the host-only sites x haps {0,2,3} text matrix) and/or --emit-tile FILE "
-                     "(the packed SNP-major binary panel, the decode->pack product)\n");
+                     "steppe ingest: %s needs an output — pass --emit-hap-codes FILE (the "
+                     "host-only sites x %s text matrix) and/or --emit-tile FILE (the packed "
+                     "SNP-major binary panel, the decode->pack product)\n",
+                     mode, hardcall ? "samples {0,1,2,3} dosage" : "haps {0,2,3}");
         return cfg::kExitInvalidConfig;
     }
     io::VcfPanelOptions opts;
     opts.map_path = args.map;
-    opts.unphased_max = args.unphased_max;
+    opts.unphased_max = args.unphased_max;  // ignored by the reader in hardcall mode
+    opts.hardcall = hardcall;
     if (!args.region.empty()) {
         std::string err;
         if (!parse_region(args.region, opts.region, err)) {
@@ -299,9 +307,9 @@ namespace {
                 return cfg::kExitInvalidConfig;
             }
             const int device_id = dc.devices.empty() ? 0 : dc.devices.front();
-            panel = device::read_vcf_panel_gpu(args.phased_vcf, opts, device_id);
+            panel = device::read_vcf_panel_gpu(vcf_path, opts, device_id);
         } else {
-            panel = io::read_vcf_panel(args.phased_vcf, opts);
+            panel = io::read_vcf_panel(vcf_path, opts);
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "steppe ingest: %s\n", e.what());
@@ -375,14 +383,15 @@ namespace {
                                   static_cast<double>(c.diploid_calls)
                             : 0.0;
     std::fprintf(stderr,
-                 "steppe ingest: phased-VCF panel | samples=%zu haps=%zu sites=%lld | "
+                 "steppe ingest: %s panel | samples=%zu columns=%zu sites=%lld | "
                  "skipped multiallelic=%lld non_snp=%lld dup_pos=%lld out_of_region=%lld | "
                  "unphased_het_dropped=%lld/%lld (frac=%.6g) half_missing_haps=%lld "
                  "missing_haps=%lld\n",
-                 panel.n_sample, panel.tile.n_individuals, c.emitted_sites,
-                 c.skipped_multiallelic, c.skipped_non_snp, c.skipped_dup_pos,
-                 c.skipped_out_of_region, c.unphased_het_dropped, c.diploid_calls, frac,
-                 c.half_missing_haps, c.missing_haps);
+                 hardcall ? "hardcall-VCF" : "phased-VCF", panel.n_sample,
+                 panel.tile.n_individuals, c.emitted_sites, c.skipped_multiallelic,
+                 c.skipped_non_snp, c.skipped_dup_pos, c.skipped_out_of_region,
+                 c.unphased_het_dropped, c.diploid_calls, frac, c.half_missing_haps,
+                 c.missing_haps);
     return cfg::kExitOk;
 }
 
@@ -403,12 +412,23 @@ namespace {
 }  // namespace
 
 int run_ingest(const IngestArgs& args) {
-    // --- dedicated phased-VCF -> haplotype-panel path -------------------------
-    // A self-contained forward-only streaming reader (no target-site table, no
-    // --panel/--fasta/--lift): reads SNPs + individuals INLINE from the phased VCF.
+    // --- dedicated multi-sample-VCF -> canonical-panel paths ------------------
+    // Self-contained forward-only streaming readers (no target-site table, no
+    // --panel/--fasta/--lift): they read SNPs + individuals INLINE from the VCF.
     // Handled first and returned, so none of the target-site validation applies.
+    // --phased-vcf and --hardcall-vcf are mutually exclusive (two haploid columns
+    // vs one diploid-dosage column per sample).
+    if (!args.phased_vcf.empty() && !args.hardcall_vcf.empty()) {
+        std::fprintf(stderr,
+                     "steppe ingest: choose ONE panel mode — --phased-vcf (2 haploid columns/"
+                     "sample) OR --hardcall-vcf (1 diploid-dosage column/sample), not both\n");
+        return cfg::kExitInvalidConfig;
+    }
     if (!args.phased_vcf.empty()) {
-        return run_phased_vcf_panel(args);
+        return run_vcf_panel_mode(args, args.phased_vcf, /*hardcall=*/false);
+    }
+    if (!args.hardcall_vcf.empty()) {
+        return run_vcf_panel_mode(args, args.hardcall_vcf, /*hardcall=*/true);
     }
 
     // --- target-site source selection (mutually exclusive) --------------------

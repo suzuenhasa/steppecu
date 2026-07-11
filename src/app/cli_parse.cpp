@@ -889,6 +889,11 @@ int run_cli(int argc, char** argv) {
                     "Phased-panel mode: a multi-sample PHASED .vcf.gz (1000G phase-3 shape) -> "
                     "canonical haplotype panel (2 haploid columns/sample, codes {0,2,3}). Reads SNPs "
                     "and individuals INLINE (no --targets/--panel/.snp/.ind). Streaming, per-chromosome");
+    ing->add_option("--hardcall-vcf", ingest_args.hardcall_vcf,
+                    "Hardcall-panel mode: a multi-sample UNPHASED diploid .vcf.gz -> canonical "
+                    "genotype panel (ONE dosage column/sample, codes {0,1,2,3}: 0/0->0 het->1 1/1->2 "
+                    "./.->3; phase-agnostic). Reads SNPs and individuals INLINE (no --targets/--panel). "
+                    "Streaming; biallelic-SNP only. Mutually exclusive with --phased-vcf");
     ing->add_option("--map", ingest_args.map,
                     "Phased-panel mode: plink/HapMap genetic map (chrom id cM bp) -> SnpTable genpos "
                     "in Morgans (optional; the GT-code panel gate is map-independent)");

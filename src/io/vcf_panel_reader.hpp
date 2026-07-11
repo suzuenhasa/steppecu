@@ -52,7 +52,14 @@ struct VcfPanelOptions {
     // (dropped to a missing haplotype pair) exceeds this. Paint's own n_diploid
     // gate does NOT catch phase loss (unphased -> code 3 slips it), so the reader
     // must guard it. Default 1.0 = report-only; set low to make it fatal.
+    // IGNORED in hardcall mode (an unphased het is a legitimate dosage-1 call).
     double unphased_max = 1.0;
+    // HARDCALL (unphased diploid) mode: decode each biallelic-SNP GT into ONE
+    // dosage column per sample (codes {0,1,2,3}: 0/0->0, het->1, 1/1->2, ./.->3;
+    // phase-agnostic) instead of two haploid columns. n_individuals == n_sample
+    // (not 2*n_sample). Everything else — BGZF scan, region/dup/biallelic filters,
+    // the SNP-major pack, the CPU/GPU selector — is shared with the phased path.
+    bool hardcall = false;
 };
 
 // Streaming pass counters (reported on stderr by the CLI).
@@ -65,8 +72,11 @@ struct VcfPanelCounts {
     long long skipped_out_of_region = 0;    // outside the --region filter
     long long diploid_calls = 0;            // emitted_sites * n_sample
     long long unphased_het_dropped = 0;     // unphased-het calls set to a missing hap pair
+                                            // (phased mode only; always 0 in hardcall mode)
     long long half_missing_haps = 0;        // one hap present, one '.' (e.g. 0|.)
-    long long missing_haps = 0;             // haplotype cells emitted as code 3
+                                            // (phased mode only; always 0 in hardcall mode)
+    long long missing_haps = 0;             // phased: haplotype cells emitted as code 3;
+                                            // hardcall: per-sample dosage calls emitted as code 3
 };
 
 // The producer result: the SNP-major panel tile, its inline-parsed SNP table
@@ -86,10 +96,13 @@ struct VcfPanelResult {
 [[nodiscard]] VcfPanelResult read_vcf_panel(const std::string& vcf_path,
                                             const VcfPanelOptions& opts);
 
-// Host-only gate helper: dump the SNP-major tile back to the sites x haps
-// {0,2,3} matrix the bcftools oracle produces — one row per SNP, "CHROM<TAB>POS"
-// then one code per haplotype column (sample0.hap1, sample0.hap2, sample1.hap1,
-// ...), tab-separated. This is the bit-exact panel-gate artifact.
+// Host-only gate helper: dump the SNP-major tile back to the sites x columns
+// matrix the bcftools oracle produces — one row per SNP, "CHROM<TAB>POS" then one
+// code per output column, tab-separated. Width-generic over tile.n_individuals:
+// for the phased panel that is the sites x haps {0,2,3} matrix (sample0.hap1,
+// sample0.hap2, sample1.hap1, ...); for the hardcall panel it is the sites x
+// samples {0,1,2,3} diploid-dosage matrix (one code per sample). The bit-exact
+// panel-gate artifact for both paths.
 void dump_hap_codes(const SnpMajorTile& tile, const SnpTable& snptab, std::ostream& os);
 
 }  // namespace steppe::io

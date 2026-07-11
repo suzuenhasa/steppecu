@@ -111,6 +111,25 @@ __device__ inline std::uint8_t dev_hap_code(const char* a, int len) {
     return 3u;  // io::kMissingCode
 }
 
+// io::diploid_dosage_code on-device (the HARDCALL rule): a single-char allele token
+// '0'->0, '1'->1, else -1; the two tokens' bit sum is the {0,1,2} dosage, and any
+// missing/malformed token -> 3. Byte-for-byte mirror of the host diploid_dosage_code.
+__device__ inline int dev_allele_bit(const char* a, int len) {
+    if (len == 1) {
+        if (a[0] == '0') return 0;
+        if (a[0] == '1') return 1;
+    }
+    return -1;
+}
+
+__device__ inline std::uint8_t dev_diploid_dosage_code(const char* a0, int l0, const char* a1,
+                                                       int l1) {
+    const int b0 = dev_allele_bit(a0, l0);
+    const int b1 = dev_allele_bit(a1, l1);
+    if (b0 < 0 || b1 < 0) return 3u;  // io::kMissingCode
+    return static_cast<std::uint8_t>(b0 + b1);
+}
+
 // vd::subfield on-device: the fi-th ':'-delimited token of [field,field+flen).
 // fi<0 or out-of-range -> empty (len 0), matching vd::subfield.
 __device__ inline void dev_subfield(const char* field, int flen, int fi,
@@ -183,6 +202,48 @@ __device__ inline void decode_gt(const char* field, int flen, int fi, std::uint8
     *unph = u;
     *half = hf;
     *miss = (h0 == 3u ? 1 : 0) + (h1 == 3u ? 1 : 0);
+}
+
+// Decode one sample's GT field into ONE phase-agnostic diploid-dosage code (the
+// HARDCALL path), exactly as the CPU hardcall loop does. The GT split is identical
+// to decode_gt (split on '|' if phased else '/', require exactly two tokens); only
+// the post-split mapping is diploid_dosage_code instead of two hap_codes. `miss` is
+// 1 iff the sample resolves to the missing code 3.
+__device__ inline void decode_gt_dosage(const char* field, int flen, int fi,
+                                        std::uint8_t* codeo, int* miss) {
+    const char* gtv;
+    int gtlen;
+    dev_subfield(field, flen, fi, &gtv, &gtlen);
+
+    std::uint8_t code = 3u;  // io::kMissingCode
+    bool phased = false;
+    for (int i = 0; i < gtlen; ++i) {
+        if (gtv[i] == '|') { phased = true; break; }
+    }
+    const char sep = phased ? '|' : '/';
+
+    int sp = -1;
+    for (int i = 0; i < gtlen; ++i) {
+        if (gtv[i] == sep) { sp = i; break; }
+    }
+    if (sp >= 0) {
+        int sp2 = -1;
+        for (int i = sp + 1; i < gtlen; ++i) {
+            if (gtv[i] == sep) { sp2 = i; break; }
+        }
+        if (sp2 < 0) {  // exactly two tokens (ga.size()==2)
+            const char* a0 = gtv;
+            const int l0 = sp;
+            const char* a1 = gtv + sp + 1;
+            const int l1 = gtlen - sp - 1;
+            code = dev_diploid_dosage_code(a0, l0, a1, l1);
+        }
+        // sp2>=0 -> >2 tokens -> ga.size()!=2 -> missing
+    }
+    // sp<0 -> <2 tokens -> ga.size()!=2 -> missing
+
+    *codeo = code;
+    *miss = (code == 3u) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,15 +371,17 @@ __global__ void colscan_kernel(const char* __restrict__ text,
     cs[n_col] = static_cast<std::uint32_t>(text_size - base) + 1u;
 }
 
-// One thread per (emitted record, output tile byte). A byte holds 4 haplotype
-// codes = 2 samples; the thread decodes both samples' GT and writes the packed
-// byte (no atomics on the tile — one writer per byte). Per-sample sub-counts are
-// atomically summed into the 3 global counters.
+// One thread per (emitted record, output tile byte). PHASED: a byte holds 4
+// haplotype codes = 2 samples (2 haps each). HARDCALL: a byte holds 4 diploid-dosage
+// codes = 4 samples. The thread decodes its samples' GT and writes the packed byte
+// (no atomics on the tile — one writer per byte). Per-sample sub-counts are
+// atomically summed into the 3 global counters (hardcall uses only counters[2]).
 __global__ void gtpack_kernel(const char* __restrict__ text,
                               const std::uint64_t* __restrict__ rec_off,
                               const std::uint32_t* __restrict__ colstart,
                               const int* __restrict__ gt_fi, long n_emit, int n_sample,
-                              int n_col, long src_bpr, std::uint8_t* __restrict__ tile,
+                              int n_col, long src_bpr, bool hardcall,
+                              std::uint8_t* __restrict__ tile,
                               unsigned long long* __restrict__ counters) {
     const long total = n_emit * src_bpr;
     const long tid = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -329,6 +392,29 @@ __global__ void gtpack_kernel(const char* __restrict__ text,
     const std::size_t base = rec_off[i];
     const std::uint32_t* cs = colstart + static_cast<std::size_t>(i) * (n_col + 1);
     const int fi = gt_fi[i];
+
+    if (hardcall) {
+        // This byte covers samples [4b, 4b+4), one dosage code each at slot s&3.
+        std::uint8_t out = 0u;
+        unsigned long long miss = 0;
+        for (int slot = 0; slot < 4; ++slot) {
+            const int s = static_cast<int>(4 * b) + slot;
+            if (s >= n_sample) continue;  // padding slots stay 0 (matches the zero-init pack)
+            const int colA = 9 + s;
+            const std::uint32_t fs = cs[colA];
+            const std::uint32_t fe = cs[colA + 1] - 1u;  // drop the separator
+            const char* field = text + base + fs;
+            const int flen = static_cast<int>(fe - fs);
+            std::uint8_t code;
+            int sm;
+            decode_gt_dosage(field, flen, fi, &code, &sm);
+            miss += static_cast<unsigned long long>(sm);
+            out = static_cast<std::uint8_t>(out | (code << ((3 - slot) * 2)));
+        }
+        tile[static_cast<std::size_t>(i) * src_bpr + b] = out;
+        if (miss) atomicAdd(&counters[2], miss);
+        return;
+    }
 
     std::uint8_t out = 0u;
     unsigned long long unph = 0, half = 0, miss = 0;
@@ -640,6 +726,7 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
         constexpr std::size_t kBatchTextCap = 256ull << 20;  // ~256 MB decompressed / batch
         std::size_t n_sample = 0;
         std::size_t n_hap = 0;
+        std::size_t n_out_cols = 0;  // hardcall: n_sample; phased: n_hap
         std::size_t src_bpr = 0;
         int n_col = 0;
         int max_col = 8;
@@ -704,7 +791,10 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
                             }
                             n_sample = h.size() - 9;
                             n_hap = n_sample * 2;
-                            src_bpr = io::packed_bytes(n_hap);
+                            // Output columns: hardcall packs ONE dosage column/sample,
+                            // phased packs two haploid columns/sample.
+                            n_out_cols = opts.hardcall ? n_sample : n_hap;
+                            src_bpr = io::packed_bytes(n_out_cols);
                             n_col = 9 + static_cast<int>(n_sample);
                             max_col = static_cast<int>(h.size()) - 1;  // last sample column index
                             out.sample_ids.clear();
@@ -903,8 +993,8 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
                 gtpack_kernel<<<gt_grid, 256, 0, stream>>>(
                     reinterpret_cast<const char*>(bt.d_text.data()), d_rec_off.data(),
                     d_colstart.data(), d_gt_fi.data(), static_cast<long>(n_emit),
-                    static_cast<int>(n_sample), n_col, static_cast<long>(src_bpr), d_tile.data(),
-                    d_counters.data());
+                    static_cast<int>(n_sample), n_col, static_cast<long>(src_bpr), opts.hardcall,
+                    d_tile.data(), d_counters.data());
                 STEPPE_CUDA_CHECK_KERNEL();
 
                 // Append the batch's packed rows to the panel (device-resident tile
@@ -935,13 +1025,13 @@ io::VcfPanelResult read_vcf_panel_gpu(const std::string& vcf_path,
         out.n_sample = n_sample;
         out.tile.src_bytes_per_record = src_bpr;
         out.tile.n_snp = static_cast<std::size_t>(counts.emitted_sites);
-        out.tile.n_individuals = n_hap;
-        out.tile.sel_rows.resize(n_hap);
-        for (std::size_t i = 0; i < n_hap; ++i) out.tile.sel_rows[i] = i;
-        out.tile.pop_offsets = {0, n_hap};
+        out.tile.n_individuals = n_out_cols;
+        out.tile.sel_rows.resize(n_out_cols);
+        for (std::size_t i = 0; i < n_out_cols; ++i) out.tile.sel_rows[i] = i;
+        out.tile.pop_offsets = {0, n_out_cols};
         out.tile.pop_labels = {std::string("PANEL")};
 
-        if (counts.diploid_calls > 0) {
+        if (!opts.hardcall && counts.diploid_calls > 0) {
             const double frac = static_cast<double>(counts.unphased_het_dropped) /
                                 static_cast<double>(counts.diploid_calls);
             if (frac > opts.unphased_max) {

@@ -49,6 +49,9 @@ struct IngestArgs {
     //   Phased-VCF -> canonical haplotype-panel path (the dedicated streaming reader,
     //   independent of the target-site genotyper above; no --targets/--panel needed).
     std::string phased_vcf;   // OPTIONAL: multi-sample PHASED .vcf.gz -> haplotype panel
+    std::string hardcall_vcf; // OPTIONAL: multi-sample UNPHASED diploid .vcf.gz -> canonical
+                              // genotype panel (ONE dosage column/sample, codes {0,1,2,3};
+                              // phase-agnostic). Mutually exclusive with --phased-vcf
     std::string map;          // OPTIONAL: plink/HapMap genetic map (chrom id cM bp) -> genpos Morgans
     std::string region;       // OPTIONAL: bounded POS filter "CHROM:START-END" (inclusive)
     std::string emit_hap_codes;  // OPTIONAL: host-only sites x haps {0,2,3} matrix (bit-exact gate)
