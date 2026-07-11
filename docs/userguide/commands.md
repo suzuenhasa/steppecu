@@ -393,7 +393,7 @@ complete-data sites (`--fold` for the polarity-free per-pop minor-allele SFS, de
 gated bit-exact vs scikit-allel `joint_sfs`. `pca` takes `-k` PCs and optionally `--eigenvalues`
 (the scree table) or `--emit-html` (a self-contained interactive scatter) — gated vs
 scikit-allel/sklearn PCA (NOT ADMIXTOOLS 2). Its eigensolve is a Halko randomized top-k solver, so
-PCA now runs the **full AADR cohort** (23,089 samples × 1.23M SNPs, ~6.5 min, 18 GB peak) — the
+PCA now runs the **full AADR cohort** (23,089 samples × 1.23M SNPs, ~6m24s, 18 GB peak) — the
 old full-spectrum solver OOM'd there.
 
 > **Measured** (one RTX 5090, `--device 0`, on a real AADR v66 fixture — 430 samples ×
@@ -451,7 +451,7 @@ the prep thread pool and `STEPPE_ROH_TIMING=1` prints the per-stage prep timing.
 > (~1,100 ancients/min), and it shards across GPUs — a 2,048-ancient cohort runs 92.6 s (1 GPU) →
 > 57 s (2) → 37 s (4), byte-identical at every device count. The win is scale-shaped: the
 > wave-batched grid lifted the kernel off ~1% GPU utilization, and multi-GPU adds a further
-> ~1.6–2.9× (task-parallel, capped by the shared read/decode prep, not the GPUs). HONEST NOTE: on the
+> ~1.6–2.5× (task-parallel, capped by the shared read/decode prep, not the GPUs). HONEST NOTE: on the
 > tiny Demo2 fixture the reference `pcangsd` (10 SQUAREM float32 iters, 16 CPU threads) finishes
 > ~1 s — steppe runs more, heavier FP64 iterations to the same fixed point, so it is slower on
 > this smoke size; the GPU win is a scale story.
