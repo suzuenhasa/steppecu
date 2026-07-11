@@ -192,9 +192,11 @@ correctness-and-parity result, not a speed claim.
 
 - **Two populations, or the whole matrix.** Without `--all-pairs`, `--pops` must
   name two *different* labels. With `--all-pairs` it computes the full P×P matrix
-  over the selected set instead (`--per-snp` is single-pair only). Hudson's
-  estimator, windowed FST, PBS, and a block-jackknife standard error are still
-  documented follow-ups, not shipped.
+  over the selected set instead (`--per-snp` is single-pair only). Windowed FST
+  (`--windowed SIZE[:STEP]`) and the per-window PBS selection scan (`--pbs A,B,C
+  --windowed`) *are* shipped (machine-eps vs scikit-allel, commit `2ec5269`).
+  Hudson's estimator and a block-jackknife standard error are still documented
+  follow-ups, not shipped.
 - **Autosomes only.** The summary and the valid-site count cover autosomal sites;
   the genome-wide FST is over those.
 - **Invalid sites are honest `NaN`s.** A site is valid only if both groups have at
