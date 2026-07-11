@@ -68,6 +68,18 @@ struct PerSnpSummary {
     const FilterConfig& cfg,
     const SnpMembership& mem);
 
+// build_snp_keep_mask_from_summary — the same keep decision as build_snp_keep_mask, but over
+// an ALREADY-derived per-SNP pooled summary (length M) instead of the O(P*M) per-pop Q/V/N.
+// It runs the identical snps-table validation + snp_keep_decision loop; only the derive step
+// (derive_per_snp_summary) is skipped because the caller streamed the decode SNP-tile by
+// SNP-tile and pooled each tile on the host as it went. Bit-identical to build_snp_keep_mask
+// fed the whole decode, so the two paths cannot drift.
+[[nodiscard]] std::vector<bool> build_snp_keep_mask_from_summary(
+    const std::vector<PerSnpSummary>& summary,
+    const SnpTable& snps,
+    const FilterConfig& cfg,
+    const SnpMembership& mem);
+
 // filter_is_active — true when the config requests ANY SNP subsetting: a MAF floor, a per-SNP
 // missing cap, autosomes-only, drop-monomorphic, transversions-only, or an include/exclude/
 // prune membership. Strand-mode is a sub-policy of the filter (it only takes effect once the

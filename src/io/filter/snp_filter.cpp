@@ -58,18 +58,15 @@ std::vector<PerSnpSummary> derive_per_snp_summary(const DecodedTileSummaryInput&
     return out;
 }
 
-std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
-                                      const SnpTable& snps,
-                                      const FilterConfig& cfg,
-                                      const SnpMembership& mem) {
-    const long M = in.M;
-    std::vector<bool> keep(static_cast<std::size_t>(M < 0 ? 0 : M), false);
-    if (M <= 0) return keep;
+namespace {
 
+// SnpTable size guard shared by the two keep-mask builders (bit-identical messages/order to
+// the pre-refactor build_snp_keep_mask): ref/alt must cover M, chrom must cover M when
+// autosomes-only is active, id must cover M when a membership predicate is active.
+void validate_snp_table(const SnpTable& snps, long M, const FilterConfig& cfg,
+                        const SnpMembership& mem) {
     const std::size_t Mu = static_cast<std::size_t>(M);
-
     const bool mem_noop = mem.is_noop();
-
     const auto require_at_least = [&](const char* what, std::size_t have, bool active) {
         if (active && have < Mu) {
             throw std::invalid_argument(
@@ -77,7 +74,6 @@ std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
                 "); got " + std::to_string(have));
         }
     };
-
     if (snps.ref.size() < Mu || snps.alt.size() < Mu) {
         throw std::invalid_argument(
             "snp_filter: snps.ref/alt must have >= M (" + std::to_string(M) +
@@ -87,19 +83,48 @@ std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
     require_at_least("autosomes_only requires snps.chrom", snps.chrom.size(),
                      cfg.autosomes_only);
     require_at_least("active membership requires snps.id", snps.id.size(), !mem_noop);
+}
 
-    const std::vector<PerSnpSummary> summary = derive_per_snp_summary(in);
-
+// The per-SNP keep decision over an already-derived summary (validation done by the caller).
+// The single decision loop both public builders share, so they cannot drift.
+std::vector<bool> decide_keep(const std::vector<PerSnpSummary>& summary, const SnpTable& snps,
+                              const FilterConfig& cfg, const SnpMembership& mem) {
+    const long M = static_cast<long>(summary.size());
+    std::vector<bool> keep(static_cast<std::size_t>(M < 0 ? 0 : M), false);
+    const bool mem_noop = mem.is_noop();
     for (long s = 0; s < M; ++s) {
         const std::size_t si = static_cast<std::size_t>(s);
-
         const int chrom = cfg.autosomes_only ? snps.chrom[si] : 0;
         const bool membership_ok = mem_noop ? true : mem.passes(snps.id[si]);
-
-        keep[si] = snp_keep_decision(summary[si], snps.ref[si], snps.alt[si], chrom,
-                                     cfg, membership_ok);
+        keep[si] = snp_keep_decision(summary[si], snps.ref[si], snps.alt[si], chrom, cfg,
+                                     membership_ok);
     }
     return keep;
+}
+
+}  // namespace
+
+std::vector<bool> build_snp_keep_mask(const DecodedTileSummaryInput& in,
+                                      const SnpTable& snps,
+                                      const FilterConfig& cfg,
+                                      const SnpMembership& mem) {
+    const long M = in.M;
+    if (M <= 0) return std::vector<bool>(static_cast<std::size_t>(M < 0 ? 0 : M), false);
+
+    validate_snp_table(snps, M, cfg, mem);
+    const std::vector<PerSnpSummary> summary = derive_per_snp_summary(in);
+    return decide_keep(summary, snps, cfg, mem);
+}
+
+std::vector<bool> build_snp_keep_mask_from_summary(const std::vector<PerSnpSummary>& summary,
+                                                   const SnpTable& snps,
+                                                   const FilterConfig& cfg,
+                                                   const SnpMembership& mem) {
+    const long M = static_cast<long>(summary.size());
+    if (M <= 0) return std::vector<bool>(0, false);
+
+    validate_snp_table(snps, M, cfg, mem);
+    return decide_keep(summary, snps, cfg, mem);
 }
 
 bool filter_is_active(const FilterConfig& cfg) noexcept {

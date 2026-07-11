@@ -2,6 +2,8 @@
 // the design (bit-exact subset-in-place, same-ascertainment guard, host repack rationale).
 #include "core/stats/apply_snp_filter.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -20,6 +22,28 @@ namespace core {
 namespace {
 
 namespace flt = steppe::io::filter;
+
+// Choose a SNP-tile width (a multiple of kCodesPerByte, so each tile start stays byte-aligned
+// in the packed 2-bit tile) that bounds the streamed per-pop decode's transient — 3 arrays
+// (Q/V/N) of P*tm doubles, on the device and copied back to host — to ~a quarter of free VRAM.
+// This is what lets PCA (and the other genotype tools that share this seam) run the QC filter
+// at biobank cohort sizes: the whole-tile O(P*M) decode (3 * P * M doubles, ~35 GB on the HO
+// top-2500-pop cohort) is never materialized; it is walked SNP-tile by SNP-tile instead. When
+// free VRAM is unknown (the CPU oracle / no-GPU path reports 0) the whole SNP axis is used, so
+// that path is byte-identical to the pre-streaming behavior.
+long choose_decode_snp_tile(int P, long M, std::size_t free_vram_bytes) {
+    if (P <= 0 || M <= 0) return M > 0 ? M : 1;
+    if (free_vram_bytes == 0) return M;  // unknown free VRAM (CPU oracle) -> whole axis
+    const std::size_t budget = free_vram_bytes / 4u;
+    const std::size_t per_snp = static_cast<std::size_t>(P) * 3u * sizeof(double);
+    long tm = static_cast<long>(budget / (per_snp == 0 ? 1u : per_snp));
+    // Round DOWN to a multiple of kCodesPerByte: only the tile START must be byte-aligned (the
+    // packed sub-tile begins at s_lo/kCodesPerByte); the final short tile is fine.
+    tm -= tm % static_cast<long>(kCodesPerByte);
+    if (tm < static_cast<long>(kCodesPerByte)) tm = static_cast<long>(kCodesPerByte);
+    if (tm > M) tm = M;
+    return tm;
+}
 
 // Gather the external "keep panel" ids (include list ∪ prune.in file), used only by the
 // same-ascertainment guard. The exclude list is a drop set, not a panel, so it is left out.
@@ -52,19 +76,43 @@ std::vector<bool> build_keep_mask(const io::GenotypeTile& tile, const io::SnpTab
         // per-individual, pooled across the tile's populations (documented in the header).
         std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
         const DecodeTileView view = make_decode_tile_view(tile, sample_ploidy, P);
-        const DecodeResult dec = backend.decode_af(view);
 
-        flt::DecodedTileSummaryInput fin;
-        fin.q = dec.q.data();
-        fin.v = dec.v.data();
-        fin.n = dec.n.data();
-        fin.P = P;
-        fin.M = M;
-        fin.pop_individuals = std::move(pop_individuals);
-        fin.ploidy = kPloidyDiploid;
+        // The pooled reduction's two tile-wide constants, computed EXACTLY as
+        // derive_per_snp_summary does (integer sum of pop sizes cast once; diploid ploidy).
+        std::size_t total_indiv = 0;
+        for (int p = 0; p < P; ++p) total_indiv += pop_individuals[static_cast<std::size_t>(p)];
+        const double total_indiv_d = static_cast<double>(total_indiv);
+        const double ploidy_d = static_cast<double>(kPloidyDiploid);
+
+        // Stream the per-pop decode over SNP tiles, pooling each tile to the O(M) per-SNP
+        // summary on the host as it goes. This is BIT-IDENTICAL to decoding the whole tile
+        // then pooling: the decode is per-(pop, SNP) independent, so a byte-aligned SNP
+        // sub-view (packed offset s_lo/kCodesPerByte, n_snp = tm) yields the same Q/N bits as
+        // the matching columns of the whole decode, and derive_pooled_summary_one is the same
+        // reduction in the same p = 0..P-1 order. Only the O(P*M) transient is removed — the
+        // whole-tile decode that cudaMalloc-fails past ~32 GB on a large-P cohort.
+        const long tileM = choose_decode_snp_tile(P, M, backend.capabilities().free_vram_bytes);
+        std::vector<flt::PerSnpSummary> summary(static_cast<std::size_t>(M));
+        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+            const long tm = std::min<long>(tileM, M - s_lo);
+            DecodeTileView sub = view;
+            sub.packed = view.packed +
+                         static_cast<std::size_t>(s_lo) / static_cast<std::size_t>(kCodesPerByte);
+            sub.n_snp = static_cast<std::size_t>(tm);
+            const DecodeResult dec = backend.decode_af(sub);
+            for (long j = 0; j < tm; ++j) {
+                const flt::PooledSnpSummary ps = flt::derive_pooled_summary_one(
+                    dec.q.data(), dec.n.data(), P, j, ploidy_d, total_indiv_d);
+                flt::PerSnpSummary& sm = summary[static_cast<std::size_t>(s_lo + j)];
+                sm.pooled_ref_af = ps.pooled_ref_af;
+                sm.pooled_minor_af = ps.pooled_minor_af;
+                sm.missing_frac = ps.missing_frac;
+                sm.pooled_allele_count = ps.pooled_allele_count;
+            }
+        }
 
         const flt::SnpMembership mem(cfg);
-        return flt::build_snp_keep_mask(fin, snptab, cfg, mem);
+        return flt::build_snp_keep_mask_from_summary(summary, snptab, cfg, mem);
     }
 
     // No numeric threshold active: only membership + class predicates (autosome, strand,
