@@ -82,15 +82,18 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
         sel.min_n = 1;
     }
 
-    // GPU-native device-resident load when no SNP filter is active (an active filter subsets the
-    // HOST tile in place, needing host packed bytes). Byte-identical either way.
-    const bool allow_device = !io::filter::filter_is_active(filter);
+    // GPU-native device-resident load; a filtered run compacts the resident tile on-device via
+    // apply_snp_filter (no host round-trip). STEPPE_HOST_FILTER=1 forces the legacy host repack
+    // oracle. Byte-identical either way.
+    const bool allow_device =
+        !(io::filter::filter_is_active(filter) && core::host_filter_forced());
     core::GenotypeFrontEnd fe =
         core::read_genotype_front_end(geno, snp, ind, sel, be, allow_device);
     // Per-SNP QC filter: subset the SNP axis in place BEFORE the decode view, so the covariance
     // (hence the eigenvectors, up to per-component sign) is bit-exact vs an externally pre-subset
     // triple. Throws on a same-ascertainment refusal / an all-filtered set.
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(fe.tile, fe.dev_tile, fe.snptab, filter, be);
     res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
 

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,15 @@
 
 namespace steppe {
 namespace core {
+
+// STEPPE_HOST_FILTER selector (default OFF): forces the legacy host materialize + repack + re-upload
+// filter path — the byte-exact invariance oracle. Mirrors device_load_enabled / STEPPE_*_THREADS.
+bool host_filter_forced() noexcept {
+    const char* e = std::getenv("STEPPE_HOST_FILTER");
+    if (e == nullptr || *e == '\0') return false;
+    return !(std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
+             std::strcmp(e, "false") == 0 || std::strcmp(e, "no") == 0);
+}
 
 namespace {
 
@@ -116,7 +126,8 @@ std::vector<std::string> gather_external_keep_ids(const FilterConfig& cfg) {
 // frequencies on the backend only when a threshold that needs them is active (MAF / per-SNP
 // missing / drop-monomorphic); otherwise the class/membership predicates are evaluated
 // directly from the SnpTable with a summary that trivially clears the numeric thresholds.
-std::vector<bool> build_keep_mask(const io::GenotypeTile& tile, const io::SnpTable& snptab,
+std::vector<bool> build_keep_mask(const io::GenotypeTile& tile,
+                                  const DeviceGenotypeTile& dev_tile, const io::SnpTable& snptab,
                                   const FilterConfig& cfg, ComputeBackend& backend, int P, long M) {
     const bool needs_decode =
         cfg.maf_min > 0.0 || cfg.geno_max_missing < 1.0 || cfg.drop_monomorphic;
@@ -131,8 +142,13 @@ std::vector<bool> build_keep_mask(const io::GenotypeTile& tile, const io::SnpTab
         // Force diploid: the four tools all read each 2-bit code as a diploid dosage (the
         // ploidy vector only sizes the view). The pooled MAF/missing definition is per-SNP
         // per-individual, pooled across the tile's populations (documented in the header).
+        // When the tile is device-resident (GPU-native filtered load) the summary decode reads
+        // the resident bytes in place; the streamed decode_af_pooled_summary is bit-identical on
+        // either view (same STEPPE_HD reduction over the same — byte-identical — packed bits).
         std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
-        const DecodeTileView view = make_decode_tile_view(tile, sample_ploidy, P);
+        const DecodeTileView view =
+            dev_tile.valid() ? make_decode_tile_view(dev_tile, sample_ploidy, P)
+                             : make_decode_tile_view(tile, sample_ploidy, P);
 
         // The pooled reduction's two tile-wide constants, computed EXACTLY as
         // derive_per_snp_summary does (integer sum of pop sizes cast once; diploid ploidy).
@@ -259,9 +275,15 @@ void subset_snptab(io::SnpTable& snptab, const std::vector<long>& kept_cols) {
 }  // namespace
 
 // Subset `tile` + `snptab` in lockstep to the kept SNP columns. A no-op (returns false) when the
-// mask keeps every column; otherwise repacks the 2-bit tile + subsets the table and returns true.
-bool subset_to_mask(io::GenotypeTile& tile, io::SnpTable& snptab,
-                    const std::vector<std::uint8_t>& keep, const char* what) {
+// mask keeps every column; otherwise it compacts the 2-bit tile — ON DEVICE when `dev_tile` is
+// valid (compact_tile_columns_device, byte-identical to repack_tile_columns; dev_tile is replaced
+// and `tile` keeps only the refreshed descriptor with an empty packed vector), else the host
+// repack_tile_columns path — subsets the table, and returns true. `kept_cols` (the ascending kept
+// source columns) is built on the host either way: it matches the device select exactly and drives
+// the tiny host SnpTable subset + the empty/all-kept guards.
+bool subset_to_mask(io::GenotypeTile& tile, DeviceGenotypeTile& dev_tile, io::SnpTable& snptab,
+                    const std::vector<std::uint8_t>& keep, const char* what,
+                    ComputeBackend& backend) {
     const long M = static_cast<long>(tile.n_snp);
     std::vector<long> kept_cols;
     kept_cols.reserve(static_cast<std::size_t>(M));
@@ -273,14 +295,22 @@ bool subset_to_mask(io::GenotypeTile& tile, io::SnpTable& snptab,
                                     " SNPs — relax --maf / --geno-max-miss / --ld-prune / the keep list");
     }
     if (static_cast<long>(kept_cols.size()) == M) return false;  // kept everything: untouched
-    repack_tile_columns(tile, kept_cols);
+    if (dev_tile.valid()) {
+        dev_tile = backend.compact_tile_columns_device(dev_tile, keep);
+        tile.packed.clear();  // already empty on the device path; only the SNP-axis extents move
+        tile.bytes_per_record = dev_tile.bytes_per_record;
+        tile.n_snp = dev_tile.n_snp;
+    } else {
+        repack_tile_columns(tile, kept_cols);
+    }
     subset_snptab(snptab, kept_cols);
     return true;
 }
 
 // Windowed-r2 LD prune (--ld-prune) over the CURRENT (post-QC) tile: decode + pairwise r^2 on the
 // backend, greedy plink2 selection, returned as a per-SNP keep mask. See ld_prune_windowed.
-std::vector<std::uint8_t> ld_prune_mask(io::GenotypeTile& tile, io::SnpTable& snptab,
+std::vector<std::uint8_t> ld_prune_mask(io::GenotypeTile& tile,
+                                        const DeviceGenotypeTile& dev_tile, io::SnpTable& snptab,
                                         const FilterConfig& cfg, ComputeBackend& backend) {
     const long M = static_cast<long>(tile.n_snp);
     std::vector<int> chrom(static_cast<std::size_t>(M), 0);
@@ -289,13 +319,17 @@ std::vector<std::uint8_t> ld_prune_mask(io::GenotypeTile& tile, io::SnpTable& sn
         chrom[si] = si < snptab.chrom.size() ? snptab.chrom[si] : 0;
     }
     std::vector<int> sample_ploidy(tile.n_individuals, kPloidyDiploid);
-    const DecodeTileView view = make_decode_tile_view(tile, sample_ploidy, static_cast<int>(tile.n_pop()));
+    const int P = static_cast<int>(tile.n_pop());
+    const DecodeTileView view = dev_tile.valid()
+                                    ? make_decode_tile_view(dev_tile, sample_ploidy, P)
+                                    : make_decode_tile_view(tile, sample_ploidy, P);
     return backend.ld_prune_windowed(view, chrom, cfg.ld_prune_window, cfg.ld_prune_step,
                                      cfg.ld_prune_r2);
 }
 
-SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, io::SnpTable& snptab,
-                                  const FilterConfig& cfg, ComputeBackend& backend) {
+SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, DeviceGenotypeTile& dev_tile,
+                                  io::SnpTable& snptab, const FilterConfig& cfg,
+                                  ComputeBackend& backend) {
     SnpFilterOutcome out;
     out.n_in = static_cast<long>(tile.n_snp);
     out.n_kept = out.n_in;
@@ -318,17 +352,22 @@ SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, io::SnpTable& snptab,
     // Phase 1 — per-SNP QC keep mask (MAF / missing / monomorphic / class / membership). Applied
     // FIRST so the LD pruner (Phase 2) runs on the QC survivors, matching the usual QC-then-prune
     // order and keeping each stage's math a pure SNP-subset of the tool's kernels.
-    const std::vector<bool> keep_bool = build_keep_mask(tile, snptab, cfg, backend, P, M);
+    const std::vector<bool> keep_bool = build_keep_mask(tile, dev_tile, snptab, cfg, backend, P, M);
     std::vector<std::uint8_t> keep(static_cast<std::size_t>(M));
     for (long s = 0; s < M; ++s) {
         keep[static_cast<std::size_t>(s)] = keep_bool[static_cast<std::size_t>(s)] ? 1u : 0u;
     }
-    if (subset_to_mask(tile, snptab, keep, "per-SNP QC filter")) out.applied = true;
+    if (subset_to_mask(tile, dev_tile, snptab, keep, "per-SNP QC filter", backend)) {
+        out.applied = true;
+    }
 
-    // Phase 2 — windowed-r2 LD prune over the survivors (the one genuinely-new GPU kernel).
+    // Phase 2 — windowed-r2 LD prune over the survivors (the one genuinely-new GPU kernel). Routes
+    // through the same device compactor so a resident tile stays resident across both phases.
     if (cfg.ld_prune_active()) {
-        const std::vector<std::uint8_t> ld_keep = ld_prune_mask(tile, snptab, cfg, backend);
-        if (subset_to_mask(tile, snptab, ld_keep, "--ld-prune")) out.applied = true;
+        const std::vector<std::uint8_t> ld_keep = ld_prune_mask(tile, dev_tile, snptab, cfg, backend);
+        if (subset_to_mask(tile, dev_tile, snptab, ld_keep, "--ld-prune", backend)) {
+            out.applied = true;
+        }
     }
 
     // The surviving SnpTable ids ARE the final kept set (used for --emit-kept-snps).

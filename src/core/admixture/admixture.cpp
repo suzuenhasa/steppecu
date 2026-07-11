@@ -22,6 +22,7 @@
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/ind_reader.hpp"
 #include "io/individual_partition.hpp"
@@ -46,11 +47,17 @@ AdmixtureResult run_admixture(const std::string& geno, const std::string& snp,
         sel.min_n = 1;
     }
 
-    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    // GPU-native device-resident load; a filtered run compacts the resident tile on-device (the
+    // host round-trip is gone). STEPPE_HOST_FILTER=1 forces the legacy host repack oracle.
+    const bool allow_device =
+        !(io::filter::filter_is_active(params.filter) && core::host_filter_forced());
+    core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, sel, be, allow_device);
     // Per-SNP QC filter: subset the SNP axis (individuals untouched) BEFORE the fixed-F build
     // and the block-EM, so a filtered run's Q is bit-exact vs an externally pre-subset triple
     // under deterministic EM. Throws on a same-ascertainment refusal / an all-filtered set.
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, params.filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(fe.tile, fe.dev_tile, fe.snptab, params.filter, be);
     res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const int P = static_cast<int>(tile.n_pop());
@@ -77,9 +84,13 @@ AdmixtureResult run_admixture(const std::string& geno, const std::string& snp,
             res.sample_pop.push_back(grp.label);
         }
 
-    // Force diploid (the decode reads each 2-bit code as a diploid dosage 0/1/2).
+    // Force diploid (the decode reads each 2-bit code as a diploid dosage 0/1/2). Consume the
+    // device-resident tile in place when the GPU-native load produced one (the supervised decode_af
+    // and the block-EM both read it via packed_device_ptr); else the host view.
     const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    const DecodeTileView view =
+        fe.dev_tile.valid() ? core::make_decode_tile_view(fe.dev_tile, sample_ploidy, P)
+                            : core::make_decode_tile_view(tile, sample_ploidy, P);
 
     // Resolve K + the fixed-F table per mode.
     int K = params.K;

@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 
+#include "core/internal/decode_af.hpp"  // genotype_code, kCodesPerByte, kBitsPerCode, kCodeMask
 #include "core/internal/launch_config.hpp"
 #include "device/cuda/check.cuh"
 #include "io/filter/snp_summary_reduce.hpp"
@@ -107,6 +108,41 @@ __global__ void compact_columns_gather_kernel(const double* __restrict__ in, int
     out[dst] = in[src];
 }
 
+// Packed 2-bit column compaction (apply_snp_filter device path).
+// One thread per (individual row r, output byte b) over the grid-stride flat index
+// idx = r*out_bpr + b. Each thread composes its output byte from the (up to) four kept source
+// columns 4b..4b+3: source column s = kept_cols[4b+t] (the ascending select output, == the host
+// repack's kept_cols), code = genotype_code(src[r*src_bpr + s/4], s), placed MSB-first at bit
+// (kCodesPerByte-1-t)*kBitsPerCode. This reproduces repack_tile_columns' 2-bit gather bit-for-bit
+// (same genotype_code extract, same shift), reading the resident source in place and writing each
+// output byte exactly once (no atomics, order-independent).
+__global__ void compact_packed_columns_kernel(const std::uint8_t* __restrict__ src,
+                                              std::size_t src_bpr,
+                                              const long* __restrict__ kept_cols, long n_kept,
+                                              std::uint8_t* __restrict__ out,
+                                              std::size_t out_bpr, std::size_t n_individuals) {
+    const std::size_t total = n_individuals * out_bpr;
+    for (std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         idx < total; idx += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+        const std::size_t r = idx / out_bpr;
+        const std::size_t b = idx % out_bpr;
+        const std::uint8_t* rec = src + r * src_bpr;
+        std::uint8_t byte = 0;
+        for (int t = 0; t < core::kCodesPerByte; ++t) {
+            const long outcol = static_cast<long>(b) * core::kCodesPerByte + t;
+            if (outcol >= n_kept) break;
+            const long s = kept_cols[outcol];
+            const std::uint8_t code = core::genotype_code(
+                rec[static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte)],
+                static_cast<int>(s));
+            const int shift = (core::kCodesPerByte - 1 - t) * core::kBitsPerCode;
+            byte = static_cast<std::uint8_t>(
+                byte | static_cast<std::uint8_t>((code & core::kCodeMask) << shift));
+        }
+        out[idx] = byte;
+    }
+}
+
 }  // namespace
 
 // Launch geometry + grid-size guard — reference §6
@@ -151,6 +187,20 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                     static_cast<unsigned>(core::grid_for(P, bx)));
     compact_columns_gather_kernel<<<grid, block, 0, stream>>>(d_in, P, M, d_flags,
                                                               d_keep_idx, d_out);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_compact_packed_columns(const std::uint8_t* d_src, std::size_t src_bytes_per_record,
+                                   const long* d_kept_cols, long n_kept, std::uint8_t* d_out,
+                                   std::size_t out_bytes_per_record, std::size_t n_individuals,
+                                   cudaStream_t stream) {
+    if (n_individuals == 0 || out_bytes_per_record == 0 || n_kept <= 0) return;
+    const long total =
+        static_cast<long>(n_individuals) * static_cast<long>(out_bytes_per_record);
+    const int grid = core::grid_stride_extent(total, kKeepBlock);
+    compact_packed_columns_kernel<<<static_cast<unsigned>(grid), kKeepBlock, 0, stream>>>(
+        d_src, src_bytes_per_record, d_kept_cols, n_kept, d_out, out_bytes_per_record,
+        n_individuals);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

@@ -32,7 +32,9 @@ namespace core {
 // `tile` carries only the descriptor (n_snp/n_individuals/pop_offsets/pop_labels/bytes_per_record)
 // with an EMPTY packed vector — the 7 GB matrix never materializes on host. Callers pick the view
 // off dev_tile when valid, else off tile (the legacy host path). `dev_tile` is invalid on the host
-// path (CpuBackend, STEPPE_GPU_LOAD=0, an active SNP filter, or M0 == 0).
+// path (CpuBackend, STEPPE_GPU_LOAD=0, STEPPE_HOST_FILTER=1 with an active filter, or M0 == 0). An
+// active SNP filter no longer forces the host path — the filter compacts the resident tile
+// on-device (apply_snp_filter -> compact_tile_columns_device).
 struct GenotypeFrontEnd {
     io::GenotypeTile tile;
     io::SnpTable snptab;
@@ -43,11 +45,13 @@ struct GenotypeFrontEnd {
 };
 
 // read_genotype_front_end: primary entry point — reference §4.
-// allow_device: opt in to the GPU-native device-resident load (the caller passes true only when
-// it can consume a device tile AND no SNP filter is active — an active filter subsets the HOST
-// tile in place, which needs the host packed bytes). Even then the load is device-resident only
-// when a CUDA backend is present and STEPPE_GPU_LOAD != 0; otherwise the host path runs. Default
-// false keeps every un-migrated caller on the unchanged host path.
+// allow_device: opt in to the GPU-native device-resident load. A migrated caller (fst / kinship /
+// pca / admixture) passes true unconditionally — a filtered run compacts the resident tile
+// on-device via apply_snp_filter, so an active filter no longer needs the host packed bytes;
+// STEPPE_HOST_FILTER=1 makes it pass false to force the legacy host repack oracle. Even then the
+// load is device-resident only when a CUDA backend is present and STEPPE_GPU_LOAD != 0; otherwise
+// the host path runs. Default false keeps the un-migrated callers (dstat / qpfstats / dates / sfs,
+// which filter through the f2 regime-B decode path) on the host tile.
 [[nodiscard]] GenotypeFrontEnd read_genotype_front_end(const std::string& geno,
                                                        const std::string& snp,
                                                        const std::string& ind,

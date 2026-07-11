@@ -881,6 +881,25 @@ public:
             "(a device-resident genotype tile requires a CUDA backend)");
     }
 
+    // compact_tile_columns_device: SNP-column-compact an ALREADY device-resident canonical tile
+    // down to the kept columns (keep_flags[s] != 0), producing a NEW device-resident tile — the
+    // apply_snp_filter host round-trip (materialize the ~6 GB tile, single-core repack_tile_columns
+    // gather, re-upload) moved on-device. `keep_flags` is the host QC keep mask (length src.n_snp,
+    // the SAME mask repack_tile_columns consumes) H2D'd here; cub::DeviceSelect::Flagged over
+    // [0, M) by it yields the ascending kept source-column list (== kept_cols), and a 2-bit
+    // packed-column gather kernel writes the compacted bytes straight into the resident output tile,
+    // byte-for-byte identical to repack_tile_columns (same genotype_code extract, same MSB-first
+    // shift). individuals/pops are unchanged; only the SNP axis shrinks. Default: throw (CUDA only —
+    // a device-resident tile requires a GPU backend; the CpuBackend / host-load selector keep the
+    // host repack path).
+    [[nodiscard]] virtual DeviceGenotypeTile compact_tile_columns_device(
+        const DeviceGenotypeTile& src, const std::vector<std::uint8_t>& keep_flags) {
+        (void)src; (void)keep_flags;
+        throw std::runtime_error(
+            "ComputeBackend::compact_tile_columns_device: not supported by this backend "
+            "(device-resident column compaction requires a CUDA backend)");
+    }
+
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
         std::span<const double> genpos, std::span<const double> physpos,

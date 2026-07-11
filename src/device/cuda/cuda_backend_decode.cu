@@ -9,6 +9,8 @@
 #include <cub/device/device_scan.cuh>
 #include <cub/device/device_select.cuh>
 
+#include <thrust/iterator/counting_iterator.h>
+
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -311,6 +313,64 @@ DeviceGenotypeTile CudaBackend::upload_canonical_device(
     }
     out.packed = buf->data();
     out.owner = std::move(buf);
+    return out;
+}
+
+// compact_tile_columns_device — device-resident SNP-column compaction for apply_snp_filter.
+// H2D the host QC keep mask, cub::DeviceSelect::Flagged the ascending kept source-column list off a
+// counting iterator (== repack_tile_columns' kept_cols), alloc a zeroed compacted resident tile,
+// and gather its 2-bit packed columns in place — no host materialize / single-core gather /
+// re-upload. Byte-for-byte identical to repack_tile_columns (apply_snp_filter host path).
+DeviceGenotypeTile CudaBackend::compact_tile_columns_device(
+    const DeviceGenotypeTile& src, const std::vector<std::uint8_t>& keep_flags) {
+    guard_device();
+    STEPPE_NVTX_RANGE("compact_tile");
+    const long M = static_cast<long>(src.n_snp);
+    const std::size_t Mz = static_cast<std::size_t>(M < 0 ? 0 : M);
+
+    // H2D the host QC keep mask (the SAME mask repack_tile_columns consumes -> identical kept set).
+    DeviceBuffer<std::uint8_t> dFlags(Mz == 0 ? 1u : Mz);
+    if (Mz > 0) h2d_async(dFlags, keep_flags.data(), Mz, stream_.get());
+
+    // cub::DeviceSelect::Flagged over the iota [0, M) by dFlags -> the ascending kept source-column
+    // list dKeptCols (output column -> source column; stable select == kept_cols) + the count. Same
+    // sizing-then-run idiom as regime B (:502-531), fed a counting iterator so no M-length iota is
+    // materialized.
+    DeviceBuffer<long> dKeptCols(Mz == 0 ? 1u : Mz);
+    DeviceBuffer<int> dNumSel(1);
+    {
+        auto iota = thrust::make_counting_iterator<long>(0);
+        std::size_t sel_bytes = 0;
+        STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+            nullptr, sel_bytes, iota, dFlags.data(), dKeptCols.data(), dNumSel.data(),
+            static_cast<std::int64_t>(M), stream_.get()));
+        DeviceBuffer<unsigned char> dSelTemp(sel_bytes == 0 ? 1 : sel_bytes);
+        std::size_t sb = sel_bytes;
+        STEPPE_CUDA_CHECK(cub::DeviceSelect::Flagged(
+            dSelTemp.data(), sb, iota, dFlags.data(), dKeptCols.data(), dNumSel.data(),
+            static_cast<std::int64_t>(M), stream_.get()));
+    }
+    int m_kept = 0;
+    d2h_async(&m_kept, dNumSel, 1, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    // Allocate the ZEROED compacted device tile (newbpr = ceil(n_kept/4)); the descriptor carries
+    // the unchanged individuals/pops (only the SNP axis shrinks).
+    const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
+    const std::size_t newbpr =
+        m_kept <= 0 ? 0 : (static_cast<std::size_t>(m_kept) + cpb - 1u) / cpb;
+    DeviceGenotypeTile out = alloc_canonical_device(
+        src.n_individuals, newbpr, static_cast<std::size_t>(m_kept < 0 ? 0 : m_kept),
+        src.pop_offsets, src.pop_labels);
+    if (m_kept <= 0 || src.n_individuals == 0 || newbpr == 0) return out;
+
+    // 2-bit packed-column gather: one thread per (row, out-byte), reading src.packed in place and
+    // writing each output byte exactly once (no atomics) -> byte-identical to repack_tile_columns.
+    auto* buf = static_cast<DeviceBuffer<std::uint8_t>*>(out.owner.get());
+    launch_compact_packed_columns(src.packed, src.bytes_per_record, dKeptCols.data(),
+                                  static_cast<long>(m_kept), buf->data(), newbpr,
+                                  src.n_individuals, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
 }
 

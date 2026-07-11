@@ -83,9 +83,11 @@ struct KinshipTile {
 
     // Read the whole SNP axis as ONE tile (the readers only support a byte-aligned prefix from
     // 0; the 1240K panel per individual is small and bounded). GPU-native device-resident load
-    // when no SNP filter is active (an active filter subsets the HOST tile in place); the host
-    // `tile` then carries only the descriptor (empty packed). Byte-identical decode either way.
-    const bool allow_device = !io::filter::filter_is_active(filter);
+    // (even with an active SNP filter — apply_snp_filter compacts the resident tile on-device); the
+    // host `tile` then carries only the descriptor (empty packed). Byte-identical decode either way.
+    // STEPPE_HOST_FILTER=1 forces allow_device=false (the legacy host repack oracle).
+    const bool allow_device =
+        !(io::filter::filter_is_active(filter) && core::host_filter_forced());
     if (allow_device && core::device_load_enabled() && be.capabilities().device_count > 0) {
         kt.dev_tile = core::read_canonical_tile_device(reader, part, be, 0,
                                                        static_cast<std::size_t>(M0));
@@ -106,7 +108,8 @@ struct KinshipTile {
     // BEFORE the autosome mask + KING sweep, so a filtered run's integer counts (nsnp/hethet/ibs0)
     // and phi are bit-exact vs an externally pre-subset triple. Throws on a same-ascertainment
     // refusal / an all-filtered set.
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(kt.tile, snptab, filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(kt.tile, kt.dev_tile, snptab, filter, be);
     kt.kept_snp_ids = flt.kept_ids;
 
     // FST-style FULL interspersed autosome mask (indexed by global SNP), NOT readv2's

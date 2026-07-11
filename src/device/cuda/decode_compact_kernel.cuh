@@ -9,6 +9,7 @@
 #ifndef STEPPE_DEVICE_CUDA_DECODE_COMPACT_KERNEL_CUH
 #define STEPPE_DEVICE_CUDA_DECODE_COMPACT_KERNEL_CUH
 
+#include <cstddef>
 #include <cstdint>
 
 #include <cuda_runtime.h>
@@ -34,6 +35,20 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                                    const std::uint8_t* d_flags,
                                    const long* d_keep_idx, double* d_out,
                                    cudaStream_t stream);
+
+// Packed 2-bit column compaction (apply_snp_filter device path).
+// Gather the kept SNP columns of a device-resident individual-major 2-bit tile into a gap-free
+// compacted tile: one thread per (individual row, output byte) reads `d_kept_cols` (the ascending
+// source-column list from cub::DeviceSelect::Flagged, == repack_tile_columns' kept_cols) and packs
+// the four output codes of its byte MSB-first — byte-for-byte identical to the host repack, no
+// atomics (each output byte is written exactly once). `src_bytes_per_record` is the SOURCE row
+// stride, `out_bytes_per_record` = ceil(n_kept/4) the destination row stride.
+void launch_compact_packed_columns(const std::uint8_t* d_src,
+                                   std::size_t src_bytes_per_record,
+                                   const long* d_kept_cols, long n_kept,
+                                   std::uint8_t* d_out,
+                                   std::size_t out_bytes_per_record,
+                                   std::size_t n_individuals, cudaStream_t stream);
 
 // Device-resident pooled-per-SNP summary reduction — reference §7.
 // Runs derive_pooled_summary_one over the resident [P×M] Q/N (the SHARED STEPPE_HD

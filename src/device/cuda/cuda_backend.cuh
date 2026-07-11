@@ -122,6 +122,11 @@ public:
         std::size_t n_individuals, std::vector<std::size_t> pop_offsets,
         std::vector<std::string> pop_labels) override;
 
+    // Device-resident SNP-column compaction for the apply_snp_filter seam (drop the host
+    // round-trip). See ComputeBackend for the contract.
+    [[nodiscard]] DeviceGenotypeTile compact_tile_columns_device(
+        const DeviceGenotypeTile& src, const std::vector<std::uint8_t>& keep_flags) override;
+
     [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
         std::span<const double> genpos, std::span<const double> physpos,

@@ -25,10 +25,12 @@ GenotypeFrontEnd read_genotype_front_end(const std::string& geno, const std::str
     fe.snptab = io::read_snp_table(fe.fmt, snp, SIZE_MAX);
     fe.M0 = std::min(reader.header().n_snp, fe.snptab.count);
 
-    // GPU-native device-resident load when the caller allows it (no active SNP filter), a CUDA
-    // backend is present, the selector is on, and there is a non-empty SNP axis. The canonical
-    // bytes are built ONCE on device; the host `tile` keeps only the descriptor (empty packed),
-    // so the whole-matrix host materialization + every tool's re-upload are eliminated.
+    // GPU-native device-resident load when the caller allows it, a CUDA backend is present, the
+    // selector is on, and there is a non-empty SNP axis. The canonical bytes are built ONCE on
+    // device; the host `tile` keeps only the descriptor (empty packed), so the whole-matrix host
+    // materialization + every tool's re-upload are eliminated. A migrated caller passes
+    // allow_device=true even with an active SNP filter — the filter then compacts the resident tile
+    // on-device (apply_snp_filter -> compact_tile_columns_device), no host round-trip.
     if (allow_device && fe.M0 > 0 && device_load_enabled() &&
         backend.capabilities().device_count > 0) {
         fe.dev_tile = read_canonical_tile_device(reader, fe.part, backend, 0, fe.M0);

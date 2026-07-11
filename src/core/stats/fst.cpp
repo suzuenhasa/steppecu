@@ -59,10 +59,12 @@ namespace {
                                        std::vector<std::string>& kept_ids, FstWindowed& fold) {
     ComputeBackend& be = device::primary_backend(resources);
 
-    const bool allow_device = !io::filter::filter_is_active(filter);
+    const bool allow_device =
+        !(io::filter::filter_is_active(filter) && core::host_filter_forced());
     core::GenotypeFrontEnd fe =
         core::read_genotype_front_end(geno, snp, ind, want, be, allow_device);
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(fe.tile, fe.dev_tile, fe.snptab, filter, be);
     kept_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const io::SnpTable& snptab = fe.snptab;
@@ -137,12 +139,14 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
     // Read the triple to the canonical tile, keeping ONLY the two requested populations
     // (population-contiguous, so each pop is one [begin, end) individual range).
     const std::vector<std::string> want{popA, popB};
-    const bool allow_device = !io::filter::filter_is_active(filter);
+    const bool allow_device =
+        !(io::filter::filter_is_active(filter) && core::host_filter_forced());
     core::GenotypeFrontEnd fe = core::read_genotype_front_end(
         geno, snp, ind, std::span<const std::string>(want), be, allow_device);
     // Per-SNP QC filter: subset the SNP axis (only the SNP set changes; per-site WC math is
     // untouched) so a filtered run is bit-exact vs an externally pre-subset triple.
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(fe.tile, fe.dev_tile, fe.snptab, filter, be);
     res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const io::SnpTable& snptab = fe.snptab;
@@ -241,10 +245,12 @@ FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& sn
         sel.min_n = (min_n >= 1) ? static_cast<std::size_t>(min_n) : std::size_t{1};
     }
 
-    const bool allow_device = !io::filter::filter_is_active(filter);
+    const bool allow_device =
+        !(io::filter::filter_is_active(filter) && core::host_filter_forced());
     core::GenotypeFrontEnd fe =
         core::read_genotype_front_end(geno, snp, ind, sel, be, allow_device);
-    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    const core::SnpFilterOutcome flt =
+        core::apply_snp_filter(fe.tile, fe.dev_tile, fe.snptab, filter, be);
     res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
     const io::SnpTable& snptab = fe.snptab;

@@ -17,12 +17,16 @@
 // allow_mixed_ascertainment. A no-op (inactive filter, or a mask that keeps every SNP) leaves
 // the tile and SnpTable untouched.
 //
-// Design note (host repack): the tile is host-resident (GenotypeTile owns std::vector<uint8_t>)
-// and every tool H2D-copies it inside its own backend kernel; the genotype-scale COMPUTE for
-// the mask (the per-pop allele-frequency decode) runs on the device via ComputeBackend::decode_af.
-// The kept-column repack is a pure 2-bit gather with no arithmetic, so it is done host-side
-// using the shared genotype_code packing helper (bit-exact by construction) rather than paying
-// an H2D+D2H round-trip only to hand the result straight back to the host tile the tool re-uploads.
+// Design note (device-resident compaction): the migrated tools (fst / kinship / pca / admixture)
+// build the canonical tile DEVICE-RESIDENT (the GPU-native load), so when a filter is active the
+// kept-column 2-bit gather runs ON DEVICE — compact_tile_columns_device compacts the resident tile
+// straight into a new resident tile (byte-for-byte identical to the old host repack_tile_columns:
+// same genotype_code extract, same MSB-first shift), and `tile` keeps only the refreshed descriptor
+// with an empty packed vector. No host materialize, no single-core gather, no re-upload. The keep
+// COMPUTE (the per-pop allele-frequency decode) already ran on the device via
+// decode_af_pooled_summary. STEPPE_HOST_FILTER=1 forces the legacy host path (materialize +
+// repack_tile_columns + re-upload) as the byte-exact invariance oracle; and when no device tile is
+// available (CpuBackend / STEPPE_GPU_LOAD=0 / M0 == 0) the host repack path runs unchanged.
 #ifndef STEPPE_CORE_STATS_APPLY_SNP_FILTER_HPP
 #define STEPPE_CORE_STATS_APPLY_SNP_FILTER_HPP
 
@@ -37,6 +41,7 @@
 namespace steppe {
 
 class ComputeBackend;
+struct DeviceGenotypeTile;  // device/backend.hpp — the device-resident tile (fwd for the seam)
 
 namespace core {
 
@@ -48,10 +53,20 @@ struct SnpFilterOutcome {
     std::vector<std::string> kept_ids;    // the retained SNP ids, in kept order (== snptab.id post)
 };
 
-// Subset `tile` + `snptab` in place to the SNPs the QC filter keeps (see the file header).
-// A no-op when the filter is inactive or keeps every SNP. Throws std::invalid_argument on a
-// same-ascertainment refusal or when the filter would keep zero SNPs.
-[[nodiscard]] SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile, io::SnpTable& snptab,
+// host_filter_forced — STEPPE_HOST_FILTER selector. When set (non-empty, not "0"/"off"/"false"/
+// "no") it forces the legacy host materialize + repack_tile_columns + re-upload filter path — the
+// byte-exact invariance oracle for the device-column-compaction gate. Default OFF (the tools pass
+// allow_device=true so a filtered load is device-resident and the compaction runs on the GPU).
+[[nodiscard]] bool host_filter_forced() noexcept;
+
+// Subset `tile` + `snptab` in place to the SNPs the QC filter keeps (see the file header). When
+// `dev_tile` is valid (the GPU-native filtered load) the 2-bit column compaction runs ON DEVICE
+// via ComputeBackend::compact_tile_columns_device (dev_tile is replaced with the compacted resident
+// tile and `tile` keeps only the descriptor with an empty packed vector); otherwise the host
+// repack_tile_columns path runs unchanged. A no-op when the filter is inactive or keeps every SNP.
+// Throws std::invalid_argument on a same-ascertainment refusal or when the filter keeps zero SNPs.
+[[nodiscard]] SnpFilterOutcome apply_snp_filter(io::GenotypeTile& tile,
+                                                DeviceGenotypeTile& dev_tile, io::SnpTable& snptab,
                                                 const FilterConfig& cfg, ComputeBackend& backend);
 
 }  // namespace core
