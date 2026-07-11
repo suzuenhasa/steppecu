@@ -34,7 +34,8 @@ void launch_king_dosage_decode(const std::uint8_t* d_packed, std::size_t bytes_p
 void launch_king_allpairs_accumulate(const std::uint8_t* d_code, int N, long tm, long s_lo,
                                      const std::uint8_t* d_include, const int* d_pairs_i,
                                      const int* d_pairs_j, long long pair0, long long C,
-                                     long* d_nsnp, long* d_hethet, long* d_ibs0, long* d_het_i,
-                                     long* d_het_j, cudaStream_t stream);
+                                     long long out_offset, long* d_nsnp, long* d_hethet,
+                                     long* d_ibs0, long* d_het_i, long* d_het_j,
+                                     cudaStream_t stream);
 
 }  // namespace steppe::device

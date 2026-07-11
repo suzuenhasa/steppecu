@@ -11,8 +11,10 @@
 #include "app/cmd_kinship.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -95,6 +97,88 @@ void emit_pairs(std::ostream& os, OutputFormat fmt, const steppe::KinshipResult&
     }
 }
 
+// Write one Genetic ID per line (no header) — the .king.cutoff.in / .out sample-set files.
+[[nodiscard]] bool write_id_list(const std::string& path, const std::vector<std::string>& ids,
+                                 std::string& err) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { err = "cannot open output file: " + path; return false; }
+    for (const std::string& id : ids) out << id << "\n";
+    out.flush();
+    if (!out.good()) { err = "write failed (disk full / short write): " + path; return false; }
+    return true;
+}
+
+// Write the above-cutoff relatedness graph as a plink2-compatible .kin0 (tab-separated, columns
+// #IID1 IID2 NSNP HETHET IBS0 KINSHIP). KINSHIP (phi) is written round-trippable (%.17g) so
+// `plink2 --king-cutoff-table` reads the exact double and reproduces the identical edge set.
+[[nodiscard]] bool write_cutoff_kin0(const std::string& path,
+                                     const steppe::KinshipCutoffResult& r, std::string& err) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { err = "cannot open output file: " + path; return false; }
+    out << "#IID1\tIID2\tNSNP\tHETHET\tIBS0\tKINSHIP\n";
+    char buf[64];
+    for (std::size_t e = 0; e < r.edge_id1.size(); ++e) {
+        std::snprintf(buf, sizeof(buf), "%.17g", r.edge_phi[e]);
+        out << r.edge_id1[e] << '\t' << r.edge_id2[e] << '\t' << r.edge_nsnp[e] << '\t'
+            << r.edge_hethet[e] << '\t' << r.edge_ibs0[e] << '\t' << buf << '\n';
+    }
+    out.flush();
+    if (!out.good()) { err = "write failed (disk full / short write): " + path; return false; }
+    return true;
+}
+
+// Run `steppe kinship --king-cutoff`: the greedy relatedness prune -> PREFIX.king.cutoff.in/.out
+// (+ the .king.cutoff.kin0 edge table). PREFIX = --out if given, else "steppe".
+int run_kinship_cutoff_command(const cfg::RunConfig& config, const io::GenotypeTriple& triple,
+                               const std::optional<std::vector<std::string>>& samples) {
+    steppe::KinshipCutoffResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (!require_first_gpu(resources, "kinship")) return cfg::kExitRuntimeError;
+        result = run_kinship_cutoff(triple.geno, triple.snp, triple.ind, samples,
+                                    config.king_cutoff(), resources, config.filter());
+    } catch (const std::invalid_argument& e) {
+        std::fprintf(stderr, "steppe kinship: %s\n", e.what());
+        return cfg::kExitInvalidConfig;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe kinship: input/device error: %s\n", e.what());
+        return exit_code_for_caught(e);
+    }
+    if (result.status != Status::Ok) {
+        std::fprintf(stderr,
+                     "steppe kinship: could not run --king-cutoff (need >= 2 diploid individuals; "
+                     "check --prefix and --samples)\n");
+        return cfg::exit_code_for(result.status);
+    }
+
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "kinship")) {
+        return cfg::kExitIoError;
+    }
+
+    const std::string prefix = config.out_file().empty() ? std::string("steppe")
+                                                         : config.out_file();
+    const std::string in_path = prefix + ".king.cutoff.in";
+    const std::string out_path = prefix + ".king.cutoff.out";
+    const std::string kin0_path = prefix + ".king.cutoff.kin0";
+    std::string werr;
+    if (!write_id_list(in_path, result.retained, werr) ||
+        !write_id_list(out_path, result.removed, werr) ||
+        !write_cutoff_kin0(kin0_path, result, werr)) {
+        std::fprintf(stderr, "steppe kinship: %s\n", werr.c_str());
+        return cfg::kExitIoError;
+    }
+
+    std::fprintf(stderr,
+                 "steppe kinship --king-cutoff %.6g: %d individuals, %zu above-cutoff pairs, "
+                 "%zu retained, %zu removed, %ld autosomal SNPs used\n"
+                 "  wrote %s (%zu), %s (%zu), %s (%zu edges)\n",
+                 result.cutoff, result.N, result.n_edges, result.retained.size(),
+                 result.removed.size(), result.autosomal_snps, in_path.c_str(),
+                 result.retained.size(), out_path.c_str(), result.removed.size(),
+                 kin0_path.c_str(), result.n_edges);
+    return cfg::kExitOk;
+}
+
 }  // namespace
 
 int run_kinship_command(const cfg::RunConfig& config) {
@@ -116,6 +200,12 @@ int run_kinship_command(const cfg::RunConfig& config) {
         samples = std::move(ids);
     }
 
+    // --king-cutoff: the greedy relatedness prune (all-pairs only) -> .in/.out/.kin0 ID files, a
+    // different output shape than the per-pair table, so it has its own dispatch + writers.
+    if (config.has_king_cutoff()) {
+        return run_kinship_cutoff_command(config, triple, samples);
+    }
+
     // Mode: an explicit --pairs list (the biobank-scale path) or the full C(N,2) sweep.
     std::vector<std::pair<std::string, std::string>> pairs;
     const bool pairs_mode = !config.pairs_file().empty();
@@ -135,9 +225,21 @@ int run_kinship_command(const cfg::RunConfig& config) {
             result = run_kinship_pairs(triple.geno, triple.snp, triple.ind, samples, pairs,
                                        config.min_kinship(), resources, config.filter());
         } else {
-            result = run_kinship_all_pairs(triple.geno, triple.snp, triple.ind, samples,
-                                           config.min_kinship(), config.sweep_sure(), resources,
-                                           config.filter());
+            // A finite --min-kinship routes through the STREAMED backend (no 5*C(N,2) allocation,
+            // the maxcomb cap does not bind). No threshold -> the dense capped sweep (small-N +
+            // goldens). STEPPE_KING_FORCE_DENSE forces the dense path with the host filter (the
+            // values-gate oracle: dense filtered to phi>=min-kinship == the streamed emission).
+            const bool has_threshold =
+                config.min_kinship() > -std::numeric_limits<double>::infinity();
+            const bool force_dense = std::getenv("STEPPE_KING_FORCE_DENSE") != nullptr;
+            if (has_threshold && !force_dense) {
+                result = run_kinship_streamed(triple.geno, triple.snp, triple.ind, samples,
+                                              config.min_kinship(), resources, config.filter());
+            } else {
+                result = run_kinship_all_pairs(triple.geno, triple.snp, triple.ind, samples,
+                                               config.min_kinship(), config.sweep_sure(), resources,
+                                               config.filter());
+            }
         }
     } catch (const std::invalid_argument& e) {
         // Fail-fast INPUT reject (unknown --pairs id, self-pair) -> invalid config.

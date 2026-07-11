@@ -230,6 +230,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take_b(merged_.kinship_all_pairs, args.kinship_all_pairs);
     take(merged_.pairs, args.pairs);
     take_d(merged_.min_kinship, args.min_kinship);
+    take_d(merged_.king_cutoff, args.king_cutoff);
     take_b(merged_.sfs_fold, args.sfs_fold);
     take_i(merged_.pca_k, args.pca_k);
     take_b(merged_.pca_eigenvalues, args.pca_eigenvalues);
@@ -634,9 +635,17 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     if (merged_.kinship_all_pairs) cfg.kinship_all_pairs_ = *merged_.kinship_all_pairs;
     if (merged_.pairs) cfg.pairs_file_ = *merged_.pairs;
     if (merged_.min_kinship) cfg.min_kinship_ = *merged_.min_kinship;
+    if (merged_.king_cutoff) {
+        cfg.king_cutoff_ = *merged_.king_cutoff;
+        cfg.king_cutoff_set_ = true;
+    }
     if (merged_.command == Command::Kinship && !cfg.pairs_file_.empty() &&
         cfg.kinship_all_pairs_) {
         return fail("steppe kinship: --pairs and --all-pairs are mutually exclusive");
+    }
+    if (merged_.command == Command::Kinship && cfg.king_cutoff_set_ && !cfg.pairs_file_.empty()) {
+        return fail("steppe kinship: --king-cutoff is all-pairs only and mutually exclusive "
+                    "with --pairs");
     }
     if (merged_.sfs_fold) cfg.sfs_fold_ = *merged_.sfs_fold;
     if (merged_.pca_k.has_value()) {

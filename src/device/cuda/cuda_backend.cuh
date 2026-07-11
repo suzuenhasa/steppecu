@@ -148,6 +148,15 @@ public:
         const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
         std::span<const int> pairs_i, std::span<const int> pairs_j, bool sure) override;
 
+    // STREAMED/compacted KING-robust all-pairs (`steppe kinship --min-kinship` / `--king-cutoff`,
+    // biobank-scale) — pair-block OUTER / SNP-tile INNER, per-block phi + cub::DeviceSelect::Flagged
+    // emit so only survivors (phi vs emit_threshold) cross PCIe and only 5*B accumulators persist.
+    // Breaks the C(N,2) cap; phi is bit-identical to king_robust_all_pairs. See
+    // cuda_backend_king_streamed.cu.
+    [[nodiscard]] KingStreamResult king_robust_filtered(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
+        double emit_threshold, bool strict_greater) override;
+
     // Windowed-r2 LD pruner (`--ld-prune WIN:STEP:R2`) — uploads the packed diploid tile, streams
     // the SNP axis by tile decoding a SNP-major dosage pane, computes per-variant stats + every
     // within-window same-chromosome pair's plink2 r^2 decision on-GPU, then runs the greedy

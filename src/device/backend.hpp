@@ -485,6 +485,28 @@ struct KingMatrix {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// KingStreamResult — the device result of the STREAMED/compacted KING-robust all-pairs sweep
+// (`steppe kinship --min-kinship` / `--king-cutoff`, the biobank-scale path). Unlike KingMatrix
+// (which materializes 5*C(N,2) persistent per-pair counts and D2H's every pair), the streamed
+// path processes the pair space in BLOCKS and, per block, keeps ONLY the pairs whose phi passes
+// the emit predicate (cub::DeviceSelect::Flagged). Peak device memory is 5*B (one pair-block) +
+// the survivors, NEVER 5*C(N,2) — so the C(N,2) cap does not bind. The survivor SoA is row-
+// aligned (length == emitted): the singleton indices i < j, the three .kin0 count columns
+// (nsnp/hethet/ibs0), and phi (from the SHARED king_phi -> bit-identical to KingMatrix's phi).
+struct KingStreamResult {
+    std::vector<int>    i;        // singleton index i (< j) per emitted pair
+    std::vector<int>    j;
+    std::vector<long>   nsnp;     // considered (both non-missing) autosomal sites
+    std::vector<long>   hethet;   // #{ci==1 & cj==1}
+    std::vector<long>   ibs0;     // #{opposite homozygotes}
+    std::vector<double> phi;      // KING kinship (king_phi; NaN pairs are already dropped)
+    int N = 0;
+    std::size_t enumerated = 0;   // C(N,2) pairs swept
+    std::size_t emitted = 0;      // survivors (pairs passing the emit predicate)
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 // SfsJoint — the 2D joint site-frequency spectrum over a population pair (`steppe sfs`).
 // grid is the row-major (extA x extB) integer joint histogram: cell (i, j) at
 // grid[i*extB + j] counts sites with pop-A category i and pop-B category j. A pure
@@ -841,6 +863,24 @@ public:
         throw std::runtime_error(
             "ComputeBackend::king_robust_all_pairs: not implemented by this backend "
             "(the GPU-only KING pair sweep requires a CUDA backend)");
+    }
+
+    // king_robust_filtered: the STREAMED/compacted KING-robust all-pairs sweep (`steppe kinship
+    // --min-kinship` / `--king-cutoff`, biobank-scale). Same decode + one-block-per-pair fold as
+    // king_robust_all_pairs, but pair-block OUTER / SNP-tile INNER so only 5*B (one pair-block)
+    // accumulators persist — never 5*C(N,2). Per block it folds phi via the SHARED king_phi and
+    // keeps only survivors passing the emit predicate (cub::DeviceSelect::Flagged): `strict_greater`
+    // selects phi > threshold (the --king-cutoff edge set), else phi >= threshold (the --min-kinship
+    // related-only table). The C(N,2) maxcomb cap does NOT bind here (memory is O(survivors)). The
+    // emitted phi is bit-identical to king_robust_all_pairs (same king_phi over the same integer
+    // counts). Default: throw (CUDA only, like king_robust_all_pairs).
+    [[nodiscard]] virtual KingStreamResult king_robust_filtered(
+        const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
+        double emit_threshold, bool strict_greater) {
+        (void)tile; (void)summary_include; (void)emit_threshold; (void)strict_greater;
+        throw std::runtime_error(
+            "ComputeBackend::king_robust_filtered: not implemented by this backend "
+            "(the GPU-only streamed KING sweep requires a CUDA backend)");
     }
 
     // ld_prune_windowed: windowed-r2 LD pruning (`--ld-prune WIN:STEP:R2`), the plink2

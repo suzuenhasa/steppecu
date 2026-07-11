@@ -115,6 +115,7 @@ struct CliArgs {
     std::optional<bool>        kinship_all_pairs;  // enumerate all C(N,2) pairs (else --pairs)
     std::optional<std::string> pairs;              // FILE of explicit id1<ws>id2 pairs
     std::optional<double>      min_kinship;        // emit only pairs with phi >= this
+    std::optional<double>      king_cutoff;        // --king-cutoff <phi>: greedy relatedness prune
 
     // `sfs` (2D joint site-frequency spectrum) controls
     std::optional<bool>        sfs_fold;      // folded (per-pop minor) SFS; default unfolded (A1 copies)

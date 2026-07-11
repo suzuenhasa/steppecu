@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -141,6 +142,119 @@ void finalize(const KingMatrix& mat, const std::vector<std::string>& labels,
     }
 }
 
+// Expand the STREAMED survivor SoA into the KinshipResult. The device already applied the emit
+// predicate (phi >= min_kinship / phi > cutoff) and the phi it carries is the SHARED king_phi over
+// the same integer counts the dense path folds -> this produces BYTE-IDENTICAL rows to `finalize`
+// on the same above-threshold set (same id1<=id2 canonicalization, same degree band, same order:
+// cub::DeviceSelect is stable and blocks run in ascending rank order).
+void finalize_streamed(const KingStreamResult& sr,
+                       const std::vector<std::string>& labels, KinshipResult& res) {
+    const std::size_t n = sr.i.size();
+    res.emitted = 0;
+    for (std::size_t r = 0; r < n; ++r) {
+        const int i = sr.i[r];
+        const int j = sr.j[r];
+        const double phi = sr.phi[r];
+        const std::string& li = labels[static_cast<std::size_t>(i)];
+        const std::string& lj = labels[static_cast<std::size_t>(j)];
+        const bool i_first = (li <= lj);
+        res.id1.push_back(i_first ? li : lj);
+        res.id2.push_back(i_first ? lj : li);
+        res.nsnp.push_back(sr.nsnp[r]);
+        res.hethet.push_back(sr.hethet[r]);
+        res.ibs0.push_back(sr.ibs0[r]);
+        res.phi.push_back(phi);
+        res.degree.emplace_back(core::king_degree_label(core::degree_from_phi(phi)));
+        ++res.emitted;
+    }
+}
+
+// plink2's --king-cutoff edge nudge (plink2_matrix_calc.cc KingCutoffBatchTable:
+// `king_cutoff *= 1.0 + kSmallEpsilon`, kSmallEpsilon = k2m44 = 2^-44). An edge is kept iff
+// phi > cutoff * (1 + 2^-44). Reproducing it makes steppe's edge set identical to plink2's even at
+// the exact boundary, and keeps the .kin0 steppe writes consistent with plink2 --king-cutoff-table.
+constexpr double kPlink2KinshipEpsilon = 0x1p-44;
+
+// Greedy relatedness prune reproducing plink2's KinshipPruneDestructive
+// (plink2_matrix_calc.cc) EXACTLY, so steppe's retained set matches `plink2 --king-cutoff` given
+// the same edge set and sample-index order. The rule, each step while any edge remains:
+//   (a) if any vertex has degree == 1, remove the PARTNER of the LOWEST-index such vertex;
+//   (b) otherwise remove the LOWEST-index vertex of MAXIMUM degree (strict-greater scan -> the
+//       first/lowest index wins a degree tie).
+// Removing a vertex detaches it from every still-present neighbour (decrementing their degrees).
+// `edge_i`/`edge_j` are the above-cutoff pairs (singleton indices); returns a per-sample removed
+// flag (true = pruned to the .out set). Sample index == the .ind singleton order (== a matching
+// plink2 roster order), which fixes the tie-break identically on both sides.
+[[nodiscard]] std::vector<char> king_greedy_prune(int N, const std::vector<int>& edge_i,
+                                                  const std::vector<int>& edge_j) {
+    std::vector<std::unordered_set<int>> adj(static_cast<std::size_t>(N));
+    const std::size_t ne = edge_i.size();
+    for (std::size_t e = 0; e < ne; ++e) {
+        const int a = edge_i[e];
+        const int b = edge_j[e];
+        if (a == b) continue;
+        adj[static_cast<std::size_t>(a)].insert(b);
+        adj[static_cast<std::size_t>(b)].insert(a);
+    }
+    std::vector<int> degree(static_cast<std::size_t>(N), 0);
+    std::vector<char> present(static_cast<std::size_t>(N), 0);  // in the nonzero-degree graph
+    std::vector<int> related;                                   // ascending-index nz vertices
+    for (int v = 0; v < N; ++v) {
+        const int d = static_cast<int>(adj[static_cast<std::size_t>(v)].size());
+        degree[static_cast<std::size_t>(v)] = d;
+        if (d > 0) {
+            present[static_cast<std::size_t>(v)] = 1;
+            related.push_back(v);
+        }
+    }
+    std::vector<char> removed(static_cast<std::size_t>(N), 0);
+
+    while (true) {
+        int prune = -1;
+        // (a) lowest-index present vertex with degree exactly 1 -> remove its single partner.
+        int d1 = -1;
+        for (const int v : related) {
+            if (present[static_cast<std::size_t>(v)] && degree[static_cast<std::size_t>(v)] == 1) {
+                d1 = v;
+                break;
+            }
+        }
+        if (d1 >= 0) {
+            prune = *adj[static_cast<std::size_t>(d1)].begin();  // its one remaining neighbour
+        } else {
+            // (b) lowest-index present vertex of maximum degree (strict-greater -> first wins ties).
+            int best = -1;
+            int best_deg = 0;
+            for (const int v : related) {
+                if (!present[static_cast<std::size_t>(v)]) continue;
+                const int d = degree[static_cast<std::size_t>(v)];
+                if (d < 1) continue;
+                if (best < 0 || d > best_deg) {
+                    best = v;
+                    best_deg = d;
+                }
+            }
+            if (best < 0) break;  // no edges remain
+            prune = best;
+        }
+        // Detach prune from every still-present neighbour, then remove it.
+        const std::vector<int> nbrs(adj[static_cast<std::size_t>(prune)].begin(),
+                                    adj[static_cast<std::size_t>(prune)].end());
+        for (const int y : nbrs) {
+            if (!present[static_cast<std::size_t>(y)]) continue;
+            adj[static_cast<std::size_t>(y)].erase(prune);
+            const int nd = static_cast<int>(adj[static_cast<std::size_t>(y)].size());
+            degree[static_cast<std::size_t>(y)] = nd;
+            if (nd == 0) present[static_cast<std::size_t>(y)] = 0;
+        }
+        adj[static_cast<std::size_t>(prune)].clear();
+        degree[static_cast<std::size_t>(prune)] = 0;
+        present[static_cast<std::size_t>(prune)] = 0;
+        removed[static_cast<std::size_t>(prune)] = 1;
+    }
+    return removed;
+}
+
 }  // namespace
 
 KinshipResult run_kinship_all_pairs(
@@ -247,6 +361,106 @@ KinshipResult run_kinship_pairs(
                  j = pj[r];
              },
              res);
+    res.status = Status::Ok;
+    return res;
+}
+
+KinshipResult run_kinship_streamed(
+    const std::string& geno, const std::string& snp, const std::string& ind,
+    const std::optional<std::vector<std::string>>& samples, double min_kinship,
+    device::Resources& resources, const FilterConfig& filter) {
+    KinshipResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+
+    ComputeBackend& be = device::primary_backend(resources);
+    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be, filter);
+    const int N = static_cast<int>(kt.labels.size());
+    res.N = N;
+    res.autosomal_snps = kt.autosomal;
+    res.kept_snp_ids = kt.kept_snp_ids;
+    if (N < 2 || kt.tile.n_snp == 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
+    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+
+    // Streamed/compacted all-pairs: emit phi >= min_kinship ON-DEVICE (strict_greater=false), so
+    // the 5*C(N,2) accumulator (and its maxcomb cap) is never allocated. Bit-identical to the dense
+    // path filtered to phi >= min_kinship.
+    const KingStreamResult sr = be.king_robust_filtered(
+        view, std::span<const std::uint8_t>(kt.summary_include), min_kinship, /*strict=*/false);
+    res.enumerated = sr.enumerated;
+    res.precision_tag = sr.precision_tag;
+    res.status = sr.status;
+    if (sr.status != Status::Ok) return res;
+
+    finalize_streamed(sr, kt.labels, res);
+    res.status = Status::Ok;
+    return res;
+}
+
+KinshipCutoffResult run_kinship_cutoff(
+    const std::string& geno, const std::string& snp, const std::string& ind,
+    const std::optional<std::vector<std::string>>& samples, double cutoff,
+    device::Resources& resources, const FilterConfig& filter) {
+    KinshipCutoffResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+    res.cutoff = cutoff;
+
+    ComputeBackend& be = device::primary_backend(resources);
+    const KinshipTile kt = read_kinship_tile(geno, snp, ind, samples, be, filter);
+    const int N = static_cast<int>(kt.labels.size());
+    res.N = N;
+    res.autosomal_snps = kt.autosomal;
+    res.kept_snp_ids = kt.kept_snp_ids;
+    if (N < 2 || kt.tile.n_snp == 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
+    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+
+    // The above-cutoff relatedness graph: phi > cutoff*(1 + 2^-44) exactly reproduces plink2's
+    // nudged edge rule, so this survivor set == plink2 --king-cutoff's edge set (and a .kin0 built
+    // from it is consistent under plink2 --king-cutoff-table with the same raw cutoff).
+    const double edge_threshold = cutoff * (1.0 + kPlink2KinshipEpsilon);
+    const KingStreamResult sr = be.king_robust_filtered(
+        view, std::span<const std::uint8_t>(kt.summary_include), edge_threshold, /*strict=*/true);
+    res.enumerated = sr.enumerated;
+    res.precision_tag = sr.precision_tag;
+    res.status = sr.status;
+    if (sr.status != Status::Ok) return res;
+
+    // Surface the edges (for the sparse .kin0) in survivor order.
+    const std::size_t ne = sr.i.size();
+    res.n_edges = ne;
+    res.edge_id1.reserve(ne);
+    res.edge_id2.reserve(ne);
+    res.edge_nsnp.reserve(ne);
+    res.edge_hethet.reserve(ne);
+    res.edge_ibs0.reserve(ne);
+    res.edge_phi.reserve(ne);
+    for (std::size_t e = 0; e < ne; ++e) {
+        res.edge_id1.push_back(kt.labels[static_cast<std::size_t>(sr.i[e])]);
+        res.edge_id2.push_back(kt.labels[static_cast<std::size_t>(sr.j[e])]);
+        res.edge_nsnp.push_back(sr.nsnp[e]);
+        res.edge_hethet.push_back(sr.hethet[e]);
+        res.edge_ibs0.push_back(sr.ibs0[e]);
+        res.edge_phi.push_back(sr.phi[e]);
+    }
+
+    // Greedy prune (plink2 KinshipPruneDestructive) -> retained / removed, in singleton-index order.
+    const std::vector<char> removed = king_greedy_prune(N, sr.i, sr.j);
+    for (int v = 0; v < N; ++v) {
+        if (removed[static_cast<std::size_t>(v)]) {
+            res.removed.push_back(kt.labels[static_cast<std::size_t>(v)]);
+        } else {
+            res.retained.push_back(kt.labels[static_cast<std::size_t>(v)]);
+        }
+    }
     res.status = Status::Ok;
     return res;
 }

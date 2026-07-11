@@ -64,7 +64,8 @@ __global__ void king_allpairs_accumulate_kernel(const std::uint8_t* __restrict__
                                                 const std::uint8_t* __restrict__ include,
                                                 const int* __restrict__ pairs_i,
                                                 const int* __restrict__ pairs_j, long long pair0,
-                                                long long C, long* __restrict__ out_nsnp,
+                                                long long C, long long out_offset,
+                                                long* __restrict__ out_nsnp,
                                                 long* __restrict__ out_hethet,
                                                 long* __restrict__ out_ibs0,
                                                 long* __restrict__ out_het_i,
@@ -72,6 +73,11 @@ __global__ void king_allpairs_accumulate_kernel(const std::uint8_t* __restrict__
     const long long idx = static_cast<long long>(blockIdx.x);  // one block per pair in the chunk
     if (idx >= C) return;
     const long long r = pair0 + idx;
+    // Output index. Dense all-pairs/--pairs pass out_offset==0 so the accumulators are the full
+    // C(N,2)/list array indexed by the global rank r (unchanged). The STREAMED path sizes the
+    // accumulators to one pair-BLOCK and passes out_offset = block_pair0, so o = r - block_pair0
+    // is the block-local slot — the only change vs the dense fold, which stays bit-identical.
+    const long long o = r - out_offset;
 
     int i, j;
     if (pairs_i != nullptr) {  // explicit-pair mode: r indexes the given list
@@ -118,11 +124,11 @@ __global__ void king_allpairs_accumulate_kernel(const std::uint8_t* __restrict__
         __syncthreads();
     }
     if (t == 0) {
-        out_nsnp[r] += s_nsnp[0];  // block owns r across this launch -> no atomic
-        out_hethet[r] += s_hh[0];
-        out_ibs0[r] += s_ib[0];
-        out_het_i[r] += s_hi[0];
-        out_het_j[r] += s_hj[0];
+        out_nsnp[o] += s_nsnp[0];  // block owns r across this launch -> no atomic
+        out_hethet[o] += s_hh[0];
+        out_ibs0[o] += s_ib[0];
+        out_het_i[o] += s_hi[0];
+        out_het_j[o] += s_hj[0];
     }
 }
 
@@ -142,18 +148,20 @@ void launch_king_dosage_decode(const std::uint8_t* d_packed, std::size_t bytes_p
 void launch_king_allpairs_accumulate(const std::uint8_t* d_code, int N, long tm, long s_lo,
                                      const std::uint8_t* d_include, const int* d_pairs_i,
                                      const int* d_pairs_j, long long pair0, long long C,
-                                     long* d_nsnp, long* d_hethet, long* d_ibs0, long* d_het_i,
-                                     long* d_het_j, cudaStream_t stream) {
+                                     long long out_offset, long* d_nsnp, long* d_hethet,
+                                     long* d_ibs0, long* d_het_i, long* d_het_j,
+                                     cudaStream_t stream) {
     if (C <= 0 || tm <= 0) return;
     // ONE BLOCK per pair (grid.x = C): the caller chunks C to <= the pair-chunk clamp so grid.x
     // stays under kMaxGridX. block must equal kKingAccumBlock so the shared-mem reduction covers
-    // exactly the launched threads.
+    // exactly the launched threads. out_offset shifts the persistent accumulator index (0 for the
+    // dense full-array path; block_pair0 for the streamed pair-block path).
     STEPPE_ASSERT(static_cast<unsigned long long>(C) <= core::kMaxGridX,
                   "king all-pairs gridDim.x (one block per pair) exceeds kMaxGridX — chunk the pairs");
     const unsigned grid = static_cast<unsigned>(C);
     king_allpairs_accumulate_kernel<<<grid, static_cast<unsigned>(kKingAccumBlock), 0, stream>>>(
-        d_code, N, tm, s_lo, d_include, d_pairs_i, d_pairs_j, pair0, C, d_nsnp, d_hethet, d_ibs0,
-        d_het_i, d_het_j);
+        d_code, N, tm, s_lo, d_include, d_pairs_i, d_pairs_j, pair0, C, out_offset, d_nsnp,
+        d_hethet, d_ibs0, d_het_i, d_het_j);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

@@ -139,8 +139,8 @@ KingMatrix CudaBackend::king_robust_all_pairs(const DecodeTileView& tile,
         for (long long pair0 = 0; pair0 < npairs; pair0 += chunk) {
             const long long C = std::min<long long>(chunk, npairs - pair0);
             launch_king_allpairs_accumulate(dCode.data(), N, tm, s_lo, d_inc, d_pi, d_pj, pair0, C,
-                                            dNsnp.data(), dHetHet.data(), dIbs0.data(),
-                                            dHetI.data(), dHetJ.data(), stream_.get());
+                                            /*out_offset=*/0, dNsnp.data(), dHetHet.data(),
+                                            dIbs0.data(), dHetI.data(), dHetJ.data(), stream_.get());
         }
     }
 

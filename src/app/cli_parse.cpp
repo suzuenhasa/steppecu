@@ -450,7 +450,14 @@ int run_cli(int argc, char** argv) {
                           "scale path. Mutually exclusive with --all-pairs");
             s->add_option("--min-kinship", a.min_kinship,
                           "Emit only pairs with phi >= this (default -inf = all); the biobank-scale "
-                          "related-only filter");
+                          "related-only filter (routed through the STREAMED backend: no C(N,2) "
+                          "allocation, so the maxcomb cap does not bind)");
+            s->add_option("--king-cutoff", a.king_cutoff,
+                          "Greedy relatedness prune (plink2 --king-cutoff): remove one of each pair "
+                          "with phi > this, writing the retained/removed Genetic IDs to "
+                          "PREFIX.king.cutoff.in/.out (+ the above-cutoff .king.cutoff.kin0 edge "
+                          "table). All-pairs only; mutually exclusive with --pairs. Streamed "
+                          "(biobank-scale, breaks the C(N,2) cap)");
             s->add_flag("--sure", a.sweep_sure,
                         "(--all-pairs) lift the C(N,2) pair-count cap for very large sample sets");
             add_filter_flags(s, a);

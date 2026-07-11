@@ -50,6 +50,58 @@ struct KinshipResult {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// KinshipCutoffResult — the result of `steppe kinship --king-cutoff <phi>` (the plink2
+// --king-cutoff analogue): the greedy relatedness prune's RETAINED / REMOVED Genetic ID sets,
+// plus the above-cutoff EDGE list (the sparse relatedness graph) so a plink2-compatible .kin0 can
+// be written for cross-checking. Retained + removed partition all N considered individuals. The
+// prune reproduces plink2's KinshipPruneDestructive exactly (remove the partner of the lowest-
+// index degree-one vertex if one exists, else the lowest-index maximum-degree vertex), so the
+// retained set matches `plink2 --king-cutoff` bit-for-bit given the same edge set and sample order.
+struct KinshipCutoffResult {
+    std::vector<std::string> retained;   // Genetic IDs kept (.king.cutoff.in), singleton-index order
+    std::vector<std::string> removed;    // Genetic IDs pruned (.king.cutoff.out), removal order
+
+    // The above-cutoff relatedness graph (phi > cutoff*(1+2^-44), matching plink2's nudged edge
+    // rule), one entry per edge — for writing the sparse .kin0 relatedness table.
+    std::vector<std::string> edge_id1;   // Genetic ID i (singleton index i < j)
+    std::vector<std::string> edge_id2;
+    std::vector<long>        edge_nsnp;
+    std::vector<long>        edge_hethet;
+    std::vector<long>        edge_ibs0;
+    std::vector<double>      edge_phi;
+
+    int N = 0;                           // individuals considered
+    std::size_t enumerated = 0;          // C(N,2) pairs swept
+    std::size_t n_edges = 0;             // above-cutoff pairs (relatedness graph edges)
+    long        autosomal_snps = 0;      // autosomal SNPs in the mask (informational)
+    double      cutoff = 0.0;            // the phi cutoff used
+
+    std::vector<std::string> kept_snp_ids;  // QC-retained SNP ids (empty if no filter)
+
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
+// run_kinship_streamed — the biobank-scale STREAMED all-pairs KING driver (the `--min-kinship`
+// related-only path). Same decode/singleton partition as run_kinship_all_pairs, but the pair
+// sweep runs pair-block-by-block on the GPU and keeps ONLY pairs with phi >= `min_kinship` via
+// on-device compaction, so the 5*C(N,2) accumulator (and its ~14k cap) is never allocated. The
+// emitted rows are bit-identical to run_kinship_all_pairs filtered to phi >= min_kinship.
+[[nodiscard]] KinshipResult run_kinship_streamed(
+    const std::string& geno, const std::string& snp, const std::string& ind,
+    const std::optional<std::vector<std::string>>& samples, double min_kinship,
+    device::Resources& resources, const FilterConfig& filter = FilterConfig{});
+
+// run_kinship_cutoff — `steppe kinship --king-cutoff <phi>`: computes all-pairs phi (streamed,
+// cap-free), builds the above-cutoff relatedness graph, and runs plink2's exact greedy prune to
+// the retained/removed sample sets. `samples` restricts the considered individuals (nullopt =
+// all); the sample index / prune tie-break order is the .ind record order (== a matching plink2
+// roster's order).
+[[nodiscard]] KinshipCutoffResult run_kinship_cutoff(
+    const std::string& geno, const std::string& snp, const std::string& ind,
+    const std::optional<std::vector<std::string>>& samples, double cutoff,
+    device::Resources& resources, const FilterConfig& filter = FilterConfig{});
+
 // run_kinship_all_pairs — the GPU all-pairs KING driver. Resolves each selected Genetic ID
 // to its own singleton index (the readv2 per-individual partition), decodes the diploid tile
 // ONCE per SNP-tile, and folds every C(N,2) pair's KING counts on-device. `samples` restricts

@@ -99,6 +99,8 @@ public:
     [[nodiscard]] bool kinship_all_pairs()       const noexcept { return kinship_all_pairs_; }
     [[nodiscard]] const std::string& pairs_file() const noexcept { return pairs_file_; }
     [[nodiscard]] double min_kinship()           const noexcept { return min_kinship_; }
+    [[nodiscard]] bool   has_king_cutoff()       const noexcept { return king_cutoff_set_; }
+    [[nodiscard]] double king_cutoff()           const noexcept { return king_cutoff_; }
 
     // `sfs` (2D joint site-frequency spectrum) controls
     [[nodiscard]] bool sfs_fold()                const noexcept { return sfs_fold_; }
@@ -199,6 +201,8 @@ private:
     bool kinship_all_pairs_ = false;
     std::string pairs_file_;
     double min_kinship_ = -std::numeric_limits<double>::infinity();
+    bool king_cutoff_set_ = false;
+    double king_cutoff_ = 0.0;
     bool sfs_fold_ = false;
     int pca_k_ = 10;
     bool pca_eigenvalues_ = false;

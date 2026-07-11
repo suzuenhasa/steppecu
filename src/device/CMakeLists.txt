@@ -22,6 +22,8 @@ add_library(steppe_device STATIC
     cuda/cuda_backend_fst_allpairs.cu
     cuda/king_allpairs_kernel.cu
     cuda/cuda_backend_king.cu
+    cuda/king_streamed_kernel.cu
+    cuda/cuda_backend_king_streamed.cu
     cuda/ld_prune_kernel.cu
     cuda/cuda_backend_ld_prune.cu
     cuda/sfs_hist_kernel.cu
