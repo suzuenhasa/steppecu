@@ -440,9 +440,10 @@ void GenoReader::check_snp_major_range(const IndPartition& part,
                                        std::size_t snp_begin,
                                        std::size_t snp_end,
                                        const char* who,
-                                       const char* begin_tag) const {
+                                       const char* begin_tag,
+                                       bool allow_nonzero_begin) const {
     const std::string prefix = std::string("io::GenoReader::") + who + ": ";
-    if (snp_begin != 0) {
+    if (snp_begin != 0 && !allow_nonzero_begin) {
         throw std::runtime_error(
             prefix + begin_tag + "requires snp_begin == 0 "
             "(byte-aligned SNP prefix); nonzero begin is the M5 tile loop.");
@@ -470,14 +471,18 @@ SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
             "PACKEDANCESTRYMAP) path; this file is TGENO (individual-major) — read it "
             "via read_tile.");
     }
-    check_snp_major_range(part, snp_begin, snp_end, "read_snp_major_tile", "P0 ");
+    // allow_nonzero_begin: this binary reader seeks by record, so read_canonical_tile can
+    // stream it SNP-block by SNP-block (snp_begin > 0) to bound host RAM at biobank sizes.
+    check_snp_major_range(part, snp_begin, snp_end, "read_snp_major_tile", "P0 ",
+                          /*allow_nonzero_begin=*/true);
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
-    if (records_present_ < tile_snps) {
+    if (snp_end > records_present_) {
         throw std::runtime_error(
-            "io::GenoReader::read_snp_major_tile: requested SNP prefix [0, " +
-            std::to_string(tile_snps) + ") exceeds SNP records on disk (" +
+            "io::GenoReader::read_snp_major_tile: requested SNP range [" +
+            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
+            ") exceeds SNP records on disk (" +
             std::to_string(records_present_) + ") in " + path_);
     }
 
@@ -495,7 +500,7 @@ SnpMajorTile GenoReader::read_snp_major_tile(const IndPartition& part,
     for (std::size_t s = 0; s < tile_snps; ++s) {
         const std::streamoff off =
             static_cast<std::streamoff>(header_.header_bytes) +
-            static_cast<std::streamoff>(s) * static_cast<std::streamoff>(src_bpr);
+            static_cast<std::streamoff>(snp_begin + s) * static_cast<std::streamoff>(src_bpr);
         in.seekg(off, std::ios::beg);
         char* dst = reinterpret_cast<char*>(tile.snp_major.data() + s * src_bpr);
         in.read(dst, rec_bytes);
@@ -520,7 +525,8 @@ SnpMajorTile GenoReader::read_eigenstrat_snp_major_tile(const IndPartition& part
             " — wrong reader for " + path_);
     }
     check_snp_major_range(part, snp_begin, snp_end,
-                          "read_eigenstrat_snp_major_tile", "P0 ");
+                          "read_eigenstrat_snp_major_tile", "P0 ",
+                          /*allow_nonzero_begin=*/false);
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
@@ -587,15 +593,18 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
             std::string(geno_format_name(header_.format)) +
             " — wrong reader for " + path_);
     }
+    // allow_nonzero_begin: the .bed reader seeks by SNP record, so read_canonical_tile can
+    // stream it SNP-block by SNP-block (snp_begin > 0) to bound host RAM at biobank sizes.
     check_snp_major_range(part, snp_begin, snp_end,
-                          "read_plink_snp_major_tile", "P2 ");
+                          "read_plink_snp_major_tile", "P2 ", /*allow_nonzero_begin=*/true);
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
-    if (tile_snps > records_present_) {
+    if (snp_end > records_present_) {
         throw std::runtime_error(
-            "io::GenoReader::read_plink_snp_major_tile: requested SNP prefix [0, " +
-            std::to_string(tile_snps) + ") exceeds SNP records on disk (" +
+            "io::GenoReader::read_plink_snp_major_tile: requested SNP range [" +
+            std::to_string(snp_begin) + ", " + std::to_string(snp_end) +
+            ") exceeds SNP records on disk (" +
             std::to_string(records_present_) + ") in " + path_);
     }
 
@@ -615,7 +624,7 @@ SnpMajorTile GenoReader::read_plink_snp_major_tile(const IndPartition& part,
     for (std::size_t s = 0; s < tile_snps; ++s) {
         const std::streamoff off =
             static_cast<std::streamoff>(header_.header_bytes) +
-            static_cast<std::streamoff>(s) * static_cast<std::streamoff>(src_bpr);
+            static_cast<std::streamoff>(snp_begin + s) * static_cast<std::streamoff>(src_bpr);
         in.seekg(off, std::ios::beg);
         char* dst = reinterpret_cast<char*>(bed_rec.data());
         in.read(dst, rec_bytes);
@@ -648,7 +657,8 @@ SnpMajorTile GenoReader::read_ancestrymap_snp_major_tile(const IndPartition& par
             " — wrong reader for " + path_);
     }
     check_snp_major_range(part, snp_begin, snp_end,
-                          "read_ancestrymap_snp_major_tile", "");
+                          "read_ancestrymap_snp_major_tile", "",
+                          /*allow_nonzero_begin=*/false);
 
     const std::size_t tile_snps = snp_end - snp_begin;
     const std::size_t src_bpr = header_.bytes_per_record;
