@@ -98,7 +98,7 @@ computing the same all-pairs matrix, one RTX 5090, `--device 0`):
 | 109 | 5,886 | **3.95×** |
 | 267 | 35,511 | **19.9×** |
 | 502 | 125,751 | **29.5×** |
-| 3,898 (full panel) | 7.6M | **22 min** vs plink2's projected **~18.5 hr** (**~50×**) |
+| 3,898 (full panel) | 7.6M | **22 min** vs plink2's projected **~18.5 hr** (**~50× — projection**, plink2 side extrapolated, not run to completion) |
 
 There's a **crossover around ~60 populations**: below it plink2 wins (steppe's
 fixed GPU-context and small-problem overhead dominate), above it steppe pulls away
