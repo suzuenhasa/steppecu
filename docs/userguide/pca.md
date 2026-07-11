@@ -215,8 +215,8 @@ VRAM** on a single RTX 5090. This used to be impossible: the old full-spectrum
 eigensolve wanted an 8.5 GB workspace and OOM'd the full cohort outright. The Halko
 top-K solver needs only ~190 MB of workspace, so the complete cohort now goes
 through in one pass. The top-10 PCs it returns match the old full-spectrum solver
-to **|r| = 1.0 on PC1–4** and **≥ 0.99998 on PC5–10** — the truncation costs you
-nothing you would ever plot.
+to **|r| = 1.0 on PC1–4** (PC5–10 concordance [UNVERIFIED - needs measurement]) —
+the truncation costs you nothing you would ever plot.
 
 ---
 
@@ -247,7 +247,8 @@ change (see caveats).
   so the complete **23,089-sample × 1.23M-SNP** panel now runs (**6:24, 18 GB peak
   VRAM**, one RTX 5090). What you get back is exactly the K PCs you asked for with
   `-k` — there is no full spectrum to inspect past that — and those top PCs match
-  the old full solver (|r| = 1.0 on PC1–4, ≥ 0.99998 on PC5–10). The one remaining
+  the old full solver (|r| = 1.0 on PC1–4; PC5–10 concordance
+  [UNVERIFIED - needs measurement]). The one remaining
   wall is the covariance itself: it is still a dense `N x N` matrix, so truly
   biobank-scale N (hundreds of thousands of samples and up) is still out of reach —
   but the whole present AADR cohort sits comfortably inside the envelope.
