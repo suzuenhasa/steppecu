@@ -226,22 +226,29 @@ Making things fast is the whole point, so here's what **one RTX 5090** does on r
 | 1240k | 1.23 M | 6.7 GB | 9 s | 37 s |
 | 2M | 2.14 M | 12 GB | 12 s | 58 s |
 
+*(Table figures are [UNVERIFIED — needs measurement]: they don't trace to a gated commit. The one
+gated `extract-f2` number is `--auto-top-k 2000` on the 2 M panel completing in **88 s**, peak host
+RSS 54 GiB under a 90 GiB cap [ca7ed59].)*
+
 The genotype matrix streams out-of-core, and large caches **auto-tier** (the f2 blocks spill from
 VRAM → host RAM → disk as needed), so panels far bigger than the card's memory still build.
 
 **Fits & stats** — single call on a 500-population cache: qpAdm, qpWave, f4, f3, f4-ratio, and D all
-land in **~3 seconds**; DATES in ~2 s; `qpfstats` in under a second.
+land in **~3 seconds**; DATES in ~2.5 s [c7af01b]. `qpfstats` (the genotype-path f2 smoother) runs
+in ~9 s for a 40-population tensor [9908d0b] — it scales with the number of pairs, so it isn't a
+sub-second call at 500 populations.
 
-**Model search** — a qpAdm **rotation of 4,047 candidate models** in **2.8 s** (~1,400 models/s), and
-an admixture-graph topology search of **25,560 graphs** in **14.5 s** (~1,770 graphs/s).
+**Model search** — a qpAdm **rotation of 10,660 candidate models** in **4.55 s** (~2,340 models/s,
+f2-load-bound; ~2,400/s in pure GPU compute) [9264c53], and an admixture-graph topology search of
+**1,590 candidate graphs** in **1.1 s** (~1,450 topologies/s) [cf06b1b].
 
 **Sweeps** — every combination, filtered on-device to the top survivors:
 
 | Sweep | statistics computed | time |
 |---|---|---|
-| f3, all triples (500 pops) | 20.7 million | 4 s |
-| f4, all quartets (500 pops) | 2.57 **billion** | 2.9 min |
-| **f4, all quartets (700 pops)** | **9.92 billion** | **12 min** |
+| f3, all triples (500 pops) | 20.7 million | [UNVERIFIED — needs measurement] |
+| f4, all quartets (500 pops) | 2.57 **billion** | 2.9 min [49ec38e] |
+| **f4, all quartets (700 pops)** | **9.92 billion** | **12 min** [49ec38e] |
 
 → roughly **14 million f4-statistics per second** — 9.9 billion of them in about twelve minutes, on
 one GPU.
