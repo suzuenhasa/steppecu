@@ -164,6 +164,12 @@ public:
     [[nodiscard]] PcaEig pca_covariance_eig(const DecodeTileView& tile, int k, int solver_mode,
                                             const Precision& precision) override;
 
+    // Standalone genotype PCA over a REAL-VALUED FP32 dosage tile (`steppe pca --bgen`). The
+    // exact-path twin of pca_covariance_eig: Patterson-standardizes ALT dosages (dosage kernels)
+    // -> dense N x N SYRK Gram -> truncated top-K eigen -> coords. See ComputeBackend.
+    [[nodiscard]] PcaEig pca_covariance_eig_dosage(const DosageTileView& tile, int k,
+                                                   const Precision& precision) override;
+
     // Standalone lsqproject PCA (`steppe pca --project-*`) — ref-only eigenbasis + per-target
     // least-squares placement over non-missing sites (two SNP-tile streaming passes; the
     // K x K assembly stays native FP64, the W/b matmuls emulated-FP64). See backend.hpp.

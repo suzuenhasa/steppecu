@@ -62,6 +62,42 @@ struct PcaSnpScale {
     return (static_cast<double>(code) - center) * inv_scale;
 }
 
+// ---- Real-valued (BGEN) dosage overloads ----
+//
+// The DosageTile path feeds the SAME Patterson standardization a fractional ALT dosage
+// (a real number in [0, 2]) instead of a decoded {0,1,2} code. The arithmetic is
+// IDENTICAL — p is the mean dosage / 2, center 2p, variance p(1-p), z = (dosage-2p)/
+// sqrt(p(1-p)) — so the dosage kernels and the integer kernels cannot drift. A missing
+// dosage is a NaN sentinel; dosage_valid is the float analogue of genotype_valid.
+// (isnan is deliberately kept out of a __host__ __device__ inline — the self-comparison
+// d == d is false iff d is NaN and is portable across host and device.)
+[[nodiscard]] STEPPE_HD inline bool dosage_valid(float d) noexcept { return d == d; }
+
+// Fold the per-SNP dosage SUM (Σ ALT dosage over non-missing samples, a real number)
+// and the non-missing count into the Patterson center/variance. Mirrors pca_snp_scale
+// but takes a double sum instead of an integer allele count.
+[[nodiscard]] STEPPE_HD inline PcaSnpScale pca_snp_scale_f(double dosage_sum,
+                                                           long n_nonmiss) noexcept {
+    PcaSnpScale s;
+    if (n_nonmiss > 0) {
+        const double p = dosage_sum / (2.0 * static_cast<double>(n_nonmiss));
+        s.p = p;
+        s.center = 2.0 * p;
+        s.pq = p * (1.0 - p);
+        s.used = s.pq > 0.0;
+    }
+    return s;
+}
+
+// Standardize one ALT dosage given the SNP's center (2p) and inv_scale. A missing
+// (NaN) dosage maps to 0 (mean-imputed after centering); a monomorphic column
+// (inv_scale == 0) is 0 for every sample — exactly the integer convention.
+[[nodiscard]] STEPPE_HD inline double pca_standardize_one_f(float dosage, double center,
+                                                            double inv_scale) noexcept {
+    if (!dosage_valid(dosage)) return 0.0;
+    return (static_cast<double>(dosage) - center) * inv_scale;
+}
+
 }  // namespace steppe::core
 
 #endif  // STEPPE_CORE_INTERNAL_PCA_STANDARDIZE_HPP

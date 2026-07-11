@@ -30,6 +30,7 @@
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
+#include "io/bgen_reader.hpp"
 #include "io/genotype_source.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/individual_partition.hpp"
@@ -225,6 +226,62 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
         const std::size_t src = j * static_cast<std::size_t>(K);
         for (int kk = 0; kk < K; ++kk) res.coords[dst + kk] = pj.coords_tgt[src + kk];
     }
+    res.status = Status::Ok;
+    return res;
+}
+
+PcaResult run_pca_bgen(const std::string& bgen_path, int k, const Precision& precision,
+                       device::Resources& resources) {
+    PcaResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+    if (k < 1) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    ComputeBackend& be = device::primary_backend(resources);
+
+    // Read the BGEN into the real-valued dosage tile (throws on I/O / out-of-scope shape).
+    const io::DosageTile tile = io::read_bgen_dosages(bgen_path);
+    const long N = static_cast<long>(tile.n_individuals);
+    const long M = static_cast<long>(tile.n_snp);
+    if (N <= 0 || M <= 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    // Per-sample identity from the BGEN sample IDs; a single "ALL" color group for the MVP
+    // (a --pops sidecar mapping IDs to populations is a documented follow-on).
+    res.sample_id = tile.sample_ids;
+    res.sample_pop.assign(static_cast<std::size_t>(N), "ALL");
+    res.pop_labels = {"ALL"};
+    res.is_projected.assign(static_cast<std::size_t>(N), 0);
+
+    DosageTileView view;
+    view.dosage = tile.dosage.data();
+    view.n_snp = tile.n_snp;
+    view.n_individuals = tile.n_individuals;
+
+    const PcaEig eig = be.pca_covariance_eig_dosage(view, k, precision);
+    if (eig.status != Status::Ok) {
+        res.status = eig.status;
+        return res;
+    }
+    if (static_cast<long>(k) > N || static_cast<long>(k) > eig.n_snp_used) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    res.coords = eig.coords;
+    res.N = eig.N;
+    res.K = eig.K;
+    res.n_ref = eig.N;
+    res.eigenvalues = eig.eigenvalues;
+    res.var_explained = eig.var_explained;
+    res.n_snp_total = M;
+    res.n_snp_used = eig.n_snp_used;
+    res.n_snp_monomorphic = eig.n_snp_monomorphic;
+    res.precision_tag = eig.precision_tag;
     res.status = Status::Ok;
     return res;
 }

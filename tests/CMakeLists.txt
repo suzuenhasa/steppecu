@@ -513,6 +513,14 @@ add_executable(test_beagle_reader unit/beagle_reader_test.cpp)
 target_link_libraries(test_beagle_reader PRIVATE steppe::io steppe::api steppe::warnings)
 steppe_add_test(NAME beagle_reader_unit COMMAND test_beagle_reader LABELS "unit")
 
+# BGEN v1.2 dosage reader (`steppe pca --bgen` ingest arm): hand-crafted fractional-prob
+# fixtures with an INDEPENDENT hand-decode — fractional dosage math, phased/unphased,
+# missing NaN, compression none+zlib, and the out-of-scope throws. Links zlib to author
+# the compressed fixture.
+add_executable(test_bgen_reader unit/bgen_reader_test.cpp)
+target_link_libraries(test_bgen_reader PRIVATE steppe::io steppe::api steppe::warnings ZLIB::ZLIB)
+steppe_add_test(NAME bgen_reader_unit COMMAND test_bgen_reader LABELS "unit")
+
 # PCAngsd EM + GL-weighted covariance reference (core::pcangsd_reference oracle):
 # the posterior/E_dosage hand value + full-fit covariance/PCA properties.
 add_executable(test_pcangsd_em unit/pcangsd_em_test.cpp)

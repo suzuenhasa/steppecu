@@ -337,6 +337,128 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
     return out;
 }
 
+PcaEig CudaBackend::pca_covariance_eig_dosage(const DosageTileView& tile, int k,
+                                              const Precision& precision) {
+    guard_device();
+    PcaEig out;
+    out.precision_tag =
+        (precision.kind == Precision::Kind::EmulatedFp64 &&
+         capabilities().emulated_fp64_honorable)
+            ? Precision::Kind::EmulatedFp64
+            : Precision::Kind::Fp64;
+
+    const long N = static_cast<long>(tile.n_individuals);
+    const long M = static_cast<long>(tile.n_snp);
+    if (N <= 0 || M <= 0 || k <= 0) {
+        out.status = Status::InvalidConfig;
+        return out;
+    }
+    const int Nn = static_cast<int>(N);
+    const int K = static_cast<int>(std::min<long>(k, N));
+
+    // v1: the EXACT dense-Gram path only (region/AADR scale). The randomized matrix-free path
+    // is a documented follow-on; it reuses this SAME dosage standardize with a streamed matvec.
+    solver_.set_stream(stream_.get());
+    const int oversample = pca_oversample();
+    const int subspace_iters = pca_subspace_iters();
+    const int L = static_cast<int>(std::min<long>(static_cast<long>(K) + oversample, N));
+    DeviceBuffer<double> dEvecL(static_cast<std::size_t>(N) * static_cast<std::size_t>(L));
+    DeviceBuffer<double> dEvalL(static_cast<std::size_t>(L));
+    DeviceBuffer<double> dTrace(1);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dTrace.data(), 0, sizeof(double), stream_.get()));
+    DeviceBuffer<unsigned long long> dUsed(1);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dUsed.data(), 0, sizeof(unsigned long long), stream_.get()));
+    int L_used = 0;
+
+    const std::size_t NN = static_cast<std::size_t>(N) * static_cast<std::size_t>(N);
+    DeviceBuffer<double> dC(NN);
+    STEPPE_CUDA_CHECK(cudaMemsetAsync(dC.data(), 0, NN * sizeof(double), stream_.get()));
+
+    // SNP tile bounding the Z operand footprint to ~free/kPcaZBudgetDivisor (mirrors the exact
+    // integer path). The resident FP32 dosage tile is N*M*4 bytes; the Z tile stays FP64.
+    std::size_t free_b = capabilities().free_vram_bytes;
+    if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+    std::size_t budget = free_b / kPcaZBudgetDivisor;
+    const std::size_t z_row_bytes = static_cast<std::size_t>(N) * sizeof(double);
+    if (budget < z_row_bytes) budget = z_row_bytes;
+    long tileM = static_cast<long>(budget / z_row_bytes);
+    if (tileM < 1) tileM = 1;
+    if (tileM > M) tileM = M;
+
+    {
+        // The resident dosage tile + the standardize scratch + the Z operand live ONLY inside
+        // this block so RAII frees them before the eigensolver allocates its workspace.
+        const std::size_t dosage_elems = static_cast<std::size_t>(N) * static_cast<std::size_t>(M);
+        DeviceBuffer<float> dDosage(dosage_elems == 0 ? 1u : dosage_elems);
+        if (dosage_elems > 0) {
+            h2d_async(dDosage, tile.dosage, dosage_elems, stream_.get());
+        }
+
+        DeviceBuffer<double> dCenter(static_cast<std::size_t>(tileM));
+        DeviceBuffer<double> dInv(static_cast<std::size_t>(tileM));
+        DeviceBuffer<double> dZ(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM));
+
+        // Covariance SYRK: emulated-FP64 default (matmul-heavy), the fit-engine block.
+        const MathModeScope syrk_mode_scope(blas_.get(), CUBLAS_PEDANTIC_MATH);
+        engage_f2_precision(blas_.get(), precision);
+        for (long s_lo = 0; s_lo < M; s_lo += tileM) {
+            const long tm = std::min<long>(tileM, M - s_lo);
+            launch_pca_dosage_snp_scale(dDosage.data(), tile.n_individuals, tile.n_snp, s_lo, tm,
+                                        dCenter.data(), dInv.data(), dUsed.data(), stream_.get());
+            launch_pca_dosage_standardize(dDosage.data(), tile.n_individuals, tile.n_snp, s_lo, tm,
+                                          dCenter.data(), dInv.data(), dZ.data(), stream_.get());
+            const double alpha = 1.0;
+            const double beta = (s_lo == 0) ? 0.0 : 1.0;
+            CUBLAS_CHECK(cublasDsyrk(blas_.get(), CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, Nn,
+                                     static_cast<int>(tm), &alpha, dZ.data(), Nn, &beta,
+                                     dC.data(), Nn));
+        }
+    }
+    launch_symmetrize_lower_to_full(dC.data(), Nn, stream_.get());
+
+    // Truncated top-K eigensolve on the resident dense Gram (shared with the integer path).
+    const PcaTruncatedEig te = pca_truncated_topk(
+        blas_.get(), solver_.get(), stream_.get(), dC.data(), Nn, K, oversample, subspace_iters,
+        precision, dEvecL.data(), dEvalL.data(), &L_used);
+    if (te.status != Status::Ok) {
+        out.status = te.status;
+        return out;
+    }
+    launch_pca_trace(dC.data(), Nn, dTrace.data(), stream_.get());
+
+    // ---- Shared tail: project top-K coords, D2H the small results, assemble the spectrum ----
+    DeviceBuffer<double> dCoords(static_cast<std::size_t>(N) * static_cast<std::size_t>(K));
+    launch_pca_coords(dEvecL.data(), dEvalL.data(), Nn, L, K, dCoords.data(), stream_.get());
+
+    out.coords.assign(static_cast<std::size_t>(N) * static_cast<std::size_t>(K), 0.0);
+    std::vector<double> eval_L(static_cast<std::size_t>(L), 0.0);
+    double trace_h = 0.0;
+    unsigned long long used_h = 0;
+    d2h_async(out.coords.data(), dCoords,
+              static_cast<std::size_t>(N) * static_cast<std::size_t>(K), stream_.get());
+    d2h_async(eval_L.data(), dEvalL, static_cast<std::size_t>(L), stream_.get());
+    d2h_async(&trace_h, dTrace, 1, stream_.get());
+    d2h_async(&used_h, dUsed, 1, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    const long double total = static_cast<long double>(trace_h);
+    out.eigenvalues.assign(static_cast<std::size_t>(K), 0.0);
+    out.var_explained.assign(static_cast<std::size_t>(K), 0.0);
+    for (int kk = 0; kk < K; ++kk) {
+        const double lambda = eval_L[static_cast<std::size_t>(L - 1 - kk)];
+        out.eigenvalues[static_cast<std::size_t>(kk)] = lambda;
+        out.var_explained[static_cast<std::size_t>(kk)] =
+            (total != 0.0L) ? static_cast<double>(static_cast<long double>(lambda) / total) : 0.0;
+    }
+
+    out.N = Nn;
+    out.K = K;
+    out.n_snp_used = static_cast<long>(used_h);
+    out.n_snp_monomorphic = M - out.n_snp_used;
+    out.status = Status::Ok;
+    return out;
+}
+
 namespace {
 // Native-FP64 Cholesky solve of the SPD K x K system A x = b (A column-major, K tiny — the
 // default K=10 per-target normal matrix). Returns false if A is not positive definite (a

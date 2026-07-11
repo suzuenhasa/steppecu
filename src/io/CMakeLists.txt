@@ -25,6 +25,7 @@ add_library(steppe_io STATIC
     vcf_panel_reader.cpp
     consumer_raw_reader.cpp
     beagle_reader.cpp
+    bgen_reader.cpp
     panel_merge_writer.cpp
     likelihood_tensor_writer.cpp
     filter/include_exclude.cpp

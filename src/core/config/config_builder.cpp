@@ -234,6 +234,7 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.pca_emit_html, args.pca_emit_html);
     take(merged_.project_samples, args.project_samples);
     take(merged_.project_mode, args.project_mode);
+    take(merged_.bgen, args.bgen);
     take(merged_.pca_solver, args.pca_solver);
     if (args.ploidy.has_value()) merged_.ploidy = args.ploidy;
 
@@ -640,6 +641,7 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.pca_eigenvalues) cfg.pca_eigenvalues_ = *merged_.pca_eigenvalues;
     if (merged_.pca_emit_html) cfg.pca_emit_html_ = *merged_.pca_emit_html;
+    if (merged_.bgen) cfg.pca_bgen_ = *merged_.bgen;
     if (!merged_.project_pops.empty()) cfg.project_pops_ = merged_.project_pops;
     if (merged_.project_samples) cfg.project_samples_file_ = *merged_.project_samples;
     if (merged_.project_mode) {

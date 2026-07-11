@@ -144,14 +144,62 @@ void emit_scree(std::ostream& os, OutputFormat fmt, const steppe::PcaResult& r) 
 }  // namespace
 
 int run_pca_command(const cfg::RunConfig& config) {
-    if (config.qpdstat_prefix().empty()) {
-        std::fprintf(stderr, "steppe pca: --prefix PREFIX.{geno,snp,ind} is required\n");
+    const bool use_bgen = !config.pca_bgen().empty();
+    if (config.qpdstat_prefix().empty() && !use_bgen) {
+        std::fprintf(stderr,
+                     "steppe pca: one of --prefix PREFIX.{geno,snp,ind} or --bgen FILE.bgen is "
+                     "required\n");
+        return cfg::kExitInvalidConfig;
+    }
+    if (!config.qpdstat_prefix().empty() && use_bgen) {
+        std::fprintf(stderr, "steppe pca: --prefix and --bgen are mutually exclusive\n");
         return cfg::kExitInvalidConfig;
     }
     const int k = config.pca_k();
     if (k < 1) {
         std::fprintf(stderr, "steppe pca: -k must be >= 1 (number of principal components)\n");
         return cfg::kExitInvalidConfig;
+    }
+
+    // BGEN v1.2 dosage path: read real-valued ALT dosages and run the Patterson PCA over them.
+    // The result schema is identical to the genotype-triple path, so every emit below is reused.
+    if (use_bgen) {
+        steppe::PcaResult bres;
+        try {
+            device::Resources resources = device::build_resources(config.device());
+            if (!require_first_gpu(resources, "pca")) return cfg::kExitRuntimeError;
+            bres = run_pca_bgen(config.pca_bgen(), k, config.device().precision, resources);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe pca: BGEN/device error: %s\n", e.what());
+            return exit_code_for_caught(e);
+        }
+        if (bres.status != Status::Ok) {
+            std::fprintf(stderr,
+                         "steppe pca: %s (check --bgen file and that -k <= min(samples, usable "
+                         "SNPs))\n",
+                         status_text(bres.status));
+            return cfg::exit_code_for(bres.status);
+        }
+        const double bv1 = bres.K > 0 ? bres.var_explained[0] * 100.0 : 0.0;
+        const double bv2 = bres.K > 1 ? bres.var_explained[1] * 100.0 : 0.0;
+        std::fprintf(stderr,
+                     "steppe pca: %d samples x %ld SNPs used (%ld dropped monomorphic) from BGEN "
+                     "dosages, top-%d PCs; PC1 var=%.2f%%, PC2 var=%.2f%%\n",
+                     bres.N, bres.n_snp_used, bres.n_snp_monomorphic, bres.K, bv1, bv2);
+        if (!config.pca_emit_html().empty()) {
+            if (!write_pca_html(config.pca_emit_html(), bres, "pca")) return cfg::kExitIoError;
+            std::fprintf(stderr, "steppe pca: wrote self-contained scatter -> %s\n",
+                         config.pca_emit_html().c_str());
+        }
+        const bool bscree = config.pca_eigenvalues();
+        if (const auto rc = emit_to_destination(
+                config, "pca", [&](std::ostream& os, OutputFormat fmt) {
+                    if (bscree) emit_scree(os, fmt, bres);
+                    else emit_coords(os, fmt, bres);
+                })) {
+            return *rc;
+        }
+        return cfg::exit_code_for(bres.status);
     }
 
     const std::string& prefix = config.qpdstat_prefix();

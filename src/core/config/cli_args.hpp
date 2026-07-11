@@ -125,6 +125,7 @@ struct CliArgs {
     std::optional<std::string> project_samples;  // FILE of Genetic IDs, each projected-only
     std::optional<std::string> project_mode;     // lsq (default) | scaled
     std::optional<std::string> pca_solver;       // exact | randomized | auto (default)
+    std::optional<std::string> bgen;             // BGEN v1.2 dosage input (routes pca to the dosage path)
 
     // qpAdm option overrides — reference §9
     std::optional<double> fudge;

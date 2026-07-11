@@ -106,6 +106,19 @@ struct PcaResult {
                                 const FilterConfig& filter = FilterConfig{},
                                 PcaSolver pca_solver = PcaSolver::Auto);
 
+// run_pca_bgen — the BGEN-v1.2 real-valued-dosage PCA driver (`steppe pca --bgen`). Reads a
+// biallelic-diploid BGEN into a DosageTile (per-(variant,sample) ALT dosage in [0,2], NaN =
+// missing) and runs the Patterson standardize -> SYRK covariance -> top-K eigen on the device
+// over the FROM-DOSAGE standardized operand (be.pca_covariance_eig_dosage). Samples are labeled
+// by the BGEN sample identifiers, all in a single "ALL" color group (a --pops sidecar is a
+// follow-on). `k` is the number of principal components; `precision` governs the covariance
+// SYRK (emulated-FP64 default), the eigen solve is always native FP64. The output PcaResult has
+// the SAME schema as run_pca, so every emit path (coords/scree/HTML) is reused unchanged.
+[[nodiscard]] PcaResult run_pca_bgen(const std::string& bgen_path,
+                                     int k,
+                                     const Precision& precision,
+                                     device::Resources& resources);
+
 }  // namespace steppe
 
 #endif  // STEPPE_PCA_HPP

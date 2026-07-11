@@ -87,6 +87,53 @@ __global__ void pca_standardize_kernel(const std::uint8_t* __restrict__ packed,
     Z[t] = core::pca_standardize_one(code, center[sl], inv_scale[sl]);
 }
 
+// ---- real-valued (BGEN) dosage kernels ----
+
+// One thread per SNP in the tile: fold all N ALT dosages (NaN skipped) -> Patterson
+// center/inv_scale. The FP32-dosage twin of pca_snp_scale_kernel (dosage sum, no bit-unpack).
+__global__ void pca_dosage_snp_scale_kernel(const float* __restrict__ dosage, std::size_t N,
+                                            std::size_t n_snp, long s_lo, long tileM,
+                                            double* __restrict__ center,
+                                            double* __restrict__ inv_scale,
+                                            unsigned long long* __restrict__ used_count) {
+    const long sl = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (sl >= tileM) return;
+    const long s = s_lo + sl;
+
+    double sum = 0.0;
+    long nn = 0;
+    for (std::size_t g = 0; g < N; ++g) {
+        const float d = dosage[g * n_snp + static_cast<std::size_t>(s)];
+        if (core::dosage_valid(d)) {
+            sum += static_cast<double>(d);
+            ++nn;
+        }
+    }
+
+    const PcaSnpScale sc = core::pca_snp_scale_f(sum, nn);
+    center[sl] = sc.center;
+    inv_scale[sl] = sc.used ? (1.0 / sqrt(sc.pq)) : 0.0;
+    if (sc.used) atomicAdd(used_count, 1ULL);
+}
+
+// One thread per (individual i, local SNP sl): write the column-major Z operand from the
+// dosage tile. The FP32-dosage twin of pca_standardize_kernel.
+__global__ void pca_dosage_standardize_kernel(const float* __restrict__ dosage, std::size_t N,
+                                              std::size_t n_snp, long s_lo, long tileM,
+                                              const double* __restrict__ center,
+                                              const double* __restrict__ inv_scale,
+                                              double* __restrict__ Z) {
+    const long t = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long total = static_cast<long>(N) * tileM;
+    if (t >= total) return;
+    const long i = t % static_cast<long>(N);   // sample (fast axis => column-major leading dim)
+    const long sl = t / static_cast<long>(N);  // local SNP (column)
+    const long s = s_lo + sl;
+
+    const float d = dosage[static_cast<std::size_t>(i) * n_snp + static_cast<std::size_t>(s)];
+    Z[t] = core::pca_standardize_one_f(d, center[sl], inv_scale[sl]);
+}
+
 // One thread per (sample i, PC k): coord[i*K + k] = evec[i + (ncol-1-k)*N] * sqrt(eval[ncol-1-k]).
 // evec is a column-major N x ncol block (leading dim N); ascending eigenvalues put the largest
 // pair in the last column, so PC k reads column ncol-1-k.
@@ -346,6 +393,29 @@ void launch_pca_standardize(const std::uint8_t* d_packed, std::size_t bytes_per_
         total, kPcaBlock, "pca standardize gridDim.x (N*tileM axis) exceeds kMaxGridX");
     pca_standardize_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
         d_packed, bytes_per_record, N, s_lo, tileM, d_center, d_inv_scale, d_Z);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_dosage_snp_scale(const float* d_dosage, std::size_t N, std::size_t n_snp,
+                                 long s_lo, long tileM, double* d_center, double* d_inv_scale,
+                                 unsigned long long* d_used_count, cudaStream_t stream) {
+    if (tileM <= 0) return;
+    const int grid = core::grid_for_x(
+        tileM, kPcaBlock, "pca dosage scale gridDim.x (SNP tile axis) exceeds kMaxGridX");
+    pca_dosage_snp_scale_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_dosage, N, n_snp, s_lo, tileM, d_center, d_inv_scale, d_used_count);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pca_dosage_standardize(const float* d_dosage, std::size_t N, std::size_t n_snp,
+                                   long s_lo, long tileM, const double* d_center,
+                                   const double* d_inv_scale, double* d_Z, cudaStream_t stream) {
+    if (tileM <= 0 || N == 0) return;
+    const long total = static_cast<long>(N) * tileM;
+    const int grid = core::grid_for_x(
+        total, kPcaBlock, "pca dosage standardize gridDim.x (N*tileM axis) exceeds kMaxGridX");
+    pca_dosage_standardize_kernel<<<static_cast<unsigned>(grid), kPcaBlock, 0, stream>>>(
+        d_dosage, N, n_snp, s_lo, tileM, d_center, d_inv_scale, d_Z);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

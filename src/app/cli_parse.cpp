@@ -482,6 +482,10 @@ int run_cli(int argc, char** argv) {
         [](CLI::App* s, CliArgs& a) {
             s->add_option("--prefix", a.qpdstat_prefix,
                           "Genotype triple prefix (reads PREFIX.{geno,snp,ind}; EIGENSTRAT/PLINK/...)");
+            s->add_option("--bgen", a.bgen,
+                          "BGEN v1.2 biallelic-diploid input (real-valued ALT dosages -> Patterson "
+                          "PCA). Mutually exclusive with --prefix; samples form a single 'ALL' "
+                          "group. Scope: layout 2, compression none/zlib (plink2 --export bgen-1.2)");
             add_str_list_flag(s, "--pops", a.pops,
                               "Populations to include (color groups); omit = ALL populations");
             add_str_list_flag(s, "--project-pops", a.project_pops,

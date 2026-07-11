@@ -225,6 +225,18 @@ struct DecodeTileView {
     bool detect_ploidy_on_device = false;
 };
 
+// Real-valued (BGEN) dosage tile view — the FP32 analogue of DecodeTileView, parallel
+// to the 2-bit path so the byte-exact hardcall decode and all PCA goldens stay
+// untouched. dosage is INDIVIDUAL-MAJOR: dosage[i * n_snp + s] is sample i's ALT
+// dosage at variant s (a real number in [0, 2]), or a quiet NaN for a missing call
+// (the float analogue of the 2-bit tile's missing == code 3). Produced by the io-leaf
+// bgen_reader; consumed by pca_covariance_eig_dosage's dosage standardize kernels.
+struct DosageTileView {
+    const float* dosage = nullptr;  // n_individuals * n_snp, individual-major; NaN = missing
+    std::size_t n_snp = 0;
+    std::size_t n_individuals = 0;
+};
+
 // Genotype decode output — reference §5
 struct DecodeResult {
     std::vector<double> q;
@@ -852,6 +864,24 @@ public:
         (void)tile; (void)k; (void)solver_mode; (void)precision;
         throw std::runtime_error(
             "ComputeBackend::pca_covariance_eig: not implemented by this backend");
+    }
+
+    // pca_covariance_eig_dosage: standalone genotype PCA over a REAL-VALUED dosage tile
+    // (`steppe pca --bgen`). The exact-path twin of pca_covariance_eig: uploads the FP32
+    // DosageTileView device-resident, Patterson-standardizes the ALT dosages on the GPU
+    // (per-SNP center 2p + scale 1/sqrt(p(1-p)) over the dosage sum, NaN mean-imputed to 0,
+    // monomorphic columns zeroed), forms the dense N x N Gram via cuBLAS SYRK, and runs the
+    // SAME truncated top-K eigensolve + coord projection tail. Only the standardize input
+    // changes (a fractional dosage in place of a {0,1,2} code); the covariance/eigen math is
+    // identical. `k` is clamped to min(k, N); the covariance SYRK follows `precision`
+    // (emulated-FP64 default), the eigen is the native-FP64 carve-out. v1 runs the exact
+    // dense path only (region/AADR scale); the matrix-free randomized path is a follow-on.
+    // Default: throw (CUDA / CPU-oracle only).
+    [[nodiscard]] virtual PcaEig pca_covariance_eig_dosage(const DosageTileView& tile, int k,
+                                                           const Precision& precision) {
+        (void)tile; (void)k; (void)precision;
+        throw std::runtime_error(
+            "ComputeBackend::pca_covariance_eig_dosage: not implemented by this backend");
     }
 
     // pca_project_lsq: the smartpca lsqproject PCA (`steppe pca --project-*`). Builds the

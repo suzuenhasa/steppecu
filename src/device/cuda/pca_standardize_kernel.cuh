@@ -33,6 +33,28 @@ void launch_pca_standardize(const std::uint8_t* d_packed, std::size_t bytes_per_
                             const double* d_center, const double* d_inv_scale,
                             double* d_Z, cudaStream_t stream);
 
+// -------- real-valued (BGEN) dosage launchers --------
+//
+// The FP32-dosage twins of launch_pca_snp_scale / launch_pca_standardize: they read a
+// DosageTileView (individual-major dosage[i*n_snp + s], NaN = missing) instead of the 2-bit
+// packed tile, but produce the IDENTICAL column-major center/inv_scale + Z operand the SYRK
+// path consumes. The Patterson fold/standardize arithmetic is shared with the integer kernels
+// (and the CPU) via core/internal/pca_standardize.hpp (pca_snp_scale_f / pca_standardize_one_f).
+
+// Per-SNP Patterson scale over one SNP tile [s_lo, s_lo+tileM): one thread per SNP folds all N
+// individuals' ALT dosages (NaN skipped) into the dosage sum -> center (2p) and inv_scale
+// (1/sqrt(p(1-p)), or 0 for a monomorphic/all-missing SNP). Atomically adds the `used` count.
+void launch_pca_dosage_snp_scale(const float* d_dosage, std::size_t N, std::size_t n_snp,
+                                 long s_lo, long tileM, double* d_center, double* d_inv_scale,
+                                 unsigned long long* d_used_count, cudaStream_t stream);
+
+// Standardize one SNP tile into the column-major Z operand: one thread per (individual i, local
+// SNP sl) writes Z[i + sl*N] = (dosage - center[sl]) * inv_scale[sl] (NaN -> 0). Identical N x
+// tileM operand shape cublasDsyrk reads (leading dim N).
+void launch_pca_dosage_standardize(const float* d_dosage, std::size_t N, std::size_t n_snp,
+                                   long s_lo, long tileM, const double* d_center,
+                                   const double* d_inv_scale, double* d_Z, cudaStream_t stream);
+
 // Project the top-K eigenvectors to sample PC coordinates: one thread per (sample i, PC k)
 // writes the row-major coords[i*K + k] = evec[i + (ncol-1-k)*N] * sqrt(max(eval[ncol-1-k], 0)).
 // d_evec is a column-major N x ncol eigenvector block with leading dim N (`ncol` = N for the
