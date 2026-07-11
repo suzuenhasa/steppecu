@@ -2,7 +2,7 @@
 //
 // CudaBackend::king_robust_filtered — the biobank-scale STREAMED/compacted KING-robust all-pairs
 // sweep behind `steppe kinship --min-kinship` and `--king-cutoff`. It reuses the dense KING path's
-// decode + one-block-per-pair fold (king_allpairs_kernel) VERBATIM; the ONE design change is the
+// bitplane pack + warp-per-pair popcount fold (king_allpairs_kernel) VERBATIM; the ONE design change is the
 // loop nest. The dense path (cuda_backend_king.cu) is SNP-tile-OUTER / pair-INNER and reduces into
 // PERSISTENT 5*C(N,2) accumulators — O(C(N,2)) device memory, which forces the ~14k cap. This path
 // is pair-BLOCK-OUTER / SNP-tile-INNER: only one pair-block's 5*B accumulators persist, so per
@@ -73,21 +73,26 @@ KingStreamResult CudaBackend::king_robust_filtered(const DecodeTileView& tile,
     if (have_inc) h2d_async(dInclude, summary_include.data(), Mz, stream_.get());
     const std::uint8_t* d_inc = have_inc ? dInclude.data() : nullptr;
 
-    // SNP tile: bound the resident N x tileM code pane to ~free/divisor (mirrors the dense path).
+    // SNP tile: bound the resident three-bitplane pane to ~free/divisor (mirrors the dense path).
+    // Pane = 3 uint32 planes (HOMREF/HET/HOMALT) x N x W = ceil(tileM/32) words = 12*N*W bytes.
     std::size_t free_b = capabilities().free_vram_bytes;
     if (free_b == 0) free_b = kKingFreeVramFallbackBytes;
-    const std::size_t row_bytes = static_cast<std::size_t>(N);
-    std::size_t code_budget = free_b / kKingCodeBudgetDivisor;
-    if (code_budget < row_bytes) code_budget = row_bytes;
-    long tileM = static_cast<long>(code_budget / row_bytes);
+    const std::size_t code_budget = free_b / kKingCodeBudgetDivisor;
+    const std::size_t bytes_per_sample_word = 3u * sizeof(std::uint32_t);
+    std::size_t words_budget = code_budget / (bytes_per_sample_word * static_cast<std::size_t>(N));
+    if (words_budget < 1) words_budget = 1;
+    long tileM = static_cast<long>(words_budget) * 32;
     if (const char* env = std::getenv("STEPPE_KING_TILE")) {
         const long v = std::strtol(env, nullptr, 10);
         if (v > 0) tileM = v;
     }
     if (tileM < 1) tileM = 1;
     if (tileM > M) tileM = M;
-    const std::size_t pane = static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM);
-    DeviceBuffer<std::uint8_t> dCode(pane == 0 ? 1u : pane);
+    const long Wmax = (tileM + 31) / 32;
+    const std::size_t plane_elems = static_cast<std::size_t>(N) * static_cast<std::size_t>(Wmax);
+    DeviceBuffer<std::uint32_t> dHomRef(plane_elems == 0 ? 1u : plane_elems);
+    DeviceBuffer<std::uint32_t> dHet(plane_elems == 0 ? 1u : plane_elems);
+    DeviceBuffer<std::uint32_t> dHomAlt(plane_elems == 0 ? 1u : plane_elems);
 
     // Pair-block B: bound the per-block arrays to ~free / divisor. The streamed invariant is that
     // ONLY B (not C(N,2)) pairs are resident at once, so B can stay far below npairs at biobank N.
@@ -136,18 +141,22 @@ KingStreamResult CudaBackend::king_robust_filtered(const DecodeTileView& tile,
         STEPPE_CUDA_CHECK(cudaMemsetAsync(dHetI.data(), 0, blockCz * sizeof(long), stream_.get()));
         STEPPE_CUDA_CHECK(cudaMemsetAsync(dHetJ.data(), 0, blockCz * sizeof(long), stream_.get()));
 
-        // Fold this block's B pairs over the WHOLE SNP axis (SNP-tile INNER). Decode is re-run per
-        // block (cheap 2-bit unpack vs the fold); only 5*B accumulators persist across the tiles.
+        // Fold this block's B pairs over the WHOLE SNP axis (SNP-tile INNER). Bitplanes are re-built
+        // per block (cheap 2-bit pack vs the fold); only 5*B accumulators persist across the tiles.
+        // The contiguous rank range folds warp-per-pair (the tiled GEMM needs a rectangular sample
+        // block, which a rank-contiguous run is not); the include mask is baked into the bitplanes.
         for (long s_lo = 0; s_lo < M; s_lo += tileM) {
             const long tm = std::min<long>(tileM, M - s_lo);
-            launch_king_dosage_decode(packed_dev, tile.bytes_per_record, N, s_lo, tm,
-                                      dCode.data(), stream_.get());
+            const long W = (tm + 31) / 32;
+            launch_king_bitplane_build(packed_dev, tile.bytes_per_record, N, s_lo, tm, W, d_inc,
+                                       dHomRef.data(), dHet.data(), dHomAlt.data(), stream_.get());
             for (long long sub = 0; sub < blockC; sub += kKingPairChunkClamp) {
                 const long long C = std::min<long long>(kKingPairChunkClamp, blockC - sub);
-                launch_king_allpairs_accumulate(
-                    dCode.data(), N, tm, s_lo, d_inc, /*pairs_i=*/nullptr, /*pairs_j=*/nullptr,
-                    /*pair0=*/block_pair0 + sub, C, /*out_offset=*/block_pair0, dNsnp.data(),
-                    dHetHet.data(), dIbs0.data(), dHetI.data(), dHetJ.data(), stream_.get());
+                launch_king_perpair_accumulate(
+                    dHomRef.data(), dHet.data(), dHomAlt.data(), N, W, /*pairs_i=*/nullptr,
+                    /*pairs_j=*/nullptr, /*pair0=*/block_pair0 + sub, C, /*out_offset=*/block_pair0,
+                    dNsnp.data(), dHetHet.data(), dIbs0.data(), dHetI.data(), dHetJ.data(),
+                    stream_.get());
             }
         }
 

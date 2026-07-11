@@ -2,11 +2,13 @@
 //
 // CudaBackend override for the KING-robust kinship pair sweep (`steppe kinship`). It uploads
 // the packed diploid genotype tile device-resident, then streams the SNP axis by tile (the
-// fst all-pairs / extract_f2 s_lo idiom): per tile it decodes the per-individual dosage code
-// ONCE into a compact N x tileM byte tensor (launch_king_dosage_decode) and folds every pair's
-// five KING counts into the persistent per-pair accumulators (launch_king_allpairs_accumulate).
-// Only the five small per-pair count vectors cross PCIe; the N x M code tensor is never
-// materialized (only an N x tileM window is resident) and the pair combine stays on the GPU.
+// fst all-pairs / extract_f2 s_lo idiom): per tile it packs the per-individual genotype ONCE into
+// three class bitplanes over the SNP axis (launch_king_bitplane_build) and folds every pair's five
+// KING counts by AND + __popc into the persistent per-pair accumulators — the full C(N,2) upper
+// triangle via a TB x TB sample-tile GEMM with shared-memory reuse (launch_king_tiled_accumulate),
+// an explicit --pairs list warp-per-pair (launch_king_perpair_accumulate). Only the five small
+// per-pair count vectors cross PCIe; the bitplane pane is never materialized full (only an
+// N x ceil(tileM/32)-word window is resident) and the pair combine stays on the GPU.
 // Integer counting (native FP64 tag only). A CUDA TU private to steppe_device, mirroring
 // cuda_backend_fst_allpairs.cu.
 #include <algorithm>
@@ -107,22 +109,28 @@ KingMatrix CudaBackend::king_robust_all_pairs(const DecodeTileView& tile,
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dHetI.data(), 0, np * sizeof(long), stream_.get()));
     STEPPE_CUDA_CHECK(cudaMemsetAsync(dHetJ.data(), 0, np * sizeof(long), stream_.get()));
 
-    // Choose a SNP tile that bounds the resident N x tileM code tensor to ~free/divisor.
+    // Choose a SNP tile that bounds the resident three-bitplane pane to ~free/divisor. The pane is
+    // 3 uint32 planes (HOMREF/HET/HOMALT) x N samples x W = ceil(tileM/32) words = 12*N*W bytes.
     std::size_t free_b = capabilities().free_vram_bytes;
     if (free_b == 0) free_b = kKingFreeVramFallbackBytes;
-    const std::size_t row_bytes = static_cast<std::size_t>(N);  // one byte per sample per SNP
-    std::size_t budget = free_b / kKingCodeBudgetDivisor;
-    if (budget < row_bytes) budget = row_bytes;
-    long tileM = static_cast<long>(budget / row_bytes);
+    const std::size_t budget = free_b / kKingCodeBudgetDivisor;
+    const std::size_t bytes_per_sample_word = 3u * sizeof(std::uint32_t);  // 3 planes, one word each
+    std::size_t words_budget = budget / (bytes_per_sample_word * static_cast<std::size_t>(N));
+    if (words_budget < 1) words_budget = 1;
+    long tileM = static_cast<long>(words_budget) * 32;
     if (const char* env = std::getenv("STEPPE_KING_TILE")) {
         const long v = std::strtol(env, nullptr, 10);
         if (v > 0) tileM = v;
     }
     if (tileM < 1) tileM = 1;
     if (tileM > M) tileM = M;
+    const long Wmax = (tileM + 31) / 32;  // words per sample at the full tile (allocation stride)
 
-    const std::size_t pane = static_cast<std::size_t>(N) * static_cast<std::size_t>(tileM);
-    DeviceBuffer<std::uint8_t> dCode(pane == 0 ? 1u : pane);
+    const std::size_t plane_elems =
+        static_cast<std::size_t>(N) * static_cast<std::size_t>(Wmax);
+    DeviceBuffer<std::uint32_t> dHomRef(plane_elems == 0 ? 1u : plane_elems);
+    DeviceBuffer<std::uint32_t> dHet(plane_elems == 0 ? 1u : plane_elems);
+    DeviceBuffer<std::uint32_t> dHomAlt(plane_elems == 0 ? 1u : plane_elems);
 
     const std::uint8_t* d_inc = have_inc ? dInclude.data() : nullptr;
     const int* d_pi = explicit_pairs ? dPairsI.data() : nullptr;
@@ -131,13 +139,23 @@ KingMatrix CudaBackend::king_robust_all_pairs(const DecodeTileView& tile,
 
     for (long s_lo = 0; s_lo < M; s_lo += tileM) {
         const long tm = std::min<long>(tileM, M - s_lo);
-        launch_king_dosage_decode(packed_dev, tile.bytes_per_record, N, s_lo, tm, dCode.data(),
-                                  stream_.get());
-        for (long long pair0 = 0; pair0 < npairs; pair0 += chunk) {
-            const long long C = std::min<long long>(chunk, npairs - pair0);
-            launch_king_allpairs_accumulate(dCode.data(), N, tm, s_lo, d_inc, d_pi, d_pj, pair0, C,
-                                            /*out_offset=*/0, dNsnp.data(), dHetHet.data(),
-                                            dIbs0.data(), dHetI.data(), dHetJ.data(), stream_.get());
+        const long W = (tm + 31) / 32;  // words this tile occupies (last tile may be short)
+        launch_king_bitplane_build(packed_dev, tile.bytes_per_record, N, s_lo, tm, W, d_inc,
+                                   dHomRef.data(), dHet.data(), dHomAlt.data(), stream_.get());
+        if (explicit_pairs) {
+            // Arbitrary (i,j) list: warp-per-pair (no tiling reuse), chunked so grid.x stays bounded.
+            for (long long pair0 = 0; pair0 < npairs; pair0 += chunk) {
+                const long long C = std::min<long long>(chunk, npairs - pair0);
+                launch_king_perpair_accumulate(dHomRef.data(), dHet.data(), dHomAlt.data(), N, W,
+                                               d_pi, d_pj, pair0, C, /*out_offset=*/0, dNsnp.data(),
+                                               dHetHet.data(), dIbs0.data(), dHetI.data(),
+                                               dHetJ.data(), stream_.get());
+            }
+        } else {
+            // Full C(N,2) upper triangle: TB x TB sample-tile GEMM with shared-memory reuse.
+            launch_king_tiled_accumulate(dHomRef.data(), dHet.data(), dHomAlt.data(), N, W,
+                                         dNsnp.data(), dHetHet.data(), dIbs0.data(), dHetI.data(),
+                                         dHetJ.data(), stream_.get());
         }
     }
 
