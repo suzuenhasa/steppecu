@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <span>
 #include <vector>
 
@@ -56,6 +57,14 @@ std::vector<std::uint8_t> CudaBackend::ld_prune_windowed(const DecodeTileView& t
 
     const long W1 = static_cast<long>(window) - 1;
     const double r2_thresh_eps = r2_thresh * (1.0 + kPlinkSmallEpsilon);
+
+    // Pairwise fold selector: the dp4a int-packed / warp-per-pair kernel is the DEFAULT; the scalar
+    // emulated-int64 kernel is the byte-identity gate oracle + fallback (STEPPE_LD_KERNEL=old). Both
+    // emit byte-identical per-pair flags (exact-integer sufficient statistics; see ld_prune_kernel).
+    const bool use_old_ld_kernel = [] {
+        const char* e = std::getenv("STEPPE_LD_KERNEL");
+        return e != nullptr && std::strcmp(e, "old") == 0;
+    }();
 
     // --- Upload the packed tile + the per-SNP chromosome vector (both persistent) ---
     DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
@@ -101,8 +110,13 @@ std::vector<std::uint8_t> CudaBackend::ld_prune_windowed(const DecodeTileView& t
                                          dDos.data(), stream_.get());
         launch_ld_variant_stats(dDos.data(), N, n_tgt, dNm.data(), dSum.data(), dSsq.data(),
                                 stream_.get());
-        launch_ld_pairwise_over(dDos.data(), N, s_lo, n_tgt, n_dec, M, dChrom.data(), window,
-                                r2_thresh_eps, dOver.data(), stream_.get());
+        if (use_old_ld_kernel) {
+            launch_ld_pairwise_over(dDos.data(), N, s_lo, n_tgt, n_dec, M, dChrom.data(), window,
+                                    r2_thresh_eps, dOver.data(), stream_.get());
+        } else {
+            launch_ld_pairwise_over_dp4a(dDos.data(), N, s_lo, n_tgt, n_dec, M, dChrom.data(),
+                                         window, r2_thresh_eps, dOver.data(), stream_.get());
+        }
         d2h_async(nm.data() + s_lo, dNm, static_cast<std::size_t>(n_tgt), stream_.get());
         d2h_async(sum.data() + s_lo, dSum, static_cast<std::size_t>(n_tgt), stream_.get());
         d2h_async(ssq.data() + s_lo, dSsq, static_cast<std::size_t>(n_tgt), stream_.get());
