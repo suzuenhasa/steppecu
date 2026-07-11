@@ -167,8 +167,10 @@ void finalize(const KingMatrix& mat, const std::vector<std::string>& labels,
 // Expand the STREAMED survivor SoA into the KinshipResult. The device already applied the emit
 // predicate (phi >= min_kinship / phi > cutoff) and the phi it carries is the SHARED king_phi over
 // the same integer counts the dense path folds -> this produces BYTE-IDENTICAL rows to `finalize`
-// on the same above-threshold set (same id1<=id2 canonicalization, same degree band, same order:
-// cub::DeviceSelect is stable and blocks run in ascending rank order).
+// on the same above-threshold set (same id1<=id2 canonicalization, same degree band, same order).
+// king_robust_filtered returns the survivor SoA in ASCENDING global rank (rank = j*(j-1)/2 + i):
+// the warp fold emits rank-contiguous blocks through stable cub, and the tiled fold rank-sorts its
+// block-schedule survivors before returning — so this in-order expansion is rank-ascending either way.
 void finalize_streamed(const KingStreamResult& sr,
                        const std::vector<std::string>& labels, KinshipResult& res) {
     const std::size_t n = sr.i.size();

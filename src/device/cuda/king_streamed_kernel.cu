@@ -57,7 +57,63 @@ __global__ void king_streamed_flag_kernel(const long* __restrict__ nsnp,
     out_flag[t] = keep ? std::uint8_t{1} : std::uint8_t{0};
 }
 
+// The block-local variant for the TILED streamed fold: one thread per block-local dense cell
+// t in [0, nCells), cell = local_row*colStride + local_col. It recovers (i, j) from the block's
+// sample origin (i = rowSampleLo + local_row, j = colSampleLo + local_col) instead of unranking a
+// global rank, gates i<j && i<N && j<N (so lower-triangle, self-pair, and partial-tile padding cells
+// never flag), computes phi via the SHARED king_phi, and writes the compaction inputs. king_phi over
+// the block accumulators is bit-identical to the dense host finalize -> the survivor set matches.
+__global__ void king_block_flag_kernel(const long* __restrict__ nsnp,
+                                       const long* __restrict__ hethet,
+                                       const long* __restrict__ ibs0,
+                                       const long* __restrict__ het_i,
+                                       const long* __restrict__ het_j, int N, int rowSampleLo,
+                                       int colSampleLo, long nCells, int colStride, double threshold,
+                                       int strict, int* __restrict__ out_i, int* __restrict__ out_j,
+                                       double* __restrict__ out_phi,
+                                       std::uint8_t* __restrict__ out_flag) {
+    const long t =
+        static_cast<long>(blockIdx.x) * static_cast<long>(blockDim.x) + static_cast<long>(threadIdx.x);
+    if (t >= nCells) return;
+    const int local_row = static_cast<int>(t / colStride);
+    const int local_col = static_cast<int>(t % colStride);
+    const int i = rowSampleLo + local_row;
+    const int j = colSampleLo + local_col;
+    const bool valid = (i < N) && (j < N) && (i < j);
+    out_i[t] = i;
+    out_j[t] = j;
+
+    KingCounts kc;
+    kc.nsnp = nsnp[t];
+    kc.hethet = hethet[t];
+    kc.ibs0 = ibs0[t];
+    kc.het_i = het_i[t];
+    kc.het_j = het_j[t];
+    const double phi = king_phi(kc);  // SHARED -> bit-identical to the dense finalize
+    out_phi[t] = phi;
+
+    // NaN phi (min-het <= 0) fails BOTH comparisons; an inactive cell (padding/lower-triangle) is
+    // gated off by `valid`, so it never flags regardless of its (zeroed) counts.
+    const bool keep = valid && ((strict != 0) ? (phi > threshold) : (phi >= threshold));
+    out_flag[t] = keep ? std::uint8_t{1} : std::uint8_t{0};
+}
+
 }  // namespace
+
+void launch_king_block_flag(const long* d_nsnp, const long* d_hethet, const long* d_ibs0,
+                            const long* d_het_i, const long* d_het_j, int N, int rowSampleLo,
+                            int colSampleLo, long nCells, int colStride, double threshold,
+                            bool strict, int* d_out_i, int* d_out_j, double* d_out_phi,
+                            std::uint8_t* d_out_flag, cudaStream_t stream) {
+    if (nCells <= 0) return;
+    const unsigned block = static_cast<unsigned>(kKingStreamFlagBlock);
+    const unsigned grid = static_cast<unsigned>(
+        core::cdiv(nCells, static_cast<long>(kKingStreamFlagBlock)));
+    king_block_flag_kernel<<<grid, block, 0, stream>>>(
+        d_nsnp, d_hethet, d_ibs0, d_het_i, d_het_j, N, rowSampleLo, colSampleLo, nCells, colStride,
+        threshold, strict ? 1 : 0, d_out_i, d_out_j, d_out_phi, d_out_flag);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
 
 void launch_king_streamed_flag(const long* d_nsnp, const long* d_hethet, const long* d_ibs0,
                                const long* d_het_i, const long* d_het_j, int N,

@@ -202,6 +202,122 @@ __global__ void king_tiled_accumulate_kernel(const std::uint32_t* __restrict__ h
     }
 }
 
+// ---- Block-local tiled fold for the STREAMED path ----------------------------------------------
+
+// A block-scoped variant of king_tiled_accumulate_kernel: it folds ONE rectangular (or diagonal)
+// sample-tile BLOCK — the row tiles [rowTileLo, rowTileLo+nRowTiles) x the col tiles
+// [colTileLo, colTileLo+nColTiles) — with the full-axis bitplane pane resident (W = ceil(M/32)),
+// so a SINGLE launch folds the whole SNP axis and each active thread writes its BLOCK-LOCAL cell
+// exactly once (no cross-launch accumulation, no atomics). The staging + king_fold_word body is
+// IDENTICAL to the dense kernel (each sample word read O(N/TB) times); the ONLY differences are the
+// tile-range decode and the block-local output index. off-diagonal blocks (BR<BC) decode blockIdx
+// as a rectangular (localTileA, localTileB) — every row sample < every col sample so I<J is
+// automatic; diagonal blocks (BR==BC, rowTileLo==colTileLo) reuse the dense kernel's upper-
+// triangular decode scoped to the block's nRowTiles tiles (the a<b / I<J gate drops the within-tile
+// lower triangle and self-pair). The output cell is the dense block-local index
+// local_row*colStride + local_col (local_row/col measured from the block's sample origin), NOT the
+// global rank the dense kernel writes — that is what keeps the accumulators O(block), not O(C(N,2)).
+__global__ void king_block_tiled_accumulate_kernel(
+    const std::uint32_t* __restrict__ homref, const std::uint32_t* __restrict__ het,
+    const std::uint32_t* __restrict__ homalt, int N, long W, int rowTileLo, int colTileLo,
+    int nRowTiles, int nColTiles, int diagonal, int colStride, long* __restrict__ out_nsnp,
+    long* __restrict__ out_hethet, long* __restrict__ out_ibs0, long* __restrict__ out_het_i,
+    long* __restrict__ out_het_j) {
+    int localTileA = 0, localTileB = 0;
+    if (diagonal != 0) {
+        // Upper-triangular tile-pair (localTileA <= localTileB) among the block's nRowTiles tiles
+        // (mirrors king_tiled_accumulate_kernel's decode, scoped to the block).
+        int tA = 0, rem = static_cast<int>(blockIdx.x), row = nRowTiles;
+        while (rem >= row) {
+            rem -= row;
+            ++tA;
+            --row;
+        }
+        localTileA = tA;
+        localTileB = tA + rem;
+    } else {
+        // Rectangular block: every (localTileA, localTileB) tile-pair is active.
+        localTileA = static_cast<int>(blockIdx.x) / nColTiles;
+        localTileB = static_cast<int>(blockIdx.x) % nColTiles;
+    }
+    const int A_base = (rowTileLo + localTileA) * kKingTile;
+    const int B_base = (colTileLo + localTileB) * kKingTile;
+
+    const int a = static_cast<int>(threadIdx.y);  // local row in tile A -> I (smaller index)
+    const int b = static_cast<int>(threadIdx.x);  // local row in tile B -> J (larger index)
+    const int I = A_base + a;
+    const int J = B_base + b;
+    // I<J holds automatically off-diagonal (row tiles strictly below col tiles) and via a<b on the
+    // within-diagonal-tile pairs; with I<N/J<N it also drops the self-pair and partial-tile rows.
+    const bool active = (I < N) && (J < N) && (I < J);
+
+    __shared__ std::uint32_t sAhr[kKingTile][kKingChunkWords + 1];
+    __shared__ std::uint32_t sAht[kKingTile][kKingChunkWords + 1];
+    __shared__ std::uint32_t sAha[kKingTile][kKingChunkWords + 1];
+    __shared__ std::uint32_t sBhr[kKingTile][kKingChunkWords + 1];
+    __shared__ std::uint32_t sBht[kKingTile][kKingChunkWords + 1];
+    __shared__ std::uint32_t sBha[kKingTile][kKingChunkWords + 1];
+
+    const int tid = static_cast<int>(threadIdx.y) * kKingTile + static_cast<int>(threadIdx.x);
+    constexpr int kNThreads = kKingTile * kKingTile;
+
+    KingWordAcc acc;
+    for (long w0 = 0; w0 < W; w0 += kKingChunkWords) {
+        const long rem_w = W - w0;
+        const int cw = (rem_w < kKingChunkWords) ? static_cast<int>(rem_w) : kKingChunkWords;
+
+        for (int e = tid; e < kKingTile * cw; e += kNThreads) {
+            const int lr = e / cw;
+            const int lw = e % cw;
+            const long gw = w0 + lw;
+            const int gA = A_base + lr;
+            const int gB = B_base + lr;
+            if (gA < N) {
+                const long off = static_cast<long>(gA) * W + gw;
+                sAhr[lr][lw] = homref[off];
+                sAht[lr][lw] = het[off];
+                sAha[lr][lw] = homalt[off];
+            } else {
+                sAhr[lr][lw] = 0;
+                sAht[lr][lw] = 0;
+                sAha[lr][lw] = 0;
+            }
+            if (gB < N) {
+                const long off = static_cast<long>(gB) * W + gw;
+                sBhr[lr][lw] = homref[off];
+                sBht[lr][lw] = het[off];
+                sBha[lr][lw] = homalt[off];
+            } else {
+                sBhr[lr][lw] = 0;
+                sBht[lr][lw] = 0;
+                sBha[lr][lw] = 0;
+            }
+        }
+        __syncthreads();
+
+        if (active) {
+            for (int wl = 0; wl < cw; ++wl) {
+                king_fold_word(sAhr[a][wl], sAht[a][wl], sAha[a][wl], sBhr[b][wl], sBht[b][wl],
+                               sBha[b][wl], acc);
+            }
+        }
+        __syncthreads();  // reuse shared for the next chunk
+    }
+
+    if (active) {
+        // Block-local dense cell (each cell has exactly one writer this launch -> plain +=, and the
+        // caller memset the block accumulators to 0, so += over the single fold == the value).
+        const int local_row = localTileA * kKingTile + a;
+        const int local_col = localTileB * kKingTile + b;
+        const long cell = static_cast<long>(local_row) * colStride + local_col;
+        out_nsnp[cell] += static_cast<long>(acc.nsnp);
+        out_hethet[cell] += static_cast<long>(acc.hethet);
+        out_ibs0[cell] += static_cast<long>(acc.ibs0);
+        out_het_i[cell] += static_cast<long>(acc.het_i);
+        out_het_j[cell] += static_cast<long>(acc.het_j);
+    }
+}
+
 // ---- Explicit-pairs / streamed contiguous rank range: one warp per pair ------------------------
 
 constexpr int kKingPerPairWarps = 8;  // 8 warps == 256 threads/block
@@ -283,6 +399,24 @@ void launch_king_tiled_accumulate(const std::uint32_t* d_homref, const std::uint
         "king tiled gridDim.x (upper-triangular tile-pair axis) exceeds kMaxGridX");
     king_tiled_accumulate_kernel<<<static_cast<unsigned>(grid), block, 0, stream>>>(
         d_homref, d_het, d_homalt, N, W, n_tiles, d_nsnp, d_hethet, d_ibs0, d_het_i, d_het_j);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_king_block_tiled_accumulate(const std::uint32_t* d_homref, const std::uint32_t* d_het,
+                                        const std::uint32_t* d_homalt, int N, long W, int rowTileLo,
+                                        int colTileLo, int nRowTiles, int nColTiles, bool diagonal,
+                                        int colStride, long* d_nsnp, long* d_hethet, long* d_ibs0,
+                                        long* d_het_i, long* d_het_j, cudaStream_t stream) {
+    if (N <= 1 || W <= 0 || nRowTiles <= 0 || nColTiles <= 0) return;
+    const long n_tile_pairs =
+        diagonal ? (static_cast<long>(nRowTiles) * (nRowTiles + 1) / 2)
+                 : (static_cast<long>(nRowTiles) * nColTiles);
+    const dim3 block(static_cast<unsigned>(kKingTile), static_cast<unsigned>(kKingTile));  // 32x32
+    const int grid = core::grid_for_x(
+        n_tile_pairs, 1, "king block-tiled gridDim.x (block tile-pair axis) exceeds kMaxGridX");
+    king_block_tiled_accumulate_kernel<<<static_cast<unsigned>(grid), block, 0, stream>>>(
+        d_homref, d_het, d_homalt, N, W, rowTileLo, colTileLo, nRowTiles, nColTiles,
+        diagonal ? 1 : 0, colStride, d_nsnp, d_hethet, d_ibs0, d_het_i, d_het_j);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

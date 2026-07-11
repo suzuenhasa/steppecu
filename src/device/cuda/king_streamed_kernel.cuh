@@ -30,4 +30,17 @@ void launch_king_streamed_flag(const long* d_nsnp, const long* d_hethet, const l
                                bool strict, int* d_out_i, int* d_out_j, double* d_out_phi,
                                std::uint8_t* d_out_flag, cudaStream_t stream);
 
+// king_block_flag: the block-local twin of launch_king_streamed_flag for the TILED streamed fold.
+// One thread per block-local dense cell t in [0, nCells) (cell = local_row*colStride + local_col).
+// It recovers (i, j) = (rowSampleLo + local_row, colSampleLo + local_col) from the block origin
+// (instead of unranking a global rank), gates i<j && i<N && j<N (padding / lower-triangle / self-pair
+// cells never flag), computes phi via the SHARED king_phi, and sets out_flag = (strict ? phi >
+// threshold : phi >= threshold). The integer count arrays are the block's dense (RT*32)x(CT*32)
+// accumulators; out_i/out_j/out_phi are the parallel compaction inputs cub selects on with out_flag.
+void launch_king_block_flag(const long* d_nsnp, const long* d_hethet, const long* d_ibs0,
+                            const long* d_het_i, const long* d_het_j, int N, int rowSampleLo,
+                            int colSampleLo, long nCells, int colStride, double threshold,
+                            bool strict, int* d_out_i, int* d_out_j, double* d_out_phi,
+                            std::uint8_t* d_out_flag, cudaStream_t stream);
+
 }  // namespace steppe::device

@@ -47,6 +47,20 @@ void launch_king_tiled_accumulate(const std::uint32_t* d_homref, const std::uint
                                   long* d_hethet, long* d_ibs0, long* d_het_i, long* d_het_j,
                                   cudaStream_t stream);
 
+// Block-local tiled accumulate: the STREAMED path's fold. A block-scoped king_tiled_accumulate over
+// ONE sample-tile block — the row tiles [rowTileLo, rowTileLo+nRowTiles) x the col tiles
+// [colTileLo, colTileLo+nColTiles) of the FULL-axis resident pane (W = ceil(M/32)). One launch folds
+// the whole SNP axis; each active (I<J) thread writes its block-local cell local_row*colStride +
+// local_col ONCE (no atomics). `diagonal` selects the within-block decode: false -> rectangular
+// (all nRowTiles*nColTiles tile-pairs, I<J automatic); true (rowTileLo==colTileLo) -> the upper-
+// triangular nRowTiles*(nRowTiles+1)/2 tile-pairs with the a<b gate. Same king_fold_word body as the
+// dense kernel -> counts are bit-identical; only the accumulators are O(block), not O(C(N,2)).
+void launch_king_block_tiled_accumulate(const std::uint32_t* d_homref, const std::uint32_t* d_het,
+                                        const std::uint32_t* d_homalt, int N, long W, int rowTileLo,
+                                        int colTileLo, int nRowTiles, int nColTiles, bool diagonal,
+                                        int colStride, long* d_nsnp, long* d_hethet, long* d_ibs0,
+                                        long* d_het_i, long* d_het_j, cudaStream_t stream);
+
 // Per-pair accumulate: ONE WARP per pair. When d_pairs_i / d_pairs_j are non-null the warp maps its
 // chunk index to that explicit (i, j); otherwise it maps the flat rank r via the O(1)
 // readv2_unrank_pair. The 32 lanes stride the current SNP-tile's W words (coalesced bitplane loads),
