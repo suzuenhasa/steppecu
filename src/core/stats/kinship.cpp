@@ -31,6 +31,7 @@
 #include "core/stats/read_canonical_tile.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "io/geno_reader.hpp"
 #include "io/genotype_source.hpp"
 #include "io/genotype_tile.hpp"
@@ -55,6 +56,7 @@ void unrank_pair_host(long long r, int& i, int& j) {
 // Read the individual partition + build the canonical diploid tile once. Throws on IO errors.
 struct KinshipTile {
     io::GenotypeTile tile;
+    DeviceGenotypeTile dev_tile;      // GPU-native load: valid when the tile is device-resident
     std::vector<std::string> labels;  // Genetic ID per singleton index
     std::vector<std::uint8_t> summary_include;
     long autosomal = 0;
@@ -80,8 +82,25 @@ struct KinshipTile {
     if (M0 <= 0) return kt;  // caller treats an empty tile as InvalidConfig
 
     // Read the whole SNP axis as ONE tile (the readers only support a byte-aligned prefix from
-    // 0; the 1240K panel per individual is small and bounded).
-    kt.tile = core::read_canonical_tile(reader, part, be, 0, static_cast<std::size_t>(M0));
+    // 0; the 1240K panel per individual is small and bounded). GPU-native device-resident load
+    // when no SNP filter is active (an active filter subsets the HOST tile in place); the host
+    // `tile` then carries only the descriptor (empty packed). Byte-identical decode either way.
+    const bool allow_device = !io::filter::filter_is_active(filter);
+    if (allow_device && core::device_load_enabled() && be.capabilities().device_count > 0) {
+        kt.dev_tile = core::read_canonical_tile_device(reader, part, be, 0,
+                                                       static_cast<std::size_t>(M0));
+        if (kt.dev_tile.valid()) {
+            kt.tile.packed.clear();
+            kt.tile.bytes_per_record = kt.dev_tile.bytes_per_record;
+            kt.tile.n_snp = kt.dev_tile.n_snp;
+            kt.tile.n_individuals = kt.dev_tile.n_individuals;
+            kt.tile.pop_offsets = kt.dev_tile.pop_offsets;
+            kt.tile.pop_labels = kt.dev_tile.pop_labels;
+        }
+    }
+    if (!kt.dev_tile.valid()) {
+        kt.tile = core::read_canonical_tile(reader, part, be, 0, static_cast<std::size_t>(M0));
+    }
 
     // Per-SNP QC filter: subset the SNP axis (individuals untouched) in lockstep with the SnpTable
     // BEFORE the autosome mask + KING sweep, so a filtered run's integer counts (nsnp/hethet/ibs0)
@@ -276,7 +295,9 @@ KinshipResult run_kinship_all_pairs(
     }
 
     const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+    const DecodeTileView view =
+        kt.dev_tile.valid() ? core::make_decode_tile_view(kt.dev_tile, sample_ploidy, N)
+                            : core::make_decode_tile_view(kt.tile, sample_ploidy, N);
 
     const KingMatrix mat = be.king_robust_all_pairs(
         view, std::span<const std::uint8_t>(kt.summary_include), std::span<const int>(),
@@ -344,7 +365,9 @@ KinshipResult run_kinship_pairs(
     }
 
     const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+    const DecodeTileView view =
+        kt.dev_tile.valid() ? core::make_decode_tile_view(kt.dev_tile, sample_ploidy, N)
+                            : core::make_decode_tile_view(kt.tile, sample_ploidy, N);
 
     const KingMatrix mat = be.king_robust_all_pairs(
         view, std::span<const std::uint8_t>(kt.summary_include), std::span<const int>(pi),
@@ -384,7 +407,9 @@ KinshipResult run_kinship_streamed(
     }
 
     const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+    const DecodeTileView view =
+        kt.dev_tile.valid() ? core::make_decode_tile_view(kt.dev_tile, sample_ploidy, N)
+                            : core::make_decode_tile_view(kt.tile, sample_ploidy, N);
 
     // Streamed/compacted all-pairs: emit phi >= min_kinship ON-DEVICE (strict_greater=false), so
     // the 5*C(N,2) accumulator (and its maxcomb cap) is never allocated. Bit-identical to the dense
@@ -421,7 +446,9 @@ KinshipCutoffResult run_kinship_cutoff(
     }
 
     const std::vector<int> sample_ploidy(kt.tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(kt.tile, sample_ploidy, N);
+    const DecodeTileView view =
+        kt.dev_tile.valid() ? core::make_decode_tile_view(kt.dev_tile, sample_ploidy, N)
+                            : core::make_decode_tile_view(kt.tile, sample_ploidy, N);
 
     // The above-cutoff relatedness graph: phi > cutoff*(1 + 2^-44) exactly reproduces plink2's
     // nudged edge rule, so this survivor set == plink2 --king-cutoff's edge set (and a .kin0 built

@@ -33,12 +33,15 @@ __device__ __forceinline__ std::uint8_t apply_encoding(std::uint8_t code,
     }
 }
 
-// The transpose kernel: one thread per output byte — reference §4
+// The transpose kernel: one thread per output byte — reference §4.
+// Produces `out_bytes_per_record` byte-columns per individual (a block width or the whole
+// width) and scatters into `out` at row stride `dst_row_stride`, byte-column offset
+// `dst_col_off`: block byte (g, b) -> out[g*dst_row_stride + dst_col_off + b].
 __global__ void transpose_to_canonical_kernel(
     const std::uint8_t* __restrict__ snp_major, std::size_t src_bytes_per_record,
     const std::size_t* __restrict__ sel_rows, std::size_t n_individuals,
     std::size_t n_snp, std::size_t out_bytes_per_record, TransposeEncoding encoding,
-    std::uint8_t* __restrict__ out) {
+    std::uint8_t* __restrict__ out, std::size_t dst_row_stride, std::size_t dst_col_off) {
     const std::size_t total = n_individuals * out_bytes_per_record;
     for (std::size_t tid =
              static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -66,7 +69,7 @@ __global__ void transpose_to_canonical_kernel(
             packed = static_cast<std::uint8_t>(
                 packed | static_cast<std::uint8_t>(canon << shift));
         }
-        out[tid] = packed;
+        out[g * dst_row_stride + dst_col_off + b] = packed;
     }
 }
 
@@ -79,14 +82,19 @@ void launch_transpose_to_canonical(const std::uint8_t* d_snp_major,
                                    std::size_t n_individuals, std::size_t n_snp,
                                    std::size_t out_bytes_per_record,
                                    TransposeEncoding encoding, std::uint8_t* d_out,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream, std::size_t dst_row_stride,
+                                   std::size_t dst_col_off) {
     const std::size_t total = n_individuals * out_bytes_per_record;
     if (total == 0) return;
+    // dst_row_stride == 0 -> contiguous whole-tile write (row stride == this launch's width),
+    // byte-identical to the pre-scatter kernel; the streamed device path passes the whole
+    // tile's stride + the block's col_off to scatter a block straight into the resident tile.
+    if (dst_row_stride == 0) dst_row_stride = out_bytes_per_record;
     const long grid_x = core::grid_stride_extent(static_cast<long>(total), kTransposeBlock);
     transpose_to_canonical_kernel<<<static_cast<unsigned>(grid_x), kTransposeBlock,
                                     0, stream>>>(
         d_snp_major, src_bytes_per_record, d_sel_rows, n_individuals, n_snp,
-        out_bytes_per_record, encoding, d_out);
+        out_bytes_per_record, encoding, d_out, dst_row_stride, dst_col_off);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

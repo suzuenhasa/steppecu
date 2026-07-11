@@ -99,9 +99,8 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
     if (max_iter < 1) max_iter = 1;
 
     // --- upload packed tile; keep ONLY the 2-bit packed genotypes resident (Tier-1) ---------
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
 
     const std::size_t NM = static_cast<std::size_t>(N) * static_cast<std::size_t>(M);
 
@@ -123,7 +122,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
         DeviceBuffer<double> dVp(static_cast<std::size_t>(N) * static_cast<std::size_t>(tileP));
         for (long s0 = 0; s0 < M; s0 += tileP) {
             const long t = std::min<long>(tileP, M - s0);
-            launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t, dGp.data(),
+            launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t, dGp.data(),
                                      dVp.data(), stream_.get());
             launch_admix_snp_mean(dGp.data(), dVp.data(), N, t, dPhat.data() + s0, stream_.get());
         }
@@ -230,7 +229,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                         CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K,
                                                  &one, dQ.data(), Ni, dF.data() + s0,
                                                  static_cast<int>(M), &zero, dA.data(), Ni));
-                        launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                        launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t,
                                                  dGt.data(), dVt.data(), stream_.get());
                         launch_admix_responsibility(dGt.data(), dVt.data(), dA.data(), N, t,
                                                     kAdmixEps, dR2.data(), dR1.data(),
@@ -254,7 +253,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, &one,
                                              dQ.data(), Ni, dF.data() + s0, static_cast<int>(M),
                                              &zero, dA.data(), Ni));
-                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                    launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t,
                                              dGt.data(), dVt.data(), stream_.get());
                     launch_admix_responsibility(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
                                                 dR2.data(), dR1.data(), stream_.get());
@@ -276,7 +275,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     CUBLAS_CHECK(cublasDgemm(blas_.get(), CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, &one,
                                              dQ.data(), Ni, dF.data() + s0, static_cast<int>(M),
                                              &zero, dA.data(), Ni));
-                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                    launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t,
                                              dGt.data(), dVt.data(), stream_.get());
                     launch_admix_loglik(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
                                         dLL.data(), stream_.get());
@@ -382,7 +381,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                     gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK),
                             F + s0, static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni,
                             strideTile);
-                    launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                    launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t,
                                              dGt.data(), dVt.data(), stream);
                     launch_admix_responsibility_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
                                                   dR2.data(), dR1.data(), S, strideTile, stream);
@@ -405,7 +404,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                 const int tt = static_cast<int>(t);
                 gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK), F + s0,
                         static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni, strideTile);
-                launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t,
+                launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t,
                                          dGt.data(), dVt.data(), stream);
                 launch_admix_responsibility_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps,
                                               dR2.data(), dR1.data(), S, strideTile, stream);
@@ -431,7 +430,7 @@ AdmixtureFit CudaBackend::admixture_fit(const DecodeTileView& tile, int K, const
                 const int tt = static_cast<int>(t);
                 gemm_sb(CUBLAS_OP_N, CUBLAS_OP_T, Ni, tt, K, Q, Ni, static_cast<long>(NK), F + s0,
                         static_cast<int>(M), static_cast<long>(MK), 0.0, dA.data(), Ni, strideTile);
-                launch_admix_decode_tile(dPacked.data(), tile.bytes_per_record, N, s0, t, dGt.data(),
+                launch_admix_decode_tile(packed_dev, tile.bytes_per_record, N, s0, t, dGt.data(),
                                          dVt.data(), stream);
                 launch_admix_loglik_b(dGt.data(), dVt.data(), dA.data(), N, t, kAdmixEps, dll, S,
                                       strideTile, stream);

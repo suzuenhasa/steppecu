@@ -224,6 +224,14 @@ struct DecodeTileView {
     int ploidy = 2;
 
     bool detect_ploidy_on_device = false;
+
+    // GPU-native load: when true, `packed` is a DEVICE pointer to the already-resident
+    // canonical tile (produced once by the on-device transpose, DeviceGenotypeTile below),
+    // so every tool's decode entry skips its host->device upload and reads it in place. When
+    // false (the default / STEPPE_GPU_LOAD=0 host path), `packed` is a host pointer and the
+    // backend uploads it as before. The tile BYTES are identical either way (same transpose
+    // kernel), so this flag never changes a result — only where the bytes already live.
+    bool packed_on_device = false;
 };
 
 // Real-valued (BGEN) dosage tile view — the FP32 analogue of DecodeTileView, parallel
@@ -274,6 +282,27 @@ struct CanonicalTile {
     std::size_t n_snp = 0;
     std::size_t n_individuals = 0;
     std::vector<std::size_t> pop_offsets;
+};
+
+// DeviceGenotypeTile — the DEVICE-RESIDENT canonical individual-major tile (the GPU-native
+// load hand-off). Where CanonicalTile owns a HOST std::vector, this owns a DeviceBuffer<uint8_t>
+// (through the opaque `owner`, exactly the RohPanelHandle pattern) so the transpose kernel's
+// output never round-trips to host: the front-end builds it once (raw packed bytes -> ONE H2D
+// -> on-device transpose -> dOut) and each tool reads `packed` (a DEVICE pointer into `owner`)
+// in place via DecodeTileView.packed_on_device. `bytes_per_record`/`n_snp`/`n_individuals`/
+// `pop_offsets`/`pop_labels` mirror CanonicalTile's descriptor so a DecodeTileView is built the
+// same way. CUDA-free struct (a shared_ptr<void> + PODs) so it crosses the core/io seam.
+struct DeviceGenotypeTile {
+    std::shared_ptr<void> owner;            // owns the DeviceBuffer<uint8_t> (device layer)
+    const std::uint8_t* packed = nullptr;   // DEVICE pointer into owner
+    std::size_t bytes_per_record = 0;
+    std::size_t n_snp = 0;
+    std::size_t n_individuals = 0;
+    std::vector<std::size_t> pop_offsets;
+    std::vector<std::string> pop_labels;
+
+    [[nodiscard]] std::size_t n_pop() const noexcept { return pop_labels.size(); }
+    [[nodiscard]] bool valid() const noexcept { return owner != nullptr && packed != nullptr; }
 };
 
 // Backend capability probe — reference §13
@@ -804,6 +833,52 @@ public:
             }
         }
         return out;
+    }
+
+    // GPU-native genotype load — the three device-resident-tile primitives the core-layer
+    // funnel (read_canonical_tile_device) composes to build a DeviceGenotypeTile WITHOUT the
+    // host round-trip transpose_to_canonical incurs (its :194 D2H + every tool's re-upload).
+    // Default: throw (CUDA only — a device-resident tile requires a GPU backend; the CpuBackend
+    // oracle and the host-load selector keep using transpose_to_canonical / the host tile).
+
+    // alloc_canonical_device: allocate a ZEROED device canonical tile (n_individuals rows of
+    // out_bytes_per_record) + carry its descriptor. The streamed GENO/PLINK arm fills it block
+    // by block via transpose_block_into_canonical_device; a one-shot arm fills it in one call.
+    [[nodiscard]] virtual DeviceGenotypeTile alloc_canonical_device(
+        std::size_t n_individuals, std::size_t out_bytes_per_record, std::size_t n_snp,
+        std::vector<std::size_t> pop_offsets, std::vector<std::string> pop_labels) {
+        (void)n_individuals; (void)out_bytes_per_record; (void)n_snp;
+        (void)pop_offsets; (void)pop_labels;
+        throw std::runtime_error(
+            "ComputeBackend::alloc_canonical_device: not supported by this backend "
+            "(a device-resident genotype tile requires a CUDA backend)");
+    }
+
+    // transpose_block_into_canonical_device: transpose+gather+encode ONE SNP-major block on the
+    // GPU (raw block bytes -> H2D -> the SAME transpose kernel transpose_to_canonical uses) and
+    // SCATTER its canonical byte-columns straight into `dst` at output byte-column `col_off` —
+    // no host reassembly (read_canonical_tile.cpp:110-111) and no D2H. block.n_snp is the block
+    // width; col_off = (block_snp_begin - tile_snp_begin) / kCodesPerByte (byte-column aligned).
+    virtual void transpose_block_into_canonical_device(
+        DeviceGenotypeTile& dst, std::size_t col_off, const SnpMajorTileView& block) {
+        (void)dst; (void)col_off; (void)block;
+        throw std::runtime_error(
+            "ComputeBackend::transpose_block_into_canonical_device: not supported by this "
+            "backend (device-resident transpose requires a CUDA backend)");
+    }
+
+    // upload_canonical_device: H2D an ALREADY-canonical host tile (the TGENO individual-major
+    // read, which needs no transpose) ONCE into a device-resident tile — the ONE legitimate
+    // whole-matrix copy for that arm, replacing every tool's re-upload with a shared resident.
+    [[nodiscard]] virtual DeviceGenotypeTile upload_canonical_device(
+        const std::uint8_t* host_packed, std::size_t bytes_per_record, std::size_t n_snp,
+        std::size_t n_individuals, std::vector<std::size_t> pop_offsets,
+        std::vector<std::string> pop_labels) {
+        (void)host_packed; (void)bytes_per_record; (void)n_snp; (void)n_individuals;
+        (void)pop_offsets; (void)pop_labels;
+        throw std::runtime_error(
+            "ComputeBackend::upload_canonical_device: not supported by this backend "
+            "(a device-resident genotype tile requires a CUDA backend)");
     }
 
     [[nodiscard]] virtual steppe::device::DeviceDecodeResult decode_af_compact_autosome(

@@ -67,11 +67,8 @@ FstMatrix CudaBackend::fst_wc_all_pairs(const DecodeTileView& tile,
     if (npairs == 0) return out;  // P < 2: a well-formed empty (diagonal-only) matrix.
 
     // Upload the packed tile (individual-major, population-contiguous) + the pop offsets.
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) {
-        h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-    }
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
     DeviceBuffer<std::size_t> dPopOff(static_cast<std::size_t>(P) + 1u);
     h2d_async(dPopOff, tile.pop_offsets, static_cast<std::size_t>(P) + 1u, stream_.get());
 
@@ -114,7 +111,7 @@ FstMatrix CudaBackend::fst_wc_all_pairs(const DecodeTileView& tile,
 
     for (long s_lo = 0; s_lo < M; s_lo += tileM) {
         const long tm = std::min<long>(tileM, M - s_lo);
-        launch_fst_suffstat_decode(dPacked.data(), tile.bytes_per_record, dPopOff.data(), P,
+        launch_fst_suffstat_decode(packed_dev, tile.bytes_per_record, dPopOff.data(), P,
                                    s_lo, tm, dN.data(), dAc.data(), dHet.data(), stream_.get());
         for (long long pair0 = 0; pair0 < npairs; pair0 += chunk) {
             const long long C = std::min<long long>(chunk, npairs - pair0);
@@ -155,11 +152,8 @@ FstWindowed CudaBackend::fst_wc_windowed(const DecodeTileView& tile, std::span<c
     out.win_den.assign(total, 0.0);
 
     // Upload the packed tile (individual-major, population-contiguous) + the pop offsets.
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) {
-        h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-    }
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
     DeviceBuffer<std::size_t> dPopOff(static_cast<std::size_t>(P) + 1u);
     h2d_async(dPopOff, tile.pop_offsets, static_cast<std::size_t>(P) + 1u, stream_.get());
 
@@ -168,7 +162,7 @@ FstWindowed CudaBackend::fst_wc_windowed(const DecodeTileView& tile, std::span<c
     // chromosome-worth of SNPs and the P x M x 3 tensor is small, so no SNP-tiling is needed).
     const std::size_t pane = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
     DeviceBuffer<double> dN(pane), dAc(pane), dHet(pane);
-    launch_fst_suffstat_decode(dPacked.data(), tile.bytes_per_record, dPopOff.data(), P,
+    launch_fst_suffstat_decode(packed_dev, tile.bytes_per_record, dPopOff.data(), P,
                                /*s_lo=*/0, /*tm=*/M, dN.data(), dAc.data(), dHet.data(),
                                stream_.get());
 

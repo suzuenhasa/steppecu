@@ -31,6 +31,21 @@ DecodeTileView make_decode_tile_view(const io::GenotypeTile& tile,
     return view;
 }
 
+DecodeTileView make_decode_tile_view(const DeviceGenotypeTile& tile,
+                                     const std::vector<int>& sample_ploidy, int P) {
+    DecodeTileView view;
+    view.packed = tile.packed;              // DEVICE pointer to the resident canonical tile
+    view.packed_on_device = true;
+    view.bytes_per_record = tile.bytes_per_record;
+    view.n_snp = tile.n_snp;
+    view.n_individuals = tile.n_individuals;
+    view.pop_offsets = tile.pop_offsets.data();
+    view.n_pop = P;
+    view.sample_ploidy = sample_ploidy.data();
+    view.ploidy = core::kPloidyDiploid;
+    return view;
+}
+
 DecodeKeepResult decode_and_keep_autosomes(ComputeBackend& be, const io::GenotypeTile& tile,
                                            const io::SnpTable& snptab, int P, long M) {
     std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);

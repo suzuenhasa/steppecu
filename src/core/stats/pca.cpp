@@ -31,6 +31,7 @@
 #include "device/backend.hpp"
 #include "device/resources.hpp"
 #include "io/bgen_reader.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "io/genotype_source.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/individual_partition.hpp"
@@ -81,7 +82,11 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
         sel.min_n = 1;
     }
 
-    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    // GPU-native device-resident load when no SNP filter is active (an active filter subsets the
+    // HOST tile in place, needing host packed bytes). Byte-identical either way.
+    const bool allow_device = !io::filter::filter_is_active(filter);
+    core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, sel, be, allow_device);
     // Per-SNP QC filter: subset the SNP axis in place BEFORE the decode view, so the covariance
     // (hence the eigenvectors, up to per-component sign) is bit-exact vs an externally pre-subset
     // triple. Throws on a same-ascertainment refusal / an all-filtered set.
@@ -151,7 +156,10 @@ PcaResult run_pca(const std::string& geno, const std::string& snp, const std::st
     // Force diploid: the standardize kernel reads each code as a diploid dosage; the ploidy
     // vector only sizes the view (the PCA kernels ignore it), so a diploid fill is correct.
     const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    const DecodeTileView view =
+        fe.dev_tile.valid()
+            ? core::make_decode_tile_view(fe.dev_tile, sample_ploidy, P)
+            : core::make_decode_tile_view(tile, sample_ploidy, P);
 
     if (!projecting) {
         // No targets marked: the plain covariance-eig path. The solver selector chooses the

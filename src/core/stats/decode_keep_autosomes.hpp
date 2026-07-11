@@ -26,6 +26,13 @@ namespace core {
 [[nodiscard]] DecodeTileView make_decode_tile_view(const io::GenotypeTile& tile,
                                                    const std::vector<int>& sample_ploidy, int P);
 
+// DecodeTileView wiring from a DEVICE-RESIDENT canonical tile (the GPU-native load): `packed`
+// is the resident DEVICE pointer and packed_on_device is set, so every tool's decode entry reads
+// it in place (skips the host->device upload). Byte-identical decode input to the host overload —
+// only where the bytes live differs. pop_offsets/sample_ploidy stay host (small metadata).
+[[nodiscard]] DecodeTileView make_decode_tile_view(const DeviceGenotypeTile& tile,
+                                                   const std::vector<int>& sample_ploidy, int P);
+
 // Resident-or-host decode + autosome keep result.
 struct DecodeKeepResult {
     bool resident = false;

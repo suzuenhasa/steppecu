@@ -49,15 +49,12 @@ SfsJoint CudaBackend::joint_sfs_2pop(const DecodeTileView& tile, int popA, int p
     const long grid_len = extA * extB;
 
     // Upload the whole packed tile device-resident (individual-major, population-contiguous).
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) {
-        h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-    }
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
 
     DeviceBuffer<unsigned long long> dGrid(static_cast<std::size_t>(grid_len));
     DeviceBuffer<long long> dNComplete(1);
-    launch_sfs_hist_2pop(dPacked.data(), tile.bytes_per_record, segA_begin, segA_end, segB_begin,
+    launch_sfs_hist_2pop(packed_dev, tile.bytes_per_record, segA_begin, segA_end, segB_begin,
                          segB_end, NA, NB, M, folded, extA, extB, dGrid.data(), grid_len,
                          dNComplete.data(), stream_.get());
 

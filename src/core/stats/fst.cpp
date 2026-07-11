@@ -25,6 +25,7 @@
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
 #include "device/resources.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "io/genotype_tile.hpp"
 #include "io/snp_reader.hpp"
 
@@ -58,7 +59,9 @@ namespace {
                                        std::vector<std::string>& kept_ids, FstWindowed& fold) {
     ComputeBackend& be = device::primary_backend(resources);
 
-    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, want, be);
+    const bool allow_device = !io::filter::filter_is_active(filter);
+    core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, want, be, allow_device);
     const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
     kept_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
@@ -104,7 +107,9 @@ namespace {
     // Force diploid (the WC accumulator reads each code as a diploid dosage; the ploidy vector
     // only sizes the view). Then the GPU window fold over the decoded sufficient statistic.
     const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    const DecodeTileView view =
+        fe.dev_tile.valid() ? core::make_decode_tile_view(fe.dev_tile, sample_ploidy, P)
+                            : core::make_decode_tile_view(tile, sample_ploidy, P);
     fold = be.fst_wc_windowed(view, std::span<const int>(pair_a), std::span<const int>(pair_b),
                               std::span<const long>(win_lo), std::span<const long>(win_hi));
     return Status::Ok;
@@ -132,8 +137,9 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
     // Read the triple to the canonical tile, keeping ONLY the two requested populations
     // (population-contiguous, so each pop is one [begin, end) individual range).
     const std::vector<std::string> want{popA, popB};
+    const bool allow_device = !io::filter::filter_is_active(filter);
     core::GenotypeFrontEnd fe = core::read_genotype_front_end(
-        geno, snp, ind, std::span<const std::string>(want), be);
+        geno, snp, ind, std::span<const std::string>(want), be, allow_device);
     // Per-SNP QC filter: subset the SNP axis (only the SNP set changes; per-site WC math is
     // untouched) so a filtered run is bit-exact vs an externally pre-subset triple.
     const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
@@ -162,7 +168,9 @@ FstResult run_fst(const std::string& geno, const std::string& snp, const std::st
     // Force diploid: the WC accumulator reads each code as a diploid dosage; the ploidy
     // vector only sizes the view (the kernel ignores it), so a diploid fill is correct.
     const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    const DecodeTileView view =
+        fe.dev_tile.valid() ? core::make_decode_tile_view(fe.dev_tile, sample_ploidy, P)
+                            : core::make_decode_tile_view(tile, sample_ploidy, P);
 
     // Autosome mask for the genome-wide summary (plink2 method=wc summarizes autosomes).
     const std::size_t Mz = static_cast<std::size_t>(M);
@@ -233,7 +241,9 @@ FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& sn
         sel.min_n = (min_n >= 1) ? static_cast<std::size_t>(min_n) : std::size_t{1};
     }
 
-    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, sel, be);
+    const bool allow_device = !io::filter::filter_is_active(filter);
+    core::GenotypeFrontEnd fe =
+        core::read_genotype_front_end(geno, snp, ind, sel, be, allow_device);
     const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
     res.kept_snp_ids = flt.kept_ids;
     const io::GenotypeTile& tile = fe.tile;
@@ -250,7 +260,9 @@ FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& sn
     // Force diploid (the WC accumulator reads each code as a diploid dosage; the ploidy vector
     // only sizes the view). Autosome summary mask, identical block to the single-pair run_fst.
     const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
-    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    const DecodeTileView view =
+        fe.dev_tile.valid() ? core::make_decode_tile_view(fe.dev_tile, sample_ploidy, P)
+                            : core::make_decode_tile_view(tile, sample_ploidy, P);
 
     const std::size_t Mz = static_cast<std::size_t>(M);
     std::vector<std::uint8_t> summary_include(Mz, 0);

@@ -44,15 +44,12 @@ FstPerSite CudaBackend::fst_wc_per_site(const DecodeTileView& tile, int popA, in
     const std::size_t segB_end = tile.pop_offsets[static_cast<std::size_t>(popB) + 1];
 
     // Upload the whole packed tile device-resident (individual-major, population-contiguous).
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) {
-        h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-    }
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
 
     DeviceBuffer<double> dNum(Mz), dDen(Mz), dFst(Mz);
     DeviceBuffer<std::uint8_t> dValid(Mz);
-    launch_fst_wc(dPacked.data(), tile.bytes_per_record, segA_begin, segA_end, segB_begin,
+    launch_fst_wc(packed_dev, tile.bytes_per_record, segA_begin, segA_end, segB_begin,
                   segB_end, M, dNum.data(), dDen.data(), dFst.data(), dValid.data(),
                   stream_.get());
 

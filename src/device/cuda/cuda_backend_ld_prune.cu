@@ -58,9 +58,8 @@ std::vector<std::uint8_t> CudaBackend::ld_prune_windowed(const DecodeTileView& t
     const double r2_thresh_eps = r2_thresh * (1.0 + kPlinkSmallEpsilon);
 
     // --- Upload the packed tile + the per-SNP chromosome vector (both persistent) ---
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
     DeviceBuffer<int> dChrom(static_cast<std::size_t>(M));
     h2d_async(dChrom, chrom.data(), static_cast<std::size_t>(M), stream_.get());
 
@@ -98,7 +97,7 @@ std::vector<std::uint8_t> CudaBackend::ld_prune_windowed(const DecodeTileView& t
     for (long s_lo = 0; s_lo < M; s_lo += tileM) {
         const long n_tgt = std::min<long>(tileM, M - s_lo);
         const long n_dec = std::min<long>(n_tgt + window - 1, M - s_lo);
-        launch_ld_dosage_decode_snpmajor(dPacked.data(), tile.bytes_per_record, N, s_lo, n_dec,
+        launch_ld_dosage_decode_snpmajor(packed_dev, tile.bytes_per_record, N, s_lo, n_dec,
                                          dDos.data(), stream_.get());
         launch_ld_variant_stats(dDos.data(), N, n_tgt, dNm.data(), dSum.data(), dSsq.data(),
                                 stream_.get());

@@ -117,8 +117,23 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
     const int Nn = static_cast<int>(N);
     const int K = static_cast<int>(std::min<long>(k, N));
 
-    const bool use_randomized =
-        pca_use_randomized(solver_mode, N, capabilities().free_vram_bytes);
+    // GPU-native load residency-invariance: on the device-resident path the canonical tile is
+    // ALREADY in VRAM here, so capabilities().free_vram_bytes is smaller by packed_bytes than on
+    // the host path (which uploads it LATER, inside packed_device_ptr). Every free-VRAM-derived
+    // decision below (the auto solver pick, the SYRK Z-tile tileM) must see the SAME budget in
+    // both paths or the SYRK tile boundaries — hence the Gram accumulation order — drift and the
+    // PCA differs at the ULP level. Add packed_bytes back so the device path reproduces the host
+    // path's budget EXACTLY (the host path stays byte-unchanged: this term is 0 for it).
+    const std::size_t packed_resident_bytes =
+        tile.packed_on_device
+            ? tile.n_individuals * tile.bytes_per_record
+            : std::size_t{0};
+    auto residency_invariant_free = [&](std::size_t free_raw) -> std::size_t {
+        return (free_raw != 0) ? free_raw + packed_resident_bytes : free_raw;
+    };
+
+    const bool use_randomized = pca_use_randomized(
+        solver_mode, N, residency_invariant_free(capabilities().free_vram_bytes));
 
     // Randomized subspace-iteration tuning + the L=K+p subspace, shared by both paths (the
     // exact path runs the SAME truncated solver on the resident dense Gram; the randomized
@@ -144,17 +159,6 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
         DeviceBuffer<double> dC(NN);
         STEPPE_CUDA_CHECK(cudaMemsetAsync(dC.data(), 0, NN * sizeof(double), stream_.get()));
 
-        // Choose a SNP tile that bounds the Z operand footprint to ~free/kPcaZBudgetDivisor,
-        // keeping the standardize+SYRK memory O(N*tileM + N^2) (the extract_f2 tiling idiom).
-        std::size_t free_b = capabilities().free_vram_bytes;
-        if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
-        std::size_t budget = free_b / kPcaZBudgetDivisor;
-        const std::size_t z_row_bytes = static_cast<std::size_t>(N) * sizeof(double);
-        if (budget < z_row_bytes) budget = z_row_bytes;
-        long tileM = static_cast<long>(budget / z_row_bytes);
-        if (tileM < 1) tileM = 1;
-        if (tileM > M) tileM = M;
-
         {
             // The packed genotype tile, the standardize center/scale scratch, and the Z operand
             // tile ALL live ONLY inside this block so RAII frees them (the ~7 GB packed tile +
@@ -162,11 +166,23 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
             // eigensolver allocates its workspace — the marginal alloc that OOMs the full
             // cohort. Nothing after the block references them (symmetrize + the truncated solve
             // read only dC).
-            const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-            DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-            if (packed_bytes > 0) {
-                h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-            }
+            DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+            const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
+
+            // Choose a SNP tile that bounds the Z operand footprint to ~free/kPcaZBudgetDivisor,
+            // keeping the standardize+SYRK memory O(N*tileM + N^2) (the extract_f2 tiling idiom).
+            // Read free VRAM AFTER packed_device_ptr so BOTH load paths measure it with the packed
+            // tile resident (host: dPacked was just cudaMalloc'd here; device: the tile was already
+            // resident) — identical cudaMalloc(packed_bytes) reservations => identical free =>
+            // identical tileM => byte-identical SYRK tiling + Gram, GPU-native load vs host load.
+            std::size_t free_b = capabilities().free_vram_bytes;
+            if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
+            std::size_t budget = free_b / kPcaZBudgetDivisor;
+            const std::size_t z_row_bytes = static_cast<std::size_t>(N) * sizeof(double);
+            if (budget < z_row_bytes) budget = z_row_bytes;
+            long tileM = static_cast<long>(budget / z_row_bytes);
+            if (tileM < 1) tileM = 1;
+            if (tileM > M) tileM = M;
 
             DeviceBuffer<double> dCenter(static_cast<std::size_t>(tileM));
             DeviceBuffer<double> dInv(static_cast<std::size_t>(tileM));
@@ -177,10 +193,10 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
             engage_f2_precision(blas_.get(), precision);
             for (long s_lo = 0; s_lo < M; s_lo += tileM) {
                 const long tm = std::min<long>(tileM, M - s_lo);
-                launch_pca_snp_scale(dPacked.data(), tile.bytes_per_record,
+                launch_pca_snp_scale(packed_dev, tile.bytes_per_record,
                                      tile.n_individuals, s_lo, tm, dCenter.data(),
                                      dInv.data(), dUsed.data(), stream_.get());
-                launch_pca_standardize(dPacked.data(), tile.bytes_per_record,
+                launch_pca_standardize(packed_dev, tile.bytes_per_record,
                                        tile.n_individuals, s_lo, tm, dCenter.data(),
                                        dInv.data(), dZ.data(), stream_.get());
                 const double alpha = 1.0;
@@ -217,9 +233,8 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
         // freed before the solve; there is no N x N object competing for the VRAM. Allocate the
         // packed tile FIRST so the Z-tile budget below is taken from the free VRAM that REMAINS
         // after it (mirrors the exact path measuring free after dC), not the full pool.
-        const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-        DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-        if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+        DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+        const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
 
         // Cache the full-range Patterson center[M]/inv_scale[M] once (no re-fold per sweep).
         DeviceBuffer<double> dCenterAll(static_cast<std::size_t>(M));
@@ -245,10 +260,10 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
         // Precompute sweep: cache center/inv, count used SNPs, accumulate trace = ||Z||_F^2.
         for (long s_lo = 0; s_lo < M; s_lo += tileM) {
             const long tm = std::min<long>(tileM, M - s_lo);
-            launch_pca_snp_scale(dPacked.data(), tile.bytes_per_record, tile.n_individuals, s_lo,
+            launch_pca_snp_scale(packed_dev, tile.bytes_per_record, tile.n_individuals, s_lo,
                                  tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo, dUsed.data(),
                                  stream_.get());
-            launch_pca_standardize(dPacked.data(), tile.bytes_per_record, tile.n_individuals, s_lo,
+            launch_pca_standardize(packed_dev, tile.bytes_per_record, tile.n_individuals, s_lo,
                                    tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo, dZ.data(),
                                    stream_.get());
             launch_pca_accumulate_sumsq(dZ.data(), static_cast<long>(N) * tm, dTrace.data(),
@@ -261,7 +276,7 @@ PcaEig CudaBackend::pca_covariance_eig(const DecodeTileView& tile, int k, int so
         // the dense sketch + SYRK). Buffers captured by value (pointers/handles/POD).
         cublasHandle_t blas = blas_.get();
         cudaStream_t stream = stream_.get();
-        const std::uint8_t* packed_ptr = dPacked.data();
+        const std::uint8_t* packed_ptr = packed_dev;
         const std::size_t bpr = tile.bytes_per_record;
         const std::size_t Nrec = tile.n_individuals;
         double* dZp = dZ.data();
@@ -541,6 +556,15 @@ PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
     DeviceBuffer<double> dInvAll(static_cast<std::size_t>(M));
 
     // SNP tile bounding the Z_ref operand to ~free/kPcaZBudgetDivisor (over the ref rows).
+    // The packed genotype tile stays resident across BOTH passes (pass 2 re-standardizes the
+    // same rows for the loadings — the design's "reuse the resident packed tile, no re-read").
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
+
+    // Read free VRAM AFTER packed_device_ptr so BOTH load paths measure it with the packed tile
+    // resident (host: dPacked was just cudaMalloc'd here; device: the tile was already resident) —
+    // identical cudaMalloc(packed_bytes) reservations => identical free => identical tileM =>
+    // byte-identical SYRK tiling + Gram accumulation order, GPU-native load vs host load.
     std::size_t free_b = capabilities().free_vram_bytes;
     if (free_b == 0) free_b = kPcaFreeVramFallbackBytes;
     std::size_t budget = free_b / kPcaZBudgetDivisor;
@@ -550,12 +574,6 @@ PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
     if (tileM < 1) tileM = 1;
     if (tileM > M) tileM = M;
 
-    // The packed genotype tile stays resident across BOTH passes (pass 2 re-standardizes the
-    // same rows for the loadings — the design's "reuse the resident packed tile, no re-read").
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-
     // ---- Pass 1: ref-only fold + SYRK covariance ----
     {
         DeviceBuffer<double> dZ(static_cast<std::size_t>(N_ref) * static_cast<std::size_t>(tileM));
@@ -563,10 +581,10 @@ PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
         engage_f2_precision(blas_.get(), precision);
         for (long s_lo = 0; s_lo < M; s_lo += tileM) {
             const long tm = std::min<long>(tileM, M - s_lo);
-            launch_pca_snp_scale_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+            launch_pca_snp_scale_gather(packed_dev, tile.bytes_per_record, dRef.data(), N_ref,
                                         s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
                                         dUsed.data(), stream_.get());
-            launch_pca_standardize_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+            launch_pca_standardize_gather(packed_dev, tile.bytes_per_record, dRef.data(), N_ref,
                                           s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
                                           dZ.data(), stream_.get());
             const double alpha = 1.0;
@@ -636,7 +654,7 @@ PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
         for (long s_lo = 0; s_lo < M; s_lo += tileM) {
             const long tm = std::min<long>(tileM, M - s_lo);
             // Re-standardize Z_ref (cached center/inv, no re-fold).
-            launch_pca_standardize_gather(dPacked.data(), tile.bytes_per_record, dRef.data(), N_ref,
+            launch_pca_standardize_gather(packed_dev, tile.bytes_per_record, dRef.data(), N_ref,
                                           s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
                                           dZref.data(), stream_.get());
             // W_tile (tm x K) = Z_ref^T U.
@@ -646,7 +664,7 @@ PcaProject CudaBackend::pca_project_lsq(const DecodeTileView& tile, int k,
                                      static_cast<int>(tm)));
             launch_pca_scale_loadings(dW.data(), tm, K, dInvS.data(), stream_.get());
             // Target standardize + observed mask.
-            launch_pca_standardize_target(dPacked.data(), tile.bytes_per_record, dTgt.data(), N_tgt,
+            launch_pca_standardize_target(packed_dev, tile.bytes_per_record, dTgt.data(), N_tgt,
                                           s_lo, tm, dCenterAll.data() + s_lo, dInvAll.data() + s_lo,
                                           dZtgt.data(), dMask.data(), stream_.get());
             // b (K x N_tgt) += W^T Z_tgt^T.

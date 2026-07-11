@@ -63,9 +63,8 @@ KingStreamResult CudaBackend::king_robust_filtered(const DecodeTileView& tile,
     if (npairs == 0) return out;  // N < 2: a well-formed empty result (no cap: memory is O(surv)).
 
     // Upload the packed diploid tile (individual-major; singleton pops -> record g == sample g).
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
-    if (packed_bytes > 0) h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
 
     // Optional autosome mask, indexed by the GLOBAL SNP position in the fold kernel.
     const std::size_t Mz = static_cast<std::size_t>(M);
@@ -141,7 +140,7 @@ KingStreamResult CudaBackend::king_robust_filtered(const DecodeTileView& tile,
         // block (cheap 2-bit unpack vs the fold); only 5*B accumulators persist across the tiles.
         for (long s_lo = 0; s_lo < M; s_lo += tileM) {
             const long tm = std::min<long>(tileM, M - s_lo);
-            launch_king_dosage_decode(dPacked.data(), tile.bytes_per_record, N, s_lo, tm,
+            launch_king_dosage_decode(packed_dev, tile.bytes_per_record, N, s_lo, tm,
                                       dCode.data(), stream_.get());
             for (long long sub = 0; sub < blockC; sub += kKingPairChunkClamp) {
                 const long long C = std::min<long long>(kKingPairChunkClamp, blockC - sub);

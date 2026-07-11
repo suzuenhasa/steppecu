@@ -108,6 +108,20 @@ public:
     [[nodiscard]] CanonicalTile transpose_to_canonical(
         const SnpMajorTileView& view) override;
 
+    // GPU-native device-resident genotype load — build the canonical tile ONCE on device
+    // (no D2H, no per-tool re-upload). See ComputeBackend for the contract.
+    [[nodiscard]] DeviceGenotypeTile alloc_canonical_device(
+        std::size_t n_individuals, std::size_t out_bytes_per_record, std::size_t n_snp,
+        std::vector<std::size_t> pop_offsets, std::vector<std::string> pop_labels) override;
+
+    void transpose_block_into_canonical_device(
+        DeviceGenotypeTile& dst, std::size_t col_off, const SnpMajorTileView& block) override;
+
+    [[nodiscard]] DeviceGenotypeTile upload_canonical_device(
+        const std::uint8_t* host_packed, std::size_t bytes_per_record, std::size_t n_snp,
+        std::size_t n_individuals, std::vector<std::size_t> pop_offsets,
+        std::vector<std::string> pop_labels) override;
+
     [[nodiscard]] steppe::device::DeviceDecodeResult decode_af_compact_autosome(
         const DecodeTileView& tile, std::span<const int> chrom,
         std::span<const double> genpos, std::span<const double> physpos,
@@ -544,6 +558,15 @@ private:
                          const double* pop_wfull, double rank_alpha, QpAdmResult& res);
 
 private:
+    // packed_device_ptr — the GPU-native-load seam shared by every tool's decode entry. Returns
+    // a DEVICE pointer to the canonical packed tile bytes: when the tile is already resident
+    // (tile.packed_on_device — the front-end built a DeviceGenotypeTile), it returns tile.packed
+    // in place and leaves `staging` empty (KILLS the per-tool re-upload); otherwise it sizes
+    // `staging` to the whole tile and H2Ds tile.packed into it (the legacy host-load path). The
+    // returned pointer is valid until `staging` is destroyed or the resident tile is freed.
+    [[nodiscard]] const std::uint8_t* packed_device_ptr(const DecodeTileView& tile,
+                                                        DeviceBuffer<std::uint8_t>& staging);
+
     // Inline device-guard helpers — reference §18
     void guard_device() const { STEPPE_CUDA_CHECK(cudaSetDevice(device_id_)); }
 

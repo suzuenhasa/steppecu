@@ -10,6 +10,8 @@
 #include <cub/device/device_select.cuh>
 
 #include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include "core/internal/host_device.hpp"
@@ -37,7 +39,6 @@ void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
         (static_cast<std::size_t>(M) + cpb - 1u) / cpb;
     const std::size_t packed_bytes = tile.n_individuals * tile_width;
     const std::size_t n_off = static_cast<std::size_t>(P) + 1u;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
     DeviceBuffer<std::size_t> dOffsets(n_off);
 
     const bool explicit_sample_ploidy = (tile.sample_ploidy != nullptr);
@@ -46,22 +47,37 @@ void CudaBackend::decode_af_resident(const DecodeTileView& tile, int P, long M,
     const bool have_sample_ploidy = explicit_sample_ploidy || device_detect;
     DeviceBuffer<int> dSamplePloidy(have_sample_ploidy ? tile.n_individuals : 0u);
 
-    STEPPE_CUDA_CHECK(cudaMemcpy2DAsync(
-        dPacked.data(), tile_width,
-        tile.packed + static_cast<std::size_t>(s_lo) / cpb, tile.bytes_per_record,
-        tile_width, tile.n_individuals,
-        cudaMemcpyHostToDevice, stream_.get()));
+    // Source pane: the M-column packed slice at s_lo, decoded at pitch tile_width. When the
+    // canonical tile is already device-resident (GPU-native load) AND this is the whole-width
+    // slice (M == n_snp, s_lo == 0), the resident tile ALREADY IS that pane at exactly this
+    // pitch, so decode it in place — no copy. Otherwise stage the pitched slice: device->device
+    // when resident (a sub-SNP window of a resident tile, e.g. the streamed f2 arm), host->device
+    // for the legacy host tile. The staged bits are identical to the resident bits either way.
+    DeviceBuffer<std::uint8_t> dPacked;
+    const std::uint8_t* packed_src = nullptr;
+    if (tile.packed_on_device && tile_width == tile.bytes_per_record && s_lo == 0) {
+        packed_src = tile.packed;
+    } else {
+        dPacked = DeviceBuffer<std::uint8_t>(packed_bytes == 0 ? 1u : packed_bytes);
+        STEPPE_CUDA_CHECK(cudaMemcpy2DAsync(
+            dPacked.data(), tile_width,
+            tile.packed + static_cast<std::size_t>(s_lo) / cpb, tile.bytes_per_record,
+            tile_width, tile.n_individuals,
+            tile.packed_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice,
+            stream_.get()));
+        packed_src = dPacked.data();
+    }
     h2d_async(dOffsets, tile.pop_offsets, n_off, stream_.get());
     if (explicit_sample_ploidy) {
         h2d_async(dSamplePloidy, tile.sample_ploidy, tile.n_individuals,
                   stream_.get());
     } else if (device_detect) {
-        launch_detect_ploidy(dPacked.data(), tile_width,
+        launch_detect_ploidy(packed_src, tile_width,
                              tile.n_individuals, tile.n_snp, dSamplePloidy.data(),
                              stream_.get());
     }
 
-    launch_decode_af(dPacked.data(), tile_width, dOffsets.data(),
+    launch_decode_af(packed_src, tile_width, dOffsets.data(),
                      P, M, tile.ploidy,
                      have_sample_ploidy ? dSamplePloidy.data() : nullptr,
                      dQ.data(), dV.data(), dN.data(), stream_.get());
@@ -144,11 +160,10 @@ std::vector<int> CudaBackend::detect_sample_ploidy_device(
     guard_device();
     std::vector<int> out(tile.n_individuals, core::kPloidyPseudoHaploid);
     if (tile.n_individuals == 0) return out;
-    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
-    DeviceBuffer<std::uint8_t> dPacked(packed_bytes);
+    DeviceBuffer<std::uint8_t> dPacked;  // staging; empty when the tile is device-resident
+    const std::uint8_t* packed_dev = packed_device_ptr(tile, dPacked);
     DeviceBuffer<int> dPloidy(tile.n_individuals);
-    h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
-    launch_detect_ploidy(dPacked.data(), tile.bytes_per_record, tile.n_individuals,
+    launch_detect_ploidy(packed_dev, tile.bytes_per_record, tile.n_individuals,
                          tile.n_snp, dPloidy.data(), stream_.get());
     d2h_async(out.data(), dPloidy, tile.n_individuals, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
@@ -193,6 +208,109 @@ CanonicalTile CudaBackend::transpose_to_canonical(
                                   stream_.get());
     d2h_async(out.packed.data(), dOut, out_total, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    return out;
+}
+
+namespace {
+
+// TransposeEncoding from the CUDA-free TileEncoding (shared by the device-resident builders).
+[[nodiscard]] TransposeEncoding transpose_encoding_of(TileEncoding e) {
+    switch (e) {
+        case TileEncoding::Identity:
+        default:
+            return TransposeEncoding::Identity;
+    }
+}
+
+}  // namespace
+
+// packed_device_ptr — GPU-native-load seam. Resident tile -> use in place (no upload); host
+// tile -> stage into `staging` with the SAME (packed_bytes==0?1u) guard + h2d the legacy path
+// used, so the host branch is byte-for-byte the prior behavior. Reference: §5.
+const std::uint8_t* CudaBackend::packed_device_ptr(const DecodeTileView& tile,
+                                                   DeviceBuffer<std::uint8_t>& staging) {
+    if (tile.packed_on_device) return tile.packed;
+    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+    staging = DeviceBuffer<std::uint8_t>(packed_bytes == 0 ? 1u : packed_bytes);
+    if (packed_bytes > 0) h2d_async(staging, tile.packed, packed_bytes, stream_.get());
+    return staging.data();
+}
+
+// alloc_canonical_device — a ZEROED device-resident canonical tile + its descriptor. Zeroing
+// guarantees byte-identity with the host path even for a would-be-unwritten byte (the streamed
+// scatter writes every output byte exactly once, so this is belt-and-suspenders). Reference: §7.
+DeviceGenotypeTile CudaBackend::alloc_canonical_device(
+    std::size_t n_individuals, std::size_t out_bytes_per_record, std::size_t n_snp,
+    std::vector<std::size_t> pop_offsets, std::vector<std::string> pop_labels) {
+    guard_device();
+    DeviceGenotypeTile out;
+    out.bytes_per_record = out_bytes_per_record;
+    out.n_snp = n_snp;
+    out.n_individuals = n_individuals;
+    out.pop_offsets = std::move(pop_offsets);
+    out.pop_labels = std::move(pop_labels);
+    const std::size_t total = n_individuals * out_bytes_per_record;
+    auto buf = std::make_shared<DeviceBuffer<std::uint8_t>>(total);
+    if (total > 0) {
+        STEPPE_CUDA_CHECK(cudaMemsetAsync(buf->data(), 0, total, stream_.get()));
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+    out.packed = buf->data();
+    out.owner = std::move(buf);
+    return out;
+}
+
+// transpose_block_into_canonical_device — transpose+gather+encode ONE SNP-major block on the
+// GPU (raw block bytes -> H2D -> the SHARED transpose kernel) and scatter its canonical byte-
+// columns into `dst` at output byte-column col_off. The kernel writes straight into the resident
+// tile (dst_row_stride = dst.bytes_per_record, dst_col_off = col_off) — no host reassembly, no
+// D2H. Byte-identical to the one-shot transpose because the kernel + inputs are the same and the
+// blocks' byte-columns tile [0, out_bpr) exactly. Reference: §7.
+void CudaBackend::transpose_block_into_canonical_device(
+    DeviceGenotypeTile& dst, std::size_t col_off, const SnpMajorTileView& block) {
+    guard_device();
+    if (block.n_snp == 0 || block.n_individuals == 0) return;
+    auto* buf = static_cast<DeviceBuffer<std::uint8_t>*>(dst.owner.get());
+    std::uint8_t* d_out = buf->data();
+
+    const std::size_t cpb = static_cast<std::size_t>(core::kCodesPerByte);
+    const std::size_t block_out_bpr = (block.n_snp + cpb - 1) / cpb;
+    const std::size_t src_total = block.n_snp * block.src_bytes_per_record;
+
+    DeviceBuffer<std::uint8_t> dSrc(src_total == 0 ? 1u : src_total);
+    DeviceBuffer<std::size_t> dSel(block.n_individuals);
+    if (src_total > 0) h2d_async(dSrc, block.snp_major, src_total, stream_.get());
+    h2d_async(dSel, block.sel_rows, block.n_individuals, stream_.get());
+
+    launch_transpose_to_canonical(dSrc.data(), block.src_bytes_per_record, dSel.data(),
+                                  block.n_individuals, block.n_snp, block_out_bpr,
+                                  transpose_encoding_of(block.encoding), d_out,
+                                  stream_.get(), dst.bytes_per_record, col_off);
+    // Sync before dSrc/dSel free (per-block staging); the raw-bytes H2D is the one legit copy.
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+}
+
+// upload_canonical_device — H2D an already-canonical host tile (TGENO individual-major) ONCE
+// into a device-resident tile: the ONE legitimate whole-matrix copy for that arm. Reference: §7.
+DeviceGenotypeTile CudaBackend::upload_canonical_device(
+    const std::uint8_t* host_packed, std::size_t bytes_per_record, std::size_t n_snp,
+    std::size_t n_individuals, std::vector<std::size_t> pop_offsets,
+    std::vector<std::string> pop_labels) {
+    guard_device();
+    DeviceGenotypeTile out;
+    out.bytes_per_record = bytes_per_record;
+    out.n_snp = n_snp;
+    out.n_individuals = n_individuals;
+    out.pop_offsets = std::move(pop_offsets);
+    out.pop_labels = std::move(pop_labels);
+    const std::size_t total = n_individuals * bytes_per_record;
+    auto buf = std::make_shared<DeviceBuffer<std::uint8_t>>(total);
+    if (total > 0) {
+        h2d_async(*buf, host_packed, total, stream_.get());
+        STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    }
+    out.packed = buf->data();
+    out.owner = std::move(buf);
     return out;
 }
 
