@@ -447,6 +447,22 @@ struct FstMatrix {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// FstWindowed — the device result of the windowed WC FST fold (`steppe fst --windowed` /
+// `--pbs`). For each requested pop pair p and each bp window w it holds the per-window
+// Sigma WC numerator / Sigma WC denominator over that window's site slice (invalid sites
+// contribute 0, mirroring allel's nansum). Laid out pair-major, [p * n_win + w]. The host
+// forms the window Fst = win_num / win_den (NaN when the window is empty or Sigma den == 0)
+// and, for --pbs, the Yi 2010 PBS transform over the three pairwise window Fst. Only these
+// two small n_pair * n_win vectors cross PCIe; the sufficient-stat decode + the window fold
+// stay device-resident. Native FP64 (the reduction carve-out).
+struct FstWindowed {
+    std::vector<double> win_num;   // n_pair * n_win, pair-major [p*n_win + w]
+    std::vector<double> win_den;   // n_pair * n_win, pair-major [p*n_win + w]
+    int n_pair = 0;
+    long n_win = 0;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
 // KingMatrix — the device result of the KING-robust kinship pair sweep (`steppe kinship`).
 // The five per-pair integer counts (Manichaikul et al. 2010) over the swept pairs: nsnp
 // (considered sites), hethet, ibs0, het_i, het_j. For the all-pairs mode the pairs are the
@@ -792,6 +808,21 @@ public:
         throw std::runtime_error(
             "ComputeBackend::fst_wc_all_pairs: not implemented by this backend "
             "(the GPU-only all-pairs sufficient-stat combine requires a CUDA backend)");
+    }
+
+    // fst_wc_windowed: the windowed WC FST fold (`steppe fst --windowed` / `--pbs`). Decodes the
+    // per-(pop, SNP) sufficient statistic {n, ac, het} ONCE over the whole SNP axis, then for each
+    // pop pair (pair_a[p], pair_b[p]) folds every bp window's wc_finalize into per-window
+    // Sigma num / Sigma den on the GPU (one block per window; the SAME shared wc_finalize the
+    // single-pair path uses). win_lo[w] / win_hi[w] are the GLOBAL half-open site slice of window
+    // w (searchsorted bounds); pair_a/pair_b are tile pop indices and must be the same length.
+    // Native FP64. Default: throw (CUDA/CPU only; matches fst_wc_per_site).
+    [[nodiscard]] virtual FstWindowed fst_wc_windowed(
+        const DecodeTileView& tile, std::span<const int> pair_a, std::span<const int> pair_b,
+        std::span<const long> win_lo, std::span<const long> win_hi) {
+        (void)tile; (void)pair_a; (void)pair_b; (void)win_lo; (void)win_hi;
+        throw std::runtime_error(
+            "ComputeBackend::fst_wc_windowed: not implemented by this backend");
     }
 
     // king_robust_all_pairs: the KING-robust kinship pair sweep (`steppe kinship`). Decodes

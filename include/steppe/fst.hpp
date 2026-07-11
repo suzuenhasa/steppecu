@@ -87,6 +87,82 @@ struct FstMatrixResult {
     Precision::Kind precision_tag = Precision::Kind::Fp64;
 };
 
+// FstWindowedResult — the per-window Weir & Cockerham 1984 FST selection scan over one pop
+// pair (`steppe fst --windowed SIZE:STEP`). Windows are bp intervals of `size` sliding by
+// `step`, reset per chromosome, matching scikit-allel's windowed_weir_cockerham_fst window
+// layout exactly (1-based inclusive [start, end], end clipped to the chromosome's last SNP).
+// Each window's Fst is the RATIO OF AVERAGES Σnum/Σden over the sites it covers (num = WC a,
+// den = a+b+c; per-site invalid → 0 contribution, mirroring allel's nansum), NaN when the
+// window is empty (n_snp == 0) or every covered site is monomorphic (Σden == 0). n_snp counts
+// ALL positions in the window, not just the valid ones.
+struct FstWindowedResult {
+    std::vector<int>    chrom;   // per window
+    std::vector<long>   start;   // window start bp (1-based inclusive)
+    std::vector<long>   end;     // window end bp   (1-based inclusive, clipped to chrom last)
+    std::vector<long>   n_snp;   // positions in [start, end] (ALL, not just valid)
+    std::vector<double> num;     // Σ WC numerator a over the window
+    std::vector<double> den;     // Σ WC denominator a+b+c over the window
+    std::vector<double> fst;     // num/den (NaN if n_snp==0 or den==0)
+
+    std::string popA;
+    std::string popB;
+
+    std::vector<std::string> kept_snp_ids;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
+// FstPbsResult — the per-window population-branch statistic (Yi et al. 2010) for three pops
+// A, B, C (`steppe fst --pbs A,B,C --windowed SIZE:STEP`). Per window it carries the three
+// pairwise window WC Fst (F_AB, F_AC, F_BC — each the same ratio-of-averages the windowed path
+// reports) and PBS_A/B/C = the branch lengths T = -ln(1 - Fst) (Fst clamped to [0, 1) so T is
+// finite) combined as PBS_A = (T_AB + T_AC - T_BC)/2 (and symmetric). A window whose pairwise
+// Fst is NaN (empty / monomorphic) yields NaN for that branch statistic.
+struct FstPbsResult {
+    std::vector<int>    chrom;
+    std::vector<long>   start;
+    std::vector<long>   end;
+    std::vector<long>   n_snp;
+    std::vector<double> fst_ab, fst_ac, fst_bc;   // per-window pairwise WC Fst
+    std::vector<double> pbs_a, pbs_b, pbs_c;      // per-window PBS (raw Yi 2010)
+
+    std::string popA;
+    std::string popB;
+    std::string popC;
+
+    std::vector<std::string> kept_snp_ids;
+    Status status = Status::Ok;
+    Precision::Kind precision_tag = Precision::Kind::Fp64;
+};
+
+// run_fst_windowed — the per-window WC FST scan driver for one pop pair. Reuses the genotype
+// front-end + apply_snp_filter, builds the per-chromosome bp windows (allel-exact), and folds
+// the per-site WC num/den into windows on the GPU (fst_wc_windowed). win_size / win_step are bp
+// (win_step defaults to win_size at the call site for non-overlapping windows).
+[[nodiscard]] FstWindowedResult run_fst_windowed(const std::string& geno,
+                                                 const std::string& snp,
+                                                 const std::string& ind,
+                                                 const std::string& popA,
+                                                 const std::string& popB,
+                                                 long win_size,
+                                                 long win_step,
+                                                 device::Resources& resources,
+                                                 const FilterConfig& filter = FilterConfig{});
+
+// run_fst_pbs — the per-window PBS scan driver for three pops A, B, C. Decodes the sufficient
+// statistic once, folds all three pairwise per-site WC num/den into the SAME bp windows on the
+// GPU, then applies the host PBS transform. win_size / win_step are bp.
+[[nodiscard]] FstPbsResult run_fst_pbs(const std::string& geno,
+                                       const std::string& snp,
+                                       const std::string& ind,
+                                       const std::string& popA,
+                                       const std::string& popB,
+                                       const std::string& popC,
+                                       long win_size,
+                                       long win_step,
+                                       device::Resources& resources,
+                                       const FilterConfig& filter = FilterConfig{});
+
 // run_fst_all_pairs — the GPU all-pairs WC FST matrix driver. Decodes the panel ONCE into a
 // per-(pop, SNP) sufficient-statistic tensor {n, ac, het}, streamed by SNP-tile, then
 // combines all C(P,2) pairs on-device (sweep_unrank k=2 -> wc_finalize -> per-pair Σ). When

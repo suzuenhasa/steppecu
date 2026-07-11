@@ -131,4 +131,67 @@ FstMatrix CudaBackend::fst_wc_all_pairs(const DecodeTileView& tile,
     return out;
 }
 
+FstWindowed CudaBackend::fst_wc_windowed(const DecodeTileView& tile, std::span<const int> pair_a,
+                                         std::span<const int> pair_b,
+                                         std::span<const long> win_lo,
+                                         std::span<const long> win_hi) {
+    guard_device();
+    FstWindowed out;
+    out.precision_tag = Precision::Kind::Fp64;
+
+    const long M = static_cast<long>(tile.n_snp);
+    const int P = tile.n_pop;
+    const int n_pair = static_cast<int>(pair_a.size());
+    const long n_win = static_cast<long>(win_lo.size());
+    out.n_pair = n_pair;
+    out.n_win = n_win;
+    if (M <= 0 || P <= 0 || n_pair <= 0 || n_win <= 0 || pair_b.size() != pair_a.size() ||
+        win_hi.size() != win_lo.size()) {
+        return out;
+    }
+
+    const std::size_t total = static_cast<std::size_t>(n_pair) * static_cast<std::size_t>(n_win);
+    out.win_num.assign(total, 0.0);
+    out.win_den.assign(total, 0.0);
+
+    // Upload the packed tile (individual-major, population-contiguous) + the pop offsets.
+    const std::size_t packed_bytes = tile.n_individuals * tile.bytes_per_record;
+    DeviceBuffer<std::uint8_t> dPacked(packed_bytes == 0 ? 1u : packed_bytes);
+    if (packed_bytes > 0) {
+        h2d_async(dPacked, tile.packed, packed_bytes, stream_.get());
+    }
+    DeviceBuffer<std::size_t> dPopOff(static_cast<std::size_t>(P) + 1u);
+    h2d_async(dPopOff, tile.pop_offsets, static_cast<std::size_t>(P) + 1u, stream_.get());
+
+    // Decode the per-(pop, SNP) sufficient statistic {n, ac, het} ONCE over the whole SNP axis
+    // (the window bins index this tensor globally; for the windowed use case M is one
+    // chromosome-worth of SNPs and the P x M x 3 tensor is small, so no SNP-tiling is needed).
+    const std::size_t pane = static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+    DeviceBuffer<double> dN(pane), dAc(pane), dHet(pane);
+    launch_fst_suffstat_decode(dPacked.data(), tile.bytes_per_record, dPopOff.data(), P,
+                               /*s_lo=*/0, /*tm=*/M, dN.data(), dAc.data(), dHet.data(),
+                               stream_.get());
+
+    // Window bins (global half-open site slices) resident for the fold.
+    const std::size_t nwz = static_cast<std::size_t>(n_win);
+    DeviceBuffer<long> dWinLo(nwz), dWinHi(nwz);
+    h2d_async(dWinLo, win_lo.data(), nwz, stream_.get());
+    h2d_async(dWinHi, win_hi.data(), nwz, stream_.get());
+
+    // Per-window Sigma num / Sigma den for all pairs (pair-major). One launch per pair over the
+    // shared resident sufficient-stat tensor.
+    DeviceBuffer<double> dWinNum(total), dWinDen(total);
+    for (int pr = 0; pr < n_pair; ++pr) {
+        const std::size_t off = static_cast<std::size_t>(pr) * nwz;
+        launch_fst_windowed_accumulate(dN.data(), dAc.data(), dHet.data(), M, pair_a[pr],
+                                       pair_b[pr], dWinLo.data(), dWinHi.data(), n_win,
+                                       dWinNum.data() + off, dWinDen.data() + off, stream_.get());
+    }
+
+    d2h_async(out.win_num.data(), dWinNum, total, stream_.get());
+    d2h_async(out.win_den.data(), dWinDen, total, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    return out;
+}
+
 }  // namespace steppe::device

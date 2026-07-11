@@ -131,6 +131,14 @@ public:
         const DecodeTileView& tile, std::span<const std::uint8_t> summary_include,
         bool sure) override;
 
+    // Windowed WC FST fold (`steppe fst --windowed` / `--pbs`) — uploads the packed tile, decodes
+    // the per-(pop,SNP) sufficient stat {n,ac,het} ONCE, then folds every bp window's wc_finalize
+    // into per-window Σnum/Σden on the GPU (one block per window, re-keyed from the all-pairs
+    // accumulate), once per requested pop pair. Only the n_pair*n_win vectors cross PCIe. FP64.
+    [[nodiscard]] FstWindowed fst_wc_windowed(
+        const DecodeTileView& tile, std::span<const int> pair_a, std::span<const int> pair_b,
+        std::span<const long> win_lo, std::span<const long> win_hi) override;
+
     // KING-robust kinship pair sweep (`steppe kinship`) — uploads the packed diploid tile,
     // streams the SNP axis by tile decoding the per-individual dosage code ONCE, and folds
     // every pair's five KING counts into the persistent per-pair accumulators (all-pairs

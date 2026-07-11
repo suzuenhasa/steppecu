@@ -137,6 +137,65 @@ __global__ void fst_allpairs_accumulate_kernel(const double* __restrict__ dN,
     }
 }
 
+// Windowed accumulate — the `steppe fst --windowed` / `--pbs` window-binned fold. It is the
+// all-pairs accumulate re-keyed pair -> WINDOW: ONE BLOCK per window w folds ONE fixed pop pair
+// (ci, cj) over that window's GLOBAL site slice [win_lo[w], win_hi[w]) of the once-decoded
+// sufficient-stat tensor (the whole SNP axis is decoded in a single shot, tm == M, s_lo == 0, so
+// every window is folded exactly once — the total is WRITTEN, no cross-tile +=). The block's
+// threads stride the slice through the SHARED wc_finalize, tree-reduce the block's partial
+// Sigma(valid?num:0) / Sigma(valid?den:0) in shared memory, and thread 0 writes the window
+// totals. A grid-stride over windows keeps the launch bounded for very fine window grids. Reuses
+// wc_finalize verbatim, so a window Fst = Sigma num / Sigma den can never drift from the
+// single-pair path; the caller launches it once per pair (1 pair for --windowed, 3 for --pbs).
+__global__ void fst_windowed_accumulate_kernel(const double* __restrict__ dN,
+                                               const double* __restrict__ dAc,
+                                               const double* __restrict__ dHet, long M, int ci,
+                                               int cj, const long* __restrict__ win_lo,
+                                               const long* __restrict__ win_hi, long n_win,
+                                               double* __restrict__ out_num,
+                                               double* __restrict__ out_den) {
+    __shared__ double s_num[kFstAccumBlock];
+    __shared__ double s_den[kFstAccumBlock];
+    const unsigned t = threadIdx.x;
+    const long ti = static_cast<long>(ci) * M;
+    const long tj = static_cast<long>(cj) * M;
+
+    for (long w = static_cast<long>(blockIdx.x); w < n_win;
+         w += static_cast<long>(gridDim.x)) {
+        __syncthreads();  // guard s_num/s_den reuse across grid-stride iterations
+        const long lo = win_lo[w];
+        const long hi = win_hi[w];
+
+        double an = 0.0, ad = 0.0;
+        for (long s = lo + static_cast<long>(t); s < hi; s += static_cast<long>(blockDim.x)) {
+            const std::size_t oi = static_cast<std::size_t>(ti + s);
+            const std::size_t oj = static_cast<std::size_t>(tj + s);
+            const WcPerPop A{dN[oi], dAc[oi], dHet[oi]};
+            const WcPerPop B{dN[oj], dAc[oj], dHet[oj]};
+            const WcSite r = wc_finalize(A, B);
+            if (r.valid) {
+                an += r.num;
+                ad += r.den;
+            }
+        }
+
+        s_num[t] = an;
+        s_den[t] = ad;
+        __syncthreads();
+        for (unsigned stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (t < stride) {
+                s_num[t] += s_num[t + stride];
+                s_den[t] += s_den[t + stride];
+            }
+            __syncthreads();
+        }
+        if (t == 0) {
+            out_num[w] = s_num[0];  // one block owns w -> plain write, no atomic / no +=
+            out_den[w] = s_den[0];
+        }
+    }
+}
+
 }  // namespace
 
 void launch_fst_suffstat_decode(const std::uint8_t* d_packed, std::size_t bytes_per_record,
@@ -165,6 +224,22 @@ void launch_fst_allpairs_accumulate(const double* d_n, const double* d_ac, const
     const unsigned grid = static_cast<unsigned>(C);
     fst_allpairs_accumulate_kernel<<<grid, static_cast<unsigned>(kFstAccumBlock), 0, stream>>>(
         d_n, d_ac, d_het, P, tm, s_lo, d_include, pair0, C, d_pair_num, d_pair_den, d_pair_cnt);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_fst_windowed_accumulate(const double* d_n, const double* d_ac, const double* d_het,
+                                    long M, int ci, int cj, const long* d_win_lo,
+                                    const long* d_win_hi, long n_win, double* d_out_num,
+                                    double* d_out_den, cudaStream_t stream) {
+    if (n_win <= 0 || M <= 0) return;
+    // ONE BLOCK per window; a grid-stride loop in the kernel drains n_win, so cap grid.x at
+    // kMaxGridX (windows never approach that in practice: genome / step << 2^31). block must be
+    // kFstAccumBlock so the shared-mem tree reduction covers exactly the launched threads.
+    long grid_l = n_win;
+    if (grid_l > static_cast<long>(core::kMaxGridX)) grid_l = static_cast<long>(core::kMaxGridX);
+    const unsigned grid = static_cast<unsigned>(grid_l);
+    fst_windowed_accumulate_kernel<<<grid, static_cast<unsigned>(kFstAccumBlock), 0, stream>>>(
+        d_n, d_ac, d_het, M, ci, cj, d_win_lo, d_win_hi, n_win, d_out_num, d_out_den);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 

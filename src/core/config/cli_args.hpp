@@ -108,6 +108,8 @@ struct CliArgs {
     std::optional<std::string> fst_method;    // wc (Weir-Cockerham 1984; default). hudson is a follow-up.
     std::optional<bool>        fst_per_snp;   // emit the per-SNP FST table (else the summary row)
     std::optional<bool>        fst_all_pairs; // compute the all-pairs (P x P) WC FST matrix
+    std::optional<std::string> fst_windowed;  // bp window "SIZE[:STEP]" -> per-window WC FST scan
+    std::optional<std::string> fst_pbs;       // "A,B,C" -> per-window PBS (Yi 2010); implies --windowed
 
     // `kinship` (KING-robust between-family kinship) controls
     std::optional<bool>        kinship_all_pairs;  // enumerate all C(N,2) pairs (else --pairs)

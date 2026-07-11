@@ -38,4 +38,16 @@ void launch_fst_allpairs_accumulate(const double* d_n, const double* d_ac, const
                                     long long pair0, long long C, double* d_pair_num,
                                     double* d_pair_den, long* d_pair_cnt, cudaStream_t stream);
 
+// Windowed accumulate (`steppe fst --windowed` / `--pbs`): the all-pairs accumulate re-keyed
+// pair -> WINDOW. ONE BLOCK per window w folds the single fixed pop pair (ci, cj) over that
+// window's GLOBAL site slice [d_win_lo[w], d_win_hi[w]) of the ONCE-decoded {n, ac, het} tensor
+// (tm == M, s_lo == 0) through the SHARED wc_finalize, tree-reduces Sigma(valid?num:0) /
+// Sigma(valid?den:0) in shared memory, and WRITES the window totals d_out_num[w] / d_out_den[w]
+// (each window folded once -> plain write, no cross-tile +=). Launched once per pair (1 for
+// --windowed, 3 for --pbs); a grid-stride over windows bounds the launch.
+void launch_fst_windowed_accumulate(const double* d_n, const double* d_ac, const double* d_het,
+                                    long M, int ci, int cj, const long* d_win_lo,
+                                    const long* d_win_hi, long n_win, double* d_out_num,
+                                    double* d_out_den, cudaStream_t stream);
+
 }  // namespace steppe::device

@@ -382,6 +382,82 @@ public:
         return out;
     }
 
+    // fst_wc_windowed: the windowed WC FST parity oracle (`steppe fst --windowed` / `--pbs`). A
+    // host loop calling the SAME wc_accumulate / wc_finalize the GPU kernel uses (native FP64):
+    // for each pop pair and each window it sums num/den over the window's global site slice
+    // [win_lo[w], win_hi[w]), invalid sites contributing 0 (mirroring allel's nansum). No
+    // validity is applied to the slice bounds — they are the searchsorted position count.
+    [[nodiscard]] FstWindowed fst_wc_windowed(
+        const DecodeTileView& tile, std::span<const int> pair_a, std::span<const int> pair_b,
+        std::span<const long> win_lo, std::span<const long> win_hi) override {
+        FstWindowed out;
+        out.precision_tag = Precision::Kind::Fp64;
+
+        const long M = static_cast<long>(tile.n_snp);
+        const int P = tile.n_pop;
+        const int n_pair = static_cast<int>(pair_a.size());
+        const long n_win = static_cast<long>(win_lo.size());
+        out.n_pair = n_pair;
+        out.n_win = n_win;
+        if (M <= 0 || P <= 0 || n_pair <= 0 || n_win <= 0 || pair_b.size() != pair_a.size() ||
+            win_hi.size() != win_lo.size()) {
+            return out;
+        }
+
+        const std::size_t total =
+            static_cast<std::size_t>(n_pair) * static_cast<std::size_t>(n_win);
+        out.win_num.assign(total, 0.0);
+        out.win_den.assign(total, 0.0);
+
+        // Decode the per-(pop, SNP) sufficient statistic {n, ac, het} ONCE (mirrors the device
+        // launch_fst_suffstat_decode), then fold each window's wc_finalize per pair.
+        std::vector<core::WcPerPop> suff(static_cast<std::size_t>(P) * static_cast<std::size_t>(M));
+        for (long s = 0; s < M; ++s) {
+            const std::size_t byte_in_rec =
+                static_cast<std::size_t>(s) / static_cast<std::size_t>(core::kCodesPerByte);
+            const int pos_in_byte = static_cast<int>(s % core::kCodesPerByte);
+            for (int p = 0; p < P; ++p) {
+                const std::size_t g0 = tile.pop_offsets[static_cast<std::size_t>(p)];
+                const std::size_t g1 = tile.pop_offsets[static_cast<std::size_t>(p) + 1];
+                core::WcPerPop acc;
+                for (std::size_t g = g0; g < g1; ++g) {
+                    const std::uint8_t byte =
+                        tile.packed[g * tile.bytes_per_record + byte_in_rec];
+                    core::wc_accumulate(core::genotype_code(byte, pos_in_byte), acc);
+                }
+                suff[static_cast<std::size_t>(p) * static_cast<std::size_t>(M) +
+                     static_cast<std::size_t>(s)] = acc;
+            }
+        }
+
+        for (int pr = 0; pr < n_pair; ++pr) {
+            const int ci = pair_a[pr];
+            const int cj = pair_b[pr];
+            if (ci < 0 || cj < 0 || ci >= P || cj >= P) continue;
+            const std::size_t ti = static_cast<std::size_t>(ci) * static_cast<std::size_t>(M);
+            const std::size_t tj = static_cast<std::size_t>(cj) * static_cast<std::size_t>(M);
+            for (long w = 0; w < n_win; ++w) {
+                const long lo = win_lo[static_cast<std::size_t>(w)];
+                const long hi = win_hi[static_cast<std::size_t>(w)];
+                long double an = 0.0L, ad = 0.0L;
+                for (long s = lo; s < hi; ++s) {
+                    const core::WcSite r = core::wc_finalize(suff[ti + static_cast<std::size_t>(s)],
+                                                             suff[tj + static_cast<std::size_t>(s)]);
+                    if (r.valid) {
+                        an += static_cast<long double>(r.num);
+                        ad += static_cast<long double>(r.den);
+                    }
+                }
+                const std::size_t idx =
+                    static_cast<std::size_t>(pr) * static_cast<std::size_t>(n_win) +
+                    static_cast<std::size_t>(w);
+                out.win_num[idx] = static_cast<double>(an);
+                out.win_den[idx] = static_cast<double>(ad);
+            }
+        }
+        return out;
+    }
+
     // joint_sfs_2pop: the 2D joint site-frequency spectrum parity oracle. A host loop
     // calling the SAME wc_accumulate per-pop fold + sfs_hist.hpp inlines (complete-site
     // test, per-pop fold, mixed-radix cell index) the GPU kernel uses, accumulating into a

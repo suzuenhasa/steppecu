@@ -1,15 +1,18 @@
 // src/app/cmd_fst.cpp
 //
-// The `steppe fst` command — standalone per-SNP Weir & Cockerham 1984 FST over a
-// population pair, computed on the GPU straight from a genotype triple. App-only and
-// CUDA-free: the GPU is reached only through the run_fst seam. Emits a per-SNP TSV/CSV/
-// JSON table (with --per-snp) or the genome-wide summary row.
+// The `steppe fst` command — standalone Weir & Cockerham 1984 FST over a genotype triple,
+// computed on the GPU. App-only and CUDA-free: the GPU is reached only through the run_fst*
+// seams. Surfaces: the genome-wide summary row / per-SNP table (--per-snp) for one pop pair,
+// the all-pairs P x P matrix (--all-pairs), the per-window WC FST selection scan
+// (--windowed SIZE[:STEP], --pops A,B), and the per-window PBS scan (--pbs A,B,C --windowed).
 //
-// v1 SCOPE GUARD: pairwise (2-pop) WC only. --all-pairs / Hudson / windowed / PBS /
-// block-jackknife SE are documented follow-ups.
+// SCOPE: WC (Weir-Cockerham 1984) only; Hudson's estimator and block-jackknife SE are
+// documented follow-ups.
 #include "app/cmd_fst.hpp"
 
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <ostream>
 #include <string>
@@ -130,6 +133,97 @@ void emit_matrix(std::ostream& os, OutputFormat fmt, const steppe::FstMatrixResu
     }
 }
 
+// The per-window WC FST selection scan table (chrom start end n_snp Fst). start/end are the
+// 1-based inclusive bp window edges (== allel windows); Fst is "NA"/null for an empty or
+// all-monomorphic window.
+void emit_windowed(std::ostream& os, OutputFormat fmt, const steppe::FstWindowedResult& r) {
+    const std::size_t W = r.chrom.size();
+    if (fmt == OutputFormat::Json) {
+        os << "[\n";
+        for (std::size_t k = 0; k < W; ++k) {
+            os << "  {\"chrom\": " << r.chrom[k] << ", \"start\": " << r.start[k]
+               << ", \"end\": " << r.end[k] << ", \"n_snp\": " << r.n_snp[k]
+               << ", \"fst\": " << json_double(r.fst[k]) << "}";
+            os << (k + 1 < W ? ",\n" : "\n");
+        }
+        os << "]\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "chrom" << sep << "start" << sep << "end" << sep << "n_snp" << sep << "Fst" << "\n";
+    for (std::size_t k = 0; k < W; ++k) {
+        os << r.chrom[k] << sep << r.start[k] << sep << r.end[k] << sep << r.n_snp[k] << sep
+           << fmt_double(r.fst[k]) << "\n";
+    }
+}
+
+// The per-window PBS scan table (chrom start end n_snp Fst_AB Fst_AC Fst_BC PBS_A PBS_B PBS_C).
+void emit_pbs(std::ostream& os, OutputFormat fmt, const steppe::FstPbsResult& r) {
+    const std::size_t W = r.chrom.size();
+    if (fmt == OutputFormat::Json) {
+        os << "[\n";
+        for (std::size_t k = 0; k < W; ++k) {
+            os << "  {\"chrom\": " << r.chrom[k] << ", \"start\": " << r.start[k]
+               << ", \"end\": " << r.end[k] << ", \"n_snp\": " << r.n_snp[k]
+               << ", \"fst_ab\": " << json_double(r.fst_ab[k])
+               << ", \"fst_ac\": " << json_double(r.fst_ac[k])
+               << ", \"fst_bc\": " << json_double(r.fst_bc[k])
+               << ", \"pbs_a\": " << json_double(r.pbs_a[k])
+               << ", \"pbs_b\": " << json_double(r.pbs_b[k])
+               << ", \"pbs_c\": " << json_double(r.pbs_c[k]) << "}";
+            os << (k + 1 < W ? ",\n" : "\n");
+        }
+        os << "]\n";
+        return;
+    }
+    const char sep = (fmt == OutputFormat::Tsv) ? '\t' : ',';
+    os << "chrom" << sep << "start" << sep << "end" << sep << "n_snp" << sep << "Fst_AB" << sep
+       << "Fst_AC" << sep << "Fst_BC" << sep << "PBS_A" << sep << "PBS_B" << sep << "PBS_C"
+       << "\n";
+    for (std::size_t k = 0; k < W; ++k) {
+        os << r.chrom[k] << sep << r.start[k] << sep << r.end[k] << sep << r.n_snp[k] << sep
+           << fmt_double(r.fst_ab[k]) << sep << fmt_double(r.fst_ac[k]) << sep
+           << fmt_double(r.fst_bc[k]) << sep << fmt_double(r.pbs_a[k]) << sep
+           << fmt_double(r.pbs_b[k]) << sep << fmt_double(r.pbs_c[k]) << "\n";
+    }
+}
+
+// Parse "SIZE[:STEP]" -> (size, step) in bp; step defaults to size (non-overlapping) when
+// ":STEP" is absent, matching allel's step-default-size. Returns false on a malformed spec or a
+// non-positive value.
+bool parse_window_spec(const std::string& s, long& size, long& step) {
+    const std::size_t colon = s.find(':');
+    const std::string sa = (colon == std::string::npos) ? s : s.substr(0, colon);
+    if (sa.empty()) return false;
+    char* end = nullptr;
+    const long sz = std::strtol(sa.c_str(), &end, 10);
+    if (end == sa.c_str() || *end != '\0' || sz <= 0) return false;
+    long st = sz;
+    if (colon != std::string::npos) {
+        const std::string sb = s.substr(colon + 1);
+        if (sb.empty()) return false;
+        end = nullptr;
+        st = std::strtol(sb.c_str(), &end, 10);
+        if (end == sb.c_str() || *end != '\0' || st <= 0) return false;
+    }
+    size = sz;
+    step = st;
+    return true;
+}
+
+// Split "A,B,C" on commas into tokens (no trimming; pop labels carry no commas).
+std::vector<std::string> split_commas(const std::string& s) {
+    std::vector<std::string> out;
+    std::size_t i = 0;
+    for (;;) {
+        const std::size_t c = s.find(',', i);
+        out.push_back(s.substr(i, (c == std::string::npos) ? std::string::npos : c - i));
+        if (c == std::string::npos) break;
+        i = c + 1;
+    }
+    return out;
+}
+
 // The all-pairs matrix path (`steppe fst --all-pairs`). Sits ABOVE the single-pair 2-pop
 // guard so single-pair semantics are unchanged. wc only in v1 (hudson is a follow-up).
 int run_fst_all_pairs_command(const cfg::RunConfig& config) {
@@ -195,6 +289,124 @@ int run_fst_all_pairs_command(const cfg::RunConfig& config) {
     return cfg::exit_code_for(result.status);
 }
 
+// The windowed WC FST / PBS selection-scan path (`steppe fst --windowed SIZE[:STEP]` and
+// `--pbs A,B,C --windowed ...`). Sits ABOVE the single-pair 2-pop guard so the genome-wide /
+// --per-snp / --all-pairs paths are untouched. wc only (hudson is a follow-up).
+int run_fst_windowed_command(const cfg::RunConfig& config) {
+    const std::string& winspec = config.fst_windowed();
+    const std::string& pbsspec = config.fst_pbs();
+
+    // --pbs is a per-window statistic and needs the window spec.
+    if (winspec.empty()) {
+        std::fprintf(stderr,
+                     "steppe fst: --pbs requires --windowed SIZE[:STEP] (PBS is computed per "
+                     "bp window)\n");
+        return cfg::kExitInvalidConfig;
+    }
+    long size = 0, step = 0;
+    if (!parse_window_spec(winspec, size, step)) {
+        std::fprintf(stderr,
+                     "steppe fst: --windowed expects SIZE[:STEP] as positive bp integers; got "
+                     "'%s'\n",
+                     winspec.c_str());
+        return cfg::kExitInvalidConfig;
+    }
+    const std::string method = config.fst_method();
+    if (method != "wc") {
+        std::fprintf(stderr,
+                     "steppe fst: --method '%s' is not available (ships wc = Weir-Cockerham "
+                     "1984; hudson is a follow-up)\n",
+                     method.c_str());
+        return cfg::kExitInvalidConfig;
+    }
+
+    const std::string& prefix = config.qpdstat_prefix();
+    const io::GenotypeTriple triple = io::resolve_genotype_triple(prefix);
+
+    // --pbs A,B,C: three pops, per-window PBS table.
+    if (!pbsspec.empty()) {
+        const std::vector<std::string> pops = split_commas(pbsspec);
+        if (pops.size() != 3 || pops[0].empty() || pops[1].empty() || pops[2].empty() ||
+            pops[0] == pops[1] || pops[0] == pops[2] || pops[1] == pops[2]) {
+            std::fprintf(stderr,
+                         "steppe fst: --pbs must name EXACTLY three DIFFERENT populations A,B,C\n");
+            return cfg::kExitInvalidConfig;
+        }
+        steppe::FstPbsResult result;
+        try {
+            device::Resources resources = device::build_resources(config.device());
+            if (!require_first_gpu(resources, "fst")) return cfg::kExitRuntimeError;
+            result = run_fst_pbs(triple.geno, triple.snp, triple.ind, pops[0], pops[1], pops[2],
+                                 size, step, resources, config.filter());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "steppe fst: input/device error: %s\n", e.what());
+            return exit_code_for_caught(e);
+        }
+        if (result.status != Status::Ok) {
+            std::fprintf(stderr,
+                         "steppe fst --pbs: %s (check the three --pbs labels exist in the .ind)\n",
+                         status_text(result.status));
+            return cfg::exit_code_for(result.status);
+        }
+        std::fprintf(stderr,
+                     "steppe fst --pbs: %s,%s,%s -> %zu bp windows (%ld:%ld, WC per-window PBS)\n",
+                     result.popA.c_str(), result.popB.c_str(), result.popC.c_str(),
+                     result.chrom.size(), size, step);
+        if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "fst")) {
+            return cfg::kExitIoError;
+        }
+        if (const auto rc = emit_to_destination(
+                config, "fst",
+                [&](std::ostream& os, OutputFormat fmt) { emit_pbs(os, fmt, result); })) {
+            return *rc;
+        }
+        return cfg::exit_code_for(result.status);
+    }
+
+    // --windowed alone: one pop pair from --pops A,B.
+    const std::vector<std::string>& pops = config.pops();
+    if (pops.size() != 2) {
+        std::fprintf(stderr,
+                     "steppe fst --windowed: --pops must name EXACTLY two populations A,B; got "
+                     "%zu\n",
+                     pops.size());
+        return cfg::kExitInvalidConfig;
+    }
+    if (pops[0] == pops[1]) {
+        std::fprintf(stderr, "steppe fst: --pops A,B must name two DIFFERENT populations\n");
+        return cfg::kExitInvalidConfig;
+    }
+    steppe::FstWindowedResult result;
+    try {
+        device::Resources resources = device::build_resources(config.device());
+        if (!require_first_gpu(resources, "fst")) return cfg::kExitRuntimeError;
+        result = run_fst_windowed(triple.geno, triple.snp, triple.ind, pops[0], pops[1], size,
+                                  step, resources, config.filter());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "steppe fst: input/device error: %s\n", e.what());
+        return exit_code_for_caught(e);
+    }
+    if (result.status != Status::Ok) {
+        std::fprintf(stderr,
+                     "steppe fst --windowed: %s (check the two --pops labels exist in the .ind)\n",
+                     status_text(result.status));
+        return cfg::exit_code_for(result.status);
+    }
+    std::fprintf(stderr,
+                 "steppe fst --windowed: %s vs %s -> %zu bp windows (%ld:%ld, WC "
+                 "ratio-of-averages per window)\n",
+                 result.popA.c_str(), result.popB.c_str(), result.chrom.size(), size, step);
+    if (!write_kept_snps(config.emit_kept_snps(), result.kept_snp_ids, "fst")) {
+        return cfg::kExitIoError;
+    }
+    if (const auto rc = emit_to_destination(
+            config, "fst",
+            [&](std::ostream& os, OutputFormat fmt) { emit_windowed(os, fmt, result); })) {
+        return *rc;
+    }
+    return cfg::exit_code_for(result.status);
+}
+
 }  // namespace
 
 int run_fst_command(const cfg::RunConfig& config) {
@@ -205,6 +417,11 @@ int run_fst_command(const cfg::RunConfig& config) {
     }
     if (config.fst_all_pairs()) {
         return run_fst_all_pairs_command(config);
+    }
+    // Windowed WC FST / PBS selection scan — additive branch ABOVE the single-pair 2-pop guard;
+    // the genome-wide / --per-snp path below is untouched.
+    if (!config.fst_windowed().empty() || !config.fst_pbs().empty()) {
+        return run_fst_windowed_command(config);
     }
     const std::vector<std::string>& pops = config.pops();
     if (pops.size() != 2) {

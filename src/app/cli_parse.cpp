@@ -416,6 +416,12 @@ int run_cli(int argc, char** argv) {
             s->add_flag("--per-snp", a.fst_per_snp,
                         "Emit the per-SNP FST table (snp_id/chrom/pos/a1/a2/num/den/fst/valid); "
                         "default emits the genome-wide summary row");
+            s->add_option("--windowed", a.fst_windowed,
+                          "bp window SIZE[:STEP] -> per-window WC FST selection scan "
+                          "(chrom,start,end,n_snp,Fst; STEP defaults to SIZE); --pops A,B");
+            s->add_option("--pbs", a.fst_pbs,
+                          "3 pops A,B,C -> per-window PBS selection scan (Yi 2010); requires "
+                          "--windowed (takes its 3 pops from here)");
             add_filter_flags(s, a);
             add_output_flags(s, a);
             add_common_flags(s, a);

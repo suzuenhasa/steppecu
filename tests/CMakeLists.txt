@@ -388,6 +388,17 @@ target_link_libraries(test_fst_all_pairs
     PRIVATE steppe::core_internal steppe::api steppe::warnings)
 steppe_add_test(NAME fst_all_pairs_unit COMMAND test_fst_all_pairs LABELS "unit")
 
+# --- Host-only unit test of the `steppe fst --windowed` / `--pbs` bp-window layout ----------
+# Pure C++ TU (no CUDA, no data): pins core/stats/bp_windows.hpp against scikit-allel's window
+# semantics (position_windows end-window clip + 1-based inclusive edges, windowed_statistic
+# searchsorted counts, overlapping windows, chromosome-reset, empty single-position range) —
+# window-edge alignment is the primary parity risk vs allel.windowed_weir_cockerham_fst.
+add_executable(test_fst_windows unit/test_fst_windows.cpp)
+target_include_directories(test_fst_windows PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_fst_windows
+    PRIVATE steppe::core_internal steppe::api steppe::warnings)
+steppe_add_test(NAME fst_windows_unit COMMAND test_fst_windows LABELS "unit")
+
 # --- Host-only unit test of the shared 2D joint-SFS histogram primitive -------
 # Pure C++ TU (no CUDA, no data): pins the __host__ __device__ SFS cell math in
 # core/internal/sfs_hist.hpp (sfs_site_complete / sfs_axis_extent / sfs_axis_index /

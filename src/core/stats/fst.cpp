@@ -14,11 +14,13 @@
 #include <cstddef>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/internal/decode_af.hpp"
 #include "core/internal/primary_backend.hpp"
 #include "core/stats/apply_snp_filter.hpp"
+#include "core/stats/bp_windows.hpp"
 #include "core/stats/decode_keep_autosomes.hpp"
 #include "core/stats/genotype_front_end.hpp"
 #include "device/backend.hpp"
@@ -27,6 +29,88 @@
 #include "io/snp_reader.hpp"
 
 namespace steppe {
+
+namespace {
+
+// The Yi et al. 2010 branch length T = -ln(1 - Fst), with Fst clamped to [0, 1) so T is finite
+// (Fst < 0 -> 0; Fst >= 1 -> just below 1). A NaN pairwise Fst (empty / monomorphic window)
+// propagates to a NaN T (matching the hand oracle np.clip(fst, 0, 1-1e-15) then -log(1-.)).
+[[nodiscard]] double pbs_branch_T(double fst) noexcept {
+    if (std::isnan(fst)) return std::nan("");
+    double f = fst;
+    if (f < 0.0) f = 0.0;
+    const double hi = 1.0 - 1e-15;
+    if (f > hi) f = hi;
+    return -std::log(1.0 - f);
+}
+
+// Shared windowed-fold front-end for run_fst_windowed / run_fst_pbs: read the triple keeping the
+// requested distinct pops `want` (via the shared genotype front-end), apply the QC filter, build
+// the per-chromosome bp windows (allel-exact), resolve each pop label to its tile index, and run
+// the GPU window fold for `pairs_in_want` (pairs expressed as indices into `want`). On success it
+// fills `windows`, `kept_ids`, and the backend `fold` result and returns Status::Ok.
+[[nodiscard]] Status run_windowed_fold(const std::string& geno, const std::string& snp,
+                                       const std::string& ind, std::span<const std::string> want,
+                                       const std::vector<std::pair<int, int>>& pairs_in_want,
+                                       long win_size, long win_step, device::Resources& resources,
+                                       const FilterConfig& filter,
+                                       std::vector<core::BpWindow>& windows,
+                                       std::vector<std::string>& kept_ids, FstWindowed& fold) {
+    ComputeBackend& be = device::primary_backend(resources);
+
+    core::GenotypeFrontEnd fe = core::read_genotype_front_end(geno, snp, ind, want, be);
+    const core::SnpFilterOutcome flt = core::apply_snp_filter(fe.tile, fe.snptab, filter, be);
+    kept_ids = flt.kept_ids;
+    const io::GenotypeTile& tile = fe.tile;
+    const io::SnpTable& snptab = fe.snptab;
+
+    const int P = static_cast<int>(tile.n_pop());
+    const long M = static_cast<long>(tile.n_snp);
+    if (P < static_cast<int>(want.size()) || M <= 0) return Status::InvalidConfig;
+
+    // Resolve each requested label to its tile pop index (order-independent; the front-end may
+    // reorder the requested pops in the tile).
+    std::vector<int> idx(want.size(), -1);
+    for (std::size_t p = 0; p < tile.pop_labels.size(); ++p) {
+        for (std::size_t w = 0; w < want.size(); ++w) {
+            if (tile.pop_labels[p] == want[w]) idx[w] = static_cast<int>(p);
+        }
+    }
+    for (const int v : idx) {
+        if (v < 0) return Status::InvalidConfig;
+    }
+
+    std::vector<int> pair_a, pair_b;
+    pair_a.reserve(pairs_in_want.size());
+    pair_b.reserve(pairs_in_want.size());
+    for (const auto& pr : pairs_in_want) {
+        pair_a.push_back(idx[static_cast<std::size_t>(pr.first)]);
+        pair_b.push_back(idx[static_cast<std::size_t>(pr.second)]);
+    }
+
+    // Per-chromosome bp windows from the kept SNP coordinates (chromosome-reset, allel-exact).
+    windows = core::build_bp_windows(std::span<const int>(snptab.chrom.data(), snptab.chrom.size()),
+                                     std::span<const double>(snptab.physpos.data(),
+                                                             snptab.physpos.size()),
+                                     win_size, win_step);
+    std::vector<long> win_lo, win_hi;
+    win_lo.reserve(windows.size());
+    win_hi.reserve(windows.size());
+    for (const core::BpWindow& w : windows) {
+        win_lo.push_back(w.lo);
+        win_hi.push_back(w.hi);
+    }
+
+    // Force diploid (the WC accumulator reads each code as a diploid dosage; the ploidy vector
+    // only sizes the view). Then the GPU window fold over the decoded sufficient statistic.
+    const std::vector<int> sample_ploidy(tile.n_individuals, core::kPloidyDiploid);
+    const DecodeTileView view = core::make_decode_tile_view(tile, sample_ploidy, P);
+    fold = be.fst_wc_windowed(view, std::span<const int>(pair_a), std::span<const int>(pair_b),
+                              std::span<const long>(win_lo), std::span<const long>(win_hi));
+    return Status::Ok;
+}
+
+}  // namespace
 
 FstResult run_fst(const std::string& geno, const std::string& snp, const std::string& ind,
                   const std::string& popA, const std::string& popB,
@@ -212,6 +296,124 @@ FstMatrixResult run_fst_all_pairs(const std::string& geno, const std::string& sn
     }
 
     res.status = Status::Ok;
+    return res;
+}
+
+FstWindowedResult run_fst_windowed(const std::string& geno, const std::string& snp,
+                                   const std::string& ind, const std::string& popA,
+                                   const std::string& popB, long win_size, long win_step,
+                                   device::Resources& resources, const FilterConfig& filter) {
+    FstWindowedResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+    res.popA = popA;
+    res.popB = popB;
+    if (popA == popB || win_size <= 0 || win_step <= 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    const std::vector<std::string> want{popA, popB};
+    const std::vector<std::pair<int, int>> pairs{{0, 1}};  // (A, B)
+    std::vector<core::BpWindow> windows;
+    FstWindowed fold;
+    res.status = run_windowed_fold(geno, snp, ind, std::span<const std::string>(want), pairs,
+                                   win_size, win_step, resources, filter, windows,
+                                   res.kept_snp_ids, fold);
+    if (res.status != Status::Ok) return res;
+    res.precision_tag = fold.precision_tag;
+
+    const std::size_t W = windows.size();
+    res.chrom.resize(W);
+    res.start.resize(W);
+    res.end.resize(W);
+    res.n_snp.resize(W);
+    res.num.resize(W);
+    res.den.resize(W);
+    res.fst.resize(W);
+    for (std::size_t k = 0; k < W; ++k) {
+        res.chrom[k] = windows[k].chrom;
+        res.start[k] = windows[k].start;
+        res.end[k] = windows[k].end;
+        const long n = windows[k].hi - windows[k].lo;
+        res.n_snp[k] = n;
+        const double num = fold.win_num[k];
+        const double den = fold.win_den[k];
+        res.num[k] = num;
+        res.den[k] = den;
+        // Ratio of averages; NaN for an empty window (n == 0) or an all-monomorphic window
+        // (Σden == 0), mirroring allel's nansum(a)/(nansum(a)+nansum(b)+nansum(c)) = 0/0.
+        res.fst[k] = (n > 0 && den != 0.0) ? (num / den) : std::nan("");
+    }
+    return res;
+}
+
+FstPbsResult run_fst_pbs(const std::string& geno, const std::string& snp, const std::string& ind,
+                         const std::string& popA, const std::string& popB, const std::string& popC,
+                         long win_size, long win_step, device::Resources& resources,
+                         const FilterConfig& filter) {
+    FstPbsResult res;
+    res.precision_tag = Precision::Kind::Fp64;
+    res.popA = popA;
+    res.popB = popB;
+    res.popC = popC;
+    if (popA == popB || popA == popC || popB == popC || win_size <= 0 || win_step <= 0) {
+        res.status = Status::InvalidConfig;
+        return res;
+    }
+
+    const std::vector<std::string> want{popA, popB, popC};
+    // Pairs (as indices into want): 0=AB, 1=AC, 2=BC.
+    const std::vector<std::pair<int, int>> pairs{{0, 1}, {0, 2}, {1, 2}};
+    std::vector<core::BpWindow> windows;
+    FstWindowed fold;
+    res.status = run_windowed_fold(geno, snp, ind, std::span<const std::string>(want), pairs,
+                                   win_size, win_step, resources, filter, windows,
+                                   res.kept_snp_ids, fold);
+    if (res.status != Status::Ok) return res;
+    res.precision_tag = fold.precision_tag;
+
+    const std::size_t W = windows.size();
+    const long n_win = fold.n_win;
+    res.chrom.resize(W);
+    res.start.resize(W);
+    res.end.resize(W);
+    res.n_snp.resize(W);
+    res.fst_ab.resize(W);
+    res.fst_ac.resize(W);
+    res.fst_bc.resize(W);
+    res.pbs_a.resize(W);
+    res.pbs_b.resize(W);
+    res.pbs_c.resize(W);
+    for (std::size_t k = 0; k < W; ++k) {
+        res.chrom[k] = windows[k].chrom;
+        res.start[k] = windows[k].start;
+        res.end[k] = windows[k].end;
+        const long n = windows[k].hi - windows[k].lo;
+        res.n_snp[k] = n;
+
+        const std::size_t kab = 0 * static_cast<std::size_t>(n_win) + k;
+        const std::size_t kac = 1 * static_cast<std::size_t>(n_win) + k;
+        const std::size_t kbc = 2 * static_cast<std::size_t>(n_win) + k;
+        const double f_ab = (n > 0 && fold.win_den[kab] != 0.0)
+                                ? (fold.win_num[kab] / fold.win_den[kab])
+                                : std::nan("");
+        const double f_ac = (n > 0 && fold.win_den[kac] != 0.0)
+                                ? (fold.win_num[kac] / fold.win_den[kac])
+                                : std::nan("");
+        const double f_bc = (n > 0 && fold.win_den[kbc] != 0.0)
+                                ? (fold.win_num[kbc] / fold.win_den[kbc])
+                                : std::nan("");
+        res.fst_ab[k] = f_ab;
+        res.fst_ac[k] = f_ac;
+        res.fst_bc[k] = f_bc;
+
+        const double t_ab = pbs_branch_T(f_ab);
+        const double t_ac = pbs_branch_T(f_ac);
+        const double t_bc = pbs_branch_T(f_bc);
+        res.pbs_a[k] = 0.5 * (t_ab + t_ac - t_bc);
+        res.pbs_b[k] = 0.5 * (t_ab + t_bc - t_ac);
+        res.pbs_c[k] = 0.5 * (t_ac + t_bc - t_ab);
+    }
     return res;
 }
 

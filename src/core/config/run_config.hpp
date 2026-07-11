@@ -90,6 +90,10 @@ public:
     [[nodiscard]] const std::string& fst_method() const noexcept { return fst_method_; }
     [[nodiscard]] bool fst_per_snp()             const noexcept { return fst_per_snp_; }
     [[nodiscard]] bool fst_all_pairs()           const noexcept { return fst_all_pairs_; }
+    // Windowed WC FST scan: "SIZE[:STEP]" bp windows (empty = inactive).
+    [[nodiscard]] const std::string& fst_windowed() const noexcept { return fst_windowed_; }
+    // PBS scan: "A,B,C" three pops (empty = inactive; implies --windowed).
+    [[nodiscard]] const std::string& fst_pbs()      const noexcept { return fst_pbs_; }
 
     // `kinship` (KING-robust between-family kinship) controls
     [[nodiscard]] bool kinship_all_pairs()       const noexcept { return kinship_all_pairs_; }
@@ -190,6 +194,8 @@ private:
     std::string fst_method_ = "wc";
     bool fst_per_snp_ = false;
     bool fst_all_pairs_ = false;
+    std::string fst_windowed_;
+    std::string fst_pbs_;
     bool kinship_all_pairs_ = false;
     std::string pairs_file_;
     double min_kinship_ = -std::numeric_limits<double>::infinity();

@@ -225,6 +225,8 @@ ConfigBuilder& ConfigBuilder::merge_cli(const CliArgs& args) {
     take(merged_.fst_method, args.fst_method);
     take_b(merged_.fst_per_snp, args.fst_per_snp);
     take_b(merged_.fst_all_pairs, args.fst_all_pairs);
+    take(merged_.fst_windowed, args.fst_windowed);
+    take(merged_.fst_pbs, args.fst_pbs);
     take_b(merged_.kinship_all_pairs, args.kinship_all_pairs);
     take(merged_.pairs, args.pairs);
     take_d(merged_.min_kinship, args.min_kinship);
@@ -627,6 +629,8 @@ BuildResult<RunConfig> ConfigBuilder::build() {
     }
     if (merged_.fst_per_snp) cfg.fst_per_snp_ = *merged_.fst_per_snp;
     if (merged_.fst_all_pairs) cfg.fst_all_pairs_ = *merged_.fst_all_pairs;
+    if (merged_.fst_windowed) cfg.fst_windowed_ = *merged_.fst_windowed;
+    if (merged_.fst_pbs) cfg.fst_pbs_ = *merged_.fst_pbs;
     if (merged_.kinship_all_pairs) cfg.kinship_all_pairs_ = *merged_.kinship_all_pairs;
     if (merged_.pairs) cfg.pairs_file_ = *merged_.pairs;
     if (merged_.min_kinship) cfg.min_kinship_ = *merged_.min_kinship;
