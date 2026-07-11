@@ -81,7 +81,7 @@ data was the popgen.dk PCAngsd tutorial **Demo2**: **100 low-coverage samples ×
 Results:
 
 - Beagle decode **600,000 / 600,000 GL values bit-exact** vs an independent read.
-- Covariance **Frobenius relative-error 3.1e-4**.
+- Covariance **Frobenius relative-error ~5e-7**.
 - PCA **PC1 and PC2 sign-aligned |Pearson r| = 1.000000**.
 - Individual allele frequencies **r = 0.99999948**.
 
@@ -176,7 +176,7 @@ pull ahead, but no such head-to-head was run.
 ## 6. Honest caveats
 
 - **Concordance, not bit-exact.** steppe is native FP64 + plain EM; pcangsd is
-  float32 + SQUAREM. They hit the same fixed point (covariance Frobenius 3.1e-4,
+  float32 + SQUAREM. They hit the same fixed point (covariance Frobenius ~5e-7,
   PC |r| = 1.000000, IAF r = 0.99999948), but the numbers are not identical to the
   last bit — by design.
 - **On this tiny demo the reference is faster.** See §5. steppe's plain unaccelerated
