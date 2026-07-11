@@ -99,6 +99,9 @@ public:
 
     [[nodiscard]] DecodeResult decode_af(const DecodeTileView& tile) override;
 
+    [[nodiscard]] std::vector<steppe::io::filter::PerSnpSummary> decode_af_pooled_summary(
+        const DecodeTileView& tile, double ploidy_d, double total_indiv_d) override;
+
     [[nodiscard]] std::vector<int> detect_sample_ploidy_device(
         const DecodeTileView& tile) override;
 

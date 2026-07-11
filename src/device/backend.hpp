@@ -24,6 +24,7 @@
 #include "steppe/qpadm.hpp"
 #include "core/internal/views.hpp"
 #include "core/internal/decode_af.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "device/device_partial.hpp"
 #include "device/device_f2_blocks.hpp"
 #include "device/device_decode_result.hpp"
@@ -704,6 +705,33 @@ public:
     }
 
     [[nodiscard]] virtual DecodeResult decode_af(const DecodeTileView& tile) = 0;
+
+    // Pooled-per-SNP QC summary for the shared apply_snp_filter seam. Returns one
+    // PerSnpSummary per SNP (length tile.n_snp) reduced across the tile's P populations
+    // with the SHARED derive_pooled_summary_one (p = 0..P-1 order, FMA-safe). The CUDA
+    // backend overrides this to run the reduction on-device and D2H only the 4*M summary
+    // planes — instead of the 3*P*M host doubles decode_af materializes — which is what
+    // removes the singleton-P (KING/kinship, P == N) single-core decode wall. This host
+    // default (decode_af + the host reduction) is BIT-FOR-BIT identical to the override
+    // by construction of the STEPPE_HD reduction, so the CPU oracle path is unchanged.
+    [[nodiscard]] virtual std::vector<io::filter::PerSnpSummary> decode_af_pooled_summary(
+        const DecodeTileView& tile, double ploidy_d, double total_indiv_d) {
+        const DecodeResult dec = decode_af(tile);
+        const int P = dec.P;
+        const long M = dec.M;
+        std::vector<io::filter::PerSnpSummary> summary(
+            static_cast<std::size_t>(M < 0 ? 0 : M));
+        for (long s = 0; s < M; ++s) {
+            const io::filter::PooledSnpSummary ps = io::filter::derive_pooled_summary_one(
+                dec.q.data(), dec.n.data(), P, s, ploidy_d, total_indiv_d);
+            io::filter::PerSnpSummary& sm = summary[static_cast<std::size_t>(s)];
+            sm.pooled_ref_af = ps.pooled_ref_af;
+            sm.pooled_minor_af = ps.pooled_minor_af;
+            sm.missing_frac = ps.missing_frac;
+            sm.pooled_allele_count = ps.pooled_allele_count;
+        }
+        return summary;
+    }
 
     [[nodiscard]] virtual std::vector<int> detect_sample_ploidy_device(
         const DecodeTileView& tile) {

@@ -14,6 +14,7 @@
 
 #include "core/internal/host_device.hpp"
 #include "core/internal/nvtx.hpp"
+#include "io/filter/snp_filter.hpp"
 #include "device/cuda/cuda_backend.cuh"
 #include "device/cuda/check.cuh"
 #include "device/cuda/decode_af_kernel.cuh"
@@ -90,6 +91,51 @@ DecodeResult CudaBackend::decode_af(const DecodeTileView& tile) {
     d2h_async(out.n.data(), dN, pm, stream_.get());
     STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
     return out;
+}
+
+// Device-resident pooled-per-SNP QC summary — reference §5b.
+// Decodes the tile to resident Q/N (never copied back), reduces each SNP across the P
+// populations ON THE DEVICE with the shared derive_pooled_summary_one, and D2Hs only the
+// four O(M) summary planes. Host traffic drops from 3*P*M doubles (decode_af) to 4*M — a
+// P-fold cut that erases the singleton-P (KING/kinship, P == N) single-core decode wall.
+// Bit-for-bit identical to the decode_af + host-reduction default: same resident Q/N bits,
+// same STEPPE_HD reduction (p = 0..P-1 order, FMA-safe pooled_ref_fma).
+std::vector<steppe::io::filter::PerSnpSummary> CudaBackend::decode_af_pooled_summary(
+    const DecodeTileView& tile, double ploidy_d, double total_indiv_d) {
+    guard_device();
+    STEPPE_NVTX_RANGE("decode_summary");
+    const int P = tile.n_pop;
+    const long M = static_cast<long>(tile.n_snp);
+    std::vector<steppe::io::filter::PerSnpSummary> summary(
+        static_cast<std::size_t>(M < 0 ? 0 : M));
+    if (P <= 0 || M <= 0) return summary;
+
+    const std::size_t pm =
+        static_cast<std::size_t>(P) * static_cast<std::size_t>(M);
+    const std::size_t Mz = static_cast<std::size_t>(M);
+    DeviceBuffer<double> dQ(pm), dV(pm), dN(pm);
+    decode_af_resident(tile, P, M, dQ, dV, dN);
+
+    DeviceBuffer<double> dRefAf(Mz), dMinorAf(Mz), dMissing(Mz), dAlleleCount(Mz);
+    launch_pooled_summary(dQ.data(), dN.data(), P, M, ploidy_d, total_indiv_d,
+                          dRefAf.data(), dMinorAf.data(), dMissing.data(),
+                          dAlleleCount.data(), stream_.get());
+
+    std::vector<double> ref_af(Mz), minor_af(Mz), missing(Mz), allele_count(Mz);
+    d2h_async(ref_af.data(), dRefAf, Mz, stream_.get());
+    d2h_async(minor_af.data(), dMinorAf, Mz, stream_.get());
+    d2h_async(missing.data(), dMissing, Mz, stream_.get());
+    d2h_async(allele_count.data(), dAlleleCount, Mz, stream_.get());
+    STEPPE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    for (std::size_t s = 0; s < Mz; ++s) {
+        steppe::io::filter::PerSnpSummary& sm = summary[s];
+        sm.pooled_ref_af = ref_af[s];
+        sm.pooled_minor_af = minor_af[s];
+        sm.missing_frac = missing[s];
+        sm.pooled_allele_count = allele_count[s];
+    }
+    return summary;
 }
 
 // Standalone on-device per-sample ploidy detection — reference §6

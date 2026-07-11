@@ -35,5 +35,15 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                                    const long* d_keep_idx, double* d_out,
                                    cudaStream_t stream);
 
+// Device-resident pooled-per-SNP summary reduction — reference §7.
+// Runs derive_pooled_summary_one over the resident [P×M] Q/N (the SHARED STEPPE_HD
+// reduction, so it is bit-for-bit identical to the host loop) and writes the four
+// O(M) summary planes, so the caller D2Hs 4*M doubles instead of 3*P*M. This is the
+// device lever that removes the singleton-P (KING/kinship) host-decode wall.
+void launch_pooled_summary(const double* d_Q, const double* d_N, int P, long M,
+                           double ploidy_d, double total_indiv_d,
+                           double* d_ref_af, double* d_minor_af, double* d_missing,
+                           double* d_allele_count, cudaStream_t stream);
+
 }  // namespace steppe::device
 #endif  // STEPPE_DEVICE_CUDA_DECODE_COMPACT_KERNEL_CUH

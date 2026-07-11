@@ -5,8 +5,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/internal/decode_af.hpp"          // genotype_code, kCodesPerByte, kPloidyDiploid
@@ -22,6 +25,60 @@ namespace core {
 namespace {
 
 namespace flt = steppe::io::filter;
+
+// Final host-worker count for an n-item loop behind STEPPE_IO_THREADS (mirrors
+// STEPPE_ROH_THREADS / STEPPE_VCF_THREADS): a positive integer pins the pool (=1 forces the
+// fully-serial reference path, the byte-exact invariance gate); unset/invalid ->
+// hardware_concurrency (0 -> 1). Always clamped to [1, n], so a small loop never over-spawns.
+[[nodiscard]] std::size_t io_thread_count(std::size_t n) {
+    if (n == 0) return 0;
+    std::size_t req = 0;
+    const char* e = std::getenv("STEPPE_IO_THREADS");
+    if (e != nullptr && *e != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 1) req = static_cast<std::size_t>(v);
+    }
+    if (req == 0) {
+        const unsigned hw = std::thread::hardware_concurrency();
+        req = (hw == 0) ? std::size_t{1} : static_cast<std::size_t>(hw);
+    }
+    return std::max<std::size_t>(std::size_t{1}, std::min<std::size_t>(req, n));
+}
+
+// Partition [0, n) into T = io_thread_count(n) contiguous blocks and run fn(begin, end) on one
+// std::thread per non-empty block, then join. T==1 runs fn inline (no spawn) — the serial path.
+// Mirrors parallel_blocks_roh EXACTLY: each worker body is wrapped so a throw crossing the
+// std::thread boundary is captured as an exception_ptr and rethrown AFTER join (an uncaught throw
+// across a thread boundary would std::terminate). Callers write only their OWN disjoint output
+// slice, so the concurrent fill is order-independent and byte-identical to the serial fill.
+template <typename Fn>
+void parallel_io_blocks(std::size_t n, Fn&& fn) {
+    const std::size_t T = io_thread_count(n);
+    if (T <= 1) {
+        if (n > 0) fn(std::size_t{0}, n);
+        return;
+    }
+    const std::size_t block = (n + T - 1) / T;  // ceil, so T blocks cover [0, n)
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    std::vector<std::exception_ptr> errs(T);
+    for (std::size_t b = 0; b < T; ++b) {
+        const std::size_t begin = b * block;
+        if (begin >= n) break;  // ceil rounding can leave trailing blocks empty
+        const std::size_t end = std::min(n, begin + block);
+        threads.emplace_back([&fn, &errs, begin, end, b]() {
+            try {
+                fn(begin, end);
+            } catch (...) {
+                errs[b] = std::current_exception();
+            }
+        });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& err : errs)
+        if (err) std::rethrow_exception(err);
+}
 
 // Choose a SNP-tile width (a multiple of kCodesPerByte, so each tile start stays byte-aligned
 // in the packed 2-bit tile) that bounds the streamed per-pop decode's transient — 3 arrays
@@ -99,15 +156,18 @@ std::vector<bool> build_keep_mask(const io::GenotypeTile& tile, const io::SnpTab
             sub.packed = view.packed +
                          static_cast<std::size_t>(s_lo) / static_cast<std::size_t>(kCodesPerByte);
             sub.n_snp = static_cast<std::size_t>(tm);
-            const DecodeResult dec = backend.decode_af(sub);
+            // Device-resident pooled reduction: the backend reduces each SNP across the P
+            // populations on the GPU and returns only the O(tm) per-SNP summary, so the
+            // 3*P*tm host doubles decode_af would copy back (3*P*M over the whole axis — the
+            // ~681 GB / 170M-page-fault wall for singleton-P KING/kinship) never leave the
+            // device. Bit-identical to decoding then pooling on the host: the CUDA override
+            // and the host default both run the same STEPPE_HD derive_pooled_summary_one in
+            // the same p = 0..P-1 order over the same Q/N bits.
+            const std::vector<flt::PerSnpSummary> tile_summary =
+                backend.decode_af_pooled_summary(sub, ploidy_d, total_indiv_d);
             for (long j = 0; j < tm; ++j) {
-                const flt::PooledSnpSummary ps = flt::derive_pooled_summary_one(
-                    dec.q.data(), dec.n.data(), P, j, ploidy_d, total_indiv_d);
-                flt::PerSnpSummary& sm = summary[static_cast<std::size_t>(s_lo + j)];
-                sm.pooled_ref_af = ps.pooled_ref_af;
-                sm.pooled_minor_af = ps.pooled_minor_af;
-                sm.missing_frac = ps.missing_frac;
-                sm.pooled_allele_count = ps.pooled_allele_count;
+                summary[static_cast<std::size_t>(s_lo + j)] =
+                    tile_summary[static_cast<std::size_t>(j)];
             }
         }
 
@@ -147,21 +207,27 @@ void repack_tile_columns(io::GenotypeTile& tile, const std::vector<long>& kept_c
     const std::size_t newbpr =
         (n_kept + static_cast<std::size_t>(kCodesPerByte) - 1) / static_cast<std::size_t>(kCodesPerByte);
 
+    // The repack is O(N * n_kept) — the residual single-core host cost after the decode wall
+    // moves on-device — and each individual row writes only its OWN disjoint newbpr-byte slice
+    // of `out`, so it parallelizes across the cores behind STEPPE_IO_THREADS with no result
+    // change (=1 runs the serial reference fill; =N splits the N rows across workers).
     std::vector<std::uint8_t> out(N * newbpr, 0);
-    for (std::size_t r = 0; r < N; ++r) {
-        const std::uint8_t* rec = tile.packed.data() + r * oldbpr;
-        std::uint8_t* orec = out.data() + r * newbpr;
-        for (std::size_t j = 0; j < n_kept; ++j) {
-            const long s = kept_cols[j];
-            const std::uint8_t code =
-                genotype_code(rec[static_cast<std::size_t>(s) / kCodesPerByte], static_cast<int>(s));
-            const int shift =
-                (kCodesPerByte - 1 - static_cast<int>(j % static_cast<std::size_t>(kCodesPerByte))) *
-                kBitsPerCode;
-            orec[j / static_cast<std::size_t>(kCodesPerByte)] |=
-                static_cast<std::uint8_t>((code & kCodeMask) << shift);
+    parallel_io_blocks(N, [&](std::size_t r0, std::size_t r1) {
+        for (std::size_t r = r0; r < r1; ++r) {
+            const std::uint8_t* rec = tile.packed.data() + r * oldbpr;
+            std::uint8_t* orec = out.data() + r * newbpr;
+            for (std::size_t j = 0; j < n_kept; ++j) {
+                const long s = kept_cols[j];
+                const std::uint8_t code =
+                    genotype_code(rec[static_cast<std::size_t>(s) / kCodesPerByte], static_cast<int>(s));
+                const int shift =
+                    (kCodesPerByte - 1 - static_cast<int>(j % static_cast<std::size_t>(kCodesPerByte))) *
+                    kBitsPerCode;
+                orec[j / static_cast<std::size_t>(kCodesPerByte)] |=
+                    static_cast<std::uint8_t>((code & kCodeMask) << shift);
+            }
         }
-    }
+    });
     tile.packed = std::move(out);
     tile.bytes_per_record = newbpr;
     tile.n_snp = n_kept;

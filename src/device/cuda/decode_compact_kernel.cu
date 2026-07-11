@@ -66,6 +66,29 @@ __global__ void regimeb_keep_mask_kernel(const double* __restrict__ Q,
     flags[s] = keep ? std::uint8_t{1} : std::uint8_t{0};
 }
 
+// Pooled-per-SNP summary reduction — reference §7.
+// One thread per SNP calls the SHARED derive_pooled_summary_one over the resident
+// [P×M] Q/N; the reduction runs the exact p = 0..P-1 order + the FMA-safe
+// pooled_ref_fma intrinsics of the host path, so the four written planes are
+// bit-for-bit identical to the host reduction over the same (D2H-copied) Q/N bits.
+__global__ void pooled_summary_kernel(const double* __restrict__ Q,
+                                      const double* __restrict__ N, int P, long M,
+                                      double ploidy_d, double total_indiv_d,
+                                      double* __restrict__ ref_af,
+                                      double* __restrict__ minor_af,
+                                      double* __restrict__ missing,
+                                      double* __restrict__ allele_count) {
+    const long s = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (s >= M) return;
+    const steppe::io::filter::PooledSnpSummary ps =
+        steppe::io::filter::derive_pooled_summary_one(Q, N, P, s, ploidy_d,
+                                                      total_indiv_d);
+    ref_af[s] = ps.pooled_ref_af;
+    minor_af[s] = ps.pooled_minor_af;
+    missing[s] = ps.missing_frac;
+    allele_count[s] = ps.pooled_allele_count;
+}
+
 // Column-gather compaction — reference §5
 __global__ void compact_columns_gather_kernel(const double* __restrict__ in, int P,
                                               long M,
@@ -128,6 +151,20 @@ void launch_compact_columns_gather(const double* d_in, int P, long M,
                     static_cast<unsigned>(core::grid_for(P, bx)));
     compact_columns_gather_kernel<<<grid, block, 0, stream>>>(d_in, P, M, d_flags,
                                                               d_keep_idx, d_out);
+    STEPPE_CUDA_CHECK_KERNEL();
+}
+
+void launch_pooled_summary(const double* d_Q, const double* d_N, int P, long M,
+                           double ploidy_d, double total_indiv_d,
+                           double* d_ref_af, double* d_minor_af, double* d_missing,
+                           double* d_allele_count, cudaStream_t stream) {
+    if (P <= 0 || M <= 0) return;
+    const int grid_x = core::grid_for_x(M, kKeepBlock,
+                                        "pooled-summary gridDim.x (SNP axis) exceeds kMaxGridX "
+                                        "(architecture.md §7) — tile the SNP axis");
+    pooled_summary_kernel<<<static_cast<unsigned>(grid_x), kKeepBlock, 0, stream>>>(
+        d_Q, d_N, P, M, ploidy_d, total_indiv_d, d_ref_af, d_minor_af, d_missing,
+        d_allele_count);
     STEPPE_CUDA_CHECK_KERNEL();
 }
 
