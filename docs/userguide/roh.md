@@ -85,19 +85,23 @@ throughput**: because ROH is a per-individual method, the real workload is a *st
 of ancients scanned against the same panel, and that is where steppe now has a
 defensible number.
 
-A batch reformulation (panel uploaded to the device **once**, donor rows gathered
-**on-device** from the resident copy, and the per-target work-items run through a
-bounded **3-slot look-ahead stream pipeline** so each target's host input-build and
-segment-calling overlap its neighbours' GPU forward-backward) lifted batch
-throughput **2.84×** — GPU duty went from **57% to 77%** — with output **bit-
-identical** to the serial path (same compaction, same reference-haplotype bytes,
-same forward-backward, same in-order segments).
+A batch reformulation runs the whole stack as one **wave-batched forward-backward
+grid**: the panel is uploaded to the device **once**, donor rows are gathered
+**on-device** from the resident copy, and instead of one block per target the
+kernel launches a whole *wave* of target-blocks in a single grid (hundreds of
+blocks at once, the wave width capped by `min(VRAM, pinned host)`). That fixed an
+occupancy starvation in the old block-per-target path — the GPU sat nearly idle
+waiting on one target at a time — with output **bit-identical** to the serial path
+(same compaction, same reference-haplotype bytes, same forward-backward, same
+in-order segments), at every device count.
 
-Measured batch throughput (real AADR ancients vs the phased reference panel, one
-RTX 5090, `--device 0`):
+Measured batch throughput (real AADR ancients vs the phased 1000G-1240K reference
+panel, chr3, `K = 5008`, one RTX 5090, `--device 0` [c9135f2 wave-batch, 515269c
+VRAM cap]):
 
-- **~138 ancients / minute** on the chromosome-subset panel used at the gate
-- **~85 ancients / hour** projected genome-wide (all chromosomes)
+- **512 ancients in 27 s** — about **1,100 ancients / minute**
+- the same batch scaled to **2,048 ancients** runs **92.6 s on 1 GPU, 57 s on 2,
+  37 s on 4**, byte-identical at every device count
 - **~90× vs pip hapROH**, projected against hapsburg's single-threaded numpy
   forward-backward
 
@@ -191,7 +195,7 @@ reproducible, not so you tune it.
 
 **Batching a stack of ancients.** There is no separate batch flag: a target triple
 holding many individuals (or `--samples` selecting several) is scanned as one batch
-against the same panel, and the panel-resident overlap pipeline (§9) kicks in
+against the same panel, and the panel-resident wave-batch pipeline (§9) kicks in
 automatically — the panel is uploaded once and the targets share it. That batch path
 is where the throughput in §4 comes from, and its output is byte-identical to
 running each target on its own.
@@ -236,18 +240,21 @@ resident); with no device visible it falls back to the CPU oracle so the command
 still works in a test/CI setting. The forward-backward runs in native FP64.
 
 Over a batch of targets the driver uploads the panel **once**
-(`roh_upload_panel`) and feeds the `(target, chromosome)` work-items through a
-bounded look-ahead stream pipeline (`roh_fb_batch`, 3 slots): each item's host
-input-build (phase P) and segment-calling (phase C) overlap its neighbours' GPU
-forward-backward, and the selected donor rows are gathered on-device from the
+(`roh_upload_panel`) and runs the `(target, chromosome)` work-items as a
+**wave-batched grid** (`roh_fb_batch` → `launch_roh_fb_wave`): a whole wave of
+item-blocks runs in one kernel launch (each indexing the resident panel through its
+own site-map, with per-item `M`/`C` from device arrays), so the GPU stays saturated
+instead of idling one target at a time; the wave width is capped by
+`min(VRAM, pinned host)`. The selected donor rows are gathered on-device from the
 resident panel rather than re-copied from the host. This is a **pure scheduling
 change** — the per-target compaction, reference-haplotype bytes, forward-backward,
 and in-order segment append are all identical, so batch output is byte-for-byte the
-same as running the targets one at a time.
+same as running the targets one at a time, and identical across device counts.
 
 Source: `src/app/cmd_roh.cpp` (CLI + driver + the batch scheduler),
 `src/core/stats/roh_model.hpp` (emission + transition rate table + the
 `roh_prior_valid` guard), `src/core/stats/roh_fb.hpp` (the forward-backward
 interface), `src/core/stats/roh_segments.{hpp,cpp}` (segment calling + summary),
 `src/device/cuda/roh_fb_kernel.cu` (the GPU kernel). Committed in 5f80ea9; the
-panel-resident batch pipeline in b67bef6.
+panel-resident batch pipeline in b67bef6, wave-batched in c9135f2 (VRAM-capped in
+515269c).
